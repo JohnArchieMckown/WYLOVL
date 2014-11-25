@@ -1,0 +1,661 @@
+DUMPER   TITLE 'Dump Formatter'
+********************************************************************
+*** %%Module: wings asm dumper;                                    *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- FILE SERVER DUMP FORMATTER.                          *
+***                                                                *
+***    This module is the dump formatter.  Each task should call   *
+***    DUMPINIT to initialize the STAE exit for that task.         *
+***                                                                *
+***    Created, 11/28/90, Jim Nisbet                               *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***  2002/06/18  mcl  dump reason code, check for supv state       *
+***  1995/02/15  ml   co-routine parm pointer in TVT               *
+***  1991/04/01  PJG  Dynamic allocation and re-entrant code       *
+***  1990/12/17  Niz  Cleanup.                                     *
+***  1990/11/28  Niz  Initial version.                             *
+***                                                                *
+********************************************************************
+DUMPER   HIBAL ASSOC=YES
+         REGS  FSR,,,,,,,BR,WAR,,,TVTR,(GVTR,LSR),SPR,RAR
+*
+         SYSDEFN
+*
+         COPY  TRCENTRY            Trace table format
+*
+SEGCB    RECORD 'SEGCB'
+*
+SUX      RECORD BEGIN              Seg User Extension (^SEGCBUSR)
+SUXFLAG  FLAG
+         FLAG  SUXFNOSTAMP         - No timestamp
+SUXCC    DS    C                   Next CC char to use
+SUXDCBP  DS    A                   DCB ptr
+         END
+*
+         PUSH  DSECTS              Common DSECTS
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+         COPY  SYMTAB
+*
+         CVT   DSECT=YES
+         IEFZB4D0 ,                Dynamic allocation
+         IEFZB4D2 ,                Dynamic allocation
+*
+         DCBD  DEVD=DA,DSORG=PS
+DCB      EQU   IHADCB,,C'X'
+*
+DVTAREA  RECORD 'DVTAREA'
+*
+         IHASDWA
+*
+EPIE     RECORD BEGIN
+EPIEID   DS    F                   'EPIE' ID
+EPIEUSER DS    F                   USER SUPPLIED PARM LIST
+EPIEREGS DS    16F                 USER REGESTERS AT INTERRUPTION
+EPIEPSW  DS    2F                  USER PSW AT INTERRUPTION
+EPIECC   EQU   EPIEPSW+1,1         PSW CC
+EPIEIA   EQU   EPIEPSW+4,4         PSW INSTRUCTION ADDRESS
+EPIEILC  DS    H                   INSTRUCTION LENGTH CODE
+EPIEIC   DS    H                   INTERRUPTION CODE
+* FOLLOWED BY RESERVED FIELDS.
+         END
+         POP   DSECTS
+*
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+         TITLE 'Initialize Dump Formatter'
+*box
+*
+*  DUMPINIT -- Routine to initialize the dump formatter's
+*    ESTAE exit, so we will get control to produce a formatted
+*    dump.
+*
+*    On entry:
+*      R1 - co-routine dump formatter address (0=none)
+*      R0 - address to be passed to co-routine 0=SDWA
+*
+*    On exit, R15 (and cc):
+*      0 - ok
+*
+DINITWA  RECORD BEGIN
+DINSTAEL ESTAE *-*,PURGE=NONE,ASYNCH=YES,TERM=YES,MF=L
+         END
+*-
+DUMPINIT XPROC DINITWA
+         FAIL  (GVT,NE,'GVT'),'Bad GVT ptr.'
+         FAIL  (TVT,NE,'TVT'),'Bad TVT ptr.'
+         ST    R1,TVTDUMPR         Save DUMP co-routine addr
+         ST    R0,TVTDUMPX         save parm address
+*
+         LA    R2,TVT
+         ESTAE ESTAE,TERM=YES,PARAM=(R2),MF=(E,DINSTAEL)
+         IF    (R15,NZ),'QSNAP "ESTAE exit not set."'
+         CLEAR R15                 A-ok
+         PEND
+         TITLE 'ESTAE Exit Routine'
+*box
+*
+*   ESTAE exit routine (entered via SYNCH from MVS).
+*
+*     This routine sets up our environment (stack, 31-bit, etc.)
+*     and then calls ESTAEFMT.
+*
+         DS    0H
+ESTAE    WITH  (ESTAE,R15),BEGIN
+         IF    (R0,EQ,12),BEGIN    No SDWA...
+         CLEAR R15                 Abend, no retries
+         BR    R14
+         END
+**mcl-   QSNAP 'DUMPER ESTAE'
+**mcl-   QSNAP (0,13,14,15)
+         STM   R0,R15,@R13         Save regs
+         LR    R10,R13             Save save area ptr
+         END
+*
+         BASE
+         LR    R6,R1               SDWA ptr
+         USING SDWA,R6
+*-
+*-       Set up our normal operating environment.
+*-
+         L     TVTR,SDWAPARM       PARM is our TVT ptr
+         FAIL  (TVT,NE,'TVT'),'Bad TVT ptr.'
+         L     GVTR,TVTGVTP        Get GVT ptr from TVT
+         FAIL  (GVT,NE,'GVT'),'Bad GVT ptr.'
+*
+         CLEAR TVTFTRC             Turn off tracing
+*
+         GETMAIN R,LV=32*1024      Get a new stack
+         LR    SPR,R1              Set stack
+         LR    WAR,R1              Ditto
+*
+         VCALL AMODE31             Switch to 31-bit mode
+*-
+*-       Format the dump.
+*-
+         LA    R1,SDWA
+         ACALL ESTAEFMT            Do ESTAE formatting
+*-
+*-       Continue abending.
+*-
+         LA    R1,SDWA             Needed for SETRP
+         SETRP RC=0                Continue abending
+         LM    R0,R15,@R10         Restore regs
+         CLEAR R15                 No retries
+         BR    R14
+*
+         DROP  SDWA,BR
+*-
+*-       Model SYSPRINT DCB.
+*-
+MDLPRDCX DCB   DDNAME=SYSPRINT,DSORG=PS,MACRF=PL,                      *
+               RECFM=VBA,LRECL=200,BLKSIZE=6233,EXLST=ESTPREXL
+MDLPRDCB EQU   MDLPRDCX,*-MDLPRDCX,C'X'
+*
+ESTPREXL DC    0A(0),X'91',AL3(ESTPRAEX)  DCB abend exit
+*
+ESTPRAEX WITH  (*,R15),BEGIN
+         MVI   @R1+3,4             Tell OS to ignore the abend
+         BR    R14                 Return
+         END
+         EJECT
+*box
+*
+*  ESTAEFMT -- Routine to open a DUMP data set and format a dump.
+*
+*    On entry:
+*      R1 - SDWA ptr (0=none)
+*
+ESTWA    RECORD BEGIN
+ESTSDWA  DS    A                   SDWA ptr
+EST99CBP DC    A(0)                POINTER TO SVC99 CONTROL
+EST99CB  DC    XL20'00'            SVC99 ALLOCATION BLOCK
+EST99US  DC    A(0)                POINTER TO DDNAME ALLOCATION
+         DC    A(0)                POINTER TO SYSOUT CLASS
+         DC    A(0)                POINTER TO FREE=CLOSE
+EST99T1  DC    AL2(0,0,0)
+ESTDDNAM DS    CL8                 DDNAME area
+EST99T2  DC    AL2(0,0,0),CL1'*'
+EST99T3  DC    AL2(0,0,0)
+*
+ESTPRSEG SEGCB
+         END
+*-
+ESTAEFMT PROC  ESTWA
+         ST    R1,ESTSDWA          Save SDWA ptr
+*-
+         QSNAP 'ESTAEFMT'
+         QSNAP (R14,R15,R0,R1)
+         QSNAP @R1,64              a bit of the SDWA ml20020618
+* 2002/06/18 mcl see if we're in supv state -- shouldn't be
+         TESTAUTH STATE=YES        RC=0 is bad news here
+         IF    (R15,Z),BEGIN       in supervisor state
+         QSNAP 'ESTAEFMT entered in supervisor state'
+         MODESET MODE=PROB         get out
+         END   ,                   (supervisor state)
+
+*  If cancel w/o dump, don't build dumpfile.   ml 2002/06/25
+
+         L     R1,ESTSDWA          restore SDWA ptr
+         WITH  (SDWA,R1),BEGIN
+         IF    (SDWAABCC+1,EQ,=X'2220'),ESTAEXIT
+         END   ,                   (with SDWA)
+
+*-       Open an output file.
+
+         MVC   ESTDDNAM,=CL8'DUMPxxxx'
+         IF    (TVTSEQ,NZ),'L R15,TVTSEQ'    Use task sequence numbr
+         ELSE  'L R15,TVTNO'                 Else use task number
+         A     R15,=A(100000)      Force high order zeros
+         BTD   ESTDDNAM+4,4,(R15)  Put taskno in DDNAME
+         LA    R1,ESTDDNAM         Dump file ddname
+         XCALL FINDDD              Locate any existing ddname
+         IF    NZ,BEGIN            None found - allocate one
+         CLEAR EST99CB             Clear svc99 control block
+         LA    R1,EST99CB          Address of svc99 control block
+         ST    R1,EST99CBP           save in rb pointer
+         OI    EST99CBP,X'80'          mark as last parameter
+         WITH  (S99RB,R1),BEGIN    address SVC99 area
+         MVI   S99RBLN,20          Set length of control block
+         MVI   S99VERB,S99VRBAL    Set for allocation request
+         MVI   S99FLG11,S99NOMNT   Set no mounting allowed
+         LA    R2,EST99US          Address of text unit list
+         ST    R2,S99TXTPP         Save in svc99 control block
+         LA    R2,EST99T1          Address of ddname unit
+         ST    R2,EST99US+0        Save in text unit pointer
+         LA    R2,EST99T2          Address of msgclass unit
+         ST    R2,EST99US+4        Save in text unit pointer
+         LA    R2,EST99T3          Address of free=close
+         ST    R2,EST99US+8        Save in text unit pointer
+         OI    EST99US+8,X'80'     Mark last unit pointer in list
+         MVC   EST99T1(6),=AL2(DALDDNAM,1,8)
+         MVC   EST99T2(6),=AL2(DALSYSOU,1,1)
+         MVI   EST99T2+6,C'A'
+         MVC   EST99T3(6),=AL2(DALCLOSE,0,0)
+         LA    R1,EST99CBP         Point to svc parameter list
+         DYNALLOC ,                Allocate print file
+         END   ,                     (with S99RB)
+         END   ,                     (allocate one)
+         LA    R1,ESTDDNAM         Dump file ddname
+         LA    R15,ESTPRSEG        Our SEGCB
+         VCALL PRTINIT             Open our DUMP dataset
+         IF    Z,BEGIN             It opened...
+*-
+*-       Produce a formatted dump.
+*-
+         L     R1,ESTSDWA
+         LA    R15,ESTPRSEG
+         ACALL DUMPFMT             Format a dump
+*-
+*-       Close the output file.
+*-
+         LA    R15,ESTPRSEG
+         VCALL PRTCLOSE            Close it
+         END   ,                     (it opened)
+
+ESTAEXIT LABEL ,
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+         TITLE 'Dump Formatter Routine'
+*box
+*
+*  DUMPFMT -- Routine to format a dump.
+*
+*    On entry:
+*      R1 - SDWA ptr (0 = not available)
+*      R15- SEGCB ptr
+*
+DFMTWA   RECORD BEGIN
+DFMTSGP  DS    A                   SEGCB ptr
+DFMTSDWA DS    A                   SDWA ptr
+         END
+*-
+DUMPFMT  XPROC DFMTWA
+         ST    R1,DFMTSDWA         Save SDWA ptr
+         ST    R15,DFMTSGP         Save SEGCB ptr
+         SEGDEF L:DFMTSGP
+*
+**mcl-   QSNAP 'DUMPFMT'
+         SEG   'TASKNAME='         REPORT SUB-TASK NAME
+         SEGT  TVTNAME             SET TASK NAME
+         SEG   ',SEQUENCE='        REPORT TASK SEQUENCE NUMBER
+         SEGDC TVTSEQ              SET SEQUENCE NUMBER
+         SEGWR ,
+         LA    R10,DFMTWA
+         WITH  (DFMTWA,R10)
+*-
+*-       Display PSW and registers from STAE work area.
+*-
+         IF    ('LT R6,DFMTSDWA',NZ),BEGIN
+         WITH  (SDWA,R6)
+         LA    R1,SDWA
+         ACALL FMTSDWA             Format SDWA
+         IF    (SDWAABCC+1,EQ,=X'2220'),DFMTEXIT
+         END
+*-
+*-       Display current symbol table
+*-
+         IF    (TVTSYMTB,NZ),BEGIN
+         ACALL FMTSYMTB            Format the symbol table
+         END
+*-
+*-       Display trace table.
+*-
+         ACALL FMTTRC              Format trace table
+*-
+*-       Call dump formatting co-routine.
+*-
+         IF    ('LT RAR,TVTDUMPR',NZ),BEGIN  Co-routine...
+         L     R1,TVTDUMPX         ->parm POINTER or =0
+         IF    (R1,NZ),'L R1,@R1'  snap the pointer
+         ELSE  'L R1,DFMTSDWA'     no parm, use SDWA
+         SEGLD ,                   R15 = SEGCB ptr
+         BASR  RAR,RAR
+         END   ,
+*-
+*-       Format control blocks.
+*-
+         SEGWR 'Dumper done.'
+*
+         SEGWR 'First part of GVT:'
+         SEGWR ' '
+         AGO   .TEMP
+         HEXDUMP (GVTR),256,CHARS=EBCDIC,FORMAT=ADDRESS
+         SEGWR
+*-
+*-       Display general information by executing commands.
+*-
+         SETMSG 'SHOW VERSION'
+         LA    R15,ESTPRSEG
+         VCALL COMMAND
+*
+         SETMSG 'SHOW INFO'
+         LA    R15,ESTPRSEG
+         VCALL COMMAND
+.TEMP    ANOP
+*
+         SEGWR ' '
+DFMTEXIT PEND
+         EJECT
+*box
+*
+*  FMTSDWA -- Format the STAE work area (SDWA).
+*
+*    On entry:
+*      R1 - SDWA ptr
+*
+FMTSDWA  PROC
+         WITH  (DFMTWA,R10)        Entry assumption
+*
+         LR    R6,R1
+         WITH  (SDWA,R6)
+* 2002/06/18 mcl:  look for extension to get reason code
+         L     R3,SDWAXPAD         ->exten. addr list
+         WITH  (SDWAPTRS,R3),BEGIN
+         L     R5,SDWASRVP         ->extension
+         END   ,                   (with R3)
+         WITH  (SDWARC1,R5)        SDWA extension
+*-
+*-       Write out abend text.
+*-
+         SEGB  'ABEND, code ='
+         L3    R2,SDWAABCC+1
+         IF    (R2,GT,4095),BEGIN  SYSTEM ABEND
+         SEG   'S'
+         LR    R1,R2
+         SRL   R1,12
+         SEGHX (R1),3
+* 2002/06/18 mcl:  reason code
+         IF    (SDWACMPF.SDWARCF,AND,(R5,NZ)),BEGIN got a code
+         SEG   '-'
+         SEGHX SDWACRC,8           code is a fullword
+         END   ,                   (got a code)
+         END   ,                   (SYSTEM)
+         ELSE  BEGIN               USER ABEND
+         SEG   'U'
+         SEGDC (R2)
+         END   ,                   (USER)
+         SEGWR
+*
+         SEGWR ' '
+*
+         IF    (SDWAABCC+1,EQ,=X'2220'),ESTEXIT  Exit if cancel
+*-
+*-       Display PSW and registers.
+*-
+         SEGWR ' '
+         SEG   'PSW addr = '
+         LC    R0,SDWAILC1
+         L     R1,SDWANXT1
+         SEGLD
+         ACALL DISPPSW
+         SEGWR
+*
+         SEG   'SVC PSW addr = '
+         LC    R0,SDWAILC2
+         L     R1,SDWANXT2
+         SEGLD
+         ACALL DISPPSW
+         SEGWR
+*
+         SEGWR ' '
+         SEGWR 'Registers:'
+         SEGWR
+         LA    R2,SDWAGRSV         Register area
+         CLEAR R3                  Counter
+         WHILE (R3,LE,15),BEGIN
+         SEG   '  R'
+         SEGDC (R3)
+         SEG   '='
+         SEGLOC L:@R2
+         LA    R2,@R2+4            Next register location
+         LA    R3,@R3+1            Next register
+         LR    R0,R3
+         N     R0,=A(3)            Time for a new line?
+         IF    Z,'SEGWR'           Yep
+         END
+*
+ESTEXIT  PEND
+         EJECT
+*box
+*
+*  FMTSYMTB -- Format this task's symbol table.
+*
+FMTSYMTB PROC
+         WITH  (DFMTWA,R10),BEGIN
+         SEGWR ' '
+         SEGWR 'Symbol table'
+         SEGWR '    Symbol   Address  Length'
+         SEGWR '    ------   -------  ------'
+         L     R3,TVTSYMTB         SET FIRST ADDRESS OF TABLE
+         WHILE (R3,NZ),BEGIN       PRINT SYMBOL TABLE
+         WITH  (SYMENTRY,R3),BEGIN
+         SEG   '    '              ADD SPACERS
+         SEGB  SYMNAME             ADD SYMBOL NAME
+         SEGHX SYMLOC,8            ADD LOCATION
+         SEG   ' '
+         SEGHX SYMLEN,8            ADD LENGTH
+         SEGWR ,                   WRITE SYMBOL ENTRY
+         L     R3,SYMNEXT          CHAIN TO NEXT SYMBOL
+         END   ,
+         END   ,
+         END   ,
+         PEND
+         EJECT
+*box
+*
+*  FMTTRC -- Format this task's trace table.
+*
+FTRCWA   RECORD BEGIN
+FTRCWORK DS    CL16                Work area
+         END
+*-
+FMTTRC   PROC  FTRCWA
+         WITH  (DFMTWA,R10)        Entry assumption
+*
+         SEGWR ' '
+         SEG   'Trace table entries (table @ '
+         SEGHX L:TVTTRBEG,8
+         SEG   '/'
+         SEGHX L:TVTTREND,8
+         SEG   ' cur='
+         SEGHX L:TVTTRCUR,8
+         SEGWR ')'
+         SEGWR ' '
+         SEG   '  Time        ID        '
+         SEGWR 'R0        R1        R14                        R15'
+         L     R4,TVTTRCUR         Most recent entry address
+         LOOP  BEGIN
+         LA    R4,L'TRCENTRY(R4)   Step to next entry
+         IF    (R4,GE,TVTTREND),'L R4,TVTTRBEG'  Check for wrap
+         WITH  (TRCENTRY,R4)
+         IF    (TRCCLOCK,NZ),BEGIN  Display this entry...
+         LM    R0,R1,TRCCLOCK
+         LA    R15,FTRCWORK        Work area
+         VCALL FMTTIME             Format time
+         SEGB  (R1),(R0)
+         SEG   TRCNAME             Trace id
+         SEG   '  '
+         SEGHX L:TRCREGS,8         R0
+         SEG   '  '
+         SEGHX L:TRCREGS+4,8       R1
+         SEG   '  '
+         SEGLOC L:TRCREGS+14*4     R14
+         SEGCOL 70
+         SEGHX L:TRCREGS+15*4,8    R15
+         SEGWR ,
+         END
+         IF    (R4,EQ,TVTTRCUR),EXIT  Check if done
+         END
+*
+         SEGWR ' '
+         SEGWR ' '
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+*
+         QLTORG
+         TITLE 'Subroutines'
+*box
+*
+*  DISPPSW -- Routine to seg PSW addr and the instruction it
+*    points to.
+*
+*    On entry:
+*      R0 - PSW instruction length (in bytes)
+*      R1 - PSW IA address
+*      R15- SEGCB ptr
+*
+DPSWWA   RECORD BEGIN
+DPSWSGP  DS    A                   SEGCB ptr
+DPSWOTOK DS    A                   Previous ESPIE token
+DPSWSTAT FLAG ,
+         FLAG  DSPWEPIE            ESPIE set
+         END
+*-
+DISPPSW  PROC  DPSWWA
+         ST    R15,DPSWSGP
+         SEGDEF L:DPSWSGP
+*
+         LA    R5,@R1              PSW IA address
+         SLR   R5,R0               Back up to actual instruction
+         SEGLOC (R5)
+*
+         TESTAUTH STATE=YES        RC=0 is bad news here
+         IF    (R15,Z),BEGIN       in supervisor state
+         QSNAP 'DISPPSW entered in supervisor state'
+         CLEAR DSPWEPIE            don't attempt SPIE
+         CLEAR DPSWOTOK            no prev token
+         END   ,                   (supervisor state)
+         ELSE  BEGIN               problem state
+         QSNAP 'DISPPSW-ESPIE SET'
+         CLEAR R4                  Pre-set no message indication
+         ESPIE SET,DPSWERR,(4,5)   Catch addressing exceptions
+         ST    R1,DPSWOTOK         Save previous ESPIE token
+         SET   DSPWEPIE
+*
+         QSNAP 'DISPPSW-after ESPIE'
+         END   ,                      (problem state)
+         CLC   @R5(6),@R5          May cause addressing exception
+         LR    R4,R5               Save valid data ptr for below
+*
+         IF    (@R5,EQ,X'FEDC'),BEGIN  Fail pseudo-instruction...
+         LC    R15,@R5+2           Text len
+         CMPR  R15,@R5+3,@R5+3     May cause addressing exception
+         LA    R4,@R5+2
+         LCR   R4,R4
+         END
+*
+DPSWCONT L     R1,DPSWOTOK         Previous ESPIE token
+         IF    (DSPWEPIE),BEGIN    we have issued ESPIE
+         ESPIE RESET,(1)           Restore SPIE
+         QSNAP 'DISPPSW-after reset'
+         END   ,                      (we issued ESPIE)
+*-
+*-       Display additional information.
+*-
+         IF    (R4,NZ),BEGIN       Additional info possible...
+         SEG   ' -- '
+*
+         IF    (R4,POS),BEGIN      Display instruction...
+         SEGHX LH:@R4,4
+         SEGB
+         SEGHX LH:@R4+2,4
+         SEGB
+         SEGHX LH:@R4+4,4
+         END
+*
+         ELSE  BEGIN               Fail text...
+         SETMSG @R5+3,LC:@R5+2
+         IF    (R0,Z),'SETMSG "FAIL"'
+         SEG   (R1),(R0)
+         END
+         END
+         PEND
+*
+DPSWERR  WITH  (*,R15),BEGIN       ESPIE exit...
+         WITH  (EPIE,R1)
+         MVC   EPIEIA,=A(X'80000000'+DPSWCONT)  Resume address
+         BR    R14
+         END
+*
+         SEGDEF DUMMY              (Neatness)
+         EJECT
+*box
+*
+*  SEGLOC -- Routine to seg an address plus "symbol+offset"
+*    if possible.
+*
+*    On entry:
+*      R1 - address
+*      R15- SEGCB ptr
+*
+SEGLWA   RECORD BEGIN
+SEGLNAME DS    CL8                 Symbol name
+SEGLOFFS DS    F                   Offset from symbol
+         END
+*-
+SEGLOC   XPROC SEGLWA
+         CLEAR SEGLWA
+*
+         LR    R6,R1               Save address
+         LR    R5,R15              SEGCB ptr
+         SEGDEF (R5)
+*-
+*-       Absolute address.
+*-
+         SEGHX (R6),8
+*-
+*-       Find closest symbol address.
+*-
+         LA    R6,@R6              Drop high bit
+*
+         L     R4,TVTSYMTB         Symbol table ptr
+         WHILE (R4,NZ),BEGIN       Go through symbol table...
+         WITH  (SYMENTRY,R4)
+         LR    R2,R6
+         S     R2,SYMLOC           Caclulate offset from symbol
+         IF    ~NEG,BEGIN          We have the offset...
+         IF    (R2,LT,SYMLEN),BEGIN  It's our symbol...
+         SEG   ' ('
+         SEGT  SYMNAME             Symbol
+         IF    (R2,POS),'SEG "+0"; SEGHX (R2)'  Plus offset
+         SEG   ')'
+         EXIT  SEGLOC
+         END
+         END
+*
+         L     R4,SYMNEXT          Get next SYMENTRY ptr
+         END
+*
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+*
+         QLTORG
+DUMPERX  EQU   *-DUMPER            Module length
+*
+         DC    0D'0'               FORCE OUT TO DOUBLE WORD
+         ENTRY SYMDUMP             DEFINE SYMBOL ENTRY FOR DUMPER
+SYMDUMP  DC    CL8'DUMPER',A(DUMPER),A(DUMPERX)
+         DC    A(0)                End of symbols
+         END   .

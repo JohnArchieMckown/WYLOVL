@@ -1,0 +1,666 @@
+NEWS     TITLE 'WYLBUR''s News Facility'                                        
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+WYLNEWS  CSECT                                                                  
+NEWS     IDENT 2193                15:11:46 07/12/02  (SLP)                     
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+         GBLC  &INSTALN            (See SYSDEFN macro)                          
+         SPACE 2                                                                
+         SYSDEFN ,                 Define installation params                   
+         SPACE 2                                                                
+         PUSH  DSECTS                                                           
+*                                                                               
+         COPY  CONTROL                                                          
+*                                                                               
+         COPY  SYSDSNS                                                          
+*                                                                               
+         COPY  UTYPDEFN                                                         
+*                                                                               
+         COPY  RTNCODES                                                         
+         TITLE 'DSECTS'                                                         
+         EJECT                                                                  
+KWR      RECORD 'KWR'                                                           
+         EJECT                                                                  
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+         POP   DSECTS                                                           
+         TITLE 'News Update Routine'                                            
+***                                                                             
+***  Historical Note (the best kind!):                                          
+***                                                                             
+***         At one time (before 3/30/85) this code put the news                 
+***         text in "shared" text pages.  The support for shared                
+***         pages has been removed from the dispatcher (to improve              
+***         performance and greatly simplifies the logic).                      
+***                                                                             
+***         The news text is now simply kept in virtual memory,                 
+***         but the old logic of keeping separate "pagenos" (now                
+***         addresses) and "offsets" still remains in the SHOW                  
+***         NEWS code which follows.                                            
+***                                                        "Niz"                
+***                                                                             
+         SPACE 2                                                                
+NDIR     RECORD BEGIN                                                           
+NDIRDATE DS    F          (First)  Date of news item                            
+NDIRLINS DS    H                   Number of lines                              
+NDIRPG   DS    F                   Page which contains news text                
+NDIRPGO  DS    H                   Offset in page to text                       
+         DS    H                   Reserved                                     
+NDIRTITL DS    CL100               Title                                        
+NDIRNEXT EQU   *,4,C'F'                                                         
+         END                                                                    
+         SPACE 2                                                                
+NEWSWA   RECORD BEGIN                                                           
+NEWSFLAG FLAG                                                                   
+*                                                                               
+NEWSDATE DS    F                   Date (yymmddnn)                              
+NEWSPG   DS    (CVNWMPG#)F         News pages                                   
+NEWSINFO EQU   NEWSDATE,*-NEWSDATE,C'X'                                         
+*                                                                               
+NEWSNPG  DS    H                   Current offset from NEWSPG                   
+NEWSPGO  DS    H                   Current offset in dir page                   
+NEWSTX   DS    F                   Current text page                            
+NEWSTXO  DS    H                   Current offset in text page                  
+NEWSNLC  DS    H                   No. of pending nl's                          
+NEWSSDC  DS    H                   No. of titles with same date                 
+NEWSNDIR DS    XL(L'NDIR)                                                       
+         END                                                                    
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SETWNEWS -- SET WNEWS Command.  (Priv'd.)                                    
+*                                                                               
+*    Note:  This routine is also called after a successful save of              
+*      NEWS PUBLIC.                                                             
+*                                                                               
+*                                                                               
+SETWNEWS GENTER                                                                 
+         IF    (CPCMNM,NE,'W'),BEGIN  Entered after SAVE...                     
+         TCCR                                                                   
+         TSEG  'Type SET WNEWS to reset WYLBUR news.'                           
+         B     CVNEXT                                                           
+         END                                                                    
+         ELSE  BEGIN               Command entry...                             
+         IF    (CPSGRP,EQ,'GA'),EXIT  Allow User Services                       
+*DONT:   IF    ^CPSFSPR,CVNVALID   Sorry pal                                    
+         END                                                                    
+*                                                                               
+         LA    R0,SDSNNEWS         Want the NEWS dsn                            
+         VCALL EXIT0               LOCAL exit - format system dsname            
+*                                                                               
+         AIF   ('&INSTALN' NE 'STANFORD').NOTNEW                                
+*  The RLG and SYSC news data sets are also referenced in "FILE".               
+         IF    CVFRLG,BEGIN        RLG News dsn...                              
+         SETMSG '$WYL.GA.PUB.RLGNEWS'                                           
+         END                                                                    
+*                                                                               
+         IF    (CVMACHID,EQ,'SYSC '),BEGIN  SUH News dsn...                     
+         SETMSG '$WYL.GA.PUB.SUH.NEWS'                                          
+         END                                                                    
+.NOTNEW  ANOP                                                                   
+*                                                                               
+         SCINIT (R1),(R0)                                                       
+*                                                                               
+         VCALL DOFNAME                                                          
+         VCALL FNAMOPTS                                                         
+         VCALL FNAMEFIN                                                         
+         SET   CPLFLG1.CPFALL                                                   
+         SET   CPFRDEXT                                                         
+         VCALL ZDETRNG                                                          
+*                                                                               
+         XPUSH ,,L'NEWSWA,PTR=WAR                                               
+         USING NEWSWA,WAR                                                       
+         CLEAR NEWSWA                                                           
+         ST    WAR,CPCWA                                                        
+         VCALL EXTOPEN             Open data set                                
+         IF    (R15,NZ),CVNEXT                                                  
+*                                                                               
+         ACALL GETNPG                                                           
+         MVC   @R1(4),=F'-1'       Init dir                                     
+         ST    R1,NEWSPG           Save ptr                                     
+         MVC   NEWSNPG,=H'4'       And set offset                               
+*                                                                               
+         L     R15,NEWSWRK                                                      
+         VCALL DESPOT              (Co-routine is NEWSRTN)                      
+         VCALL EXTCLOSE                                                         
+         SETMSG '*69/99/99 EOF'     Dummy eof line                              
+         LCALL NEWSRTN                                                          
+NRTNDIR  IF    ('LT R5,NEWSPG',NZ),BEGIN  Dir must be sorted...                 
+         IF    (@R5,EQ,=F'-1'),BEGIN   Empty dir...                             
+         LR    R1,R5                                                            
+         ACALL FREENPG             Free news page                               
+         CLEAR NEWSINFO                                                         
+         EXIT  NRTNDIR                                                          
+         END                                                                    
+*                                                                               
+NRTNSORT L     R5,NEWSPG                                                        
+         LOOP  BEGIN               Sort NDIR entries...                         
+         WITH  (NDIR,R5)                                                        
+         L     R4,NDIRDATE                                                      
+         IF    (R4,LGT,NDIRNEXT),'FLIP (NDIR,NDIRNEXT); B NRTNSORT'             
+         LA    R5,NDIRNEXT                                                      
+         UNTIL (NDIRDATE,EQ,=F'-1')                                             
+         END                                                                    
+*                                                                               
+         L     R5,NEWSPG                                                        
+         LOOP  BEGIN                                                            
+         WITH  (NDIR,R5)                                                        
+         IF    ('CLC NDIR(3),NDIRNEXT',EQ),BEGIN  Same date...                  
+         LA    R15,1                                                            
+         LA    R3,NDIRNEXT                                                      
+         WHILE ('CLC NDIR(3),@R3',EQ),'LA R15,@R15+1; LA R3,@R3+L"NDIR'         
+         LA    R1,1                                                             
+         LOOP  BEGIN                                                            
+         STC   R1,NDIRDATE+3       Save id count                                
+         L     R4,NDIRDATE         Possible newest date                         
+         LA    R5,NDIRNEXT                                                      
+         LA    R1,@R1+1                                                         
+         UNTIL (R1,GT,R15)                                                      
+         END                                                                    
+         END                                                                    
+         ELSE  'MVI NDIRDATE+3,1; L R4,NDIRDATE; LA R5,NDIRNEXT'                
+         UNTIL (NDIRDATE,EQ,=F'-1')                                             
+         END                                                                    
+*                                                                               
+         ST    R4,NEWSDATE         Latest date                                  
+         END                                                                    
+*-                                                                              
+*- Now that the news info has been successfully built, make the pages           
+*-  shared and replace the CV news directory with the new directory.            
+*- Then delete the old news pages (because the pages are shared they            
+*- will not actually be available for re-use until the use count goes           
+*-       to zero).                                                              
+*-                                                                              
+         LA    R4,CVNWMPG#                                                      
+         LA    R5,NEWSPG                                                        
+NRTNSLOP IF    ('LT R1,@R5',NZ),BEGIN                                           
+         ACALL ALLONPG                                                          
+         LA    R5,@R5+4                                                         
+         BCT   R4,NRTNSLOP                                                      
+         END                                                                    
+         FLIP  (NEWSINFO,CVNWINFO)  News is now available                       
+*                                                                               
+         LA    R4,CVNWMPG#                                                      
+         LA    R5,NEWSPG                                                        
+NRTNFLOP IF    ('LT R1,@R5',NZ),BEGIN                                           
+         ACALL RELNPG                                                           
+         LA    R5,@R5+4                                                         
+         BCT   R4,NRTNFLOP                                                      
+         END                                                                    
+         B     CVNEXT                                                           
+         DROP  BR,NEWSWA                                                        
+*                                                                               
+         DS    0F                                                               
+NEWSWRK  DC    AL1(DESRTRN+LXCATRTN+UNPRST),AL3(NEWSRTN)                        
+         EJECT                                                                  
+*                                                                               
+* Called by the range processor with line loc in R1 and len in R0.              
+*                                                                               
+NEWSRTN  XENTER R2,R8,,LOCAL                                                    
+         L     R6,CPCWA            NEWSWA ptr                                   
+         USING NEWSWA,R6                                                        
+         IF    ('LTR R15,R0',POS),BEGIN  Trim trailing blanks...                
+         AR    R15,R1                                                           
+NRTNTLP  DECR  R15                                                              
+         IF    (@R15,NE,' '),EXIT                                               
+         BCT   R0,NRTNTLP                                                       
+         END                                                                    
+         LR    R5,R1               Save line loc                                
+         LR    R4,R0               ... and len                                  
+*                                                                               
+         IF    (@R5,NE,'*'),NRTNTEXT                                            
+         IF    (R4,LT,11),NRTNTEXT  Not long enough to be a title line          
+         IF    ((@R5+3,NE,'/'),OR,(@R5+6,NE,'/')),NRTNTEXT                      
+         SETMSG @R5+7,2             Year (yy)                                   
+         IF    ('VCALL DTB',NEG),NRTNTEXT                                       
+         LR    R2,R15                                                           
+         IF    (R2,LT,=F'70'),BEGIN                                             
+         A     R2,=F'100'                                                       
+         END                                                                    
+         SLL   R2,8                                                             
+         SETMSG @R5+1,2             Month (mm)                                  
+         IF    ('VCALL DTB',NEG),NRTNTEXT                                       
+         AR    R2,R15                                                           
+         SLL   R2,8                                                             
+         SETMSG @R5+4,2             Day (dd)                                    
+         IF    ('VCALL DTB',NEG),NRTNTEXT                                       
+         AR    R2,R15                                                           
+         SLL   R2,8                                                             
+         IF    (R2,Z),NRTNTEXT                                                  
+         LH    R15,NEWSSDC         Item id for items with same date             
+         DECR  R15                                                              
+         CLM   R2,B'1110',NEWSNDIR Same date as before?                         
+         IF    NE,'LA R15,255'     Yes                                          
+         STH   R15,NEWSSDC         Save id                                      
+         AR    R2,R15              Add in "id"                                  
+         IF    ('OC NEWSNDIR(4),NEWSNDIR',NZ),BEGIN  Add prev NDIR...           
+         OC    NEWSNDIR+(NDIRPG-NDIR)(4),NEWSNDIR+(NDIRPG-NDIR)                 
+         IF    NZ,'LH R15,NEWSTXO; LA R15,@R15+5; STH R15,NEWSTXO'              
+*                                                                               
+         L     R15,NEWSPG                                                       
+         LH    R3,NEWSPGO          Current offset in dir page                   
+         AR    R15,R3                                                           
+         WITH  (NDIR,R15),'MVC NDIR,NEWSNDIR'  Move in entry                    
+         LA    R3,@R3+L'NDIR       New offset                                   
+         STH   R3,NEWSPGO                                                       
+         LA    R15,@R15+L'NDIR                                                  
+         MVC   @R15(4),=F'-1'      Mark end                                     
+         IF    (R3,GT,CVNWSIZ#-L'NDIR-4),NDIRFUL  No space in dir               
+         CLEAR NEWSNDIR,NEWSNLC    Reset entry, etc.                            
+         END                                                                    
+*                                                                               
+         LA    R3,NEWSNDIR                                                      
+         WITH  (NDIR,R3),BEGIN                                                  
+         ST    R2,NDIRDATE         Fill in date                                 
+         MVC   NDIRTITL,CVBLANKS                                                
+         DECR  R4                  (For leading "*")                            
+         CEIL  R4,L'NDIRTITL                                                    
+         MOVE  R4,NDIRTITL,@R5+1                                                
+         END                                                                    
+         B     NRTNEXIT                                                         
+*                                                                               
+NRTNTEXT LA    R3,NEWSNDIR                                                      
+         USING NDIR,R3                                                          
+         IF    (NDIRDATE,Z),NRTNEXIT  Text before any titles -- ignore          
+         IF    (R4,Z),BEGIN        Null line...                                 
+         IF    (NDIRPG,Z),NRTNEXIT  Ignore leading null lines                   
+         INCR  R0,NEWSNLC                                                       
+         B     NRTNEXIT                                                         
+         END                                                                    
+*                                                                               
+         IF    (NEWSTX,Z),BEGIN                                                 
+         LH    R2,NEWSNPG                                                       
+         IF    (R2,GE,CVNWMPG#*4),NMORSPA                                       
+         ACALL GETNPG                                                           
+NRTNRTRY ST    R1,NEWSPG(R2)       Save pageno in list                          
+         ST    R1,NEWSTX           Save new pageno                              
+         CLEAR NEWSTXO             Reset offset                                 
+         LA    R2,@R2+4            Kick dir offset                              
+         STH   R2,NEWSNPG                                                       
+         END                                                                    
+*                                                                               
+         IF    (NDIRPG,Z),'MVC NDIRPG(6),NEWSTX'                                
+*                                                                               
+         LH    R2,NEWSNLC          Pending new line count                       
+         CLEAR NEWSNLC             Reset                                        
+         CEIL  R2,3                Max of 3                                     
+*                                                                               
+* NEWS BUG 9/16/86                                                              
+* UNDER CERTAIN CIRCUMSTANCES, NEWS USED TO CLOBBER 'ENDOFNEW'                  
+* CONSTANT AT END OF NEWS PAGE.  WHEN WE CHECK TO SEE IF THE NEW                
+* LINE WILL FIT WE MUST ALLOW FOR THE FOLLOWING:                                
+*    1 BYTE LEN, R2 - BYTES NL, R4-BYTES TEXT, 5 BYTES END OF                   
+*    TEXT, 5 BYTES NEXT PAGE LINK, AND 6 BYTES FUDGE !                          
+*                                                                               
+*        LA    R15,1+@R2+8(R4)     Len required for line  (OLD CHECK)           
+*                                                                               
+         LA    R15,1+@R2+16(R4)    Len required for line  (NEW CHECK)           
+         AH    R15,NEWSTXO         Add in prev stuff                            
+         IF    (R15,GT,CVNWSIZ#),BEGIN  Wont fit on this page...                
+         LH    R2,NEWSNPG                                                       
+         IF    (R2,GE,CVNWMPG#*2),NMORSPA  All out of pages                     
+         ACALL GETNPG              Get new page                                 
+         LH    R15,NEWSTXO                                                      
+         A     R15,NEWSTX                                                       
+         MVI   @R15,X'FF'          Mark as continuation                         
+         ST4   R1,@R15+1           Addr of new page                             
+         B     NRTNRTRY                                                         
+         END                                                                    
+*                                                                               
+         L     R1,NEWSTX                                                        
+         AH    R1,NEWSTXO          Insertion point                              
+         LA    R15,@R2(R4)         Line len (including any NL's)                
+         STC   R15,@R1             Save it                                      
+         AH    R15,NEWSTXO                                                      
+         LA    R15,@R15+1          Len byte                                     
+         STH   R15,NEWSTXO                                                      
+         LA    R15,1+@R2(R1)       Text will go here                            
+         MOVE  R2,@R1+1,=X'151515' Move in any NL's                             
+         MOVE  R4,@R15,@R5         Move in text                                 
+         LA    R2,@R2+1+1          No. of lines                                 
+         AH    R2,NDIRLINS         Add to line count                            
+         STH   R2,NDIRLINS         Update count                                 
+         DROP  NDIR                                                             
+         LA    R15,@R4+1(R15)                                                   
+         MVC   @R15(5),=X'FF00000000'  End of text marker                       
+NRTNEXIT XEXIT                                                                  
+*                                                                               
+NMORSPA  SETMSG 'News too big, at line'                                         
+         B     NERRLINE                                                         
+*                                                                               
+NDIRFUL  SETMSG 'Too many titles, at line'                                      
+NERRLINE TSEG  (R1),(R0),B                                                      
+         L     R0,CPLCNO                                                        
+         VCALL CVEXNO                                                           
+NERROR   TSEG  (R1),(R0),CR                                                     
+         LA    R5,NEWSPG                                                        
+         LA    R4,CVNWMPG#                                                      
+NRTNELOP IF    ('LT R1,@R5',NZ),BEGIN                                           
+         ACALL FREENPG                                                          
+         LA    R5,@R5+4                                                         
+         BCT   R4,NRTNELOP                                                      
+         END                                                                    
+         B     CVERROR                                                          
+*                                                                               
+         DROP  BR,NEWSWA                                                        
+         TITLE 'SHOW NEWS Command'                                              
+*box                                                                            
+*                                                                               
+*  SHOWNEWS -- SHOW NEWS command.                                               
+*                                                                               
+SHOWNEWS GENTER                                                                 
+         L     R6,=F'-1'           Show unread news only                        
+         LA    R5,1                Display title and prompt for text            
+         SET   CPFVER              Assume verify                                
+         SCAN  SHNWPRT                                                          
+         SCANCHK                                                                
+         IF    CPFDUMP,'CLEAR CPFVER'  Dump implies noverify                    
+         IF    (R6,NE,-1),BEGIN    Explicit date given...                       
+         LR    R0,R5                                                            
+         LR    R1,R6                                                            
+         LCALL NEWSDISP            Display news                                 
+         BNZ   SHNONEWS                                                         
+         END   ELSE,BEGIN          Show news since last read...                 
+         XPUSH ,,L'KWR,PTR=R4                                                   
+         WITH  (KWR,R4)                                                         
+         CLEAR KWR                                                              
+         MVC   KWRGRP,CPSGRP                                                    
+         MVC   KWRUSER,CPSUSER                                                  
+         KREAD KWR                                                              
+         IF    ^KWRHFL.KWRHFCK,BEGIN                                            
+         ABORT 'No account file.  Request aborted.',,NOKWFILE                   
+         END                                                                    
+         LR    R0,R5                                                            
+         L     R1,KWRNEWDT         Show news after this date                    
+         LCALL NEWSDISP                                                         
+         BNZ   SHNONEWS                                                         
+         IF    (R1,NE,KWRNEWDT),BEGIN                                           
+         LR    R6,R1                                                            
+         LOOP  BEGIN                                                            
+         ST    R6,KWRNEWDT         Update date read                             
+         KWRITE KWR                                                             
+         UNTIL KWRHFL.KWRHFUOK                                                  
+         END                                                                    
+         END                                                                    
+         CLEAR KWR                 Tidy up                                      
+         END                                                                    
+         B     CVNEXT                                                           
+*                                                                               
+SHNONEWS SETMSG 'No recent news.  Type SHOW NEWS ALL for all items.'            
+         MVC   CPERRID,=CL8'NONEWNEW'                                           
+         IF (R15,NE,4),'MVC CPERRID,=CL8"NONEWS"; SETMSG "No news."'            
+         B     CVNXTMSG                                                         
+         DROP  BR                                                               
+         SPACE 2                                                                
+SHNWPRT  SCKW  ALL,SHNWALL                                                      
+         SCKW  SUMMARY,SHNWSUM,A                                                
+         SCKW  ,V(VERPSH),PUSH                                                  
+         SCKW  ,V(COLLPSH),PUSH                                                 
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+SHNWALL  PROC  ,                                                                
+         CLEAR R6                  Date=0 will get everything                   
+         O     R5,=A(L'SHNFREV)    Display items from new to old                
+         PRETURN (R5,R6)                                                        
+         PEND                                                                   
+*                                                                               
+SHNWSUM  PROC  ,                                                                
+         O     R5,=A(L'SHNFSUM)    Summary only                                 
+         PRETURN (R5)                                                           
+         PEND                                                                   
+*                                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  NEWSDISP -- Routine to display news information.  This routine is            
+*    either called at logon (if auto news is in effect) or by the               
+*    SHOW NEWS command.                                                         
+*                                                                               
+*    On entry:                                                                  
+*      R0  =  flag byte (see SHNFLAG below)                                     
+*      R1  =  show items after this date                                        
+*                                                                               
+*    On exit:                                                                   
+*      R1  =  date of last news item read                                       
+*      R15 =  0 - ok; 4 - no recent news; 8 - no news                           
+*                                                                               
+SHNWA    RECORD BEGIN                                                           
+         XSA   R2,R8                                                            
+SHNMODE  DS    XL3                 Option mode   (R0 on entry)                  
+SHNFLAG  FLAG                                                                   
+         FLAG  SHNFSUM             - Only display titles                        
+         FLAG  SHNFREV             - Display items from new to old              
+SHNDATE  DS    F                   Minimum date  (R1 on entry)                  
+SHNWPG   DS    (CVNWMPG#)F         Copy of news dir                             
+*                                                                               
+SHNLINE  DS    CL(&LINESZ)         Copy of a news line                          
+         END                                                                    
+*                                                                               
+NEWSDISP XENTER R2,R8,L'SHNWA                                                   
+         USING SHNWA,WAR                                                        
+         STM   R0,R1,SHNMODE       Save options                                 
+         CLEAR SHNWPG              Zot first entry                              
+         IF    (CVNWPG,Z),'LA R15,8; B NEWSEXIT'                                
+         IF    (SHNDATE,GE,CVNWDATE),'LA R15,4; B NEWSEXIT'                     
+*                                                                               
+         SET   CPFNPT              Don't allow p/p text                         
+*-                                                                              
+*-       Allocate shared news pages.                                            
+*-                                                                              
+         LA    R5,CVNWPG           Start of news pageno's                       
+         LA    R4,CVNWMPG#         Max no of pages allowed                      
+NALLOCLP IF    ('LT R1,@R5',NZ),BEGIN                                           
+         ACALL ALLONPG             Kick use count                               
+         LA    R5,@R5+4                                                         
+         BCT   R4,NALLOCLP                                                      
+         END                                                                    
+*                                                                               
+         MVC   SHNWPG(CVNWMPG#*4),CVNWPG  Save copy of dir at start             
+         L     R6,SHNWPG                                                        
+         WITH  (NDIR,R6),BEGIN                                                  
+         WHILE (SHNDATE,GE,NDIRDATE),'LA R6,NDIRNEXT'                           
+         IF    (NDIRDATE,EQ,=F'-1'),'LA R15,4; B NEWSEXIT'                      
+         TSEG  'System News ('                                                  
+         LR    R5,R6                                                            
+         CLEAR R2                                                               
+         WHILE (NDIRDATE,NE,=F'-1'),'LA R2,@R2+1; LA R6,NDIRNEXT'               
+         IF    SHNFREV,'LR R5,R6; SH R5,=AL2(L"NDIR)'                           
+         LR    R6,R5                                                            
+         TNUM  (R2)                                                             
+         SETMSG ' items'                                                        
+         IF    (R2,EQ,1),'DECR R0'                                              
+         TSEG  (R1),(R0)                                                        
+         TSEG  '):',,CR                                                         
+         TCR                                                                    
+*                                                                               
+NEWSLP   MVC   SHNLINE(L'NDIRTITL),NDIRTITL                                     
+         SETMSG SHNLINE,L'NDIRTITL                                              
+         VCALL LRTRIM                                                           
+*                                                                               
+         LH    R5,NDIRLINS         No. of text lines                            
+*                                                                               
+         TSEG  (R1),(R0)                                                        
+         END                                                                    
+*                                                                               
+         IF    (R5,NZ),BEGIN       OK to read...                                
+         TSEG  ';',,B                                                           
+         TNUM  (R5)                                                             
+         TSEG  ' lines'                                                         
+         IF    SHNFSUM,NEWSSUM     Summary, scram                               
+         IF    CPFVER,BEGIN                                                     
+         TSEG  ',',,B                                                           
+         SETMSG 'read'                                                          
+         LCR   R0,R0               Don't add "yes/no"                           
+         VCALL YESRTN              Prompt                                       
+         IF    NEG,BEGIN           Attn response...                             
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'CLEAR JCBFATTN'  No Exec break                        
+         B     NEWSDONE                                                         
+         END                                                                    
+         IF    POS,'LH R0,=H"-1"; B NEWSNEXT'  User doesn't want text           
+         END                                                                    
+         ELSE  'TCR'                                                            
+         L     R5,@R6+(NDIRPG-NDIR)  Page no                                    
+         LH    R4,@R6+(NDIRPGO-NDIR) Text offset                                
+*                                                                               
+NEWSTEXT LOOP  BEGIN                                                            
+         LC    R15,@R4(R5)         Len byte or FF                               
+         IF    (R15,EQ,X'FF'),BEGIN                                             
+         LA    R5,@R4+1(R5)                                                     
+         L     R5,@R5              Continuation pageno or zero                  
+         IF    (R5,Z),'SETMSG CVBLANKS,1; EXIT NEWSTEXT'  End of text           
+         CLEAR R4                  Reset offset                                 
+         NEXT  NEWSTEXT                                                         
+         END                                                                    
+*                                                                               
+         LR    R0,R15                                                           
+         CEIL  R15,L'SHNLINE                                                    
+         LA    R1,@R4+1(R5)                                                     
+         MOVE  R15,SHNLINE,@R1                                                  
+         LA    R4,@R4+1            Len byte                                     
+         AR    R4,R0               Text                                         
+         TSEG  SHNLINE,(R0),CR                                                  
+         IF    NZ,BEGIN                                                         
+         IF    CPFVER,'SETMSG CVBLANKS,1; EXIT NEWSTEXT'  Next item             
+         B     NEWSDONE                                                         
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+NEWSSUM  CLEAR R0                                                               
+         END                                                                    
+*                                                                               
+         WITH  (NDIR,R6),BEGIN                                                  
+NEWSNEXT MVC   SHNDATE,NDIRDATE                                                 
+*                                                                               
+         IF    SHNFREV,BEGIN                                                    
+         SH    R6,=AL2(L'NDIR)     Previous entry                               
+         IF    (R6,LT,SHNWPG),NEWSDONE  Before first, we're done                
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         LA    R6,NDIRNEXT         Next entry                                   
+         IF    (NDIRDATE,EQ,=F'-1'),NEWSDONE  After last entry                  
+         END                                                                    
+         IF    (R0,^NEG),'TSEG (R1),(R0),CR'                                    
+         B     NEWSLP                                                           
+         END                                                                    
+*                                                                               
+NEWSDONE CLEAR R15                                                              
+NEWSEXIT LR    R6,R15              Save return code                             
+*                                                                               
+         LA    R4,CVNWMPG#                                                      
+         LA    R5,SHNWPG           Start of news pageno's                       
+NFREELP  IF    ('LT R1,@R5',NZ),BEGIN                                           
+         ACALL RELNPG              Release news pages                           
+         LA    R5,@R5+4                                                         
+         BCT   R4,NFREELP                                                       
+         END                                                                    
+*                                                                               
+         CLEAR CPFNPT              Reset                                        
+*                                                                               
+         L     R1,SHNDATE          Date                                         
+         LTR   R15,R6              Return code                                  
+         XEXIT                                                                  
+         DROP  SHNWA,BR                                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  GETNPG -- Routine to get memory for a news page.                             
+*                                                                               
+*    On exit:                                                                   
+*      R1 - returned buffer ptr                                                 
+*                                                                               
+GETNPG   XENTER R2,R8,,LOCAL                                                    
+         GETMAIN R,LV=CVNWSIZ#+16  Get a news page                              
+         MVC   @R1(4),=C'NPG '                                                  
+         CLEAR (@R1+4,4)           Clear use count                              
+*                                                                               
+         LR    R2,R1                                                            
+         AH    R2,=AL2(CVNWSIZ#+8)  Point to suffix                             
+         MVC   @R2(8),=C'ENDOFNEW'                                              
+*                                                                               
+         LA    R1,@R1+8                                                         
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  FREENPG -- Routine to free memory for a news page.                           
+*                                                                               
+*    On entry:                                                                  
+*      R1 - news buffer ptr                                                     
+*                                                                               
+FREENPG  XENTER R2,R8,,LOCAL                                                    
+         SH    R1,=H'8'            Backup to prefix                             
+         FAIL  (@R1,NE,'NPG '),FREENPG,'SHOW NEWS logic error.'                 
+         MVC   @R1(4),=C'ONPG'     Change id                                    
+*                                                                               
+         LR    R2,R1                                                            
+         AH    R2,=AL2(CVNWSIZ#+8)  Point to suffix                             
+         FAIL  (@R2,NE,'ENDOFNEW'),FREENPG2,'SHOW NEWS logic error.'            
+*                                                                               
+         FREEMAIN R,A=(1),LV=CVNWSIZ#+16  Free news page                        
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  ALLONPG -- Routine to allocate a news page (i.e., kicks the                  
+*    use count).                                                                
+*                                                                               
+*    On entry:                                                                  
+*      R1 - news buffer ptr                                                     
+*                                                                               
+ALLONPG  XENTER R2,R8,,LOCAL                                                    
+         SH    R1,=H'8'            Backup to prefix                             
+         FAIL  (@R1,NE,'NPG '),ALLONPG,'SHOW NEWS logic error.'                 
+*                                                                               
+         LR    R2,R1                                                            
+         AH    R2,=AL2(CVNWSIZ#+8)  Point to suffix                             
+         FAIL  (@R2,NE,'ENDOFNEW'),ALLONPG2,'SHOW NEWS logic error.'            
+*                                                                               
+         LA    R15,1                                                            
+         A     R15,@R1+4           Kick use count                               
+         ST    R15,@R1+4                                                        
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RELNPG -- Routine to release a news page.  This routine will                 
+*    free the news page if the use count goes to zero.                          
+*                                                                               
+*    On entry:                                                                  
+*      R1 - news buffer ptr                                                     
+*                                                                               
+RELNPG   XENTER R2,R8,,LOCAL                                                    
+         LR    R2,R1                                                            
+         SH    R2,=H'8'            Backup to prefix                             
+         FAIL  (@R2,NE,'NPG '),RELNPG,'SHOW NEWS logic error.'                  
+         L     R15,@R2+4           Current use count                            
+         DECR  R15                 Decr                                         
+         ST    R15,@R2+4           Save new use count                           
+*                                                                               
+         LR    R3,R2                                                            
+         AH    R3,=AL2(CVNWSIZ#+8)  Point to suffix                             
+         FAIL  (@R3,NE,'ENDOFNEW'),ALLONPG3,'SHOW NEWS logic error.'            
+*                                                                               
+         IF    (R15,NP),'ACALL FREENPG'  Free NPG                               
+         XEXIT                                                                  
+         DROP  BR                                                               
+*                                                                               
+         QLTORG                                                                 
+         VLTORG                                                                 
+         END   .                                                                

@@ -1,0 +1,2388 @@
+TEXT     TITLE 'WYLBUR''s Text Preparation Commands'                            
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+WYLTEXT  CSECT                                                                  
+TEXT     IDENT 2025                11:49:35 01/25/02  (SLP)                     
+*                                                                               
+*  NEEDED FIXES:  ELIMIATE OSCINIT                                              
+*                                                                               
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+         SYSDEFN ,                 Define installation params                   
+*                                                                               
+         PUSH  DSECTS                                                           
+         EJECT                                                                  
+         COPY  CONTROL             Copy cv/cp                                   
+         TITLE 'DSECTS'                                                         
+*                                                                               
+         POP   DSECTS                                                           
+         TITLE 'ALIGN/JUSTIFY/CENTER Work Area'                                 
+ALWA     RECORD BEGIN              Align work area definition                   
+ALWASTRT DS    0F                                                               
+ALFLAGS  FLAG                                                                   
+         FLAG  ALFNUMB             - renumber range                             
+         FLAG  ALFMRKN             - marker specified flag                      
+         FLAG  ALFSPACE            - space option specified                     
+         FLAG  ALFEVEN             - even option specified                      
+         FLAG  ALFPARA             - paragraph option given                     
+         FLAG  ALFEBL              - extra blanks on left flag                  
+         FLAG  ALFSOME             - something in buffer flag                   
+         FLAG  ALFSTOP             - stop align process                         
+*                                                                               
+ALLNMRK  DS    CL1                 Marker character                             
+ALLNMAX  DS    H                   Length save spot                             
+ALINDST  DS    H                   Align indent value                           
+ALINDPA  DS    H                   Indent for new paragraph                     
+ALINDNT  DS    H                   Next indent value                            
+ALWBUFL  DS    H                   Buffer length                                
+ALWPBC   DS    H                   Previous blank count                         
+* as old junky code, alwbc was 'ex'ed as 'bne diflead', or 'nop',               
+* now we alwbc as a flag. 0 - nop. nz - bne diflead.                            
+ALWBC    BNE   0                   Nop or bne diflead                           
+ALWSAVE  DS    3F                  Save area for output pointers                
+ALWLAST  DS    A                   Length of last word                          
+ALWJPT   DS    A                   Point to begin justification                 
+ALLNOSV  DS    F                   Work cell for line number                    
+ALFRSTSV DS    F                   First line of range save                     
+ALBSADJ  DS    H                   Backspace adjustment for line                
+ALCURBS  DS    H                   Backspace adjustment for curr                
+ALWAINIT EQU   ALWASTRT,*-ALWASTRT,C'X'  fields to be initialized               
+ALWBL    DS    C                   A blank                                      
+ALBUFF   DS    CL(&PRESSZ)         Buffer work area                             
+         END                                                                    
+         TITLE 'CENTER Command'                                                 
+*box                                                                            
+*                                                                               
+*  CENTER -- CENTER command.                                                    
+*                                                                               
+CENTER   XPROC ALWA                                                             
+         LA    R6,ALWA             ALWA ptr                                     
+         ST    R6,CPCWA            Save it                                      
+         USING ALWA,R6                                                          
+         VCALL NDETRNG             Scan for range                               
+         CLEAR ALWAINIT            Clear work area                              
+         SET   CPLFLG5.CPFNLST     Default is nolist                            
+         MVC   ALLNMAX(2),CPLENGTH  set default length                          
+         SCAN  CENPRT              Scan for other values                        
+         SCANCHK                                                                
+         LH    R0,ALLNMAX          Test indent against length                   
+         CH    R0,ALINDST          Indent must be less                          
+         IF    NH,BEGIN                                                         
+         ERROR 'Indentation exceeds length. '                                   
+         END                                                                    
+         IF    CPFTYPED,'COUNT CPACHCT'                                         
+         RDRNG CENWORK,(DESNRTN+LOCATRTN+UNPRST+DESABORT)                       
+         PEND                                                                   
+*                                                                               
+*  sckw stuff                                                                   
+*                                                                               
+*                                                                               
+&LINESZM1 SETA &LINESZ-1                                                        
+*                                                                               
+CENPRT   SCKW  LENGTH,CENLEN,(P,PI,A),&LINESZ                                   
+         SCKW  INDENT,CENIND,(P,I,A),&LINESZM1                                  
+         SCKW  AROUND,CENARO,(P,I,A),&LINESZM1                                  
+         SCKW  ,V(LTNPSH),PUSH                                                  
+         SCKW  ,V(SCNINVAL)                                                     
+*                                                                               
+CENLEN   DPROC                                                                  
+         STH   R0,ALLNMAX          Save length                                  
+         CLEAR R0                                                               
+         PEND                                                                   
+*                                                                               
+CENIND   DPROC                                                                  
+         STH   R0,ALINDST          Save indent value                            
+         CLEAR R0                                                               
+         PEND                                                                   
+*                                                                               
+CENARO   DPROC                                                                  
+         SLL   R0,1                Mult by two for length                       
+         STH   R0,ALLNMAX          Save funny length                            
+         CLEAR R0                                                               
+         PEND                                                                   
+*                                                                               
+         EJECT                                                                  
+*                                                                               
+*  center co-routine                                                            
+*                                                                               
+CENWORK  PROC                                                                   
+         L     R6,CPCWA            ALWA ptr                                     
+         IF    (R0,Z),CENNULL      Null line                                    
+CENBL    IF    (@R1,EQ,' '),BEGIN  Leading blank?                               
+         LA    R1,@R1+1            To next char                                 
+         BCT   R0,CENBL                                                         
+         END                                                                    
+         IF    (R0,POS),BEGIN      Check for backspaces...                      
+         LR    R2,R1                                                            
+         LR    R3,R0                                                            
+CENBACK  IF    (@R2,EQ,X'16'),'DECR R0; DECR R0'  adjust count                  
+         LA    R2,@R2+1                                                         
+         BCT   R3,CENBACK                                                       
+         IF    (R0,^POS),CENNULL   Leave it                                     
+         END                                                                    
+         LH    R3,ALLNMAX          Length                                       
+         LH    R4,ALINDST          Indent                                       
+         SR    R3,R0               Compute no. of blanks                        
+         SR    R3,R4               Allow for indent                             
+         BNM   CENPOS              Br if ok                                     
+         IF    ('AR R4,R3',NEG),'CLEAR R4'                                      
+         CLEAR R3                                                               
+CENPOS   SRL   R3,1                Compute blanks for left side                 
+         AR    R3,R4               Add adjusted indentation                     
+         MVI   ALBUFF,C' '         Blank out                                    
+         EX    R3,'MVC ALBUFF+1(0),ALBUFF'  blank buffer                        
+         LR    R2,R0               Save length                                  
+         AR    R0,R3               Compute final length                         
+         IF    (R0,GT,&LINESZ),BEGIN  if length is to big                       
+         SH    R0,=Y(&LINESZ)      Get amount over                              
+         IF    ('SR R3,R0',M),'CLEAR R3'  make sure at least zero               
+         LR    R0,R2               Copy r2                                      
+         AR    R0,R3               Bump r0                                      
+         END                                                                    
+         LA    R3,ALBUFF(R3)       Compute text address                         
+         EX    R2,'MVC @R3(0),@R1' Move text to buffer                          
+CENNULL  LA    R1,ALBUFF           Point at new line                            
+         CLEAR R4                  Attn flag                                    
+         IF    ^CPLFLG5.CPFNLST,BEGIN  list line...                             
+         XPUSH R0,R1                                                            
+         VCALL LISTLINE                                                         
+         IF    ('TWRITE',NZ),'LA R4,1'                                          
+         XPOP  R0,R1                                                            
+         END                                                                    
+         L     R15,CPLCNO          Get line no.                                 
+         VCALL PRESS               Press the line                               
+         VCALL STOW                Replace the line                             
+         IF    (R4,NZ),CVERROR     Stop if attn                                 
+         PEND  ,                   Return to despot                             
+         DROP  ALWA                                                             
+         SPACE 2                                                                
+         EJECT                                                                  
+         QLTORG                                                                 
+         TITLE 'ALIGN/JUSTIFY Commands'                                         
+*box                                                                            
+*                                                                               
+*  ALIGN -- ALIGN/JUSTIFY commands.                                             
+*                                                                               
+ALIGN    XPROC ALWA                                                             
+         LA    R6,ALWA             ALWA ptr                                     
+         USING ALWA,R6                                                          
+         ST    R6,CPCWA            Save ALWA ptr                                
+         VCALL NDETRNG             Process any range                            
+         CLEAR CPACINFO            Reset collect info                           
+         CLEAR ALWAINIT            Clear work area                              
+         MVI   ALWBL,C' '          Initialize blank                             
+         MVC   ALWBC(4),=F'1'      Initialize branch instr (BNE)                
+         SET   CPLFLG5.CPFNLST     Default is nolist                            
+         MVC   ALLNMAX(2),CPLENGTH  set default length                          
+         SCAN  ALIPRT              Scan for options                             
+         SCANCHK                                                                
+         LH    R1,ALINDST          Check indent parms                           
+         CH    R1,ALLNMAX          Less than length                             
+         IF    NL,BEGIN                                                         
+         ERROR 'Illegal indentation.'                                           
+         END                                                                    
+         LA    R0,ALBUFF(R1)       Justify starting point                       
+         ST    R0,ALWJPT           Save it                                      
+         AH    R1,ALINDPA          Add in extra paragraph indent                
+         IF    M,BEGIN                                                          
+         ERROR 'Illegal indentation.'                                           
+         END                                                                    
+         CH    R1,ALLNMAX          Less than length                             
+         IF    NL,BEGIN                                                         
+         ERROR 'Illegal indentation.'                                           
+         END                                                                    
+         STH   R1,ALINDPA          Set paragraph indent                         
+         STH   R1,ALINDNT          Set first indent                             
+         IF    ALFEVEN,'CLEAR ALWBC'  make branch a nop                         
+         MVI   CPWKPS,X'80'        Set to avoid numbering first                 
+         MVC   CPACLNO,=F'-1000'   Set current line invalid                     
+         SET   CPFNCUR             set so despot won't change current           
+         COUNT CPACHCT             Count typed command changes                  
+         RDRNG WRKALIN,(DESRTRN+LOCATRTN+UNPRST+DESABORT)                       
+         IF    ALFSOME,BEGIN       Stuff remains in buffer...                   
+         LA    R5,ALBUFF           Point to text                                
+         LM    R3,R4,ALWSAVE       Get count                                    
+         SH    R4,ALWBUFL          Into r4                                      
+         SH    R4,ALBSADJ          Take account of backspaces                   
+         LCR   R4,R4               For otalin                                   
+         ACALL OTALIN              Output last                                  
+         END                                                                    
+         IF    ALFNUMB,BEGIN       Renumber...                                  
+         OSCINIT CVBLANKS,2         Init                                        
+         XC    CPLFLG1(5),CPLFLG1  Reset flags for number                       
+         VCALL NUMBER              Renumber                                     
+         END                                                                    
+         IF    CPLFLG5.CPFNLST,BEGIN  only re-number if nolist...               
+         IF    (CPWKPS,GT,CPALLNO),'MVC ALLNOSV,CVMAXLNO'  Max                  
+         IF    ^ALFNUMB,'ACALL RENUMB'  go fix line numbers                     
+         END                                                                    
+*                                                                               
+         B     CVNEXT              ALL DONE, EXIT                               
+*                                                                               
+         CLEAR R15                                                              
+         PEND ,                    NEVER EXECUTED, WE EXIT ABOVE                
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*  Align SCKW stuff                                                             
+*                                                                               
+&LINESZM1 SETA &LINESZ-1                                                        
+*                                                                               
+ALIPRT   SCKW  LENGTH,HAVLENE,(P,A,PI),&LINESZ                                  
+         SCKW  MARKER,HAVMARK,(P,A)                                             
+         SCKW  SPACE,HAVSPACE,A                                                 
+         SCKW  EVEN,HAVEVEN,A                                                   
+         SCKW  NUMBER,HAVNUMB,A                                                 
+         SCKW  ,V(LTNPSH),PUSH                                                  
+         SCKW  INDENT,ALINDENT,(P,I,A),&LINESZM1                                
+         SCKW  PARAGRAPH,HAVPARA,A                                              
+         SCKW  ,V(SCNINVAL)                                                     
+*                                                                               
+INDPRT   SCKW  +,ALNPA2,(P,I),50                                                
+         SCKW  -,ALNPA1,(P,I),50                                                
+         SCKW  ,ALNPA2,(I)                                                      
+         SCKW  ,ALCONT                                                          
+         SPACE 2                                                                
+*                                                                               
+HAVLENE  DPROC                                                                  
+         STH   R0,ALLNMAX          Store                                        
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+HAVMARK  PROC                                                                   
+         SET   ALFMRKN             Set marker given                             
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),BEGIN                            
+         MVC   ALLNMRK(1),@R1+1                                                 
+         END                                                                    
+         ELSE  BEGIN                                                            
+         SCUPTOK R1                                                             
+         MVC   ALLNMRK(1),@R1      Set marker                                   
+         END                                                                    
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+HAVSPACE DPROC ,                   Set space option given                       
+         SET   ALFSPACE                                                         
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+HAVPARA  DPROC                                                                  
+         SET   ALFPARA             Set paragraph option given                   
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+HAVEVEN  DPROC                                                                  
+         SET   ALFEVEN             Set even option given                        
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+HAVNUMB  DPROC                                                                  
+         SET   ALFNUMB             Set to renumber                              
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+ALINDENT PROC                                                                   
+         STH   R0,ALINDST          Save indent value                            
+         SCPUSH ,                  Save scan pointers                           
+         SCAN  INDPRT              Scan for paragraph indent                    
+         SCANCHK                                                                
+         IF    (R15,EQ,8),BEGIN    If number not scanned,, restore              
+         SCPOP ,                                                                
+         END                                                                    
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+ALNPA1   DPROC                                                                  
+         LCR   R0,R0               Complement the value                         
+         STH   R0,ALINDPA          Save the paragraph indent                    
+         LA    R15,4                                                            
+         PEND                                                                   
+*                                                                               
+ALNPA2   DPROC                                                                  
+         IF    (R0,GT,50),BEGIN                                                 
+         ERROR 'Indent specification too large. (>50) '                         
+         END                                                                    
+         STH   R0,ALINDPA          Save the paragraph indent                    
+         LA    R15,4                                                            
+         PEND                                                                   
+*                                                                               
+ALCONT   DPROC ,                   Number not scanned, restore scan             
+         LA    R15,8                                                            
+         PEND                                                                   
+*                                                                               
+         SPACE 2                                                                
+         DROP  BR                                                               
+         EJECT                                                                  
+*                                                                               
+*  ALIGN CO-ROUTINE                                                             
+*                                                                               
+WRKALIN  PROC                                                                   
+         L     R6,CPCWA            Get ALWA ptr                                 
+         LM    R3,R5,ALWSAVE       Restore pointers                             
+         L     R2,CPLCNO           Get current line no                          
+         STM   R0,R2,ALWSAVE       Save pointers to line & lineno               
+         L     R0,CPLCNO           Line-number to delete                        
+         LR    R1,R0                                                            
+         VCALL DELRANGE            Delete line                                  
+         LH    R0,=H'-1'           Set R0 neg in case end of rnge               
+         IF    CPFLSKIP,BLINE      new range, go finish old stuff               
+*                                                                               
+NEWRNGEC LM    R0,R2,ALWSAVE       Restore pointers to line                     
+         ST    R2,ALLNOSV          Save highest line no. yet                    
+         LTR   R0,R0               Null line                                    
+         BNP   BLINE               Br yes                                       
+         IF    ALFMRKN,BEGIN       Marker given...                              
+         CLC   ALLNMRK(1),@R1      Marker line                                  
+         BE    ALMAR               Br yes                                       
+         END                                                                    
+DOLEAD   LR    R2,R1               Find blank count                             
+BLCHOP   CLI   @R2,C' '            Is this blank                                
+         BNE   ENDLEAD             No, at end of blanks                         
+         LA    R2,@R2+1            Step past blank                              
+         BCT   R0,BLCHOP           Loop till non-blank                          
+         B     BLINE                                                            
+*                                                                               
+ENDLEAD  SR    R2,R1               Compute blank count                          
+         CH    R2,ALWPBC           Test against previous                        
+         MVC   ALWPBC,ALINDST      Set count for next compare                   
+*        EX    0,ALWBC             Exec conditional br or nop                   
+         IF    (NE,AND,(ALWBC,NE,0)),DIFLEAD                                    
+         B     NEXTWORD            Br if so                                     
+*                                                                               
+DIFLEAD  CH    R2,ALINDPA          Is this normal new paragraph                 
+         BE    BLINEI              Yes, go flush buff and restart               
+         CH    R2,ALINDST          Is this normal indent                        
+         BNE   ALMAR1              No, treat as if marker line                  
+* a new paragraph has started with the normal indentation instead               
+* of the paragraph indentation.  maintain the indentation and                   
+* process the line.                                                             
+         MVC   ALINDNT,ALINDST     Set normal indent value                      
+         B     NEXTWORD            Go process line normally                     
+*                                                                               
+GETWORD  LTR   R0,R0               More input text                              
+         BNP   NEXTLINE            Br no                                        
+         LR    R2,R1               Start of word                                
+         CLI   @R2,C' '            Blank                                        
+         BNE   NONDO               Br if not                                    
+         B     BDO                 Br if so                                     
+*                                                                               
+BLOOP    CLI   @R2,C' '            Next char. blank                             
+         BNE   BEND                Br no                                        
+BDO      LA    R2,@R2+1            Next                                         
+         BCT   R0,BLOOP                                                         
+         B     NEXTLINE            Br if no more in line                        
+*                                                                               
+BEND     SR    R2,R1               Compute length                               
+         IF    ^ALFSPACE,DOWORD    Space option not given                       
+         CL    R5,ALWJPT           Past justify point                           
+         BL    DOWORD              Br if not                                    
+         B     NEXTWORD            Skip the blanks                              
+*                                                                               
+NONLOOP  IF    (@R2,EQ,' '),NONEND  end of word                                 
+NONDO    IF    (@R2,EQ,X'16'),BEGIN  backspace...                               
+         LA    R15,2               Else increment bs adjustment                 
+         AH    R15,ALCURBS         .. count by 2                                
+         STH   R15,ALCURBS                                                      
+         END                                                                    
+         LA    R2,@R2+1                                                         
+         BCT   R0,NONLOOP                                                       
+NONEND   SR    R2,R1               Compute length                               
+         IF    ^ALFSOME,DOWORD     Nothing remains in line                      
+         LR    R15,R5              End of out buffer                            
+         DECR  R15                                                              
+         CLI   @R15,C' '           Last char blank                              
+         BE    DOWORD              Br yes                                       
+         MVC   @R5(2),CVBLANKS     Put 2 blanks at end                          
+         LA    R14,2               Set count                                    
+         IF    ((@R15,EQ,'.'),OR,(@R15,EQ,'?')),ADDIN                           
+         IF    ((@R15,EQ,':'),OR,(@R15,EQ,'!')),ADDIN                           
+         DECR  R14                 Reset count to 1                             
+ADDIN    CR    R4,R14              Room for blanks                              
+         BNH   FULL                Br if not                                    
+         ST    R14,ALWLAST         Save word length                             
+         AR    R5,R14              Update pointer and count                     
+         SR    R4,R14                                                           
+         SET   ALFSOME             Set something in buffer                      
+         CL    R5,ALWJPT           Past justify point                           
+         BNH   *+8                 Br if not                                    
+         LA    R3,@R3+1            Bump word count                              
+DOWORD   IF    (R4,Z),FULL         Must stop now                                
+         LR    R15,R2              Room in line?                                
+         SH    R15,ALCURBS         Deduct bs adjustment                         
+         CR    R4,R15              Compare with spaces left                     
+         BL    FULL                Not enough                                   
+         LH    R14,ALWBUFL         Now check that the line ..                   
+         AH    R14,ALBSADJ         ..  is not too long ..                       
+         AH    R14,ALCURBS         ..  for wylbur to stow                       
+         CH    R14,=Y(&LINESZ)                                                  
+         BNH   ROOM                it's ok                                      
+*  let the word go in if the difference can be taken                            
+*  off the free spaces (r4)                                                     
+         SH    R14,=Y(&LINESZ)     Calculate excess                             
+         AR    R14,R15             Add signif chars in the word                 
+         CR    R4,R14                                                           
+         BNL   ROOM                Br if so                                     
+FULL     IF    ^ALFSOME,NOWORDS    No words in line                             
+         IF    (CPCMNM,NE,'J'),UNJUST  align                                    
+         LR    R15,R5              Output pointer                               
+         DECR  R15                                                              
+         IF    (@R15,NE,' '),NBT                                                
+         S     R5,ALWLAST          Back up                                      
+         A     R4,ALWLAST                                                       
+         DECR  R3                  Decrement word count                         
+*                                                                               
+NBT      DECR  R3                  Compute no. of gaps                          
+         SRA   R3,1                                                             
+         BNP   UNJUST              Br if none                                   
+         STM   R0,R2,ALWSAVE       Need a few regs                              
+         LTR   R1,R4               No of spaces to insert                       
+         BNP   JEND                Br if none                                   
+         CLEAR R0                                                               
+         DR    R0,R3               Compute spaces/gaps                          
+         LTR   R0,R0                                                            
+         BNP   EBR                 Br if even up                                
+         LA    R1,@R1+1            Start with extra on right                    
+         IF    ^ALFEBL,EBR         Right/left                                   
+         DECR  R1                  Take it back                                 
+         SR    R0,R3               Compute gaps before extra                    
+         LCR   R0,R0                                                            
+EBR      LA    R15,0(R4,R5)        Last char plus 1                             
+EBLOOP   DECR  R15                 Look at last                                 
+         DECR  R5                                                               
+EBLOOPX  MVC   @R15(1),@R5         Move one char                                
+         CLI   @R15,C' '           Was it blank                                 
+         BNE   EBLOOP              Br if not                                    
+BSLOOP   DECR  R15                 Move rest of blanks                          
+         DECR  R5                                                               
+         MVC   @R15(1),@R5                                                      
+         CLI   @R15,C' '           End of gap                                   
+         BE    BSLOOP              Br if not                                    
+         LTR   R2,R1               No. of blanks                                
+         BNP   NEB                 Br if none                                   
+EBPUT    MVI   @R15,C' '           A blank                                      
+         DECR  R15                                                              
+         BCT   R2,EBPUT                                                         
+NEB      BCT   R0,JENDT            Br if more gaps to do                        
+         DECR  R1                  Assume extra on right                        
+         IF    ALFEBL,'LA R1,@R1+2'                                             
+         FLIP  ALFEBL              Flip between left & right                    
+         LTR   R1,R1               Anything more to do                          
+         BNP   JEND                Br if not                                    
+JENDT    BCT   R3,EBLOOPX          Br if more gaps                              
+JEND     LM    R0,R2,ALWSAVE       Restore regs                                 
+         CLEAR R4                  Set buffer full                              
+UNJUST   LA    R3,1                Set switch                                   
+         LA    R5,ALBUFF                                                        
+         SH    R4,ALWBUFL          Compute length                               
+         SH    R4,ALBSADJ          take account of bs's                         
+         LCR   R4,R4                                                            
+         ACALL OTALIN              Put out line                                 
+NOWORDS  LA    R5,ALBUFF           Reset buffer pointer                         
+         LH    R15,ALINDNT         Indentation                                  
+         EX    R15,'MVC ALBUFF(0),ALWBL'  blank start of line                   
+         AR    R5,R15              Point at start of text                       
+         LH    R4,ALLNMAX          Set up length                                
+         STH   R4,ALWBUFL          Save buffer size                             
+         CLEAR ALBSADJ             Clear bs adjustment                          
+         SR    R4,R15                                                           
+         LH    R14,ALINDST         Reset indentation                            
+         STH   R14,ALINDNT                                                      
+         LR    R14,R3              Save word count                              
+         CLEAR R3                  Set no words in line                         
+         CLEAR ALFSOME                                                          
+         CLI   @R1,C' '            Was word blank                               
+         BNE   AGAIN               Br if not                                    
+         LTR   R14,R14             Anything in prev line                        
+         BP    NEXTWORD            Br if so                                     
+AGAIN    CR    R4,R2               Room in line now                             
+         BNL   ROOM                Br if so                                     
+         CLI   @R1,C' '            Blanks                                       
+         BE    NEXTWORD            Br if so                                     
+         SH    R2,ALCURBS          Convert to apperent length                   
+         LA    R14,&LINESZ         Max. line length                             
+         SR    R14,R2              Compute max indent                           
+         CR    R14,R15             Pick min                                     
+         BNL   *+6                                                              
+         LR    R15,R14                                                          
+         LA    R5,ALBUFF           Compute start of line                        
+         AR    R5,R15                                                           
+         AR    R15,R2              Compute buffer length                        
+         STH   R15,ALWBUFL                                                      
+         LR    R4,R2               Value of length remaining                    
+         AH    R2,ALCURBS          Back to "real" len                           
+*                                                                               
+ROOM     EX    R2,'MVC @R5(0),@R1' Move word into buffer                        
+         ST    R2,ALWLAST          Save length of word                          
+         AR    R5,R2               Update pointer                               
+         SR    R4,R2                                                            
+         AH    R4,ALCURBS          Adjust for backspaces                        
+         LH    R15,ALCURBS         Add bs adj. for this ..                      
+         AH    R15,ALBSADJ         .. word to adj. for ..                       
+         STH   R15,ALBSADJ         .. the line                                  
+         AH    R15,ALWBUFL         Check for backspace overflow                 
+         CH    R15,=Y(&LINESZ)                                                  
+         BNH   ROOMOK                                                           
+         SH    R15,=Y(&LINESZ)     And if so take the excess                    
+         SR    R4,R15              Off the free space                           
+         SH    R15,ALBSADJ         Adjust albsadj                               
+         LCR   R15,R15                                                          
+         STH   R15,ALBSADJ                                                      
+ROOMOK   CLEAR ALCURBS                                                          
+         SET   ALFSOME             Set something in line                        
+         CL    R5,ALWJPT           Past justify point                           
+         BNH   *+8                 Br if not                                    
+         LA    R3,@R3+1            Bump word count                              
+NEXTWORD AR    R1,R2               Bump input pointer                           
+         B     GETWORD                                                          
+*                                                                               
+ALMAR1   AR    R0,R2               Restore count                                
+*LMAR    BAL   R2,BLINEX           Set sw and output marked line                
+ALMAR    LA    R2,999              replace bal r2,.. hope this is ok            
+         B     BLINEX                                                           
+*                                                                               
+BLINEI   AR    R0,R2               Restore count                                
+BLINE    CLEAR R2                  Set switch                                   
+BLINEX   IF    ALFSOME,BEGIN       Something in buffer...                       
+         LA    R5,ALBUFF           Buffer addr                                  
+         SH    R4,ALWBUFL          Compute length                               
+         SH    R4,ALBSADJ          Take account of backspaces                   
+         LCR   R4,R4                                                            
+         ACALL OTALIN              Empty buffer                                 
+         END                                                                    
+         CLEAR R4                  Clear output count                           
+         SR    R3,R3               Set no words                                 
+         CLEAR ALFSOME                                                          
+         LH    R15,ALINDPA         Set for paragraph                            
+         STH   R15,ALINDNT                                                      
+         STH   R15,ALWPBC          Also set indent value allowed                
+         CLEAR ALFEBL              Reset extra blanks switch                    
+         LTR   R2,R2               Marker                                       
+         BNZ   LNOUT               Br if so                                     
+         LTR   R0,R0               Test input line                              
+         BP    DOLEAD              Br if indented line                          
+         BZ    LNOUT               Br if blank line                             
+* process end of range                                                          
+         IF    ^ALFNUMB,'ACALL RENUMB'  renumber the old range                  
+         L     R0,ALWSAVE+8        Get first line in range                      
+         ST    R0,CPNWLN           Reset cpnwln for range                       
+         ST    R0,ALFRSTSV         Save as first line no used                   
+         ST    R0,CPWKPS           Set new work line no.                        
+         B     NEWRNGEC            Go process line for new rnge                 
+*                                                                               
+LNOUT    LR    R5,R1               Point at text                                
+         LR    R4,R0                                                            
+         ACALL OTALIN              Output line                                  
+         CLEAR R4                  Set buffer empty                             
+         IF    ALFPARA,BEGIN       Only do one paragraph                        
+         SET   CPFRQUIT            Quit range                                   
+         END                                                                    
+*                                                                               
+NEXTLINE STM   R3,R5,ALWSAVE       Save output pointers                         
+         IF    ALFSTOP,BEGIN       Time to quit                                 
+         SET   CPFRQUIT            Quit range                                   
+         END                                                                    
+         PEND                                                                   
+         DROP  BR                                                               
+         EJECT                                                                  
+* output aligned lines routine                                                  
+*        pointer - r5                                                           
+*        count - r4                                                             
+*        return - rar                                                           
+*        r0,r1,r15 - free                                                       
+*                                                                               
+OTALIN   PROC                                                                   
+         MVC   CPLCNO,CPWKPS       Set cplcno in case last                      
+         LA    R1,CPWKPS           Saved line no                                
+         VCALL LOCATE              Setup for dorpin & check if line n           
+         IF    CPDRPT.CPFMTCH,BEGIN  line already exists...                     
+         TSEG  'No line-number available, the following text lost:',,WR         
+         SETMSG (R5),(R4)                                                       
+         B     CVERRMSG                                                         
+         END                                                                    
+         MVC   CPNWLN,CPLCNO       Set next line for despot                     
+         CLEAR CPLFLG4.CPFDESET    Reset flag from previous call                
+         TM    CPDRPT,CPFNTYT+CPFHIGH  see if next line exists                  
+         BNZ   NOLINE              Branch no around flag set                    
+         OI    CPLFLG4,CPFDESET    Tell despot that line set                    
+NOLINE   MVC   CPLCNO,CPWKPS       Set to lineno we will use                    
+         IF    ^CPLFLG5.CPFNLST,BEGIN    list line...                           
+         SETMSG (R5),(R4)                                                       
+         VCALL LISTLINE                                                         
+         IF    ('TWRITE',NZ),'SET ALFSTOP'  attn                                
+         END                                                                    
+         L     R15,CPLCNO          Lineno                                       
+         ST    R15,CPACLNO         Set current line                             
+         LR    R1,R5               Pointer to r1                                
+         LR    R0,R4               Count to r0                                  
+         VCALL PRESS               Press                                        
+         VCALL STOW                Put away                                     
+         L     R0,CPWKPS           Line no used                                 
+         LA    R1,1                Kick minimum                                 
+         VCALL ADDER                                                            
+         ST    R0,CPWKPS           Save as default for next                     
+         PEND                                                                   
+         EJECT                                                                  
+* do a local renumber of last section done by align                             
+RENUMB   PROC                                                                   
+         LT    R5,CPWKPS           Get next number to use                       
+         BM    RENUMBEX            Branch no to exit                            
+         DECR  R5                  Reduce by one                                
+         ST    R5,CPWKPS           Set to last number used                      
+         S     R5,ALFRSTSV         Get line count - 1                           
+         BNP   RENUMBEX            Exit if not positive                         
+*                                                                               
+         L     R15,CPWKPS          Last line number                             
+         A     R15,CVONE                                                        
+         VCALL GETLNO              Next line-number                             
+         IF    NEG,'L R1,CVMAXLNO'                                              
+         ELSE  'L R1,CPLCNO; DECR R1'  R1 = last line-number                    
+         L     R0,ALFRSTSV         R0 = first line-number                       
+         CLEAR R2                  R2 = delta (0 = calculate)                   
+         LR    R3,R0               R3 = starting lineno                         
+         VCALL NUMRANGE            Re-number the range                          
+         IF    Z,BEGIN                                                          
+         ST    R2,CPWKDL           Save new delta                               
+         ST    R0,CPACLNO          Update current line pointer                  
+         END                                                                    
+*                                                                               
+RENUMBEX PEND                                                                   
+*                                                                               
+         DROP  ALWA                                                             
+         QLTORG                                                                 
+         TITLE 'SORT command and routines'                                      
+*box                                                                            
+*                                                                               
+*                                                                               
+*  SORT - COMMAND                                                               
+*                                                                               
+*                                                                               
+SORTWA   RECORD BEGIN                                                           
+STMEM    DS    F                   SORT MEMORY                                  
+STMEMEND DS    F                   END OF SORT MEMORY                           
+STLIST1  DS    F                   SORT LIST                                    
+STLIST2  DS    F                   SECONDARY SORT LIST                          
+STLISTPT DS    F                   LIST POINTER                                 
+STTEXTPT DS    F                   TEXT POINTER                                 
+STFRSTLN DS    F                   1ST LINE TO SORT                             
+STLASTLN DS    F                   LAST LINE TO SORT                            
+STCOUNT  DS    F                   SORT LINE COUNT                              
+STCOL1   DS    F                   COL 1                                        
+STCOL2   DS    F                   COL 2                                        
+STTRTAB  DS    F                   TRANSLATE TABLE                              
+STPAD    DS    F                   PAD CHAR                                     
+STFLAGS  FLAG  ,                                                                
+         FLAG  STFREV              DECENDING SORT                               
+         FLAG  STFDEL              DELETE DUPLICATES                            
+STLINENO DS    F                   OUTPUT LINENO                                
+STDELTA  DS    F                   OUTPUT DELTA                                 
+         END                                                                    
+*                                                                               
+STWA     RECORD BEGIN                                                           
+STSORTWA DS    (L'SORTWA)X                                                      
+         END                                                                    
+*                                                                               
+*                                                                               
+SORT     XPROC STWA                                                             
+         USING STWA,WAR                                                         
+         USING SORTWA,R6                                                        
+         LA    R6,STSORTWA                                                      
+*                                                                               
+         COMMENT                   INIT WORK AREA                               
+         CLEAR SORTWA                                                           
+         MVC   STLINENO,=F'1000'                                                
+         MVC   STDELTA,=F'1000'                                                 
+         MVC   STPAD,=A(X'40000000')                                            
+*                                                                               
+         COMMENT                   CHECK FOR ACTIVE FILE                        
+         VCALL CHKACT                                                           
+*                                                                               
+         COMMENT                   PROCESS RANGE                                
+         SET   CPLFLG1.CPFALL      DEFAULT IS ALL                               
+         VCALL NDETRNG                                                          
+         IF    CPFSTRRG,BEGIN                                                   
+         ERROR 'Associative range not allowed. '                                
+         END                                                                    
+         IF    CPFDSJNT,BEGIN                                                   
+         ERROR 'Disjoint range not allowed. '                                   
+         END                                                                    
+         MVC   STFRSTLN,CPFSLN                                                  
+         IF    (STFRSTLN,LT,1000),BEGIN                                         
+         MVC   STFRSTLN,=F'1000'                                                
+         END                                                                    
+         MVC   STLASTLN,CPLSLN                                                  
+         IF    (STLASTLN,GT,CVMAXLNO),BEGIN                                     
+         CLEAR STLASTLN                                                         
+         END                                                                    
+         IF    CPLFLG1.CPFALLV,BEGIN IF ALL, OVERRIDE ACTUAL                    
+         MVC   STFRSTLN,=F'1000'                                                
+         MVC   STLASTLN,CVMAXLNO                                                
+         END                                                                    
+*                                                                               
+         COMMENT                   SCAN SORT COMMAND                            
+         SCAN  SORTPRT                                                          
+         SCANCHK                                                                
+*                                                                               
+         COMMENT                   GET MEMORY FOR SORT                          
+         ACALL STGETMEM                                                         
+         ST    R1,STMEM                                                         
+         AR    R1,R0                                                            
+         ST    R1,STMEMEND                                                      
+*                                                                               
+         COMMENT                   GET TEXT TO SORT W/CO-ROUTINE                
+         LA    R1,SORTWA                                                        
+         ST    R1,CPCWA            WORK AREA ADDR FOR CO-ROUTINE                
+         RDRNG STGETTXT,(DESRTRN+LOCATRTN+DESABORT+UNPRST)                      
+         IF    NZ,BEGIN            IF ATTENTION, ABORT SORT                     
+         L     R1,STMEM                                                         
+         VCALL FREECORE                                                         
+         ERROR 'Sort Aborted.'                                                  
+         END                                                                    
+*                                                                               
+         COMMENT                   IF DECENDING, REVERSE LIST                   
+         IF    STFREV,BEGIN                                                     
+         L     R0,STCOUNT                                                       
+         L     R1,STLIST1                                                       
+         L     R2,STLIST2                                                       
+         ACALL STLISTRV                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   NOW SORT TEXT !!                             
+         L     R0,STCOUNT          R1,R0 - LIST                                 
+         SLL   R0,2                                                             
+         L     R1,STLIST1                                                       
+         L     R2,STLIST2          R2 - SECONDARY LIST                          
+         L     R3,STCOL1           R3,R4 - FIELD COL                            
+         L     R4,STCOL2                                                        
+         L     R5,STTRTAB                                                       
+         L     R15,STPAD                                                        
+         ACALL SORTLIST            SORT LIST                                    
+         IF    (R1,EQ,STLIST2),BEGIN  IF SORTED LIST IN LIST2                   
+         MVC   STLIST2,STLIST1     EXCHANGE LIST POINTERS                       
+         ST    R1,STLIST1                                                       
+         END   ,                   SORTED LIST NOW IN STLIST1                   
+*                                                                               
+         COMMENT                   CLEAR ACTIVE                                 
+         L     R0,STFRSTLN                                                      
+         L     R1,STLASTLN                                                      
+         VCALL DELRANGE                                                         
+*                                                                               
+         COMMENT                   CALCULATE NEW DELTA                          
+         L     R0,STFRSTLN                                                      
+         L     R1,STLASTLN                                                      
+         L     R2,STCOUNT                                                       
+         ACALL AUTODELT                                                         
+         IF    NZ,BEGIN                                                         
+         BOMB                                                                   
+         END                                                                    
+         ST    R0,STLINENO                                                      
+         ST    R1,STDELTA                                                       
+*                                                                               
+         COMMENT                   IF DECENDING, REVERSE LIST                   
+         IF    STFREV,BEGIN                                                     
+         L     R0,STCOUNT                                                       
+         L     R1,STLIST1                                                       
+         L     R2,STLIST2                                                       
+         ACALL STLISTRV                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   IF DELETE, DELETE LINES WITH                 
+         COMMENT                   DUPLICATE FIELDS                             
+         IF    STFDEL,BEGIN                                                     
+         L     R0,STCOUNT          R1,R0 - LIST                                 
+         L     R1,STLIST1                                                       
+         L     R3,STCOL1           R3,R4 - FIELD COL                            
+         L     R4,STCOL2                                                        
+         L     R5,STTRTAB                                                       
+         L     R15,STPAD                                                        
+         ACALL SDELETE             DELETE                                       
+         ST    R0,STCOUNT                                                       
+         END                                                                    
+*                                                                               
+         COMMENT                   WRITE OUT SORTED ACTIVE                      
+         L     R4,STLIST1          R4,R5 - START,END OF SORTED LIST             
+         L     R5,STCOUNT                                                       
+         SLL   R5,2                                                             
+         AR    R5,R4                                                            
+         WHILE (R4,LT,R5),BEGIN                                                 
+         L     R1,0(R4)                                                         
+         LH    R0,0(R1)                                                         
+         LA    R1,2(R1)                                                         
+         L     R15,STLINENO                                                     
+         VCALL PUTLINE                                                          
+         L     R15,STLINENO                                                     
+         A     R15,STDELTA                                                      
+         ST    R15,STLINENO                                                     
+         LA    R4,4(R4)                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   FREE SORT MEMORY !!!!                        
+         L     R1,STMEM                                                         
+         VCALL FREECORE                                                         
+*                                                                               
+         COMMENT                   GIVE TERMINATION MESSAGE                     
+         L     R0,STCOUNT                                                       
+         TNUM  (R0)                                                             
+         TSEG  ' lines sorted. '                                                
+*                                                                               
+         B     CVNEXT              ALL DONE, EXIT                               
+*                                                                               
+         CLEAR R15                                                              
+         PEND ,                    NEVER EXECUTED, WE EXIT ABOVE                
+         SPACE 2                                                                
+*                                                                               
+* SORT SCAN ROUTINES                                                            
+*                                                                               
+SORTPRT  SCKW  COLUMNS,STCOLMN,(A,P,PI),&LINESZ                                 
+         SCKW  COLS,STCOLMN,(A,P,PI),&LINESZ                                    
+         SCKW  D,STREVRSE                                                       
+         SCKW  DESCENDING,STREVRSE,A                                            
+         SCKW  DELETE,STDELETE,A                                                
+         SCKW  NOCASE,STNOCASE                                                  
+         SCKW  UPLOW,STNOCASE,A                                                 
+         SCKW  HEX,STHEX                                                        
+         SCKW  ,V(SCNINVAL)                                                     
+         SPACE 2                                                                
+SORTPRT2 SCKW  /,STCOLMN2,(P,PI),&LINESZ                                        
+         SCKW  ,STSCNRES                                                        
+         SPACE 2                                                                
+*-                                                                              
+*-       COLUMN = ...                                                           
+*-                                                                              
+STCOLMN  PROC  ,                                                                
+         ST    R0,STCOL1                                                        
+         SCPUSH ,                                                               
+         SCAN  SORTPRT2                                                         
+         SCANCHK                                                                
+         IF    (R15,EQ,8),BEGIN                                                 
+         SCPOP                                                                  
+         END                                                                    
+         CLEAR R15                                                              
+         PEND                                                                   
+         SPACE 2                                                                
+STCOLMN2 PROC                                                                   
+         ST    R0,STCOL2                                                        
+         S     R0,STCOL1                                                        
+         A     R0,=F'1'                                                         
+         IF    NP,BEGIN                                                         
+         ERROR 'Invalid COLUMN specification. '                                 
+         END                                                                    
+         LA    R15,4                                                            
+         PEND                                                                   
+         SPACE 2                                                                
+STSCNRES DPROC ,                                                                
+         LA    R15,8                                                            
+         PEND                                                                   
+         SPACE 2                                                                
+*-                                                                              
+*-       DECENDING                                                              
+*-                                                                              
+STREVRSE DPROC ,                                                                
+         SET   STFREV                                                           
+         CLEAR R15                                                              
+         PEND                                                                   
+         SPACE 2                                                                
+*-                                                                              
+*-       DELETE                                                                 
+*-                                                                              
+STDELETE DPROC ,                                                                
+         SET   STFDEL                                                           
+         CLEAR R15                                                              
+         PEND                                                                   
+         SPACE 2                                                                
+*-                                                                              
+*-       NOCASE                                                                 
+*-                                                                              
+STNOCASE PROC  ,                                                                
+         LA    R1,NOCASETB                                                      
+         ST    R1,STTRTAB                                                       
+         CLEAR R15                                                              
+         PEND                                                                   
+         SPACE 2                                                                
+*-                                                                              
+*-       HEX NUMBER STRING                                                      
+*-                                                                              
+STHEX    PROC  ,                                                                
+         LA    R1,HEXTB                                                         
+         ST    R1,STTRTAB                                                       
+         CLEAR R15                                                              
+         PEND                                                                   
+         SPACE 2                                                                
+*                                                                               
+*  TRANSLATION TABLES                                                           
+*                                                                               
+*                                                                               
+         DC    0F'0'                                                            
+NOCASETB LABEL ,                                                                
+         DC    256AL1(*-NOCASETB)                                               
+         ORG   NOCASETB+C'A'                                                    
+         DC    C'abcdefghi'        TREAT UPPER AS LOWER CASE                    
+         ORG   NOCASETB+C'J'                                                    
+         DC    C'jklmnopqr'        TREAT UPPER AS LOWER CASE                    
+         ORG   NOCASETB+C'S'                                                    
+         DC    C'stuvwxyz'         TREAT UPPER AS LOWER CASE                    
+         ORG   ,                                                                
+*                                                                               
+         DC    0F'0'                                                            
+HEXTB    LABEL ,                                                                
+         DC    256AL1(*-HEXTB)                                                  
+         ORG   HEXTB+C'A'          TREAT HEX CHARS AS HEX                       
+         DC    X'FAFBFCFDFEFF'                                                  
+         ORG   HEXTB+C'a'                                                       
+         DC    X'FAFBFCFDFEFF'                                                  
+         ORG   ,                                                                
+         EJECT                                                                  
+         QLTORG                                                                 
+         EJECT                                                                  
+*                                                                               
+**                                                                              
+**  GET SORT MEMORY                                                             
+**                                                                              
+**  RETURNS:                                                                    
+**    R0 - MEMORY LEN                                                           
+**    R1 - MEMORY AREA                                                          
+**                                                                              
+**  MEMORY NEEDED =                                                             
+**     2 LISTS OF MEMORY POINTERS (LINE COUNT LONG) +                           
+**     AREA FOR TEXT AND TEXT LENGTH POINTERS (BYTE COUNT +                     
+**     2*LINE COUNT)                                                            
+**                                                                              
+**                                                                              
+**                                                                              
+*                                                                               
+STGETMEM PROC                                                                   
+*                                                                               
+         L     R1,CPALNCT                                                       
+         SLL   R1,3                LINE COUNT * 8                               
+         L     R2,CPALNCT                                                       
+         SLL   R2,1                LINE COUNT * 2                               
+         L     R3,CPABYCT          BYTE COUNT                                   
+         L     R4,=F'16384'        16K FUDGE FACTOR                             
+         AR    R1,R2                                                            
+         AR    R1,R3                                                            
+         AR    R1,R4                                                            
+         SRL   R1,7                                                             
+         SLL   R1,7                                                             
+         LR    R0,R1                                                            
+         VCALL GETCORE             GET MEMORY                                   
+*                                                                               
+         PRETURN (R0,R1)                                                        
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*                                                                               
+*  STGETTXT - SORT CO-ROUTINE                                                   
+*                                                                               
+*  GET TEXT INTO MEMORY                                                         
+*  THIS ROUTINE ENTERED ONCE FOR EACH LINE IN RANGE                             
+*                                                                               
+*  ON ENTRY:                                                                    
+*        R1,R0 - LINE LOC,LEN                                                   
+*                                                                               
+*                                                                               
+STGETTXT PROC                                                                   
+         USING SORTWA,R6                                                        
+         L     R6,CPCWA                                                         
+*                                                                               
+         COMMENT                   FIRST TIME THRU SET UP                       
+         COMMENT                   LIST AREA, TEXT AREAS ,,,                    
+         IF    (STCOUNT,EQ,0),BEGIN                                             
+         L     R4,STMEM            R4 - LIST1                                   
+         ST    R4,STLIST1                                                       
+         ST    R4,STLISTPT         R4 - LIST1 PTR                               
+         L     R5,CPALNCT          R5 - LIST LENGTH                             
+         SLL   R5,2                                                             
+         LA    R5,64(R5)           CHICKEN                                      
+         SRL   R5,4                                                             
+         SLL   R5,4                                                             
+         AR    R4,R5                                                            
+         ST    R4,STLIST2          R4 - LIST 2                                  
+         AR    R4,R5                                                            
+         ST    R4,STTEXTPT         R5 - TEXT AREA                               
+         END                                                                    
+*                                                                               
+         COMMENT                   COUNT LINES SORTED                           
+         L     R15,STCOUNT                                                      
+         INCR  R15                                                              
+         ST    R15,STCOUNT                                                      
+*                                                                               
+         COMMENT                   SAVE MAX, MIN LINE NUMBERS                   
+         L     R15,CPLCNO                                                       
+         IF    (R15,LT,STFRSTLN),BEGIN                                          
+         ST    R15,STFRSTLN                                                     
+         END                                                                    
+         IF    (R15,GT,STLASTLN),BEGIN                                          
+         ST    R15,STLASTLN                                                     
+         END                                                                    
+*                                                                               
+         COMMENT                   SAVE LINE TEXT                               
+         COMMENT                   R1,R0 -  LINE LOC,LEN                        
+         COMMENT                                                                
+         L     R4,STLISTPT         UPDATE LIST PTR                              
+         L     R2,STTEXTPT                                                      
+         ST    R2,0(R4)                                                         
+         LA    R4,4(R4)                                                         
+         ST    R4,STLISTPT                                                      
+         L     R4,STTEXTPT         FILL IN TEXT AREA                            
+         STH   R0,0(R4)                                                         
+         LR    R14,R1                                                           
+         LR    R15,R0                                                           
+         LA    R2,2(R4)                                                         
+         LR    R3,R0                                                            
+         MVCL  R2,R14                                                           
+         ST    R2,STTEXTPT         UPDATE TEXT PTR                              
+         LA    R2,256(R2)                                                       
+         IF    (R2,GE,STMEMEND),BEGIN  MEMORY OVERFLOW CHECK                    
+         L     R1,STMEM                                                         
+         VCALL FREECORE                                                         
+         ERROR 'Sort memory overflow.  Sort aborted.'                           
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  R6                                                               
+         EJECT                                                                  
+*                                                                               
+*  SORTLIST - SORT LIST OF ENTRIES                                              
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R0 - LIST LENGTH                                                           
+*    R1 - LIST ADDRESS                                                          
+*    R2 - SECONDARY LIST ADDRESS                                                
+*    R3 - FIRST COL (ZERO IF NONE)                                              
+*    R4 - 2ND COL (ZERO IF NONE)                                                
+*    R5 - TRANSLATE TABLE ADDRESS                                               
+*    R15 - PAD BYTE                                                             
+*                                                                               
+*  ON EXIT:                                                                     
+*    R1 - SORTED LIST (MAY POINT TO SECONDARY LIST SPACE)                       
+*                                                                               
+*  WE SORT BY MERGING SORTED MINI-LISTS, WE START WITH                          
+*  MINI-LISTS OF ONE ENTRY AND DOUBLE THE MINI-LIST SIZE                        
+*  UNTIL THE WHOLE THING IS SORTED.                                             
+*                                                                               
+*  REGISTER USAGE FOR LOOP                                                      
+*    R14,R15,R0,R1  --- TEMP FOR CLCL, ETC                                      
+*    R2,R3 --- PTR,END OF MINI-LIST1                                            
+*    R4,R5 --- PRT,END OF MINI-LIST2                                            
+*    R6 --- OUTPUT LIST                                                         
+*                                                                               
+*                                                                               
+SLWA     RECORD BEGIN                                                           
+SLIST1   DS    F                                                                
+SLIST2   DS    F                                                                
+SLISTLEN DS    F                                                                
+SLIST    DS    F                                                                
+SLISTEND DS    F                                                                
+SLCOL1   DS    F                                                                
+SLCOL2   DS    F                                                                
+SLTRTAB  DS    F                                                                
+SLPAD    DS    F                                                                
+MLISTSIZ DS    F                   MINI LIST SIZE (IN BYTES)                    
+SLFLAG   FLAG                                                                   
+         FLAG  SLDONE              MINI LIST MERGE LOOP FLAG                    
+SLFLDOFF DS    F                                                                
+SLFLDLEN DS    F                                                                
+SLBUF1   DS    CL256                                                            
+SLBUF2   DS    CL256                                                            
+SLTRBUF  DS    CL256                                                            
+         END                                                                    
+*                                                                               
+*                                                                               
+SORTLIST PROC  SLWA                                                             
+*                                                                               
+         COMMENT                   HANDLE SORT FIELD OPTIONS                    
+         COMMENT                   SEPARATELY  (EFFICIENCY)                     
+         IF    ((R3,NZ),OR,(R5,NZ)),BEGIN                                       
+         ACALL SORTWOPT                                                         
+         PRETURN R1                                                             
+         EXIT  SORTLIST            EXIT SORT PROC                               
+         END                                                                    
+*                                                                               
+         COMMENT                   SET UP SORT LIST WORK AREA                   
+         CLEAR SLWA                                                             
+         ST    R1,SLIST1                                                        
+         ST    R0,SLISTLEN                                                      
+         ST    R2,SLIST2                                                        
+         ST    R3,SLCOL1                                                        
+         ST    R4,SLCOL2                                                        
+         ST    R5,SLTRTAB                                                       
+         ST    R15,SLPAD                                                        
+         ST    R1,SLIST                                                         
+         AR    R1,R0                                                            
+         ST    R1,SLISTEND                                                      
+         IF    (R0,LT,8),EXIT                                                   
+*                                                                               
+         COMMENT                   SET UP FOR MULTIPLE PASSES                   
+         MVC   MLISTSIZ,=F'4'                                                   
+         L     R2,SLIST                                                         
+         LA    R3,4(R2)                                                         
+         LR    R4,R3                                                            
+         LA    R5,4(R4)                                                         
+         L     R6,SLIST2                                                        
+*                                                                               
+         COMMENT                   LOOP THRU LIST MERGE SORTING                 
+         WHILE (MLISTSIZ,LT,SLISTLEN),BEGIN                                     
+*                                                                               
+         COMMENT                   DO ONE PASS THRU LIST                        
+         WHILE (R2,LT,SLISTEND),BEGIN                                           
+*                                                                               
+         COMMENT                   MERGE 2 MINI LISTS                           
+         CLEAR SLDONE                                                           
+         WHILE ^SLDONE,BEGIN                                                    
+         COMMENT                   COMPARE ENTRIES                              
+         L     R1,0(R2)                                                         
+         LA    R0,2(R1)                                                         
+         LH    R1,0(R1)                                                         
+         L     R14,0(R4)                                                        
+         LH    R15,0(R14)                                                       
+         LA    R14,2(R14)                                                       
+         O     R1,SLPAD                                                         
+         O     R15,SLPAD                                                        
+         CLCL  R0,R14                                                           
+         IF    LE,BEGIN            IF *MINI_LIST1 < *MINI_LIST2                 
+         L     R1,0(R2)                                                         
+         ST    R1,0(R6)              *NEWLIST = *MINI_LIST1                     
+         LA    R2,4(R2)              MINI_LIST1++;  NEWLIST++                   
+         LA    R6,4(R6)                                                         
+         IF    (R2,GE,R3),BEGIN      IF MINI_LIST1 >= MINI_LIST1_END            
+         LR    R14,R6                  REST OF MINI_LIST2 TO NEWLIST            
+         LR    R15,R5                  BUMP MINI_LIST2 AS NEEDED                
+         SR    R15,R4                  BUMP NEWLIST AS NEEDED                   
+         LR    R4,R4                                                            
+         LR    R5,R15                                                           
+         MVCL  R14,R4                                                           
+         SET   SLDONE                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END                                                                    
+         ELSE  BEGIN               IF *MINI_LIST1 > *MINI_LIST2                 
+         L     R1,0(R4)                                                         
+         ST    R1,0(R6)              *NEWLIST = *MINI_LIST2                     
+         LA    R4,4(R4)              MINI_LIST2++;  NEWLIST++                   
+         LA    R6,4(R6)                                                         
+         IF    (R4,GE,R5),BEGIN      IF MINI_LIST1 >= MINI_LIST1_END            
+         LR    R14,R6                  REST OF MINI_LIST1 TO NEWLIST            
+         LR    R15,R3                  BUMP MINI_LIST1 AS NEEDED                
+         SR    R15,R2                  BUMP NEWLIST AS NEEDED                   
+         LR    R2,R2                                                            
+         LR    R3,R15                                                           
+         MVCL  R14,R2                                                           
+         SET   SLDONE                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END                                                                    
+         END   , OF MERGE 2 MINI-LISTS                                          
+*                                                                               
+         COMMENT                   SET UP TO MERGE NEXT 2 MINI LISTS            
+         LR    R2,R4                                                            
+         LR    R3,R2                                                            
+         A     R3,MLISTSIZ                                                      
+         LR    R4,R3                                                            
+         LR    R5,R4                                                            
+         A     R5,MLISTSIZ                                                      
+         IF    (R5,GT,SLISTEND),BEGIN                                           
+         L     R5,SLISTEND                                                      
+         END                                                                    
+         IF    (R3,GE,SLISTEND),BEGIN                                           
+         L     R3,SLISTEND                                                      
+         LR    R14,R6                                                           
+         LR    R15,R3                                                           
+         SR    R15,R2                                                           
+         LR    R2,R2                                                            
+         LR    R3,R15                                                           
+         MVCL  R14,R2                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END   , 1 PASS THRU WHOLE LIST                                         
+*                                                                               
+         COMMENT                   SET UP FOR NEXT PASS                         
+         VCALL SLICECHK            ALLOW SOMEONE ELSE TO RUN                    
+         L     R1,MLISTSIZ                                                      
+         SLL   R1,1                DOUBLE MINI_LIST SIZE                        
+         ST    R1,MLISTSIZ                                                      
+         IF    (SLIST,EQ,SLIST1),' MVC SLIST,SLIST2'                            
+         ELSE  ' MVC SLIST,SLIST1'                                              
+         L     R1,SLIST            RESET LIST, LISTEND                          
+         A     R1,SLISTLEN                                                      
+         ST    R1,SLISTEND                                                      
+         L     R2,SLIST            GET MINI_LIST POINTERS                       
+         LR    R3,R2                                                            
+         A     R3,MLISTSIZ                                                      
+         LR    R4,R3                                                            
+         LR    R5,R4                                                            
+         A     R5,MLISTSIZ                                                      
+         IF    (R5,GT,SLISTEND),' L R5,SLISTEND'                                
+         IF    (SLIST,EQ,SLIST1),' L R6,SLIST2'                                 
+         ELSE  'L R6,SLIST1'                                                    
+         END   , OF SORTLOOP                                                    
+*                                                                               
+         COMMENT                   RETURN R1 - SORTED LIST                      
+         L     R1,SLIST                                                         
+         PRETURN R1                                                             
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*  SORTWOPT - SORT WITH FIELD OPTIONS.                                          
+*                                                                               
+*  PROCESS WITH COLUMN OPTIONS, TRANSLATE TABLE OPTIONS.                        
+*                                                                               
+*  N.B.                                                                         
+*  THIS ROUTINE IS IDENTICAL TO SORTLIST !!! WITH THE                           
+*  EXCEPTION THAT IT COMPARES WITH COL OPTIONS, TRANSLATE OPTIONS.              
+*  THE CODE IS KEPT SEPARATE FOR EFFICIENCY REASONS.                            
+*  (IE. THE INNER LOOP IS MUCH SMALLER IN THE NON OPTIONS ROUTINE)              
+*                                                                               
+*  TO CREATE THIS ROUTINE. SORTLIST ROUTINE WAS DEBUGGED AND                    
+*  THEN COPIED HERE.  A SEPARATE COMPARE ROUTINE IS CALLED TO                   
+*  DO THE MORE COMPLICATED COMPARE.                                             
+*                                                                               
+*  FOR ENTRY/EXIT CONVENTIONS SEE SORTLIST ROUTINE.                             
+*                                                                               
+*                                                                               
+SORTWOPT PROC  SLWA                                                             
+*                                                                               
+         CLEAR SLWA                                                             
+         ST    R1,SLIST1                                                        
+         ST    R0,SLISTLEN                                                      
+         ST    R2,SLIST2                                                        
+         ST    R3,SLCOL1                                                        
+         ST    R4,SLCOL2                                                        
+         ST    R5,SLTRTAB                                                       
+         ST    R15,SLPAD                                                        
+         ST    R1,SLIST                                                         
+         AR    R1,R0                                                            
+         ST    R1,SLISTEND                                                      
+         IF    (R0,LT,8),EXIT                                                   
+*                                                                               
+         COMMENT                   PROCESS SORT FIELD COLUMNS                   
+         IF    (R3,Z),BEGIN        R3 - FIELD OFFSET                            
+         LA    R4,255              R4 - FIELD LEN                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         DECR  R3                                                               
+         IF    (R4,Z),' LA R4,255'                                              
+         SR    R4,R3                                                            
+         END                                                                    
+         ST    R3,SLFLDOFF                                                      
+         ST    R4,SLFLDLEN                                                      
+*                                                                               
+         COMMENT                   MOVE TR TABLE TO LOCAL ADDR                  
+         LA    R0,SLTRBUF                                                       
+         LA    R1,256                                                           
+         L     R2,SLTRTAB                                                       
+         LR    R3,R1                                                            
+         MVCL  R0,R2                                                            
+*                                                                               
+         COMMENT                   SET UP FOR MULTIPLE PASSES                   
+         MVC   MLISTSIZ,=F'4'                                                   
+         L     R2,SLIST                                                         
+         LA    R3,4(R2)                                                         
+         LR    R4,R3                                                            
+         LA    R5,4(R4)                                                         
+         L     R6,SLIST2                                                        
+*                                                                               
+         COMMENT                   LOOP THRU LIST MERGE SORTING                 
+         WHILE (MLISTSIZ,LT,SLISTLEN),BEGIN                                     
+*                                                                               
+         COMMENT                   DO ONE PASS THRU LIST                        
+         WHILE (R2,LT,SLISTEND),BEGIN                                           
+*                                                                               
+         COMMENT                   MERGE 2 MINI LISTS                           
+         CLEAR SLDONE                                                           
+         WHILE ^SLDONE,BEGIN                                                    
+         COMMENT                   COMPARE ENTRIES                              
+         COMMENT ,                  (WITH FIELD, TRANSLATION OPTS)              
+*                                                                               
+         COMMENT                   GET FIELD 1 IN R14,R15                       
+         L     R14,0(R2)           (THEN IN R0,R1)                              
+         LH    R15,0(R14)                                                       
+         LA    R14,2(R14)                                                       
+         IF    (R15,GT,255),' BOMB '                                            
+         A     R14,SLFLDOFF               DO COLUMN STUFF                       
+         S     R15,SLFLDOFF                                                     
+         IF    (R15,NEG),' CLEAR R15'                                           
+         IF    (R15,GT,SLFLDLEN),' L R15,SLFLDLEN '                             
+         IF    (SLTRTAB,NE,0),BEGIN       DO TRANSLATE STUFF                    
+         IF    (R15,POS),BEGIN                                                  
+         DEX   R15,' MVC SLBUF1(*-*),0(R14) '                                   
+         EX    R15,' TR SLBUF1(*-*),SLTRBUF '                                   
+         LA    R14,SLBUF1                                                       
+         LA    R15,1(R15)                                                       
+         END                                                                    
+         END                                                                    
+         O     R15,SLPAD                                                        
+         LR    R0,R14              FIELD 1 IN R0,R1                             
+         LR    R1,R15                                                           
+*                                                                               
+         COMMENT                   GET FIELD 2 IN R14,R15                       
+         L     R14,0(R4)                                                        
+         LH    R15,0(R14)                                                       
+         LA    R14,2(R14)                                                       
+         IF    (R15,GT,255),' BOMB '                                            
+         A     R14,SLFLDOFF               DO COLUMN STUFF                       
+         S     R15,SLFLDOFF                                                     
+         IF    (R15,NEG),' CLEAR R15'                                           
+         IF    (R15,GT,SLFLDLEN),' L R15,SLFLDLEN '                             
+         IF    (SLTRTAB,NE,0),BEGIN       DO TRANSLATE STUFF                    
+         IF    (R15,POS),BEGIN                                                  
+         DEX   R15,' MVC SLBUF2(*-*),0(R14) '                                   
+         EX    R15,' TR SLBUF2(*-*),SLTRBUF '                                   
+         LA    R14,SLBUF2                                                       
+         LA    R15,1(R15)                                                       
+         END                                                                    
+         END                                                                    
+         O     R15,SLPAD                                                        
+*                                                                               
+         CLCL  R0,R14              COMPARE FIELDS !!                            
+*                                                                               
+         IF    LE,BEGIN            IF *MINI_LIST1 < *MINI_LIST2                 
+         L     R1,0(R2)                                                         
+         ST    R1,0(R6)              *NEWLIST = *MINI_LIST1                     
+         LA    R2,4(R2)              MINI_LIST1++;  NEWLIST++                   
+         LA    R6,4(R6)                                                         
+         IF    (R2,GE,R3),BEGIN      IF MINI_LIST1 >= MINI_LIST1_END            
+         LR    R14,R6                  REST OF MINI_LIST2 TO NEWLIST            
+         LR    R15,R5                  BUMP MINI_LIST2 AS NEEDED                
+         SR    R15,R4                  BUMP NEWLIST AS NEEDED                   
+         LR    R4,R4                                                            
+         LR    R5,R15                                                           
+         MVCL  R14,R4                                                           
+         SET   SLDONE                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END                                                                    
+         ELSE  BEGIN               IF *MINI_LIST1 > *MINI_LIST2                 
+         L     R1,0(R4)                                                         
+         ST    R1,0(R6)              *NEWLIST = *MINI_LIST2                     
+         LA    R4,4(R4)              MINI_LIST2++;  NEWLIST++                   
+         LA    R6,4(R6)                                                         
+         IF    (R4,GE,R5),BEGIN      IF MINI_LIST1 >= MINI_LIST1_END            
+         LR    R14,R6                  REST OF MINI_LIST1 TO NEWLIST            
+         LR    R15,R3                  BUMP MINI_LIST1 AS NEEDED                
+         SR    R15,R2                  BUMP NEWLIST AS NEEDED                   
+         LR    R2,R2                                                            
+         LR    R3,R15                                                           
+         MVCL  R14,R2                                                           
+         SET   SLDONE                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END                                                                    
+         END   , OF MERGE 2 MINI-LISTS                                          
+*                                                                               
+         COMMENT                   SET UP TO MERGE NEXT 2 MINI LISTS            
+         LR    R2,R4                                                            
+         LR    R3,R2                                                            
+         A     R3,MLISTSIZ                                                      
+         LR    R4,R3                                                            
+         LR    R5,R4                                                            
+         A     R5,MLISTSIZ                                                      
+         IF    (R5,GT,SLISTEND),BEGIN                                           
+         L     R5,SLISTEND                                                      
+         END                                                                    
+         IF    (R3,GE,SLISTEND),BEGIN                                           
+         L     R3,SLISTEND                                                      
+         LR    R14,R6                                                           
+         LR    R15,R3                                                           
+         SR    R15,R2                                                           
+         LR    R2,R2                                                            
+         LR    R3,R15                                                           
+         MVCL  R14,R2                                                           
+         LR    R6,R14                                                           
+         END                                                                    
+         END   , 1 PASS THRU WHOLE LIST                                         
+*                                                                               
+         COMMENT                   SET UP FOR NEXT PASS                         
+         VCALL SLICECHK            ALLOW SOMEONE ELSE TO RUN                    
+         L     R1,MLISTSIZ                                                      
+         SLL   R1,1                DOUBLE MINI_LIST SIZE                        
+         ST    R1,MLISTSIZ                                                      
+         IF    (SLIST,EQ,SLIST1),' MVC SLIST,SLIST2'                            
+         ELSE  ' MVC SLIST,SLIST1'                                              
+         L     R1,SLIST            RESET LIST, LISTEND                          
+         A     R1,SLISTLEN                                                      
+         ST    R1,SLISTEND                                                      
+         L     R2,SLIST            GET MINI_LIST POINTERS                       
+         LR    R3,R2                                                            
+         A     R3,MLISTSIZ                                                      
+         LR    R4,R3                                                            
+         LR    R5,R4                                                            
+         A     R5,MLISTSIZ                                                      
+         IF    (R5,GT,SLISTEND),' L R5,SLISTEND'                                
+         IF    (SLIST,EQ,SLIST1),' L R6,SLIST2'                                 
+         ELSE  'L R6,SLIST1'                                                    
+         END   , OF SORTLOOP                                                    
+*                                                                               
+         COMMENT                   RETURN R1 - SORTED LIST                      
+         L     R1,SLIST                                                         
+         PRETURN R1                                                             
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+**                                                                              
+**  REVERSE LIST                                                                
+**                                                                              
+**  ON ENTRY:                                                                   
+**       R0 - COUNT OF ITEMS IN LIST                                            
+**       R1 - LIST                                                              
+**       R2 - SECONDARY LIST (USE AS TEMP)                                      
+**                                                                              
+**                                                                              
+*                                                                               
+STLISTRV PROC                                                                   
+*                                                                               
+         SLL   R0,2                R0 - LIST LEN IN BYTES                       
+         LR    R4,R2                                                            
+         LR    R5,R0                                                            
+         LR    R14,R1                                                           
+         LR    R15,R0                                                           
+         MVCL  R4,R14              MOVE LIST TO SECONDARY LIST                  
+         LR    R4,R1               R4,R5 - PTR, END OF LIST                     
+         LR    R5,R1                                                            
+         AR    R5,R0                                                            
+         LR    R14,R2              R14 - PTR TO END OF 2ND LIST                 
+         AR    R14,R0                                                           
+         S     R14,=F'4'                                                        
+         WHILE (R4,LT,R5),BEGIN    LOOP, MOVE FROM END OF 2ND LIST              
+         L     R6,0(R14)             TO START OF FIRST...                       
+         ST    R6,0(R4)                                                         
+         LA    R4,4(R4)                                                         
+         S     R14,=F'4'                                                        
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*  SDELETE                                                                      
+*                                                                               
+*  DELETE DUPLICATE RECORDS  (FIELDS !!)                                        
+*  THE LIST OF POINTER IS UPDATED.                                              
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R0 - COUNT                                                                 
+*    R1 - LIST                                                                  
+*    R3 - FIRST COL (0 IF NONE)                                                 
+*    R4 - SECOND COL (0 IF NONE)                                                
+*    R5 - TRANSLATE TABLE (0 IF NONE)                                           
+*    R15 - PAD CHAR                                                             
+*                                                                               
+*  ON EXIT:                                                                     
+*    R0 - NEW COUNT                                                             
+*                                                                               
+*  NOTE:                                                                        
+*  THIS CODE IS SIMPLE,,, THE ROUGH PART IS THE COMPARE WHICH                   
+*  DEALS WITH THE COLUMN/TRANSLATE STUFF.  IT IS COPIED FROM                    
+*  THE SORTWOPT (SORT WITH OPTIONS) ROUTINE.                                    
+*                                                                               
+*  N.B.                                                                         
+*    IF COLUMNS AND/OR TABLES ARE SPECIFIED, THEY ARE USED                      
+*    TO DETERMINE WHICH RECORD TO DELETE.  IE. WE **DELETE**                    
+*    RECORDS CONTAINING DUPLICATE FIELDS !                                      
+*                                                                               
+*                                                                               
+SDWA     RECORD BEGIN                                                           
+SDCOUNT  DS    F                                                                
+SDLIST   DS    F                                                                
+SDCOL1   DS    F                                                                
+SDCOL2   DS    F                                                                
+SDTRTAB  DS    F                                                                
+SDPAD    DS    F                                                                
+SDFLDOFF DS    F                                                                
+SDFLDLEN DS    F                                                                
+SDBUF1   DS    CL256                                                            
+SDBUF2   DS    CL256                                                            
+SDTRBUF  DS    CL256                                                            
+         END                                                                    
+*                                                                               
+*                                                                               
+SDELETE  PROC SDWA                                                              
+*                                                                               
+         CLEAR SDWA                                                             
+         ST    R0,SDCOUNT                                                       
+         ST    R1,SDLIST                                                        
+         ST    R3,SDCOL1                                                        
+         ST    R4,SDCOL2                                                        
+         ST    R5,SDTRTAB                                                       
+         ST    R15,SDPAD                                                        
+*                                                                               
+         IF    (SDCOUNT,LE,1),EXIT                                              
+*                                                                               
+         COMMENT                   PROCESS SORT FIELD COLUMNS                   
+         IF    (R3,Z),BEGIN        R3 - FIELD OFFSET                            
+         LA    R4,255              R4 - FIELD LEN                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         DECR  R3                                                               
+         IF    (R4,Z),' LA R4,255'                                              
+         SR    R4,R3                                                            
+         END                                                                    
+         ST    R3,SDFLDOFF                                                      
+         ST    R4,SDFLDLEN                                                      
+*                                                                               
+         COMMENT                   MOVE TR TABLE TO LOCAL ADDR                  
+         LA    R0,SDTRBUF                                                       
+         LA    R1,256                                                           
+         L     R2,SDTRTAB                                                       
+         LR    R3,R1                                                            
+         MVCL  R0,R2                                                            
+*                                                                               
+         COMMENT                   COMPARE (SORTED!) ENTRIES FOR                
+         COMMENT                   DUPLICATES                                   
+         L     R2,SDLIST           R2 - CURRENT RECORD                          
+         LA    R4,4(R2)            R4 - NEXT RECORD                             
+         L     R5,SDCOUNT          R5 - END OF LIST                             
+         SLL   R5,2                                                             
+         AR    R5,R2                                                            
+         WHILE (R4,LT,R5),BEGIN    LOOP LOOKING FOR DUPLICATES                  
+*                                                                               
+         COMMENT                   COMPARE CODE FOLLOWS                         
+         COMMENT                   GET FIELD 1 IN R14,R15                       
+         L     R14,0(R2)           (THEN IN R0,R1)                              
+         LH    R15,0(R14)                                                       
+         LA    R14,2(R14)                                                       
+         IF    (R15,GT,255),' BOMB '                                            
+         A     R14,SDFLDOFF               DO COLUMN STUFF                       
+         S     R15,SDFLDOFF                                                     
+         IF    (R15,NEG),' CLEAR R15'                                           
+         IF    (R15,GT,SDFLDLEN),' L R15,SDFLDLEN '                             
+         IF    (SDTRTAB,NE,0),BEGIN       DO TRANSLATE STUFF                    
+         IF    (R15,POS),BEGIN                                                  
+         DEX   R15,' MVC SDBUF1(*-*),0(R14) '                                   
+         EX    R15,' TR SDBUF1(*-*),SDTRBUF '                                   
+         LA    R14,SDBUF1                                                       
+         LA    R15,1(R15)                                                       
+         END                                                                    
+         END                                                                    
+         O     R15,SDPAD                                                        
+         LR    R0,R14              FIELD 1 IN R0,R1                             
+         LR    R1,R15                                                           
+*                                                                               
+         COMMENT                   GET FIELD 2 IN R14,R15                       
+         L     R14,0(R4)                                                        
+         LH    R15,0(R14)                                                       
+         LA    R14,2(R14)                                                       
+         IF    (R15,GT,255),' BOMB '                                            
+         A     R14,SDFLDOFF               DO COLUMN STUFF                       
+         S     R15,SDFLDOFF                                                     
+         IF    (R15,NEG),' CLEAR R15'                                           
+         IF    (R15,GT,SDFLDLEN),' L R15,SDFLDLEN '                             
+         IF    (SDTRTAB,NE,0),BEGIN       DO TRANSLATE STUFF                    
+         IF    (R15,POS),BEGIN                                                  
+         DEX   R15,' MVC SDBUF2(*-*),0(R14) '                                   
+         EX    R15,' TR SDBUF2(*-*),SDTRBUF '                                   
+         LA    R14,SDBUF2                                                       
+         LA    R15,1(R15)                                                       
+         END                                                                    
+         END                                                                    
+         O     R15,SDPAD                                                        
+*                                                                               
+         CLCL  R0,R14              COMPARE FIELDS !!                            
+*                                                                               
+         IF    Z,BEGIN             IF EQUAL, BUMP NEXT                          
+         LA    R4,4(R4)                                                         
+         END                                                                    
+         ELSE  BEGIN ,             IF NOT EQUAL,,,                              
+         LA    R2,4(R2)            BUMP CURRENT                                 
+         L     R6,0(R4)            MAKE NEXT CURRENT                            
+         ST    R6,0(R2)                                                         
+         LA    R4,4(R4)            BUMB NEXT                                    
+         END                                                                    
+         END   , OF LOOP THRU ALL LINES                                         
+*                                                                               
+         COMMENT                   RETURN UPDATED LIST COUNT                    
+         LA    R2,4(R2)                                                         
+         S     R2,SDLIST                                                        
+         SRL   R2,2                                                             
+         LR    R0,R2                                                            
+         PRETURN R0                                                             
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*                                                                               
+*  AUTODELT - CALCULATE DELTA FOR RANGE...                                      
+*                                                                               
+*  ON ENTRY:                                                                    
+*       R0 - START OF RANGE                                                     
+*       R1 - END OF RANGE                                                       
+*       R2 - NUMBER OF LINES IN RANGE                                           
+*                                                                               
+*  ON EXIT:                                                                     
+*       R0 - START OF RANGE (ROUNDED BY DELTA)                                  
+*       R1 - DELTA FOR RANGE (1.0,0.1,0.01,OR 0.001)                            
+*      R15 - CC=Z, LINES WILL FIT IN RANGE USING RETURNED DELTA                 
+*            CC=NZ, TOO MANY LINES IN RANGE FOR 0.001 DELTA !!                  
+*                                                                               
+*  ALGORITHM: WE TRY 1, .01, .001, AND .0001 AS DELTA, AND CHOOSE               
+*       THE LARGEST DELTA.   NOTE, WE DON'T LOOK AT THE USER SET                
+*       DELTA... IF I COULD I WOULD AX USER SET DELTA,, YUUKK!                  
+*                                                                               
+*                                                                               
+*                                                                               
+ADWA     RECORD BEGIN                                                           
+ADSTART  DS    F                                                                
+ADEND    DS    F                                                                
+ADCOUNT  DS    F                                                                
+         END                                                                    
+*                                                                               
+*                                                                               
+AUTODELT PROC  ADWA                                                             
+*                                                                               
+         COMMENT                   INIT WORK AREA                               
+         ST    R0,ADSTART                                                       
+         ST    R1,ADEND                                                         
+         ST    R2,ADCOUNT                                                       
+*                                                                               
+         COMMENT                   TRY 1.000                                    
+         CLEAR R2                                                               
+         L     R3,ADSTART                                                       
+         A     R3,=F'999'                                                       
+         D     R2,=F'1000'                                                      
+         CLEAR R2                                                               
+         M     R2,=F'1000'                                                      
+         LR    R0,R3               ROUNDED START OF RANGE                       
+         CLEAR R4                                                               
+         L     R5,ADCOUNT                                                       
+         DECR  R5                                                               
+         M     R4,=F'1000'                                                      
+         AR    R3,R5                                                            
+         IF    ((R3,LE,ADEND),AND,(R4,Z)),BEGIN    IF 1.000 IS OK               
+         LA    R1,1000                                                          
+         CLEAR R15                                                              
+         END                                                                    
+*                                                                               
+         COMMENT                   TRY 0.1                                      
+         ELSE BEGIN                                                             
+         CLEAR R2                                                               
+         L     R3,ADSTART                                                       
+         A     R3,=F'99'                                                        
+         D     R2,=F'100'                                                       
+         CLEAR R2                                                               
+         M     R2,=F'100'                                                       
+         LR    R0,R3               ROUNDED START OF RANGE                       
+         CLEAR R4                                                               
+         L     R5,ADCOUNT                                                       
+         DECR  R5                                                               
+         M     R4,=F'100'                                                       
+         AR    R3,R5                                                            
+         IF    ((R5,LE,ADEND),AND,(R4,Z)),BEGIN    IF 0.100 IS OK               
+         LA    R1,100                                                           
+         CLEAR R15                                                              
+         END                                                                    
+*                                                                               
+         COMMENT                   TRY 0.01                                     
+         ELSE BEGIN                                                             
+         CLEAR R2                                                               
+         L     R3,ADSTART                                                       
+         A     R3,=F'9'                                                         
+         D     R2,=F'10'                                                        
+         CLEAR R2                                                               
+         M     R2,=F'10'                                                        
+         LR    R0,R3               ROUNDED START OF RANGE                       
+         CLEAR R4                                                               
+         L     R5,ADCOUNT                                                       
+         DECR  R5                                                               
+         M     R4,=F'10'                                                        
+         AR    R3,R5                                                            
+         IF    ((R3,LE,ADEND),AND,(R4,Z)),BEGIN    IF 0.010 IS OK               
+         LA    R1,10                                                            
+         CLEAR R15                                                              
+         END                                                                    
+*                                                                               
+         COMMENT                   TRY 0.001                                    
+         ELSE BEGIN                                                             
+         L     R3,ADSTART                                                       
+         LR    R0,R3               ROUNDED START OF RANGE                       
+         A     R3,ADCOUNT                                                       
+         DECR  R3                                                               
+         IF    (R3,LE,ADEND),BEGIN IF 0.001 IS OK                               
+         LA    R1,1                                                             
+         CLEAR R15                                                              
+         END                                                                    
+         ELSE  BEGIN                                                            
+         LA    R1,1                                                             
+         LA    R15,4                                                            
+         END                                                                    
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         COMMENT                   OH YEAH!                                     
+         PRETURN (R0,R1)                                                        
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'SPIRES PROTOCOL FORMATTING'                                     
+*                                                                               
+*  FORMAT SPIRES PROTOCOL                                                       
+*                                                                               
+*  INSPIRED BY XFORMAT FOR WYLBUR EXEC FILES.                                   
+*  PLACED IN WYLBUR, BECAUSE WE ARE NICE GUYS.                                  
+*  (THERE IS NO OTHER JUSTIFIABLE REASON.)                                      
+*                                                                               
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R1,R0 - LOC,LEN PROTOCOL FORMAT OPTION STRING                              
+*                                                                               
+*  NOTE:                                                                        
+*  *** THIS SHOULD BE A SPIRES COMMAND *** !!!                                  
+*  LTM AND PCJ AGREE THIS SHOULD NOT BE IN WYLBUR BUT IN                        
+*  SPIRES.  LONG TERM THAT IS WHERE IT WILL GO.                                 
+*                                                                               
+*  NOTE:                                                                        
+*  ERRORS EXIT VIA CVERROR                                                      
+*                                                                               
+*                                                                               
+PFWA     RECORD BEGIN                                                           
+PFINDENT DS    F                   INDENT                                       
+PFFLAGS  FLAG  ,                                                                
+         FLAG  PFFCONT             CONTINUED LINE                               
+PFBLEVEL DS    F                   BLOCK LEVEL                                  
+PFPADLEN DS    F                   PAD LENGTH                                   
+PFLINENO DS    F                   LINE AREA                                    
+PFLINEL  DS    F                                                                
+PFLINE   DS    CL(&LINESZ)                                                      
+PFDLINEL DS    F                   DIGESTED (SQUISHED UPPER) LINE               
+PFDLINE  DS    CL(&LINESZ)                                                      
+PFOLINEL DS    F                   OUTPUT LINE AREA                             
+PFOLINE  DS    CL(2*&LINESZ)                                                    
+PFLNTAB  DS    256F                LIST OF BLOCK LINENOS                        
+PFTYPTAB DS    256C                LIST OF BLOCK TYPE                           
+         END                                                                    
+*                                                                               
+*                                                                               
+*                                                                               
+*                                                                               
+PFORMAT  XPROC PFWA                                                             
+         LA    R6,PFWA                                                          
+         USING PFWA,R6                                                          
+         CLEAR PFWA                                                             
+*                                                                               
+         COMMENT                   SET NON ZERO DEFAULTS                        
+         LA    R2,3                                                             
+         ST    R2,PFINDENT                                                      
+*                                                                               
+         COMMENT                   PROGRAM ALLOWED IN SPIRES ONLY               
+         COMMENT ,                  (WEAK CHECK)                                
+         IF    ((CPSVPGM,Z),OR,(CPSVPGM,EQ,' ')),BEGIN                          
+         ERROR 'PFORMAT command available in SPIRES only.'                      
+         END                                                                    
+         IF    (CPSVPGM,EQ,'DISP'),BEGIN                                        
+         ERROR 'PFORMAT command available in SPIRES only.'                      
+         END                                                                    
+*                                                                               
+         COMMENT                   SCAN OPTIONS                                 
+         SCAN  PFPRT                                                            
+         SCANCHK                                                                
+*                                                                               
+         COMMENT                   INCREMENT CHANGE COUNT                       
+         INCR  R2,CPACHCT                                                       
+*                                                                               
+         COMMENT                   GET FIRST LINE, SET UP LOOP                  
+         CLEAR PFLINENO                                                         
+         LA    R1,PFLINE                                                        
+         LA    R2,PFLINENO                                                      
+         CLEAR R3                                                               
+         VCALL GTFRST              GET FIRST LINE                               
+         COMMENT                   IF FIRST LINE IS '*'.. , IGNORE              
+         IF    ((R15,Z),AND,(R0,POS),AND,(@R1,EQ,'*')),BEGIN                    
+         VCALL GTNEXT              GET NEXT LINE                                
+         END                                                                    
+         ST    R0,PFLINEL                                                       
+*                                                                               
+         COMMENT                   LOOP FORMATTING LINES                        
+         WHILE (R15,Z),BEGIN       LOOP FORMATTING LINES                        
+         ACALL LNFORMAT            FORMAT LINE                                  
+         VCALL GTNEXT              GET NEXT LINE                                
+         ST    R0,PFLINEL                                                       
+         END   ,                   LOOP                                         
+*                                                                               
+         COMMENT                   IF NOT AT LEVEL 0, ERROR                     
+         IF    (PFBLEVEL,NE,0),BEGIN                                            
+         ACALL MISSEND ERROR DOES NOT RETURN                                    
+         END                                                                    
+*                                                                               
+         COMMENT                   ALL DONE                                     
+         B     CVNEXT                                                           
+         PEND  ,                                                                
+         DROP  R6                                                               
+         EJECT                                                                  
+*                                                                               
+*  SCAN STUFF                                                                   
+*                                                                               
+PFPRT    SCKW  INDENT,PINDENT,(A,P,PI)                                          
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+PINDENT  PROC  ,                                                                
+         USING PFWA,R6                                                          
+         IF    ((R0,LT,2),OR,(R0,GT,16)),BEGIN                                  
+         ERROR 'Invalid indent value.  (value<2, value>16)'                     
+         END                                                                    
+         ST    R0,PFINDENT                                                      
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*  FORMAT LINE                                                                  
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R6 - PFWA                                                                  
+*                                                                               
+*                                                                               
+LNFWA    RECORD BEGIN                                                           
+LNFFLAG1 FLAG  ,                                                                
+         FLAG  (LFFNONE,1,EQ)      NO FORMATTING                                
+         FLAG  (LFFLEFT,2,EQ)      LEFT JUSTFY LINE                             
+         FLAG  (LFFNORM,4,EQ)      DO NORMAL FORMATTING                         
+LNFFLAG2 FLAG  ,                                                                
+         FLAG  LFFNEWB             NEW BLOCK                                    
+         FLAG  LFFENDB             END BLOCK                                    
+         FLAG  LFFNOEC             NOECHO                                       
+         FLAG  LFFPREP             PREPROCESS                                   
+LFFTYPE  FLAG  ,                                                                
+         FLAG  (LFFBEGIN,1,EQ)     BEGIN BLOCK                                  
+         FLAG  (LFFWHILE,2,EQ)     WHILE BLOCK                                  
+         FLAG  (LFFREP,4,EQ)       REPEAT BLOCK                                 
+         END                                                                    
+*                                                                               
+*                                                                               
+*                                                                               
+LNFORMAT PROC  LNFWA                                                            
+         CLEAR LNFWA                                                            
+         USING PFWA,R6                                                          
+*                                                                               
+         COMMENT                   STRIP BLANKS, UPPER CASE, SQUISH             
+         COMMENT                   BLANKS IN LINE                               
+         LA    R1,PFLINE                                                        
+         L     R0,PFLINEL                                                       
+         ACALL LNDIGEST                                                         
+*                                                                               
+         COMMENT                                                                
+         L     R0,PFDLINEL         R0 - DIGESTED LINE LEN                       
+         LA    R1,PFDLINE          R1 - DIGESTED LINE LOC                       
+         ACALL PFLRTRIM                 (DIGEST ! / TOO)                        
+         LA    R2,PFLINE           R2 - UNDIGESTED LINE LOC                     
+*                                                                               
+         COMMENT                   LOOK FOR LINES THAT CHANGE                   
+         COMMENT                   FORMATTING                                   
+         IF    PFFCONT,BEGIN                                                    
+         SET   LFFNORM                                                          
+         END                                                                    
+         ELSEIF (R0,Z),BEGIN                                                    
+         SET   LFFNONE                                                          
+         END                                                                    
+         ELSEIF (@R2,EQ,'-'),BEGIN                                              
+         SET   LFFNONE                                                          
+         END                                                                    
+         ELSEIF (@R2,EQ,';'),BEGIN                                              
+         SET   LFFNONE                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'++'),AND,(R0,GE,2)),BEGIN                             
+         SET   LFFLEFT                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'DEC'),AND,(R0,GE,3)),BEGIN                            
+         SET   LFFLEFT                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'ENDD'),AND,(R0,GE,4)),BEGIN                           
+         SET   LFFLEFT                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'WHI'),AND,(R0,GE,3)),BEGIN                            
+         SET   LFFNORM                                                          
+         SET   LFFWHILE                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'REPEAT'),AND,(R0,GE,6)),BEGIN                         
+         SET   LFFNORM                                                          
+         SET   LFFREP                                                           
+         SET   LFFNEWB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'IF'),AND,(R0,GE,2)),BEGIN                             
+         SET   LFFNORM                                                          
+         ACALL CHKBEGIN                                                         
+         IF    (R15,Z),BEGIN                                                    
+         SET   LFFBEGIN                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         END                                                                    
+         ELSEIF ((@R1,EQ,'ELSE BEGIN'),AND,(R0,GE,10)),BEGIN                    
+         SET   LFFNORM                                                          
+         SET   LFFBEGIN                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'ELSE'),AND,(R0,GE,10)),BEGIN                          
+         SET   LFFNORM                                                          
+         ACALL CHKBEGIN                                                         
+         IF    (R15,Z),BEGIN                                                    
+         SET   LFFBEGIN                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         END                                                                    
+         ELSEIF ((@R1,EQ,'BEGIN'),AND,(R0,GE,5)),BEGIN                          
+         SET   LFFNORM                                                          
+         SET   LFFBEGIN                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'THEN BEGIN'),AND,(R0,GE,10)),BEGIN YUCK               
+         SET   LFFNORM                                                          
+         SET   LFFBEGIN                                                         
+         SET   LFFNEWB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'ENDB'),AND,(R0,GE,4)),BEGIN                           
+         SET   LFFNORM                                                          
+         SET   LFFBEGIN                                                         
+         SET   LFFENDB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'ENDW'),AND,(R0,GE,4)),BEGIN                           
+         SET   LFFNORM                                                          
+         SET   LFFWHILE                                                         
+         SET   LFFENDB                                                          
+         END                                                                    
+         ELSEIF ((@R1,EQ,'UNT'),AND,(R0,GE,3)),BEGIN                            
+         SET   LFFNORM                                                          
+         SET   LFFREP                                                           
+         SET   LFFENDB                                                          
+         END                                                                    
+         ELSE  BEGIN                                                            
+         SET   LFFNORM                                                          
+         END                                                                    
+*                                                                               
+         COMMENT                   CHECK FOR NOECHO AND/OR PREPARSE             
+         LA    R1,PFDLINE                                                       
+         L     R0,PFDLINEL                                                      
+         IF    ^PFFCONT,BEGIN                                                   
+         IF    (@R1,EQ,'!'),BEGIN                                               
+         SET   LFFNOEC                                                          
+         END                                                                    
+         IF    (@R1,EQ,'/'),BEGIN                                               
+         SET   LFFPREP                                                          
+         END                                                                    
+         IF    ((@R1,EQ,'!/'),AND,(R0,GE,2)),BEGIN                              
+         SET   LFFPREP                                                          
+         END                                                                    
+         IF    ((@R1,EQ,'! /'),AND,(R0,GE,3)),BEGIN                             
+         SET   LFFPREP                                                          
+         END                                                                    
+         END                                                                    
+*                                                                               
+*                                                                               
+*  FORMAT LINE ,, WRITE LINE                                                    
+*                                                                               
+*                                                                               
+         COMMENT                   DONT FORMAT                                  
+         IF    LFFNONE,BEGIN                                                    
+         END                                                                    
+*                                                                               
+         COMMENT                   LEFT JUSTIFY                                 
+         ELSEIF LFFLEFT,BEGIN                                                   
+         L     R0,PFLINEL                                                       
+         LA    R1,PFLINE                                                        
+         VCALL LRTRIM                                                           
+         L     R15,PFLINENO                                                     
+         VCALL PUTLINE                                                          
+         END                                                                    
+*                                                                               
+         COMMENT                   STANDARD FORMAT                              
+         ELSEIF LFFNORM,BEGIN                                                   
+*                                                                               
+         COMMENT                   STANDARD FORMAT:                             
+         COMMENT                   END BLOCK PROCESSING,                        
+         IF    LFFENDB,BEGIN       CHECK TYPE, POP LEVEL, PAD LEN               
+         L     R1,PFBLEVEL                                                      
+         IF    (R1,NP),BEGIN                                                    
+         ACALL NOTINBLK ERROR DOES NOT RETURN                                   
+         END                                                                    
+         LA    R2,PFTYPTAB                                                      
+         A     R2,PFBLEVEL                                                      
+         LA    R3,LFFTYPE                                                       
+         IF    ('CLC @R2(1),@R3 ',NE),BEGIN                                     
+         ACALL NOTTYPE ERROR DOES NOT RETURN                                    
+         END                                                                    
+         L     R1,PFBLEVEL                                                      
+         DECR  R1                                                               
+         ST    R1,PFBLEVEL                                                      
+         L     R1,PFPADLEN                                                      
+         S     R1,PFINDENT                                                      
+         ST    R1,PFPADLEN                                                      
+         END                                                                    
+*                                                                               
+         COMMENT                   FORMAT LINE                                  
+         COMMENT                   NOECHO||PAD||CONT||PREPRO||TEXT              
+         LA    R4,PFOLINE          R4 - OUTPUT INDEX                            
+         IF    LFFNOEC,'MVI @R4,C"!" '                                          
+         ELSE  'MVI @R4,C" " '                                                  
+         INCR  R4                                                               
+         L     R5,PFPADLEN                                                      
+         WHILE (R5,POS),BEGIN                                                   
+         MVI   @R4,C' '                                                         
+         INCR  R4                                                               
+         DECR  R5                                                               
+         END                                                                    
+         IF    PFFCONT,BEGIN                                                    
+         L     R5,PFINDENT                                                      
+         WHILE (R5,POS),BEGIN                                                   
+         MVI   @R4,C' '                                                         
+         INCR  R4                                                               
+         DECR  R5                                                               
+         END                                                                    
+         END                                                                    
+         IF    LFFPREP,'MVI @R4,C"/" '                                          
+         ELSE  'MVI @R4,C" " '                                                  
+         INCR  R4                                                               
+         L     R0,PFLINEL                                                       
+         LA    R1,PFLINE                                                        
+         IF    (LFFNOEC,OR,LFFPREP),' ACALL PFLRTRIM'                           
+         ELSE  'VCALL LRTRIM'                                                   
+         LR    R5,R0                                                            
+         MOVE  R5,@R4,@R1                                                       
+         AR    R4,R0                                                            
+         LR    R0,R4                                                            
+         LA    R1,PFOLINE                                                       
+         SR    R0,R1                                                            
+         IF    (R0,GE,&LINESZ),BEGIN                                            
+         ACALL LONGLINE ERROR DOES NOT RETURN                                   
+         END                                                                    
+         L     R15,PFLINENO                                                     
+         VCALL PUTLINE             OUTPUT FORMATED LINE                         
+*                                                                               
+         COMMENT                   STANDARD FORMAT:                             
+         COMMENT                   NEW BLOCK PROCESSING                         
+         IF    LFFNEWB,BEGIN       PUSH LEVEL, PAD, LINENO, TYPE                
+         L     R1,PFBLEVEL                                                      
+         INCR  R1                                                               
+         ST    R1,PFBLEVEL                                                      
+         L     R1,PFPADLEN                                                      
+         A     R1,PFINDENT                                                      
+         ST    R1,PFPADLEN                                                      
+         LA    R2,PFLNTAB                                                       
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         L     R1,PFLINENO                                                      
+         ST    R1,0(R2)                                                         
+         LA    R2,PFTYPTAB                                                      
+         A     R2,PFBLEVEL                                                      
+         IC    R1,LFFTYPE                                                       
+         STC   R1,0(R2)                                                         
+         END                                                                    
+         END                                                                    
+*                                                                               
+         COMMENT                   CHECK IF CONTINUATION LINE                   
+         CLEAR PFFCONT                                                          
+         L     R0,PFLINEL                                                       
+         LA    R1,PFLINE                                                        
+         IF    (R0,POS),BEGIN                                                   
+         AR    R1,R0                                                            
+         DECR  R1                                                               
+         IF    (@R1,EQ,'\'),BEGIN                                               
+         SET   PFFCONT                                                          
+         END                                                                    
+         END                                                                    
+*                                                                               
+         PEND  ,                                                                
+         EJECT                                                                  
+*                                                                               
+*  LNDIGEST - THIS ROUTINE DOES A STRIP(UPPER(SQUISH(TEXT)))                    
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R1,R0 - LINE LOC,LEN                                                       
+*    R6 - PFWA                                                                  
+*                                                                               
+*                                                                               
+*  ON EXIT:                                                                     
+*    NEW LINE IS PFDLINE, LENGTH IS PFDLINEL                                    
+*                                                                               
+*                                                                               
+LNDIGEST PROC ,                                                                 
+*                                                                               
+         COMMENT                   STRIP BLANKS                                 
+         VCALL LRTRIM                                                           
+         LR    R2,R1               R2 - INPUT LINE                              
+         LR    R3,R0               R3 - END OF INPUT LINE                       
+         AR    R3,R2                                                            
+         LA    R4,PFDLINE          R4 - OUTPUT LINE INDEX                       
+*                                                                               
+         COMMENT                   SQUISH                                       
+         WHILE (R2,LT,R3),BEGIN                                                 
+         IF    (@R2,NE,' '),BEGIN                                               
+         MVC   @R4(1),@R2                                                       
+         INCR  R2                                                               
+         INCR  R4                                                               
+         END                                                                    
+         ELSE  BEGIN  IE. IF (R2,EQ,' ')                                        
+         MVC   @R4(1),@R2                                                       
+         INCR  R2                                                               
+         INCR  R4                                                               
+         WHILE ((@R2,EQ,' '),AND,(R2,LT,R3)),BEGIN                              
+         INCR  R2                                                               
+         END                                                                    
+         END                                                                    
+         END                                                                    
+         COMMENT                   CALCULATE SQUISH LENGTH                      
+         LA    R5,PFDLINE                                                       
+         SR    R4,R5                                                            
+         ST    R4,PFDLINEL                                                      
+*                                                                               
+         COMMENT                   UPPER CASE LINE                              
+         LA    R2,PFDLINE                                                       
+         L     R3,PFDLINEL                                                      
+         L     R4,CVUPPTBL                                                      
+         DEX   R3,' TR @R2(0),@R4 '                                             
+*                                                                               
+         PEND  ,                                                                
+         EJECT                                                                  
+*                                                                               
+*  SPECIAL PFORMAT LRTRIM                                                       
+*                                                                               
+*  WE TRIM LEADING AND TRAILING BLANKS AND ALSO                                 
+*  WE GET RID OF LEADING '!' NOECHO CHAR AND                                    
+*  LEADING '/' PREPROCESS CHARACTER.                                            
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R1,R0 - LINE LOC,LEN                                                       
+*                                                                               
+*  ON EXIT:                                                                     
+*    R1,R0 - NEW LOC,LEN                                                        
+*                                                                               
+*  NOTE:                                                                        
+*  ONLY POINTER IS CHANGED, TEXT IS NOT MOVED.                                  
+*                                                                               
+*                                                                               
+PFLRTRIM PROC  ,                                                                
+         LR    R2,R1                                                            
+         AR    R2,R0                                                            
+         WHILE ((R1,LT,R2),AND,(@R1,EQ,' ')),' INCR R1 '                        
+         IF    ((R1,LT,R2),AND,(@R1,EQ,'!')),' INCR R1 '                        
+         WHILE ((R1,LT,R2),AND,(@R1,EQ,' ')),' INCR R1 '                        
+         IF    ((R1,LT,R2),AND,(@R1,EQ,'/')),' INCR R1 '                        
+         WHILE ((R1,LT,R2),AND,(@R1,EQ,' ')),' INCR R1 '                        
+         DECR  R2                                                               
+         WHILE ((R2,GE,R1),AND,(@R2,EQ,' ')),' DECR R2 '                        
+         INCR  R2                                                               
+         LR    R0,R2                                                            
+         SR    R0,R1                                                            
+         PRETURN (R0,R1)                                                        
+         PEND  ,                                                                
+         EJECT                                                                  
+*                                                                               
+*  CHECK IF                                                                     
+*                                                                               
+*  THIS ROUTINE CHECKS TO SEE IF LINE IS START OF BLOCK.                        
+*  WE CHECK 'IF' AND 'ELSE' COMMANDS                                            
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R6 - PFWA                                                                  
+*    CURRENT LINE INFO IS PFLINENO, PFLINE, PFLINEL                             
+*                                                                               
+*  ON EXIT:                                                                     
+*    R15=0 IF BEGIN BLOCK,  R15=NZ IF NOT BEGIN BLOCK                           
+*                                                                               
+*  NOTE:                                                                        
+*  WE READ ALL CONTINUATION LINES.  WE ALSO DIGEST THE                          
+*  LINES (IE. SQUISH, STRIP BLANKS, AND UPPER CASE).                            
+*  NEXT WE BLANK EVERYTHING IN QUOTES AND HACK OFF ANY                          
+*  TRAINLING COMMENT (AFTER ;).   FINALLY WE LOOK FOR                           
+*  A ': BEGIN' OR A 'THEN BEGIN' OR A ':BEGIN'.                                 
+*  THIS STRATEGY SHOULD BE GOOD ENOUGH !  (HOPEFULLY)                           
+*                                                                               
+*                                                                               
+CFWA     RECORD BEGIN                                                           
+CFLINENO DS    F                   AREA FOR CONTINUE LINE                       
+CFLINEL  DS    F                                                                
+CFLINE   DS    CL(&LINESZ)                                                      
+CFCLINEL DS    F                   AREA FOR CONCATENATION                       
+CFCLINE  DS    CL(4*&LINESZ)                                                    
+CFDLINEL DS    F                   Save caller's PFDLINEX                       
+CFDLINE  DS    CL(&LINESZ)                                                      
+         END                                                                    
+*                                                                               
+*                                                                               
+CHKBEGIN  PROC  CFWA                                                            
+         USING PFWA,R6                                                          
+*                                                                               
+         COMMENT                   INIT CFWA                                    
+         L     R2,PFLINENO                                                      
+         ST    R2,CFLINENO                                                      
+         CLEAR CFLINEL                                                          
+         CLEAR CFCLINEL                                                         
+*                                                                               
+         COMMENT                   MOVE DIGESTED LINE TO CONCAT                 
+         LA    R2,PFDLINE                                                       
+         L     R3,PFDLINEL                                                      
+         ST    R3,CFDLINEL         Save caller's digested line                  
+         MVC   CFDLINE,PFDLINE     because we may clobber it                    
+         LA    R4,CFCLINE                                                       
+         LR    R5,R3                                                            
+         MVCL  R4,R2                                                            
+         L     R3,PFDLINEL                                                      
+         ST    R3,CFCLINEL                                                      
+*                                                                               
+         COMMENT                   LOOP READING,DIGESTING                       
+         COMMENT                   AND CONCATING CONTINUATION LINES             
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         AR    R2,R3                                                            
+         DECR  R2                                                               
+         WHILE ((R3,POS),AND,(@R2,EQ,'\')),BEGIN                                
+         MVI   @R2,C' '                                                         
+         COMMENT                   GET NEXT LINE                                
+         LA    R1,CFLINE                                                        
+         LA    R2,CFLINENO                                                      
+         CLEAR R3                                                               
+         VCALL GTNEXT                                                           
+         IF    (R15,NZ),' CLEAR R0 '                                            
+         ST    R0,CFLINEL                                                       
+         COMMENT                   DIGEST IT                                    
+         LA    R1,CFLINE                                                        
+         L     R0,CFLINEL                                                       
+         ACALL LNDIGEST                                                         
+         COMMENT                   CONCAT IT                                    
+         LA    R2,PFDLINE                                                       
+         L     R3,PFDLINEL                                                      
+         LA    R4,CFCLINE                                                       
+         A     R4,CFCLINEL                                                      
+         LR    R5,R3                                                            
+         MVCL  R4,R2                                                            
+         L     R3,PFDLINEL                                                      
+         A     R3,CFCLINEL                                                      
+         ST    R3,CFCLINEL                                                      
+         IF    (R3,GE,2*&LINESZ),BEGIN                                          
+         ACALL LONGLINE                                                         
+         END                                                                    
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         AR    R2,R3                                                            
+         DECR  R2                                                               
+         END                                                                    
+*                                                                               
+         COMMENT                   BLANK INSIDE QUOTES, COMMENTS (;)            
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         WHILE ((@R2,NE,';'),AND,(R2,LT,R3)),BEGIN                              
+         IF    (@R2,EQ,''''),BEGIN                                              
+         INCR  R2                                                               
+         WHILE ((@R2,NE,''''),AND,(R2,LT,R3)),BEGIN                             
+         MVI   @R2,C' '                                                         
+         INCR  R2                                                               
+         END                                                                    
+         INCR  R2                                                               
+         END                                                                    
+         ELSEIF (@R2,EQ,'"'),BEGIN                                              
+         INCR  R2                                                               
+         WHILE ((@R2,NE,'"'),AND,(R2,LT,R3)),BEGIN                              
+         MVI   @R2,C' '                                                         
+         INCR  R2                                                               
+         END                                                                    
+         INCR  R2                                                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         INCR  R2                                                               
+         END                                                                    
+         END                                                                    
+         COMMENT                   NOW TRUNCATE COMMENT, IF ANY                 
+         IF    (R2,LT,R3),BEGIN                                                 
+         LA    R3,CFCLINE                                                       
+         SR    R2,R3                                                            
+         ST    R3,CFCLINE                                                       
+         END                                                                    
+*                                                                               
+         COMMENT                   LOOK FOR 'THEN BEGIN', ':BEGIN'              
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         AR    R3,R2                                                            
+         S     R3,=F'10'                                                        
+         WHILE ((@R2,NE,'THEN BEGIN'),AND,(R2,LE,R3)),BEGIN                     
+         INCR  R2                                                               
+         END                                                                    
+         IF    ((@R2,EQ,'THEN BEGIN'),AND,(R2,LE,R3)),BEGIN                     
+         B     NEWBLOCK                                                         
+         END                                                                    
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         AR    R3,R2                                                            
+         S     R3,=F'7'                                                         
+         WHILE ((@R2,NE,': BEGIN'),AND,(R2,LE,R3)),BEGIN                        
+         INCR  R2                                                               
+         END                                                                    
+         IF    ((@R2,EQ,': BEGIN'),AND,(R2,LE,R3)),BEGIN                        
+         B     NEWBLOCK                                                         
+         END                                                                    
+         LA    R2,CFCLINE                                                       
+         L     R3,CFCLINEL                                                      
+         AR    R3,R2                                                            
+         S     R3,=F'6'                                                         
+         WHILE ((@R2,NE,':BEGIN'),AND,(R2,LE,R3)),BEGIN                         
+         INCR  R2                                                               
+         END                                                                    
+         IF    ((@R2,EQ,':BEGIN'),AND,(R2,LE,R3)),BEGIN                         
+         B     NEWBLOCK                                                         
+         END                                                                    
+         COMMENT                   DID NOT FIND 'BEGIN'                         
+         B     NOBLOCK                                                          
+*                                                                               
+NEWBLOCK LABEL ,                                                                
+         CLEAR R15                                                              
+         B     CKIFDONE                                                         
+*                                                                               
+NOBLOCK  LABEL ,                                                                
+         LA    R15,4                                                            
+         B     CKIFDONE                                                         
+*                                                                               
+CKIFDONE LABEL ,                                                                
+         L     R0,CFDLINEL         Restore caller's PFDLINEx                    
+         ST    R0,PFDLINEL                                                      
+         MVC   PFDLINE,CFDLINE                                                  
+         PEND  ,                                                                
+         EJECT                                                                  
+*                                                                               
+*  PROTOCOL FORMAT ERROR ROUTINES                                               
+*                                                                               
+*                                                                               
+         USING PFWA,R6                                                          
+*                                                                               
+MISSEND  PROC  ,                                                                
+         TSEG  'No END block statement.  Block starts at line '                 
+         LA    R2,PFLNTAB                                                       
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         A     R2,PFBLEVEL                                                      
+         L     R0,0(R2)                                                         
+         VCALL CVEXNO                                                           
+         ERROR (R1),(R0)                                                        
+         PEND                                                                   
+*                                                                               
+NOTINBLK PROC  ,                                                                
+         TSEG  'Extra END block statement.  Error in line '                     
+         L     R0,PFLINENO                                                      
+         VCALL CVEXNO                                                           
+         ERROR (R1),(R0)                                                        
+         PEND                                                                   
+*                                                                               
+NOTTYPE  PROC  ,                                                                
+         TSEG  'END block is wrong type.  Error in line '                       
+         L     R0,PFLINENO                                                      
+         VCALL CVEXNO                                                           
+         ERROR (R1),(R0)                                                        
+         PEND                                                                   
+*                                                                               
+LONGLINE PROC  ,                                                                
+         TSEG  'Line '                                                          
+         L     R0,PFLINENO                                                      
+         VCALL CVEXNO                                                           
+         TSEG  (R1),(R0)                                                        
+         ERROR ' is too long to format. '                                       
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+         VLTORG                                                                 
+         END   .                                                                

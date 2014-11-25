@@ -1,0 +1,1345 @@
+VPO      TITLE 'WYLBUR''S VTAM PROGRAM OPERATOR'                                
+         SPACE 9                                                                
+*********************************************************************           
+*         THIS IS WYLBUR MODULE VPO                                 *           
+*         WYLBUR'S VTAM PROGRAM OPERATOR                            *           
+*********************************************************************           
+*                                                                   *           
+* WYLBUR/370 RELEASE VI - CLASS 1 - STANFORD UNIVERSITY PROPRIETARY *           
+*                                                                   *           
+*********************************************************************           
+         HIBAL                                                                  
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+RPLR     REG   3      VTAM RPL                                                  
+VTMR     REG   4      MESSAGE                                                   
+VTUR     REG   5      USER                                                      
+VTCR     REG   6      CVT FOR THIS MODULE                                       
+         SPACE 2                                                                
+         SYSDEFN                                                                
+         USING (CP),(CV)                                                        
+         SPACE                                                                  
+*                                  ASSEMBLY PARAMETERS                          
+&USERS   SETA  10                  NUMBER OF CONCURRENT USERS                   
+         SPACE 6                                                                
+WYLVPO   CSECT                                                                  
+         SPACE                                                                  
+VPO      IDENT 2193                15:11:57 07/12/02  (SLP)                     
+         EJECT                                                                  
+* THIS MODULE ALLOWS A WYLBUR USER TO ISSUE VTAM COMMANDS, AND                  
+* TO RECEIVE THE REPLIES.                                                       
+*                                                                               
+* THE CORRESPONDENCE BETWEEN THE WYLBUR COMMAND AND THE VTAM                    
+* COMMAND IS AS FOLLOWS:                                                        
+*                                                                               
+*            WYLBUR                          VTAM                               
+*                                                                               
+*      [DUMP] VTAM D [NET] anything       D NET,anything                        
+*      [DUMP] VTAM V [NET] anything       V NET,anything                        
+*      [DUMP] VTAM F [NET] anything       F NET,anything                        
+*                                                                               
+* Where "anything" is passed to VTAM unchanged, except that BLANKs              
+* and COMMAs as a WYLBUR separator are changed to a single COMMA,               
+* and the WYLBUR terminator (SEMI-COLON) ends the message.                      
+*                                                                               
+* If a user includes the ",TEST=YES" parameter, it must be at                   
+* the end of his command.                                                       
+*                                                                               
+* The VTAM Application Name is taken from CVWYLSSN.  It must be                 
+* authorized as a "Secondary Program Operator" in the VTAMLST dataset.          
+*                                                                               
+* A representative APPL definition statement is:                                
+*                                                                               
+*        WYLBUR   APPL  AUTH=SPO,EAS=1                                          
+*                                                                               
+         SPACE 2                                                                
+* ORGANIZATION:                                                                 
+         SPACE                                                                  
+* The MAIN TASK (WYLBUR) receives a command from a user, and                    
+* validates that the user is authorized to make the command.                    
+* A free slot in the fixed length User List is obtained,                        
+* and the command to VTAM is placed in the Outbound Message Q.                  
+         SPACE                                                                  
+* Messages on the User Inbound Q are typed to the user.                         
+         SPACE                                                                  
+* The SUB-TASK (higher priority) handles all communication with VTAM.           
+* The ACB is opened if necessary.  Two RPLs are used, one outbound,             
+* and one inbound.  Requests are sent to VTAM, when found on the                
+* Outbound Message Q. Inbound messages are placed on the appropriate            
+* User's Inbound Message Q.                                                     
+*                                                                               
+* When detecting the "VTCFWCLS" flag, the sub-task will close the               
+* ACB and terminate.                                                            
+         TITLE 'MACRO DEFINITIONS'                                              
+*                                                                               
+         MACRO                                                                  
+&L       NAME                                                                   
+*PUSH,NOGEN                                                                     
+##&L     EQU   *                                                                
+         DS    0AL4(##&L)                                                       
+*POP                                                                            
+         MEND                                                                   
+*                                                                               
+         SPACE                                                                  
+         MACRO                                                                  
+         GETMSG ,                            GET A MESSAGE ELEMENT              
+         GETMAIN RC,LV=L'VTM,LOC=ANY                                            
+         IF    (R15,NZ),'CLEAR R1'                                              
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R1)                                                         
+         CLEAR VTM                                                              
+         MVC   VTMID,=CL4'VTM'                                                  
+         END                                                                    
+         LTR   VTMR,R1                                                          
+         MEND                                                                   
+         SPACE                                                                  
+         MACRO                                                                  
+&LABEL   FREEMSG ,                           FREE A MESSAGE ELEMENT             
+&LABEL   FREEMAIN RC,LV=L'VTM,A=(VTMR)                                          
+         MEND                                                                   
+         SPACE                                                                  
+         MACRO                                                                  
+         GENU  &USERS                        GENERATE USER LIST                 
+&COUNT   SETA  1                                                                
+         CNOP  0,4                           MUST MATCH VTU DSECT               
+.LOOP    DC    CL4'VTU'                      ID                                 
+         DC    H'&COUNT'                     USER #                             
+         DC    F'0'                          ECB                                
+         DC    H'0'                          POHID FOR VTAM MESSAGES            
+         DC    AL1(L'VTUFFREE)               FLAGS                              
+         DC    A(0)                          PTR TO USER CONTROL PAGE           
+         DC    D'0'                          PTR TO USER INBOUND MSG Q          
+         DS    0D                            END OF USER ELEMENT                
+&COUNT   SETA  &COUNT+1                                                         
+         AIF   (&COUNT LE &USERS).LOOP                                          
+         DC    CL4'VTU'                                                         
+         DC    F'0'                          ID = 0 = NO MORE                   
+         MEND                                                                   
+         SPACE                                                                  
+         MACRO                                                                  
+&L       STFAIL ,                            SUB-TASK FAIL                      
+.*       FROM MILTEN OF 3/81                                                    
+         GBLA  &$COUNT                                                          
+         LCLB  &END                                                             
+&MSG     SETC  '&SYSLIST(1)'                                                    
+&C       SETA  &$COUNT                                                          
+&$COUNT  SETA  &$COUNT+1                                                        
+&L       LABEL                                                                  
+         AIF   ('&MSG' EQ '' OR '&MSG '(1,1) EQ '''').MSG                       
+         IF    &SYSLIST(1),BEGIN                                                
+&END     SETB  1                                                                
+&MSG     SETC  '&SYSLIST(2)'                                                    
+.MSG     DC    0H'0',X'FEDC',AL1($$$FAIL&C-(*+1))                               
+         AIF   ('&MSG' EQ '').ENDCHK                                            
+         AIF   ('&MSG'(1,1) EQ '''').QMSG                                       
+         DC    C'&MSG'                                                          
+         AGO   .ENDCHK                                                          
+.QMSG    DC    C&MSG                                                            
+.ENDCHK  ANOP                                                                   
+$$$FAIL&C  EQU  *                                                               
+         AIF   (NOT &END).EXIT                                                  
+         END                                                                    
+.EXIT    MEND                                                                   
+         TITLE 'DSECTS'                                                         
+VTU      RECORD BEGIN              USER LIST ELEMENT                            
+VTUSTART EQU   *                                                                
+VTUID    DS    CL4'VTU'            ID                                           
+VTU#     DS    H                   USER # (OR 0=NO MORE)                        
+VTUECB   DS    F                   ECB                                          
+VTUPOHID DS    H                   POHID FOR VTAM MESSAGES                      
+VTUF     FLAG  ,                   FLAGS                                        
+         FLAG  VTUFFREE            -FREE ELEMENT (MAY BE RE-ASSIGNED)           
+         FLAG  VTUFATTN            -ATTN RECEIVED - DISCARD MESSAGES            
+         FLAG  VTUFSND             -WAITING TO SEND COMMAND TO VTAM             
+         FLAG  VTUFRCV             -WAITING FOR REPLIES FROM VTAM               
+         FLAG  VTUFDIS             -D NET REQUEST BEING PROCESSED               
+         FLAG  VTUFEND             -ENDING MESSAGE RECEIVED                     
+         FLAG  VTUFTEST            -TEST=YES PARAMETER USED                     
+VTUCP    DS    A                   PTR TO USER CONTROL PAGE                     
+VTUMSGH  DS    D                   PTR TO HEAD OF USER INBOUND MSG Q            
+VTUEND   DS    0D                                                               
+         END                                                                    
+         EJECT                                                                  
+         RECORD BEGIN             MESSAGE Q ELEMENT                             
+*VTM                                                                            
+ISTDPOHD DSECT                                                                  
+VTMSTART EQU   *                  START OF RECORD                               
+VTMID    DS    CL4'VTM'           ID                                            
+VTMNEXT  DS    F                  POINTER TO NEXT OR ZERO                       
+VTMU#    DS    H                  USER #                                        
+VTMCNT   DS    H                  COUNT OF DATA IN TEXT FIELD                   
+         SPACE                                                                  
+         ISTDPOHD ,               IBM MESSAGE DEFINITION                        
+         SPACE                                                                  
+VTMTEXT  DS    CL86               MESSAGE TEXT                                  
+VTMEND   DS    0F                                                               
+         SPACE                                                                  
+VTMIHDR  EQU   POHRSVD,VTMTEXT-POHRSVD,C'X'  IBM HEADER                         
+VTMVMSG  EQU   VTMIHDR,VTMEND-VTMIHDR,C'X'   MESSAGE TO-FROM VTAM               
+VTM      EQU   VTMSTART,VTMEND-VTMSTART,C'X' MESSAGE Q ELEMENT                  
+         END                                                                    
+         EJECT                                                                  
+         PUSH  DSECTS              DSECTS FROM MACRO LIBRARIES                  
+ TITLE 'ACB - VTAM ACB - A020'                                                  
+         IFGACB AM=VTAM                                                         
+         POP   DSECTS                                                           
+         SPACE                                                                  
+IFGACB   DSECT ,                   ACB - WYLBUR EXTENSION                       
+*                                                                               
+ACBWOFFS EQU   *+16-IFGACB                                                      
+         ORG   IFGACB+(ACBWOFFS+31)/32*32                                       
+ACBWSTRT DS    0F                  START OF WYLBUR EXTENSION                    
+ACBWAPLT DS    X                   LENGTH OF APPLICATION NAME                   
+ACBWAPPL DS    CL8                 APPLICATION NAME                             
+ACBWPSLT DS    X                   LENGTH OF PASSWORD                           
+ACBWPSWD DS    CL8                 PASSWORD                                     
+ACBOLIST OPEN  (ACB),MF=L          LIST FOR OPEN MACRO                          
+ACBWEND  DS    0F                  END OF WYLBUR EXTENSION                      
+         SPACE                                                                  
+ACB      EQU   IFGACB,ACBWSTRT-IFGACB,C'X'                                      
+ACBWYL   EQU   IFGACB,ACBWEND-IFGACB,C'X'                                       
+         SPACE                                                                  
+         PUSH DSECTS                                                            
+ TITLE 'RPL - VTAM RPL - 0020'                                                  
+         IFGRPL AM=VTAM                                                         
+         POP   DSECTS                                                           
+         SPACE                                                                  
+IFGRPL   DSECT ,                   RPL - WYLBUR EXTENSION                       
+*                                                                               
+RPLEND   EQU   *                                                                
+RPL      EQU   IFGRPL,RPLEND-IFGRPL,C'X'                                        
+*                                  END OF WYLBUR EXTENSION                      
+         SPACE                                                                  
+         PUSH  DSECTS                                                           
+         COPY  CONTROL            Copy CV/CP                                    
+*                                                                               
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         SPACE 3                                                                
+         POP   DSECTS                                                           
+         SPACE 3                                                                
+*NOGEN,DATA                                                                     
+WYLVPO   CSECT                                                                  
+         TITLE 'CSECTS -- COMMON TO MAIN TASK AND SUB-TASK'                     
+VTC      DS    0F                 CONTROL VECTOR FOR THIS MODULE                
+         SPACE                                                                  
+         DC    CL4'VTC'                                                         
+VTCF     FLAG  ,                   FLAGS                                        
+         FLAG  VTCFPDN             -VTAM IS PERMANENTLY DOWN                    
+         FLAG  VTCFTDN             -VTAM IS TEMPORARILY DOWN                    
+         FLAG  VTCFWCLS            -CLOSE OUT - WYLBUR IS ENDING                
+         FLAG  VTCFVCLS            -CLOSE ACB - VTAM IS ENDING                  
+         FLAG  VTCFACTV            -ACTIVITY IN THE SUB-TASK WAIT LOOP          
+         FLAG  VTCFE10A            -ERROR 10 A RECEIVED - FREEZE                
+*                                                                               
+VTCLPOH  DC    H'0'                LAST POHID ASSIGNED                          
+*                                                                               
+VTCELST  DC    A(VTCSECB)          SUB-TASK WAIT ECB LIST                       
+         DC    A(VTCRCECB)                                                      
+         DC    X'80',AL3(VTCSWORK)                                              
+VTCSECB  DC    F'0'                ECB FOR SEND RPL COMPLETED                   
+VTCRCECB DC    F'0'                ECB FOR RECEIVE COMMAND RPL COMPLET          
+VTCSWORK DC    F'0'                ECB FOR WORK FOR SUB-TASK                    
+         SPACE                                                                  
+VTCATECB DC    A(VTCSTNEV)         SUB-TASK ATTACH ECB (DO NOT WAIT)            
+VTCSTRUN EQU   0                    -RUNNING                                    
+VTCSTEND EQU   1                    -STATES >= SUB-TASK NOT RUNNING             
+VTCSTNEV EQU   1                    -NEVER STARTED                              
+VTCSTDET EQU   2                    -DETACHED                                   
+VTCSWCLS EQU   3                    -CLOSED NORMALLY BY WYLBUR                  
+VTCSVCLS EQU   4                    -CLOSED NORMALLY BY VTAM                    
+*                                   -ELSE CLOSED ABNORMALLY                     
+               SPACE                                                            
+MSGSAV   DC    2F'0'               MESSAGE POINTER SAVE                         
+         SPACE                                                                  
+C        EQU   X'40'               ECB POSTED COMPLETE                          
+ACTIV    EQU   X'FF'               RPL ACTIVE                                   
+         SPACE                                                                  
+*                                  Q POINTERS                                   
+VTCOUTH  DC    D'0'                 OUTBOUND MESSAGES HEAD                      
+         SPACE                                                                  
+VTCECNT  DC    F'0'                ERROR COUNT                                  
+VTCRCNT  DC    F'0'                RETRY COUNT                                  
+VTCSTRTN DC    F'0',X'0C'          SAVE SUB-TASK RETURN CODE                    
+*                                                                               
+VTCSTTCB DC    A(0)                PTR TO SUB-TASK TCB                          
+VTCACB   DC    A(0)                PTR TO ACB                                   
+ABNDMSG  DC    C'SUBTASK ABENDED XXXXXXXX+'                                     
+         SPACE                                                                  
+         PUSH  PRINT                                                            
+         PRINT NOGEN                                                            
+USERLIST DS    0D                                                               
+         GENU  &USERS              USER LIST                                    
+         SPACE                                                                  
+         POP PRINT                                                              
+         TITLE 'MAIN TASK -- COMMAND PROCESSING'                                
+VTAM     GENTER ,               ---COMMAND ENTRY---                             
+         IF    ^CVFTEST,BEGIN      Production Wylbur...                         
+         TSEG  'VTAM commands not yet available in '                            
+         ABORT 'production Wylbur.'                                             
+         END                                                                    
+*                                                                               
+         L     VTCR,=A(VTC)                                                     
+         USING (VTC)                                                            
+         SPACE                                                                  
+         IF    (VTCFE10A),'ABORT "CATASTROPHIC VTAM ERROR"'                     
+         IF    (VTCFPDN),'ABORT "PATH CLOSED PERMANENTLY"'                      
+         IF    (VTCFWCLS),'ABORT "WYLBUR IS ENDING"'                            
+         SPACE                                                                  
+         USING (VTM)                                                            
+         USING (VTU)                                                            
+         LA    VTUR,USERLIST       GET A USER SLOT                              
+GETSLOT  WHILE (^VTUFFREE),BEGIN                                                
+         LA    VTUR,VTU+L'VTU                                                   
+         IF    (VTU#,NZ),NEXT                                                   
+         FREEMSG                   IF NONE FOUND                                
+         ABORT 'PATH NOT AVAILABLE'                                             
+         END   ,                   END GET A USER SLOT                          
+         SPACE                                                                  
+         FAIL  (VTUID,NE,=C'VTU'),VPO,'VTAM - VTUID INVALID'                    
+         FAIL  (VTU#,GT,=Y(&USERS)),VPO,'VTAM - VTU# INVALID'                   
+         CLEAR VTUF                FOUND VALID USER SLOT                        
+         ST    CPR,VTUCP                                                        
+         LH    R1,VTCLPOH                                                       
+         INCR  R1                                                               
+         IF    (R1,GT,=Y(X'7FF0')),'LA R1,1'                                    
+         STH   R1,VTCLPOH                                                       
+         STH   R1,VTUPOHID                                                      
+         SPACE                                                                  
+         LT    VTMR,VTUMSGH        RELEASE ANY MESSAGES                         
+         WHILE (NZ),BEGIN                                                       
+         L     R2,VTMNEXT                                                       
+         FREEMSG                                                                
+         LTR   VTMR,R2                                                          
+         END                                                                    
+         CLEAR VTUMSGH                                                          
+         SPACE                                                                  
+         GETMSG                    GET A MESSAGE ELEMENT                        
+         IF    (Z),'SET VTUFFREE; ABORT "PATH NOT AVAILABLE"'                   
+         FAIL  (VTMID,NE,=C'VTM'),VPO,'VTAM - VTMID INVALID'                    
+         MVI   POHSTAT,POHGEN+POHRREQ                                           
+         MVC   VTMU#,VTU#                                                       
+         MVC   POHID,VTUPOHID                                                   
+         SPACE                                                                  
+*                                  SCAN MESSAGE                                 
+         LH    R0,CPSCNLEN         R0 := INPUT COUNT                            
+         L     R1,CPSCNLOC         R1 := INPUT LOCATION                         
+         LA    R3,L'VTMTEXT-6      R3 := OUTPUT COUNT                           
+         LA    R15,VTMTEXT+6       R15 := OUTPUT LOCATION                       
+         COMMENT                   R2  = WORK REGISTER                          
+         SPACE                                                                  
+         CEIL  R0,75                                                            
+         LR    R2,R0               FORCE UPPER CASE                             
+         DEX   R2,'TR @R1(0),UPCASE'                                            
+         CLEAR R2                                                               
+         COMMENT                   SEARCH FOR D[ISPLAY]                         
+         WHILE ((R0,POS),AND,((@R1,EQ,C' '),OR,(@R1,EQ,C','))),        *        
+               'DECR R0; INCR R1'                                               
+         IF    ((R0,NPOS),OR,(@R1,EQ,C';')),INVALID                             
+         IF     (@R1,EQ,C'D'),'SET VTUFDIS; MVC VTMTEXT(6),=C"D NET,"'          
+         ELSEIF (@R1,EQ,C'V'),'MVC VTMTEXT(6),=C"V NET,"'                       
+         ELSEIF ((@R1,EQ,C'M'),OR,(@R1,EQ,C'F')),                      *        
+               'MVC VTMTEXT(6),=C"F NET,"'                                      
+         ELSE  'B INVALID'                                                      
+         COMMENT                   SKIP OVER ISPLAY                             
+         WHILE ((R0,POS),AND,(@R1,GE,X'C1')),'DECR R0; INCR R1'                 
+         IF    (R0,NPOS),SCANL4                                                 
+         IF    (@R1,EQ,';'),SCANL4                                              
+         COMMENT                   SEARCH FOR NET                               
+         WHILE ((R0,POS),AND,((@R1,EQ,C' '),OR,(@R1,EQ,C','))),        *        
+               'DECR R0; INCR R1'                                               
+         IF    ((R0,NPOS),OR,(@R1,EQ,C';')),INVALID                             
+         IF    (@R1,EQ,C'N'),BEGIN IF USER INCLUDED "NET"                       
+         COMMENT                   SKIP OVER "NET'                              
+         WHILE ((R0,POS),AND,(@R1,GE,X'C1')),'DECR R0; INCR R1'                 
+         WHILE ((R0,POS),AND,((@R1,EQ,C' '),OR,(@R1,EQ,C','))),        *        
+               'DECR R0; INCR R1'                                               
+         IF    ((R0,NPOS),OR,(@R1,EQ,C';')),INVALID                             
+         END   ,                  END USER INCLUDED "NET"                       
+         SPACE                                                                  
+         IF    (R0,NPOS),SCANL4                                                 
+         IF    (^VTUFDIS,AND,^CPSFOPR),BEGIN IF NOT AUTHORIZED                  
+INVALID  CLEAR (VTUECB,VTUEND-VTUECB)         FREE THE USER SLOT                
+         SET   VTUFFREE                                                         
+         FREEMSG                   FREE THE MESSAGE                             
+         ABORT 'Invalid VTAM command'                                           
+         END   ,                            END NOT AUTHORIZED                  
+         SPACE                                                                  
+SCANLOOP BEGIN ,                             MOVE MESSAGE                       
+         IC    R2,@R1                                                           
+         EX    R2,'CLI =C" ",0'                                                 
+         IF    (NE),BEGIN          IF NOT BLANK                                 
+         EX    R2,'CLI =C",",0'                                                 
+         IF    (NE),BEGIN          IF NOT SEPARATOR                             
+SCANL1   STC   R2,@R15              STORE CHARACTER                             
+         LA    R15,@R15+1           STEP OUTPUT                                 
+         BCT   R3,*+8                                                           
+         B     SCANL4                                                           
+         LA    R1,@R1+1            STEP INPUT                                   
+         BCT   R0,*+8                                                           
+         B     SCANL4                                                           
+         EX    R2,'CLI =C";",0'                                                 
+         IF    (EQ),SCANL4                    EXIT IF TERMINATOR                
+         B     SCANLOOP                                                         
+         END   ,                   END NOT SEPARATOR                            
+         END    ,                  END NOT BLANK                                
+         SPACE                                                                  
+         MVI   @R15,C','            ELSE SEPARATOR                              
+         LA    R15,@R15+1           STEP OUTPUT                                 
+         BCT   R3,*+8                                                           
+         B     SCANL4                                                           
+SCANL2   LA    R1,@R1+1            STEP INPUT                                   
+         BCT   R0,*+8                                                           
+         B     SCANL4                                                           
+SCANL3   IC    R2,@R1              GET NEXT AFTER SEPARATOR                     
+         EX    R2,'CLI =C" ",0'                                                 
+         IF    (NE),BEGIN                                                       
+         EX    R2,'CLI =C",",0'                                                 
+         IF    (NE),SCANL1         B ^SEPARATOR                                 
+         END                                                                    
+         B     SCANL2                                                           
+         END   ,                             END SCANLOOP                       
+         SPACE                                                                  
+SCANL4   DECR  R15                           FINISH MESSAGE                     
+         IF    ((@R15,EQ,C','),OR,(@R15,EQ,C';')),'LA R1,L"VTMTEXT-1'           
+         ELSE  'LA R1,L"VTMTEXT'                                                
+         SR    R1,R3               CALCULATE TEXT COUNT                         
+         IF    (NP),'CLEAR R1'                                                  
+         STH   R1,VTMCNT                                                        
+         SPACE                                                                  
+         S     R1,=F'9'            CHECK FOR "TEST=YES"                         
+         IF    (POS),BEGIN                                                      
+         LA    R2,VTMTEXT(R1)                                                   
+         IF    (@R2,EQ,C',TEST=YES'),'SET VTUFTEST'                             
+         END                                                                    
+         SPACE                                                                  
+         LOOP  BEGIN               PLACE MESSAGE ON OUTBOUND Q                  
+         CLEAR VTMNEXT                                                          
+         LM    R2,R3,VTCOUTH                                                    
+         LR    R15,VTMR                                                         
+         LTR   R14,R2                                                           
+         IF    (Z),'LR R14,VTMR'                                                
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3),'ST VTMR,VTMNEXT'                                       
+         END                                                                    
+         CDS   R2,R14,VTCOUTH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                   END PLACE MESSAGE ON OUTBOUND Q              
+         SPACE                                                                  
+         SET   VTUFSND                                                          
+         SPACE                                                                  
+         POST  VTCSWORK            POST WORK FOR SUB-TASK                       
+         SPACE                                                                  
+         EJECT                                                                  
+GIM      LABEL                     GET INBOUND MESSAGE                          
+         SPACE                                                                  
+         L     R2,VTCATECB         FIRST MAKE SURE SUB-TASK IS RUNNING          
+         N     R2,=A(X'3FFFFFFF')                                               
+         IF    (R2,GT,VTCSTDET),BEGIN        IF SUB-TASK ABENDED                
+         L     R15,=F'400'                   WAIT FOR EXTR TO COMPLETE          
+         VCALL WAITER                                                           
+         B     GIM                                                              
+         END   ,                             END SUB-TASK ABENDED               
+         SPACE                                                                  
+         IF    (R2,GE,VTCSTEND),BEGIN        IF SUB-TASK NOT RUNNING            
+         IF    (^VTCFE10A*^VTCFPDN*^VTCFWCLS),BEGIN                             
+         POST  VTCSWORK            POST WORK FOR SUB-TASK                       
+         L     R1,=A(VTAMSTSK)                                                  
+         IDENTIFY EP=VTAMSTSK,ENTRY=(1)                                         
+         CLEAR  VTCATECB                                                        
+        ATTACH EP=VTAMSTSK,ECB=VTCATECB,ETXR=ETXR,DPMOD=+10                     
+         IF    (R15,NZ),BEGIN      IF BAD RETURN                                
+         CLEAR (VTUECB,VTUEND-VTUECB)         FREE USER SLOT                    
+         SET   VTUFFREE                                                         
+         KAPUT GIM,'SYSTEM ERROR - ATTACH SUBTASK REFUSED'                      
+         END   ,                   END BAD RETURN                               
+         SPACE                                                                  
+         ST    R1,VTCSTTCB                                                      
+         END                                                                    
+         END   ,                              END SUB-TASK NOT RUNNING          
+         SPACE 3                                                                
+GMLOOP   LABEL                     REMOVE MESSAGE FROM Q                        
+         CLEAR VTUECB                                                           
+         WITH  (VTM,R2),BEGIN      R2 = VTM BASE                                
+         LM    R2,R3,VTUMSGH                                                    
+         IF    (R2,ZERO),BEGIN     IF NO MESSAGE                                
+         IF    (VTUFEND),BEGIN     IF END FLAG SET                              
+         IF    (VTUFTEST),BEGIN    IF TEST=YES                                  
+         CLEAR VTUFTEST                                                         
+         L     R15,=F'400'         WAIT FOR TEST RESULTS                        
+         LNR   R15,R15                                                          
+         VCALL WAITER                                                           
+         IF    (NZ),GMATTN         IF ATTN                                      
+         B     GMLOOP                                                           
+         END   ,                   END TEST=YES                                 
+         SPACE                                                                  
+         B     MFREEU              RETURN TO WYLBUR                             
+         END   ,                   END END FLAG SET                             
+         SPACE                                                                  
+         LA    R0,1                -> WAIT <-                                   
+         LA    R1,VTUECB                                                        
+         VCALL WAITECB                                                          
+         IF    (NZ),GMATTN                                                      
+         B     GMLOOP                                                           
+         END   ,                   END NO MESSAGE                               
+         SPACE                                                                  
+         LOOP  BEGIN               REMOVE MESSAGE                               
+         LT    R14,VTMNEXT                                                      
+         IF    (Z),'CLEAR R15'                                                  
+         ELSE  'LR R15,R3'                                                      
+         CDS   R2,R14,VTUMSGH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                   END REMOVE MESSAGE                           
+         END   ,                   END R2 = VTM BASE                            
+         SPACE                                                                  
+         LR    VTMR,R2                                                          
+         IF    (VTMR,Z),GMLOOP     BR NO MESSAGE AVAILABLE                      
+         FAIL  (VTMID,NE,=C'VTM'),VPO,'GIM - VTMID INVALID'                     
+         SPACE                                                                  
+         LH    R2,VTMCNT                                                        
+         TSEG  VTMTEXT,(R2)        WRITE TO TERMINAL                            
+         FREEMSG                                                                
+         TCR                                                                    
+         IF    (R15,POS),BEGIN     IF ATTN                                      
+GMATTN   SET   VTUFATTN                                                         
+         B     MFREEU                                                           
+         END   ,                   END ATTN                                     
+         B     GMLOOP                        END GMLOOP                         
+         SPACE                                                                  
+MFREEU   CLEAR VTUPOHID            REMOVE MESSAGES & FREE USER SLOT             
+         WITH  (VTM,R2),BEGIN      R2 = VTM BASE                                
+         LM    R2,R3,VTUMSGH                                                    
+         IF    (R2,NZ),BEGIN       IF MESSAGE                                   
+         SPACE                                                                  
+         LOOP  BEGIN               REMOVE MESSAGE                               
+         LT    R14,VTMNEXT                                                      
+         IF    (Z),'CLEAR R15'                                                  
+         ELSE  'LR R15,R3'                                                      
+         CDS   R2,R14,VTUMSGH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                   END REMOVE MESSAGE                           
+         LR    VTMR,R2                                                          
+         FREEMSG                                                                
+         B     MFREEU                                                           
+         END   ,                   END MESSAGE                                  
+         END   ,                   END R2 = VTM BASE                            
+         SPACE                                                                  
+         CLEAR (VTUECB,VTUEND-VTUECB)        FREE USER SLOT                     
+         SET   VTUFFREE                                                         
+         CLEAR R0,R1,R15           RETURN                                       
+         SPACE                                                                  
+         B     CVNEXT              MAIN-TASK RETURN                             
+         SPACE 3                                                                
+         LTORG                                                                  
+         SPACE                                                                  
+UPCASE   DC    256AL1(*-UPCASE)                                                 
+         ORG   UPCASE+C'a'         LOWER CASE                                   
+         DC    C'ABCDEFGHI'                                                     
+         ORG   UPCASE+C'j'         LOWER CASE                                   
+         DC    C'JKLMNOPQR'                                                     
+         ORG   UPCASE+C's'         LOWER CASE                                   
+         DC    C'STUVWXYZ'                                                      
+         ORG                                                                    
+         DROP                                                                   
+         USING (CP),(CV)                     ASSUMED                            
+         TITLE 'MAIN TASK -- CLOSE SUB-TASK'                                    
+*                                            ENTRY TO CLOSE SUB-TASK            
+*                                            ASSUME WYLBUR ENDING               
+         SPACE                                                                  
+VTAMSTOP XPROC                                                                  
+         L      VTCR,=A(VTC)                                                    
+         USING (VTC)                                                            
+         SPACE                                                                  
+         IF    ((VTCATECB,EQ,VTCSTNEV),OR,(VTCATECB,EQ,VTCSTDET)),     *        
+               VTAMCLSX                     EXIT TASK NOT ATTACHED              
+         IF    (VTCATECB,EQ,VTCSTRUN),BEGIN IF RUNNING                          
+         SET   VTCFWCLS                                                         
+         POST  VTCSWORK                                                         
+         STIMER WAIT,BINTVL==A(5*100)        WAIT FOR 5 SECONDS                 
+         END   ,                             END RUNNING                        
+         SPACE                                                                  
+VTAMCLSX CLEAR R15                           RETURN                             
+         PEND                                                                   
+         DROP                                                                   
+         USING (CP),(CV)                     ASSUMED                            
+         LTORG                                                                  
+         TITLE 'MAIN TASK -- CLEANUP SUB-TASK'                                  
+         USING (VTC)                         ASSUMED                            
+         DROP  CPR                           NOT AVAILABLE                      
+         SPACE 3                                                                
+CLEANST  PROC  ,                   CLEANUP AFTER ABEND OF SUB-TASK              
+*                                  CALLED FRO IRB ROUTINE                       
+         MVC   VTCSTRTN,VTCATECB    SAVE RETURN CODE                            
+         MVC   VTCATECB,=A(VTCSTDET)                                            
+         IF    (VTCSTTCB,NZ),BEGIN                                              
+         DETACH VTCSTTCB             DETACH THE TASK                            
+         CLEAR VTCSTTCB                                                         
+         END                                                                    
+         SPACE                                                                  
+         LT    R2,VTCACB                                                        
+         IF    (NZ),BEGIN                    IF ACB                             
+         WITH  (ACB,R2)                      RE-FORMAT THE ACB                  
+         LA    R3,ACBWAPLT                                                      
+         GENCB AM=VTAM,BLK=ACB,WAREA=(R2),LENGTH=L'ACB,                *        
+               EXLST=AXLIST,APPLID=(R3),MACRF=NLOGON                            
+         END   ,                             END ACB                            
+         SPACE                                                                  
+         WITH  VTM                                                              
+         L     RPLR,=A(SRPL)                 IDLE RPLS                          
+         WITH  RPL                                                              
+         CLEAR RPLACTIV.ACTIV,VTCSECB                                           
+         L     VTMR,RPLAREA                                                     
+         CLEAR RPLAREA                                                          
+         IF    (VTMR,NZ),BEGIN                                                  
+         SL    VTMR,=A(VTMVMSG-VTM)                                             
+         IF    (VTMID,EQ,C'VTM'),'FREEMSG'                                      
+         END                                                                    
+         SPACE                                                                  
+         L     RPLR,=A(RCRPL)                                                   
+         CLEAR RPLACTIV.ACTIV,VTCRCECB                                          
+         L     VTMR,RPLAREA                                                     
+         CLEAR RPLAREA                                                          
+         IF    (VTMR,NZ),BEGIN                                                  
+         SL    VTMR,=A(VTMVMSG-VTM)                                             
+         IF    (VTMID,EQ,C'VTM'),'FREEMSG'                                      
+         END                                                                    
+         SPACE                                                                  
+         LT   VTMR,VTCOUTH                   FREE OUTBOUND MESSAGES             
+         WHILE (NZ),BEGIN                                                       
+         L     R2,VTMNEXT                                                       
+         FREEMSG                                                                
+         LTR   VTMR,R2                                                          
+         END                                                                    
+         CLEAR VTCOUTH                                                          
+         SPACE                                                                  
+         IF    (VTCFWCLS+VTCFVCLS),'SETMSG "COMMAND TERMINATED"'                
+         ELSE  BEGIN                                                            
+         UNPK  ABNDMSG+16(9),VTCSTRTN(5)                                        
+         TR    ABNDMSG+16(8),=C'0123456789ABCDEF'-C'0'                          
+         SETMSG ABNDMSG                                                         
+         DECR  R0                                                               
+         END                                                                    
+         STM   R0,R1,MSGSAV                                                     
+         SPACE                                                                  
+         L     VTUR,=A(USERLIST)                                                
+         WITH  VTU                                                              
+         WHILE (VTU#,NZ),BEGIN               SCAN USERS                         
+         IF    (^VTUFFREE),BEGIN             IF ACTIVE USER                     
+         LM    R2,R3,VTUMSGH       R2 := SAVED Q HEAD                           
+         BEGIN                               BEGIN GET NEW MSG ELEMENT          
+         LTR   VTMR,R3             GET NEWEST MESSAGE ON USER Q                 
+         SPACE                                                                  
+         IF    (NZ),BEGIN          IF MESSAGE ON Q                              
+         IF    (VTUFEND),COMMANDP                                               
+         GETMSG                    GET BLANK MSG ELEMENT                        
+         IF    (NZ),COMMAND3                                                    
+         SPACE                                                                  
+         SET   VTUFEND             IF NOT AVAILABLE                             
+         LTR   VTMR,R3                                                          
+         IF    (ZERO),COMMANDP                                                  
+         MVI   POHSTAT,POHEND+POHDATA                                           
+         CLEAR VTUFRCV                                                          
+         B     COMMANDP                                                         
+         END   ,                   END MESSAGE ON Q                             
+         SPACE                                                                  
+         LABEL                     ELSE NO MESSAGE ON Q                         
+         GETMSG                    GET BLANK MESSAGE ELEMENT                    
+         IF    (Z),BEGIN           IF NOT AVAILABLE                             
+         SET   VTUFEND                                                          
+         CLEAR VTUFRCV                                                          
+         B     COMMANDP                                                         
+         END   ,                   END NOT AVAILABLE                            
+         END   ,                             END GET NEW MSG ELEMENT            
+         SPACE                                                                  
+COMMAND3 CLEAR VTM                 GOT BLANK MSG ELEMENT                        
+         MVC   VTMID,=CL4'VTM'     SIMULATE RECEIVED MESSAGE                    
+         MVC   VTMU#,VTU#                                                       
+         LM    R14,R15,MSGSAV                                                   
+         DEX   R14,'MVC VTMTEXT(0),@R15'                                        
+         INCR  R14                                                              
+         STH   R14,VTMCNT                                                       
+         MVI   POHSTAT,POHEND+POHDATA                                           
+         CLEAR VTUFRCV+VTUFSND                                                  
+         SPACE                                                                  
+         IF    (R2,Z),'LR R2,VTMR'                                              
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3)                                                         
+         ST    VTMR,VTMNEXT                                                     
+         END                                                                    
+         LR    R3,VTMR                                                          
+         SPACE                                                                  
+COMMANDR STM   R2,R3,VTUMSGH                 REPLACE Q HEAD                     
+         SPACE                                                                  
+         SET   VTUFEND                                                          
+COMMANDP POST  VTUECB                                                           
+         END   ,                             END ACTIVE USER                    
+         LA    VTUR,VTU+L'VTU                                                   
+         END   ,                             END SCAN USERS                     
+         SPACE                                                                  
+         PEND                                                                   
+         DROP                                                                   
+         LTORG                                                                  
+         TITLE 'MAIN-TASK -- SUBTASK COMPLETION IRB ROUTINE'                    
+ETXR     CSECT              END OF TASK ROUTINE                                 
+         SAVE  (14,12),T,*         OS ENTRY                                     
+         LR    R5,R13              SAVE R13                                     
+         LR    BR,R15                                                           
+         USING ETXR,BR                                                          
+         SPACE                                                                  
+         GETMAIN RC,LV=250*4,LOC=ANY                                            
+         IF    (R15,ZERO),BEGIN                                                 
+         LR    R13,R1              SETUP WYLBUR ENVIRONMENT                     
+         LR    R8,R13                                                           
+         CLEAR CPR                                                              
+         L     CVR,=V(CV)                                                       
+         USING (CV)                                                             
+         SPACE 3                                                                
+         L     VTCR,=A(VTC)                                                     
+         SPACE                                                                  
+         ACALL CLEANST             CLEANUP SUBTASK                              
+         SPACE                                                                  
+         LR    R1,R13                                                           
+         FREEMAIN RC,LV=250*4,A=(1)                                             
+         END                                                                    
+         SPACE                                                                  
+         LR    R13,R5                                                           
+         RETURN (14,12),RC=0                                                    
+         DROP                                                                   
+         LTORG                                                                  
+         TITLE 'SUB-TASK -- CSECTS AND ENTRY'                                   
+VTAMSTSK CSECT              SUB-TASK TO INTERFACE WITH VTAM                     
+         SPACE                                                                  
+         DATA  BEGIN               SUB-TASK CSECTS                              
+         PUSH  PRINT                                                            
+         PRINT NOGEN                                                            
+         SPACE                                                                  
+STRSAVE  DC    18F'0'            OS REGISTER SAVE AREA                          
+         SPACE                                                                  
+*                                  ACB EXIT LIST                                
+AXLIST   EXLST AM=VTAM,TPEND=TEEXIT                                             
+         SPACE                                                                  
+*                                  SEND RPL                                     
+SRPL     RPL   AM=VTAM,ECB=VTCSECB,OPTCD=ASY                                    
+         SPACE                                                                  
+*                                   RECEIVE COMMAND RPL                         
+RCRPL    RPL   AM=VTAM,ECB=VTCRCECB,OPTCD=(TRUNC,ASY,Q),               *        
+               AREALEN=L'VTMVMSG                                                
+         SPACE                                                                  
+         POP   PRINT                                                            
+         END                                                                    
+         SPACE 3                                                                
+         SAVE  (14,12),T,*                   OS ENTRY                           
+         LR    BR,R15                                                           
+         USING VTAMSTSK,BR                                                      
+         LA    R2,STRSAVE                                                       
+         ST    R2,@R13+8                                                        
+         ST    R13,@R2+4                                                        
+         LR    R13,R2                                                           
+         SPACE                                                                  
+         L     CVR,=V(CV)                                                       
+         USING (CV)                                                             
+*-                                                                              
+*-       Switch to same AMODE as the mother task.                               
+*-                                                                              
+         IF    CVFXA,BEGIN         XA mode...                                   
+         LA    R2,A31GO                                                         
+         IF    CVFXA31,BEGIN       We want 31-bit mode...                       
+         O     R2,=A(X'80000000')  31 BIT MODE WANTED                           
+         END                                                                    
+         BSM   0,R2                                                             
+*                                                                               
+A31GO    LABEL                                                                  
+         END                                                                    
+*                                                                               
+         L     VTCR,=A(VTC)                                                     
+         USING (VTC)                                                            
+         CLEAR CPR                 NOT RELATED TO A SINGLE USER                 
+         SPACE                                                                  
+         SET   VTCFACTV                                                         
+         CLEAR MSGSAV                                                           
+         SPACE                                                                  
+         IF    (VTCACB,ZERO),BEGIN           GENERATE ACB                       
+         LA    R0,L'ACBWYL                                                      
+         GETMAIN R,LV=(0)                    ACB MUST BE BELOW 16M              
+         LR    R2,R1                                                            
+         WITH  (ACB,R2)                                                         
+         ST    R2,VTCACB                                                        
+         CLEAR (ACBWSTRT,ACBWEND-ACBWSTRT)                                      
+         MVI   ACBOLIST,X'80'                                                   
+         MVC   ACBWAPPL,CVWYLSSN                                                
+         LA    R3,8                                                             
+         WHILE (R3,POS),BEGIN                                                   
+         LA    R4,ACBWAPPL-1(R3)                                                
+         IF    (('CLI @R4,0',NE),AND,('CLI @R4,X"40"',NE)),EXIT                 
+         BCTR  R3,0                                                             
+         END                                                                    
+         STC   R3,ACBWAPLT                                                      
+         LA    R3,ACBWAPLT                                                      
+         SPACE                                                                  
+         GENCB AM=VTAM,BLK=ACB,WAREA=(R2),LENGTH=L'ACB,                *        
+               EXLST=AXLIST,APPLID=(R3),MACRF=NLOGON                            
+         STFAIL  (R15,NZ),VPO,'GENACB REFUSED'                                  
+         SPACE                                                                  
+         LA    R1,SRPL                                                          
+         WITH  (IFGRPL,R1)                                                      
+         ST    R2,RPLDACB                                                       
+         LA    R1,RCRPL                                                         
+         ST    R2,RPLDACB                                                       
+         END   ,                             END GENERATE ACB                   
+         SPACE                                                                  
+         LA    BR,WAIT                                                          
+         BR    BR                                                               
+         USING WAIT,BR                                                          
+         LTORG                                                                  
+     TITLE 'SUB-TASK -- WAIT LOOP -- CLOSE OR OPEN ACB'                         
+WAIT     LABEL                               ---WAIT LOOP---                    
+         IF    (^VTCFACTV),BEGIN                                                
+         WAIT  1,ECBLIST=VTCELST                                                
+         END                                                                    
+         CLEAR VTCFACTV                                                         
+         SPACE                                                                  
+         IF    (VTCSWORK.C),BEGIN            IF WORK FROM MAIN                  
+         CLEAR VTCSWORK                                                         
+         L     R2,VTCACB                                                        
+         WITH  (ACB,R2)                                                         
+CLOSEACB IF    (VTCFWCLS+VTCFVCLS+VTCFE10A),BEGIN     CLOSE ACB                 
+         IF    (VTCFWCLS),'SETMSG "PATH CLOSED"'                                
+         ELSEIF (VTCFE10A),'SETMSG "CATASTROPHIC VTAM ERROR"'                   
+         ELSE  'SETMSG "VTAM IS HALTING"'                                       
+         STM   R0,R1,MSGSAV                                                     
+         SPACE                                                                  
+         IF    (^VTCFE10A),BEGIN                                                
+         CLOSE ((R2)),MF=(E,ACBOLIST)                                           
+         IF    (ACBERFLG,EQ,ACBRNOCF),BEGIN                                     
+         CLOSE ((R2)),MF=(E,ACBOLIST)                                           
+         END                                                                    
+         END                                                                    
+         SPACE                                                                  
+         IF    (VTCFWCLS),BEGIN              IF WYLBUR CLOSING                  
+         L     R13,@R13+4                                                       
+         RETURN 14,RC=VTCSWCLS               CLOSE TASK NORMALLY                
+         END   ,                             END WYLBUR CLOSING                 
+         SPACE                                                                  
+         ELSE  'SET VTCFTDN; CLEAR VTCFWCLS+VTCFVCLS'                           
+         END   ,                             END CLOSE ACB                      
+         SPACE 2                                                                
+         SPACE                                                                  
+         ELSE  BEGIN                         ELSE ^ CLOSE ACB                   
+OPENACB  IF    (^ACBOFLGS.ACBOPEN,AND,^VTCFPDN),BEGIN  OPEN ACB                 
+         OPEN  ((R2)),MF=(E,ACBOLIST)        OPEN THE ACB                       
+         CLEAR R0                                                               
+         IF    (ACBOFLGS.ACBOPEN),BEGIN      IF GOOD                            
+         CLEAR VTCFPDN+VTCFTDN                                                  
+         END   ,                             END GOOD                           
+         SPACE                                                                  
+         ELSE  BEGIN                         ELSE OPEN FAILED                   
+         IF    (ACBERFLG,EQ,ACBONVRT),BEGIN                                     
+         SETMSG 'COMMAND FAILED - NOT ENOUGH VTAM STORAGE'                      
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,X'24'),BEGIN                                        
+         SETMSG 'VTAM NOT AVAILABLE - INCORRECT PASSWORD'                       
+         SET   VTCFPDN                                                          
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOANAT),BEGIN                                     
+         SETMSG 'VTAM NOT AVAILABLE - NOT INCLUDED IN OPERATING SYSTEM'         
+         SET   VTCFPDN                                                          
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOAHLT),BEGIN                                     
+         SETMSG 'VTAM IS HALTING'                                               
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOVINA),BEGIN                                     
+         SETMSG 'VTAM IS NOT ACTIVE'                                            
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    ((ACBERFLG,EQ,ACBOAVFY),OR,(ACBERFLG,EQ,ACBOANSN),OR,   *        
+               (ACBERFLG,EQ,ACBOAPLE)),BEGIN                                    
+         SETMSG 'VTAM NOT AVAILABLE - INVALID APPLICATION NAME'                 
+         SET   VTCFPDN                                                          
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOAPNM),BEGIN                                     
+         SETMSG 'VTAM TEMPORARILY NOT AVAILABLE - NO APPLICATION NAME'          
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOAPAA),BEGIN                                     
+   SETMSG 'VTAM TEMPORARILY NOT AVAILABLE - APPLICATION ALREADY ACTIVE'         
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (ACBERFLG,EQ,ACBOUNDF),BEGIN                                     
+         SETMSG 'COMMAND FAILED - VTAM SYSTEM ERROR'                            
+         SET   VTCFPDN                                                          
+         B     OPENFAIL                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    ((ACBERFLG,EQ,ACBOACT),OR,(ACBERFLG,EQ,ACBCBUSY)),BEGIN          
+         EXIT   OPENACB             ALREADY OPEN                                
+         END                                                                    
+         SPACE 2                                                                
+OPENFAIL STM   R0,R1,MSGSAV                                                     
+         END   ,                             END OPEN FAILED                    
+         END   ,                             END OPEN ACB                       
+         END   ,                             END ^ CLOSE ACB                    
+         END   ,                             END WORK FROM MAIN                 
+         DROP  R2                                                               
+     TITLE 'SUB-TASK -- WAIT LOOP -- PROCESS RECEIVE COMMAND COMPLETE'          
+RCVCMD   IF    (VTCRCECB.C),BEGIN            IF RCVCMD POSTED                   
+         SET   VTCFACTV                                                         
+         L     RPLR,=A(RCRPL)                                                   
+         WITH  RPL                                                              
+         SPACE                                                                  
+         CHECK RPL=(RPLR)                                                       
+         CLEAR VTCRCECB                                                         
+         CLEAR R2                                                               
+         IF    (R15,GT,=H'4'),'LH R1,=H"28"'                                    
+         ELSE  BEGIN                                                            
+         IF    (R0,EQ,=H'24'),'LR R1,R0'                                        
+         ELSE  BEGIN                                                            
+         LC    R1,RPLRTNCD         R1 := RTNCD                                  
+         IC    R2,RPLFDB2          R2 := FDBK2                                  
+         END                                                                    
+         END                                                                    
+         CEIL  R1,28                                                            
+         SPACE                                                                  
+         L     R15,RCVCTABL(R1)                                                 
+         BR    R15                 BRANCH TO PROCESS                            
+RCVCTABL DC    A(RCVCNORM)         NORMAL                                       
+         DC    A(ERRORRET)         ERROR SYNAD                                  
+         DC    A(SEND)             RETRY                                        
+         DC    A(ERRORRET)         ERROR INTEGRETY                              
+         DC    A(RCVCENV)          ERROR ENVIRONMENT                            
+         DC    A(RCVCLOGC)         ERROR LOGIC                                  
+         DC    A(RCVCERR)          ERROR BAD RPL                                
+         DC    A(RCVCACB)          ERROR ACB NOT OPEN                           
+         SPACE 3                                                                
+RCVCACB  LABEL                     ACB NOT OPEN                                 
+         CLEAR RPLACTIV.ACTIV                                                   
+         EXIT  RCVCMD                                                           
+         SPACE                                                                  
+RCVCENV  LABEL                     ENVIRONMENT ERROR                            
+         IF    (R2,EQ,=A(X'000A')),'SET VTCFE10A; B ERRORRET'                   
+         IF    (R2,EQ,=A(X'000D')),'EXIT RCVCMD'                                
+         B     ERRORRET                                                         
+         SPACE                                                                  
+RCVCLOGC LABEL                     LOGIC ERROR                                  
+         IF    (R2,EQ,=A(X'006F')),'B ERRORRET'   PROCESSOR INACTIVE            
+         IF    (R2,EQ,=A(X'0070')),'B ERRORRET'   CLOSE W OUTSTANDING           
+         B     ERRORRET                                                         
+         SPACE                                                                  
+RCVCERR  LABEL                     BAD RPL                                      
+         L     R3,RPLFDBK2                                                      
+         STFAIL ,'UNEXPECTED VTAM RETURN CODE'                                  
+         SPACE 2                                                                
+RCVCNORM LABEL                     NORMAL COMPLETION                            
+         IF    (R2,EQ,=F'6'),'EXIT RCVCMD'                                      
+         LT    VTMR,RPLAREA                                                     
+         IF    (Z),'EXIT RCVCMD'                                                
+         SL    VTMR,=A(VTMVMSG-VTM)                                             
+         WITH  VTM                                                              
+         SPACE                                                                  
+         STFAIL (VTMID,NE,=C'VTM'),'RCVCMD - VTMID INVALID'                     
+         SPACE                                                                  
+*                                            PROCESS MESSAGE                    
+         IF    (^POHSTAT.POHGEN),'EXIT RCVCMD' IGNORE UNSOLICITED MSG           
+         LTH   R1,POHID                                                         
+         IF    (Z),'EXIT RCVCMD'                                                
+         LA    VTUR,USERLIST                                                    
+         WITH  VTU                                                              
+         WHILE (R1,NE,VTUPOHID),BEGIN        FIND USER                          
+         LA    VTUR,VTU+L'VTU                                                   
+         IF    (VTU#,Z),'EXIT RCVCMD'                                           
+         END   ,                             END FIND USER                      
+         SPACE                                                                  
+         IF    (VTUFFREE+VTUFATTN),'EXIT RCVCMD'                                
+         MVC   VTMU#,VTU#                                                       
+         L     R1,RPLRLEN                                                       
+         SL    R1,=A(L'VTMIHDR)                                                 
+         STH   R1,VTMCNT                                                        
+         CLEAR RPLAREA                                                          
+         DROP  RPLR                                                             
+         SPACE                                                                  
+         CLEAR R1                  R1 REMEMBERS TO SET END                      
+         SPACE                                                                  
+         IF     (VTMTEXT,EQ,C'IST097'),'B RCVCMD1'       "ACCEPTED"             
+         ELSEIF (VTMTEXT,EQ,C'IST039I'),'LA R1,1'        "FAILED"               
+         ELSEIF (VTMTEXT,EQ,C'IST411I'),'LA R1,1'        "VTAMTERM"             
+         ELSEIF (VTMTEXT,EQ,C'IST412I'),'LA R1,1'        "VTAMTERM"             
+         ELSEIF (VTMTEXT,EQ,C'IST450I'),'LA R1,1'        "INVALID"              
+         ELSEIF (VTMTEXT,EQ,C'IST452I'),'LA R1,1'        "EXTRANEOUS"           
+         ELSEIF (VTMTEXT,EQ,C'IST453I'),'LA R1,1'        "INVALID"              
+         ELSEIF (VTMTEXT,EQ,C'IST454I'),'LA R1,1'        "STORAGE"              
+         ELSEIF (VTMTEXT,EQ,C'IST456I'),'LA R1,1'        "OMITTED"              
+         ELSEIF (VTMTEXT,EQ,C'IST539I'),'LA R1,1'        "COS FAILED"           
+         ELSEIF (VTMTEXT,EQ,C'IST540I'),'LA R1,1'        "ROUTE FAILED"         
+         ELSEIF (VTMTEXT,EQ,C'IST835I'),'LA R1,1'        "NO USERVARS"          
+         ELSEIF (VTUFDIS),BEGIN              IF DISPLAY COMMAND                 
+         IF    (POHSTAT.POHEND),'LA R1,1'    IF POHEND                          
+         END   ,                             END DISPLAY COMMAND                
+         SPACE                                                                  
+         ELSE  'LA R1,1'                                                        
+         SPACE                                                                  
+RCVCMD1  LABEL                                                                  
+         IF    (VTMR,NZ),BEGIN                                                  
+         LOOP  BEGIN               QUEUE THE MESSAGE                            
+         CLEAR VTMNEXT                                                          
+         LR    R15,VTMR                                                         
+         LM    R2,R3,VTUMSGH                                                    
+         LTR   R14,R2                                                           
+         IF    (Z),'LR R14,VTMR'                                                
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3),'ST VTMR,VTMNEXT'                                       
+         END                                                                    
+         CDS   R2,R14,VTUMSGH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                   END QUEUE THE MESSAGE                        
+         SPACE                                                                  
+         IF    (R1,NZ),'SET VTUFEND'  SET END                                   
+         END                                                                    
+         SPACE                                                                  
+         POST  VTUECB                                                           
+         END   ,                            END RCVCMD POSTED                   
+     TITLE 'SUB-TASK -- WAIT LOOP --  PROCESS SEND COMPLETE'                    
+SEND     IF    (VTCSECB.C),BEGIN            IF SEND POSTED                      
+         SET   VTCFACTV                                                         
+         L     RPLR,=A(SRPL)                                                    
+         WITH  RPL                                                              
+         SPACE                                                                  
+         CHECK RPL=(RPLR)                                                       
+         CLEAR VTCSECB                                                          
+         CLEAR R2                                                               
+         IF    (R15,GT,=H'4'),'LH R1,=H"28"'                                    
+         ELSE  BEGIN                                                            
+         IF    (R0,EQ,=H'24'),'LR R1,R0'                                        
+         ELSE  BEGIN                                                            
+         LC    R1,RPLRTNCD         R1 := RTNCD                                  
+         IC    R2,RPLFDB2          R2 := FDBK2                                  
+         END                                                                    
+         END                                                                    
+         CEIL  R1,28                                                            
+         LT    VTMR,RPLAREA                                                     
+         STFAIL  (Z),'SEND - NO BUFFER'                                         
+         SL    VTMR,=A(VTMVMSG-VTM)                                             
+         WITH  VTM                                                              
+         CLEAR RPLAREA                                                          
+         SPACE                                                                  
+         L     R15,SNDCTABL(R1)                                                 
+         BR    R15                 BRANCH TO PROCESS                            
+SNDCTABL DC    A(SNDCNORM)         NORMAL                                       
+         DC    A(ERRORRET)         ERROR SYNAD                                  
+         DC    A(SNDRETRY)         RETRY                                        
+         DC    A(ERRORRET)         ERROR INTEGRETY                              
+         DC    A(SNDCENV)          ERROR ENVIRONMENT                            
+         DC    A(SNDCLGIC)         ERROR LOGIC                                  
+         DC    A(SNDCERR)          ERROR BAD RPL                                
+         DC    A(SNDCACB)          ERROR ACB NOT OPEN                           
+         SPACE 3                                                                
+SNDCACB  LABEL                     ACB NOT OPEN                                 
+         CLEAR RPLACTIV.ACTIV                                                   
+         EXIT  SEND                                                             
+         SPACE                                                                  
+SNDCENV  LABEL                     ENVIRONMENT ERROR                            
+         IF    (R2,EQ,=A(X'000A')),'SET VTCFE10A; B ERRORRET'                   
+         IF    (R2,EQ,=A(X'000D')),'EXIT SEND'    ACB CLOSED                    
+         IF    (R2,EQ,=A(X'000E')),'B ERRORRET'   VTAM ERROR                    
+         SPACE                                                                  
+SNDCLGIC LABEL                     LOGIC ERROR                                  
+         IF    (R2,EQ,=A(X'006F')),'B ERRORRET'   PROCESSOR INACTIVE            
+         IF    (R2,EQ,=A(X'0070')),'B ERRORRET'   CLOSE W OUTSTANDING           
+         IF    (R2,EQ,=A(X'0071')),'B ERRORRET'   INVALID COMMAND               
+         IF    (R2,EQ,=A(X'0073')),'B ERRORRET'   INVALID PARAMETER             
+         B     SNDCERR                                                          
+         SPACE                                                                  
+SNDCERR  LABEL                     BAD RPL                                      
+         L     R3,RPLFDBK2                                                      
+         STFAIL ,'UNEXPECTED VTAM RETURN CODE'                                  
+         SPACE 2                                                                
+SNDCNORM LABEL                     NORMAL COMPLETION                            
+         STFAIL  (VTMID,NE,=C'VTM'),'SEND - VTMID INVALID'                      
+         LTH   VTUR,VTMU#                                                       
+         IF    (Z),'EXIT SEND'                                                  
+         STFAIL  (VTUR,GT,=A(&USERS)),'SEND - BAD USER#'                        
+         DECR  VTUR                                                             
+         MH    VTUR,=Y(L'VTU)                                                   
+         LA    VTUR,USERLIST(VTUR)                                              
+         WITH  VTU                                                              
+         STFAIL  (VTUID,NE,C'VTU'),'SEND - VTUID INVALID'                       
+         IF    (VTUPOHID,NE,POHID),'EXIT SEND' IGNORE BAD POHID                 
+         IF    (VTUFFREE),'EXIT SEND'                                           
+         SPACE                                                                  
+         COMMENT                             GOOD                               
+         IF    (R2,NZ),SERROR                                                   
+         SET   VTUFRCV                                                          
+         FREEMSG                             RELEASE MESSAGE ELEMENT            
+         EXIT  SEND                                                             
+         SPACE                                                                  
+SNDRETRY SET   VTUFSND                       RETRY                              
+         INCR  R1,VTCRCNT                                                       
+         LOOP  BEGIN                         QUEUE BACK ON TAIL                 
+         CLEAR VTMNEXT                                                          
+         LM    R2,R3,VTCOUTH                                                    
+         LR    R15,VTMR                                                         
+         LTR   R14,R2                                                           
+         IF    (Z),'LR R14,VTMR'                                                
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3),'ST VTMR,VTMNEXT'                                       
+         END                                                                    
+         CDS   R2,R14,VTCOUTH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                   END QUEUE THE MESSAGE                        
+         SPACE                                                                  
+         EXIT  SEND                                                             
+         SPACE                                                                  
+SERROR   LABEL                               SEND ERROR                         
+         L     R15,VTCACB                                                       
+         WITH  (ACB,R15)                                                        
+         IF    (^ACBOFLGS.ACBOPEN),'EXIT SEND'                                  
+*                                            SIMULATE RECEIVED MESSAGE          
+ERRORRET LABEL                     SET UP ERROR RETURN MESSAGE                  
+         INCR  R14,VTCECNT                                                      
+         IF    (VTUFATTN),BEGIN              IF ATTENTION SET                   
+         IF    (VTMR,NZ),'FREEMSG'                                              
+         B     ACBCLS                                                           
+         END   ,                              END ATTENTION SET                 
+         SPACE                                                                  
+         IF    (VTMR,Z),'GETMSG'                                                
+         IF    (VTMR,NZ),BEGIN                                                  
+         CLEAR POHSTAT             SIMULATE A RECEIVED MESSAGE                  
+         SET   POHSTAT.POHEND                                                   
+         MVC   VTMTEXT(13),=CL13'ERROR RETURN '                                 
+         ST4   R1,VTMTEXT+34       WORK AREA                                    
+         MVI   VTMTEXT+38,X'0C'                                                 
+         ST4   R2,VTMTEXT+39                                                    
+         MVI   VTMTEXT+43,X'0C'                                                 
+         UNPK  VTMTEXT+13(9),VTMTEXT+34(5)                                      
+         MVI   VTMTEXT+21,X'40'                                                 
+         UNPK  VTMTEXT+22(9),VTMTEXT+39(5)                                      
+         TR    VTMTEXT+22(8),=C'0123456789ABCDEF'-C'0'                          
+         MVC   VTMCNT,=H'30'                                                    
+         END                                                                    
+         LA    R1,1                SET END                                      
+         B     RCVCMD1             QUEUE THE SIMULATED MESSAGE                  
+         END   ,                             END SEND POSTED                    
+     TITLE 'SUB-TASK -- WAIT LOOP --  PROCESS ACB CLOSED'                       
+ACBCLS   BEGIN                               PROCESS ACB CLOSED                 
+         L     R2,VTCACB                                                        
+         WITH  (ACB,R2)                                                         
+         IF    (ACBOFLGS.ACBOPEN,AND,^VTCFE10A),EXIT                            
+         DROP  R2                                                               
+         WITH  VTM                                                              
+         CLEAR VTCFACTV                                                         
+         SPACE                                                                  
+FREEOUTB LT   VTMR,VTCOUTH                   FREE OUTBOUND MESSAGES             
+         IF   (NZ),BEGIN                                                        
+         L     R2,VTMNEXT                                                       
+         CS    VTMR,R2,VTCOUTH                                                  
+         IF    (NE),FREEOUTB                                                    
+         FREEMSG                                                                
+         B     FREEOUTB                                                         
+         END                                                                    
+         SPACE                                                                  
+         IF    (MSGSAV,ZERO),BEGIN                                              
+         SETMSG 'ACB CLOSED'                                                    
+         STM   R0,R1,MSGSAV                                                     
+         END                                                                    
+         SPACE                                                                  
+         LA    VTUR,USERLIST                                                    
+         WITH  VTU                                                              
+         WHILE (VTU#,NZ),BEGIN               SCAN USERS                         
+         IF    (VTUFFREE+VTUFATTN),BEGIN     IF USER NOT WAITING                
+ACBCLS1  LABEL                               DEQUE RAMAINING MESSAGES           
+         LM    R14,R15,VTUMSGH                                                  
+         CLEAR R0,R1                                                            
+         CDS   R14,R0,VTUMSGH                                                   
+         BNE   ACBCLS1                                                          
+         LTR   VTMR,R14                                                         
+         WHILE (NZ),BEGIN                                                       
+         STFAIL  (VTMID,NE,=C'VTM'),'ACBCLS1 - VTMID INVALID'                   
+         L     R2,VTMNEXT                                                       
+         FREEMSG                                                                
+         LTR   VTMR,R2                                                          
+         END                                                                    
+         CLEAR (VTUECB,VTUEND-VTUECB)         FREE USER SLOT                    
+         SET   VTUFFREE                                                         
+         B     ACBCLSN                                                          
+         END   ,                             END USER NOT WAITING               
+         SPACE                                                                  
+ACBCLS2  LABEL                               ELSE ACTIVE USER                   
+         CLEAR R14,R15                                                          
+         LM    R2,R3,VTUMSGH       R2 := SAVED Q HEAD                           
+         CDS   R2,R14,VTUMSGH      CLEAR Q HEAD TO STOP MAIN                    
+         BNE   ACBCLS2                                                          
+         SPACE                                                                  
+         WITH  VTM                                                              
+         BEGIN                               BEGIN GET NEW MSG ELEMENT          
+         LTR   VTMR,R3             GET NEWEST MESSAGE ON USER Q                 
+         SPACE                                                                  
+         IF    (NZ),BEGIN          IF MESSAGE ON Q                              
+         IF    (VTUFEND),ACBCLSR                                                
+         GETMSG                    GET BLANK MSG ELEMENT                        
+         IF    (NZ),ACBCLS3                                                     
+         SPACE                                                                  
+         B     ACBCLSR             IF NOT AVAILABLE                             
+         END   ,                   END MESSAGE ON Q                             
+         SPACE                                                                  
+         LABEL                     ELSE NO MESSAGE ON Q                         
+         GETMSG                    GET BLANK MESSAGE ELEMENT                    
+         IF    (Z),ACBCLSR         IF NOT AVAILABLE                             
+         END   ,                             END GET NEW MSG ELEMENT            
+         SPACE                                                                  
+ACBCLS3  CLEAR VTM                 GOT BLANK MSG ELEMENT                        
+         MVC   VTMID,=CL4'VTM'     SIMULATE RECEIVED MESSAGE                    
+         MVC   VTMU#,VTU#                                                       
+         LM    R14,R15,MSGSAV                                                   
+         DEX   R14,'MVC VTMTEXT(0),@R15'                                        
+         INCR  R14                                                              
+         STH   R14,VTMCNT                                                       
+         MVI   POHSTAT,POHEND+POHDATA                                           
+         CLEAR VTUFRCV+VTUFSND                                                  
+         SPACE                                                                  
+         IF    (R2,Z),'LR R2,VTMR'                                              
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3)                                                         
+         ST    VTMR,VTMNEXT                                                     
+         END                                                                    
+         LR    R3,VTMR                                                          
+         SPACE                                                                  
+ACBCLSR  LM    R14,R15,VTUMSGH               REPLACE Q HEAD                     
+         CDS   R14,R2,VTUMSGH                                                   
+         BNE   ACBCLSR                                                          
+         SPACE                                                                  
+         SET   VTUFEND                                                          
+         POST  VTUECB                                                           
+ACBCLSN  LABEL                               NEXT USER                          
+         LA    VTUR,VTU+L'VTU                                                   
+         END   ,                             END SCAN USERS                     
+         SPACE                                                                  
+         CLEAR VTCFVCLS+VTCFWCLS+VTCFACTV                                       
+         SPACE                                                                  
+         IF    (VTCFPDN+VTCFE10A),BEGIN      IF PERMANENTLY DOWN                
+         L     R13,@R13+4                                                       
+         RETURN 14,RC=VTCSVCLS     CLOSE TASK NORMALLY                          
+         END   ,                            END PERMANENTLY DOWN                
+         SPACE                                                                  
+         B     WAIT                         ELSE GOTO WAIT                      
+         SPACE                                                                  
+         END   ,                             END PROCESS ACB CLOSED             
+     TITLE 'SUB-TASK -- WAIT LOOP --  START RPLS'                               
+STARTRPL BEGIN                               START RPLS                         
+         WITH  RPL,VTM                                                          
+         L     RPLR,=A(RCRPL)             ---START RCVCMD---                    
+         IF    (^RPLACTIV.ACTIV),BEGIN       IF RCVCMD RPL ^ ACTIVE             
+         LT     VTMR,RPLAREA                                                    
+         IF     (NZ),BEGIN                   IF BUFFER                          
+         SL     VTMR,=A(VTMVMSG-VTM)                                            
+         STFAIL   (VTMID,NE,C'VTM'),'STARTRPL - VTMID INVALID'                  
+         CLEAR  (VTMNEXT,VTMEND-VTMNEXT)                                        
+         END     ELSE,BEGIN                  END BUFFER                         
+         GETMSG                              ELSE GET BUFFER                    
+         IF    (Z),STARTRP2                                                     
+         END   ,                             END GET BUFFER                     
+         SPACE                                                                  
+         MVC   POHID,=Y(X'7FFF') LARGE NUMBER                                   
+         SPACE                                                                  
+         RCVCMD RPL=(RPLR),AREA=VTMVMSG,AREALEN=L'VTMVMSG                       
+         LR    R1,R0                                                            
+         LC    R2,RPLFDB2                                                       
+         STFAIL  (R1,EQ,=H'24'),'STARTRPL - RCVCMD-BADRPL'                      
+         IF    (R15,ZERO),'SET VTCFACTV'                                        
+         END    ,                            END RCVCMD ^ ACTIVE                
+         EJECT                                                                  
+STARTRP2 LABEL                            ---START SEND---                      
+         L     RPLR,=A(SRPL)                                                    
+         IF     (^RPLACTIV.ACTIV),BEGIN      IF SEND RPL ^ ACTIVE               
+         LOOP  BEGIN                         REMOVE MESSAGE FROM Q              
+         WITH  (VTM,R2)                                                         
+         LM    R2,R3,VTCOUTH                                                    
+         IF    (R2,ZERO),'EXIT STARTRPL'  EXIT NO MESSAGE                       
+         LT    R14,VTMNEXT                                                      
+         IF    (Z),'CLEAR R5'                                                   
+         ELSE  'LR R15,R3'                                                      
+         CDS   R2,R14,VTCOUTH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                             END REMOVE MESSAGE FROM Q          
+         LR    VTMR,R2                                                          
+         SPACE                                                                  
+         STFAIL  (VTMID,NE,=C'VTM'),'STARTRP2 - VTMID INVALID'                  
+         LTH   VTUR,VTMU#                                                       
+         IF    (Z),STARTRP3        BR BAD USER #                                
+         IF    (VTUR,GT,=A(&USERS)),STARTRP3                                    
+         DECR  VTUR                                                             
+         MH    VTUR,=Y(L'VTU)                                                   
+         LA    VTUR,USERLIST(VTUR)                                              
+         WITH  VTU                                                              
+         IF    (VTUFFREE+VTUFATTN),BEGIN     IF FREE                            
+STARTRP3 FREEMSG                                                                
+         B     STARTRP2                                                         
+         END    ,                             END FREE                          
+         SPACE                                                                  
+         CLEAR VTUFSND                                                          
+         LH    R2,VTMCNT                                                        
+         LA    R2,@R2+L'VTMIHDR                                                 
+         SPACE                                                                  
+         L     RPLR,=A(SRPL)                                                    
+         WITH  RPL                                                              
+         SENDCMD RPL=(RPLR),AREA=VTMVMSG,RECLEN=(R2)                            
+         LR    R1,R0                                                            
+         LC    R2,RPLFDB2                                                       
+         IF    (R15,ZERO),'SET VTCFACTV'                                        
+         ELSE  BEGIN                         IF BAD                             
+         STFAIL  (R1,EQ,=H'24'),'STARTRPL2 - INVALID RPL'                       
+         CLEAR RPLAREA                                                          
+         IF    (R1,NE,=H'8'),BEGIN                                              
+         B     SERROR                                                           
+         END                                                                    
+         SPACE                                                                  
+         SET   VTUFSND                       RETRY                              
+         LOOP  BEGIN                         REPLACE MESSAGE ON Q               
+         CLEAR VTMNEXT                                                          
+         LM    R2,R3,VTCOUTH                                                    
+         LR    R15,VTMR                                                         
+         LTR   R14,R2                                                           
+         IF    (Z),'LR R14,VTMR'                                                
+         ELSE  BEGIN                                                            
+         WITH  (VTM,R3),'ST VTMR,VTMNEXT'                                       
+         END                                                                    
+         CDS   R2,R14,VTCOUTH                                                   
+         IF    (EQ),EXIT                                                        
+         END   ,                             END REPLACE MESSAGE ON Q           
+         SPACE                                                                  
+         END   ,                             END BAD                            
+         END   ,                             END SEND ^ ACTIVE                  
+         END   ,                             END START RPLS                     
+         SPACE                                                                  
+         B     WAIT                       ---END OF WAIT LOOP---                
+         SPACE 2                                                                
+         LTORG                                                                  
+         VLTORG                                                                 
+         DROP                                                                   
+         TITLE 'SUB-TASK -- TPEND EXIT ROUTINE'                                 
+TEEXIT   LABEL                     TELEPROCESSING END EXIT                      
+         LR    BR,R15                                                           
+         USING TEEXIT,BR                                                        
+         LR    R8,R14              R8 := SAVE RETURN ADDRESS                    
+         LM    R2,R3,0(R1)                                                      
+         USING ACB,R2                                                           
+         L     VTCR,=A(VTC)                                                     
+         USING (VTC)                                                            
+         SET   VTCFVCLS            SET CLOSE ACB FOR VTAM                       
+         POST  VTCSWORK                                                         
+         LR    R14,R8                                                           
+         BR    R14                 RETURN                                       
+         SPACE                                                                  
+         LTORG                                                                  
+         DROP                                                                   
+         END   .                                                                

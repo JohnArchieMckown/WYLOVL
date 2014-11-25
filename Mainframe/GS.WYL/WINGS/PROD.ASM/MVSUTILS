@@ -1,0 +1,2508 @@
+MVSUTILS TITLE 'Wings MVS/ESA Utility Interface Routines'
+*********************************************************************
+*** %%Module: wings asm mvsutils;                                   *
+*********************************************************************
+***                                                                 *
+***                                                                 *
+***  WINGS -- FILE SERVER MVS/ESA Utility Interface Routines        *
+***                                                                 *
+***    This module is a collection of MVS/ESA system interface      *
+***    routines.                                                    *
+***                                                                 *
+***    Created, 5/2/91, Parker Gillespie                            *
+***                                                                 *
+***                                                                 *
+***  Modifications:                                                 *
+***  1999/12/15  mcl  CNTRACKS handle null extent count             *
+***  1998/05/08  mcl  3590 (Magstar) support in UCBLOOK             *
+***  1998/04/20  mcl  LOC=ANY on UCBLOOK to find UCB over 16M line, *
+***                   use UCBLOOK to find extension                 *
+***  1997/09/30  mcl  correct READ check for file-verify            *
+***  1997/09/22  mcl  pass jobname, lineno, username to RACF        *
+***  1997/08/13  mcl  eliminate FAIL on bad ACEE/WACEE ptrs         *
+***                   Combine CHKREAD/CHKWRITE into CHKRACFA        *
+***  1997/01/09  mcl  clear R15 in CHKREAD; CHKOURS replace dup.    *
+***                   code in CHKREAD, CHKWRITE                     *
+***  1996/10/16  mcl  UCBEXTP (24-bit address) not UCBEXTPT!        *
+***  1996/10/07  mcl  don't log DSNVERIFY write/read checks         *
+***  1996/09/30  mcl  minor msg editing                             *
+***  1996/07/25  mcl  transparent tweaks to RACF err msgs setup     *
+***  1996/06/07  mcl  retry with wait on enqueued dataset           *
+***  1996/05/13  mcl  DYNINIT check for leftover msgs, IEFDB476 clr *
+***  1996/05/06  mcl  FMTUCB for UNITINFO                           *
+***  1996/04/23  MCL  FINDUCB by unitname                           *
+***  1996/02/29  mcl  DSNENQ procedure                              *
+***  1996/02/22  mcl  replace OSFWK1 work areas                     *
+***  1996/02/15  mcl  update LOGTIME to match OSFILE                *
+***  1996/02/08  mcl  add extension block for SVC99 msgs            *
+***  1995/10/30  mcl  make sure R15 cleared on RACF=NO              *
+***  1995/09/15  mcl  make sure R15 cleared on "same acct"          *
+***  1995/06/07  MCL  Pass FILPB to CHKWRITE, CHKREAD, RCHECK       *
+***  1995/02/15  mcl  fix VERBTRAN for codes w/hi bit on            *
+***  1995/02/13  mcl  check for specific RACF profile when deleting *
+***  1995/02/01  mcl  minor tweaks                                  *
+***  1995/01/19  mcl  UCBLOOK fail if volser blank/zero             *
+***  1994/12/08  mcl  new, improve, PC version UCBLOOK (thanks LDW) *
+***  1994/11/28  mcl  various fixes to RACF code                    *
+***  1994/11/23  mcl  move RACF code here from OSFILE               *
+***  1994/07/07  mcl  only suppress msgs if not debug               *
+***  1994/06/10  mcl  PRTDYN (display SVC99 info) moved here        *
+***  1994/05/16  mcl  suppress messages (S99MSGL0)                  *
+***  1991/05/02  pjg  Initial version.                              *
+***                                                                 *
+*********************************************************************
+         SPACE 2
+MVSUTILS HIBAL ASSOC=YES
+         REGS  FSR,,,,,,,,WAR,,BR,TVTR,(GVTR,LSR),SPR,RAR
+MVSUTILS CSECT ,                   Declare control section name
+MVSUTILS AMODE 31                  Routines operate in 31-bit mode
+MVSUTILS RMODE ANY                 Any residency allowed
+*
+         GBLC  &ZONE,&ALTZONE
+         SYSDEFN
+*
+SEGCB    RECORD 'SEGCB'
+*
+         PUSH  DSECTS              Common DSECTS
+         CVT   DSECT=YES
+         IEFUCBOB ,                Unit control block
+         IEFZB4D0 ,                Dynamic allocation
+         IEFZB4D2 ,                Dynamic allocation
+         IEFZB476 EMDSEC1=YES,EMDSEC2=YES  dynalloc error msg areas
+         IHAASCB ,                 Address Space Control Block
+         IHAASXB ,                 Address Space Control Block Ext
+         IHAACEE ,                 RACF access control env element
+         IHADVCT ,                 Device characteristics table
+         IHAEVNT ,                 Map EVENTS table format
+         IKJTCB DSECT=YES          Task control block
+         IECDDCE ,                 Device characteristics table
+
+*  EQUs for UCBTYPE info
+
+DEVIFLGC EQU   UCBTBYT1            IOS FLAGS/MODEL CODE
+*  VALUES:
+DEVIF16  EQU   X'04'               1600 BPI MODE
+DEVIF62  EQU   X'02'               6250 BPI MODE
+
+DEVOPTFT EQU   UCBTBYT2            OPTIONAL FEATURES
+*  VALUES:
+DEVOPCTC EQU   X'04'               CHANNEL-TO-CHANNEL ADAPTER
+DEVOP7TR EQU   X'80'               7-TRACK (TAPE)
+DEVOP816 EQU   X'20'               800/1600 BPI DUAL DENSITY (TAPE)
+DEVOP166 EQU   X'10'               1600/6250 BPI
+DEVOPSHR EQU   X'20'               SHARED DISK
+DEVOPOFL EQU   X'40'               TRACK OVERFLOW
+
+*UCBDVCLS  is UCBTBYT3, DEVICE CLASS
+*  VALUES:
+DEVCLUR  EQU   X'08'               UNIT-RECORD
+DEVCLGR  EQU   X'10'               GRAPHICS
+DEVCLCM  EQU   X'40'               COMMUNICATION
+DEVCLTA  EQU   X'80'               TAPE
+DEVCLDA  EQU   X'20'               DIRECT ACCESS
+DEVCLCTC EQU   X'41'               CTC adapter
+
+* UCBUNTYP  is UCBTBYT4, UNIT TYPE
+DEVUN348 EQU   X'80'               (when TA class:  3480 tape)
+DEVUN349 EQU   X'81'                ...             3490E tape
+DEVUN359 EQU   X'83'               3590 (magstar)          ml980507
+DVTAREA  RECORD 'DVTAREA'
+TIOTDSCT DSECT ,
+         IEFTIOT1 ,
+*
+         DCBD  DEVD=DA,DSORG=PS
+DCB      EQU   IHADCB,,C'X'
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         COPY  TVTOSFIL
+         END
+
+*  File parameter area
+*
+FILPB    RECORD 'FILPB'            File parameter block
+*
+         COPY  TRCENTRY            Trace entry format
+*
+         COPY  WTOCB               WTO information block
+         POP   DSECTS
+*
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+         COPY  DYNTABLE
+         SPACE 3
+         COPY  WINGACEE
+         SPACE 2
+         COPY  RACFEQU             COPY RACF ACCESS EQUATES
+         SPACE 3
+         COPY  UPATH
+         SPACE 3
+         QLTORG
+         TITLE 'Wings: CNTRACKS - Count tracks in data set'
+*BOX
+*
+*  CNTRACKS - Total tracks in an extent sequence
+*
+*  On entry:   R0  - Number of extents in the portion
+*              R1  - Address of first extent (ten bytes)
+*              R15 - Tracks/cylinder constant for this device
+*
+*  On exit:    R1  - Number of tracks allocated for this portion
+*
+         SPACE ,
+MVSUTILS CSECT ,                   Continue control section
+CNTRACKS XPROC ,
+         LR    R4,R0               Save total number of extents
+         LR    R5,R1               Save address of first extent
+         CLEAR R1                  Clear track tally register
+         IF    (R4,NP),CNTDONE     if no extents! ml 1999/12/15
+         LOOP  BEGIN
+         L2    R3,@R5+6            Load high cylinder extent
+         MR    R2,R15                compute track number
+         L2    R6,@R5+8                load track number
+         ALR   R6,R3                     compute starting location
+         SPACE ,
+         L2    R3,@R5+2            Load low cylinder extent
+         MR    R2,R15                compute track number
+         L2    R2,@R5+4                load track number
+         ALR   R3,R2                     compute low track location
+         SPACE ,
+         SR    R6,R3               Compute total tracks
+         LA    R6,@R6+1            Adjust total tracks
+         AR    R1,R6               Add to tally register
+         LA    R5,@R5+10           Bump to next extent
+         UNTIL (BCT,R4),END        Count all extents
+CNTDONE  PRETURN (R1)              Return tallied tracks
+         PEND  ,
+         TITLE 'Wings: FINDUCB - Locate unit control block address'
+*box
+*
+*  FINDUCB - Locate unit control block address
+*
+*  On entry:   R1  Contains the address of the volume to be found,
+*                  one of:
+*              6-character volume serial
+*              2 bytes of blanks, four-hex-digit unit address
+*              3 bytes of blanks, three-hex-digit unit address
+*
+*  On exit:    R1  Contains the address of the located unit control
+*                  block.
+*              R0  Contains the address of the UCB common extension
+*                  ml 1998/04/20
+*              R15=NZ The unit control block could not be located.
+*              R15=100 The volser was blank or zero
+*              0<R15<100 return code from UCBLOOK
+*
+*  rev. mcl 1996/04/24  lookup unit address
+*
+         SPACE ,
+UPL      RECORD BEGIN              UCB-scan parameter list
+UPLWKAD  DC    A(UPLWRK)           UCB ptr to work area
+UPLCLSAD DC    A(UPLCLASS)         ptr to device class
+UPLUCBAD DC    A(X'80000000'+UPLUCB)   ptr to UCB
+UPLWRK   DC    CL100' '            work area for UCB scan routine
+UPLSAVE  DC    18F'0'              save area for UCB search
+UPLCLASS DC    X'20'               device class
+         UCBLOOK  MF=(L,UPLMFL)    UCBLOOK parmlist
+UPLUCB   DC    A(0)                UCB receive address
+UPLUCBX  DC    A(0)                UCB extension addr      ml980420
+         END   ,
+         SPACE ,
+FINDUCB  XPROC UPL                 Enter and reserve stack space
+         LR    R2,R1               Save pointer to volume serial
+         CLI   @R2,C' '            check volser
+         IF    H,BEGIN             got a volser
+         CLEAR UPL                 Clear control area
+** LDW's new code                  ml 1994/12/08
+         MODESET  MODE=SUP         grumble
+         SPACE 2
+** 1998/04/20 MCL:  LOC=ANY, UCBCXPTR
+         UCBLOOK  VOLSER=(R2),UCBPTR=UPLUCB,NOPIN,DEVCLASS=DASD,       *
+               LOC=ANY,DYNAMIC=YES,RANGE=ALL,UCBCXPTR=UPLUCBX,         *
+               MF=(E,UPLMFL,COMPLETE)
+         SPACE 2
+         LR    R3,R15              preserve return code
+         SPACE 2
+         MODESET  MODE=PROB        be normal again
+         END   ,                     (got volser)
+         ELSE  BEGIN               Not a volser
+         CLI   @R2+3,C'A'          unit-addr will have hex digit here
+         IF    NL,BEGIN            Got a unit "address"
+         LA    R2,@R2+2            ->unit "address" 4 hex digits
+         MODESET  MODE=SUP         grumble
+         SPACE 2
+** 1998/04/20 MCL:  LOC=ANY, UCBCXPTR
+         UCBLOOK  DEVNCHAR=(R2),UCBPTR=UPLUCB,NOPIN,LOC=ANY,           *
+               DYNAMIC=YES,RANGE=ALL,UCBCXPTR=UPLUCBX,                 *
+               MF=(E,UPLMFL,COMPLETE)
+         SPACE 2
+         LR    R3,R15              preserve return code
+         SPACE 2
+         MODESET  MODE=PROB        be normal again
+         END   ,                      (Got unit address)
+
+         ELSE  BEGIN               no volser or unit
+         SR    R1,R1               no ucb address
+         SR    R0,R0                 no extension either   ml980420
+         LA    R3,100              Bad RC
+         END   ,                     (no volser or unit)
+         END   ,                     (Not volser
+         SPACE 2
+         L     R1,UPLUCB           Set ucb address
+         L     R0,UPLUCBX          ...and extension        ml980420
+         LR    R15,R3              Move return code
+         PRETURN (R0,R1)           Return ucb addresses
+         PTRACE FINDUCBR
+         PEND  ,
+         TITLE 'Format UCB Information'
+*  On input:
+*  R1 -> UCB                                    ml19980420
+*  R0 -> UCB common extension                   ml19980420
+*  R15 -> UIFWORK workarea below                ml19980420
+*  TVTUIFL flags set
+*  On exit:  work area filled in
+*
+*  1998/04/20  mcl  get ucbx from caller for >16m ucbs
+*  1996/05/01  mcl  initial implementation
+*
+UIFWORK  RECORD BEGIN
+         SPACE
+UIFLENG  DC    F'0'                Length of folowing data
+UIBUF    DC   0X'0'                To return raw UCB:
+UIUPTR   DC    A(0)                ->UCB
+UIBASE   DC    XL48'00'            base segment
+UICOMX   DC    XL32'00'            Common extension
+UIDCE    DC    XL48'00'            DASD class extension
+UIUCSE   EQU   UIDCE,40            UCS extension
+UI#BUF   EQU   *-UIBASE            Length
+         ORG   UIBUF
+
+UIHEXB   DC    13CL9'xxxxxxxx '    hexdump base UCB addr, 12 words
+UI#HEX   EQU   *-UIHEXB            length
+         ORG   UIBUF
+
+UIMSG    DC    0CL80' '            For formatted UCB dump
+UIMUNIT  DC    CL4'0000'           Unit address hex digits
+         DC    C' '
+UIMSTAT  DC    C'O',C' '           Status on/offline
+UIMSTA2  DC    C'NRD'              status
+         DC    C' '
+UIMDEVCL DC    C'DISK'             Device class
+         DC    C' '
+UIMVOL   DC    CL6'VVVVVV'         Volume serial (disk/tape)
+         DC    C' '
+UIMDESCR DC    CL20'device description'
+MSGCYLS  EQU   UIMDESCR+9,6
+         DC    C' '
+UIMUSE   DC    CL3'SMS'            per/pri/pub/sms
+         DC    C' '
+UIMNOTE  DC    CL8' '              misc.
+         ORG   UIMUSE
+UIMUCS   DC    CL4'TN10'           UCS value
+         DC    C' '
+UIMFCB   DC    C'L106'             FCB value
+         ORG   ,
+UI#MSG   EQU   *-UIMSG             length
+         SPACE 2
+         END   UIFWORK
+
+UCBFMT   XPROC ,
+
+** ml 1998/04/20: these changed (added ext, changed regs)
+
+         LR    R9,R15              ->AREA
+         WITH  (UIFWORK,R9)
+         LR    R7,R1               ->UCB
+         WITH  (UCBOB,R7)
+         LR    R4,R0               ->common extension
+         WITH  (UCBCMEXT,R4)          address comm ext
+
+*  Formatted dump of UCB
+
+         IF    TVTUIFMT,BEGIN      FORMATTED UCB info
+         MVC   UIMSG(UI#MSG),GVTBLANK   clear buffer
+         BTX   UIMUNIT,4,L2:UCBCHAN  Unit address
+         MVC   UIMDEVCL,=C'????'   device not known yet
+         MVI   UIMSTAT,C'F'        oFfline
+         IF    UCBSTAT.UCBONLI,BEGIN    ONLINE
+         MVI   UIMSTAT,C'O'        show Online
+         IF    UCBSTAT.UCBCHGS,BEGIN  TO BE VARIED OFFLINE
+         MVC   UIMSTA2,=C'PND'     YES
+         END   ,                      (to be varied on)
+         END   ,                      (online)
+         TM    UCBSFLS,UCBNRY      not-ready?    ml19980420
+         IF    O,BEGIN             not.                   .
+         MVC   UIMSTA2,=C'NRD'     show not ready         .
+         END   ,                      (not.)              .
+
+         IF    UCBDVCLS.DEVCLDA,BEGIN   DISK
+*  DISK  device class
+         MVC   UIMVOL,UCBVOLI      volser
+         MVC   UIMDEVCL,=C'DISK'   IF DISK
+         SR    R1,R1
+         IC    R1,UCBUNTYP         UNIT TYPE CODE
+         MH    R1,=H'20'           *20 FOR TABLE OFFSET
+         LA    R1,DISKTBLE(R1)     GET ENTRY
+         MVC   UIMDESCR,0(R1)      INTO MSG.
+         SPACE
+*  Following borrowed from LDW's DUCB pgm
+         SPACE
+         CLC   =C'3380',UIMDESCR        IS IT SOMETHING STUPID?
+         BE    DA12                     yes
+         CLC   =C'3390',UIMDESCR        IS IT SOMETHING STUPID?
+         BNE   DA11                     NO - NORMAL DEVICE
+DA12     EQU   *                   3380 or 3390
+*-no     L     R4,UCBEXTPT             -> COMMON EXTENSION
+*-see above L3  R4,UCBEXTP              -> common ext. (watch hi byte)
+         L     R3,DCEUCBEX(R4)          ->DCE
+         LTR   R3,R3                    check pointer
+         BZ    DA11                     NONE - CAN'T BE 3380E
+         WITH  (DCE,R3)                 address DCE
+         TM    DCEFLAG1,DCEVALFS        DEVICE FIELDS VALID?
+         BZ    DA11                     NO - CAN'T BE 3380E/K
+         LH    R0,DCEUDCYL              get number of cylinders
+         EDIT  MSGCYLS,(R0),OSFMISCD
+         CLC   =C'3390',UIMDESCR        newer stupid device?
+         BE    DA13                     yes - check its models
+         MVI   UIMDESCR+4,C'K'          assume 3380K
+         CLC   =H'2656',DCEUDCYL        # OF DATA+ALT CYL ==> "K"
+         BE    DA11                     yes - continue
+         MVI   UIMDESCR+4,C'E'          assume 3380E
+*)       CLC   =H'1771',DCEUDCYL        # OF DATA+ALT CYL ==> "E"
+*)       BE    DA11                     yes - continue
+*)       MVI   UIMDESCR+4,C')'          assume standard 3380
+         B     DA11                     continue
+DA13     EQU   *
+         MVC   UIMDESCR+4(2),=C'-2'     assume 3390-2
+         CLC   =H'2227',DCEUDCYL        # OF DATA+ALT CYL ==> "-2"
+         BE    DA11                     yes - continue
+         MVC   UIMDESCR+4(2),=C'-3'     assume 3390-2
+         CLC   =H'3340',DCEUDCYL        # OF DATA+ALT CYL ==> "-3"
+         BE    DA11                     yes - continue
+         CLC   =H'3339',DCEUDCYL        # OF DATA (RAMAC) ==> "-3"
+         MVC   UIMDESCR+4(2),=C'-3'     assume standard 3390
+DA11     EQU   *
+
+         IF    UCBSTAT.UCBSYSR,BEGIN  SYSRES
+         MVI   UIMSTAT,C'S'             INDICATE SO
+         END   ,                      (SYSRES)
+         ELSE  BEGIN               Not SYSRES
+         IF    UCBSTAT.UCBCHGS,BEGIN  to be varied off
+         MVC   UIMSTA2,=C'PND'
+         END   ,                      (to be off)
+         IF    UCBSTAT.UCBRESV,BEGIN
+         MVI   UIMSTAT,C'R'
+         END   ,
+         IF    UCBSTAT.UCBUNLD,BEGIN  unload pending
+         MVC   UIMSTA2,=C'PUL'
+         END   ,
+         IF    UCBSTAT.UCBALOC,BEGIN  allocated
+         MVI   UIMSTAT,C'A'
+         END   ,
+         END   ,                      (not SYSRES)
+         SPACE
+*  Report use attributes of disk device.
+         SPACE
+         IF    UCBFL5.UCBSMS,BEGIN SMS vol
+         MVC   UIMUSE,=C'SMS'
+         END   ,                      (SMS vol)
+         ELSE  BEGIN               Non-SMS
+         IF    UCBSTAB.UCBBPRV,BEGIN   Private
+         MVC   UIMUSE,=C'PRI'
+         END   ,                       (private)
+         ELSEIF UCBSTAB.UCBBPUB,BEGIN  public
+         MVC   UIMUSE,=C'PUB'
+         END   ,                       (public)
+         ELSEIF UCBSTAB.UCBBSTR,BEGIN  storage
+         MVC   UIMUSE,=C'STO'
+         END   ,                       (storage)
+         ELSE  BEGIN               none of the above???
+         MVC   UIMUSE,=C'???'
+         END   ,                      (???)
+         END   ,                      (non-SMS)
+
+         IF    DEVOPTFT.DEVOPSHR,BEGIN  SHARED
+         MVC   UIMNOTE,=C'Shared  '
+         END   ,                        (SHARED)
+         OC    UIMVOL,GVTBLANK     make vol. printable
+         END   ,                      (DISK)
+
+         IF    UCBDVCLS.DEVCLTA,BEGIN            TAPE
+*  TAPE device class
+TEQT     MVC   UIMDEVCL,=C'TAPE'
+         MVC   UIMVOL,UCBVOLI      volser
+         OC    UIMVOL,GVTBLANK     make printable
+         MVC   UIMDESCR,=CL20'3480' )
+         CLI   UCBUNTYP,DEVUN348   3480?
+         BE    TPD
+         MVC   UIMDESCR,=CL20'3490E'
+         CLI   UCBUNTYP,DEVUN349   3490?
+         BE    TPD
+         MVC   UIMDESCR,=CL20'3590'              ml980507
+         CLI   UCBUNTYP,DEVUN359   3590?
+         BE    TPD
+         MVC   UIMDESCR,=CL20'1600/6250'
+         TM    DEVOPTFT,DEVOP166   1600/6250?
+         BO    TPD
+         MVC   UIMDESCR,=CL20'800/1600'
+         TM    DEVOPTFT,DEVOP816
+         BO    TPD
+         MVC   UIMDESCR,=CL20' 7 TRACK'
+         TM    DEVOPTFT,DEVOP7TR
+         BO    TPD
+         MVC   UIMDESCR,=CL20' 9 TRACK'
+TPD      EQU   *
+         END   ,                                 (TAPE)
+
+         IF    UCBDVCLS.DEVCLUR,BEGIN            Unit Record
+*  Unit Record Device
+         MVC   UIMDEVCL,=C'U.R.'
+         CLI   UCBUNTYP,X'0F'      device within known range
+         IF    NH,BEGIN            If in table
+         SR    R1,R1
+         IC    R1,UCBUNTYP
+         MH    R1,=H'20'           * table entry length
+         LA    R1,URTABLE(R1)      -->this one
+         MVC   UIMDESCR,0(R1)
+         END   ,                     (in table)
+         L     R3,UCBXTADR         ->UCS/3800 ext.
+         WITH  (UCBUCS,R3),BEGIN   Address extension
+         MVC   UIMUCS,UCBUCSID     UCS/CHARS
+         MVC   UIMFCB,UCBFCBID     FCB
+         OC    UIMUCS,GVTBLANK     make printable
+         OC    UIMFCB,GVTBLANK      ...
+         END   ,                      (with R3)
+         END   ,                                 (unit record)
+
+         IF    UCBDVCLS.DEVCLCM,BEGIN            COMM
+         MVC   UIMDEVCL,=C'COMM'
+         END   ,                                 (COMM)
+
+         IF    UCBDVCLS.DEVCLCTC,BEGIN           CTC
+         MVC   UIMDEVCL,=C'CTC '
+         END   ,                                 (CTC )
+
+         IF    UCBDVCLS.DEVCLGR,BEGIN            Graphics
+         MVC   UIMDEVCL,=C'GRAF'
+         END   ,                                 (graphics)
+
+UIFOUT   EQU   *
+         LA    R0,UI#MSG           area length
+         ST    R0,UIFLENG
+         END   ,                      (Formatted UCB dump)
+
+*  Hexdump of UCB
+
+         ELSEIF TVTUIHEX,BEGIN     HEX dump of UCB
+         MVC   UIHEXB(UI#HEX),GVTBLANK   clear
+         BTX   UIHEXB,8,(R7)       UCB address or 0 if not found
+         LA    R4,8                L'result if no UCB
+         IF    (R7,NZ),BEGIN       if found
+         LA    R4,UI#HEX           result length
+         LA    R3,12               Do 12 words
+         LA    R2,UIHEXB+9         ->result area
+UILOOP   BTX   @R2,8,0(R7)         dump a word of the UCB
+         LA    R2,9(R2)            ->next word out
+         LA    R7,4(R7)            ->next word in
+         BCT   R3,UILOOP           do another
+         END   ,                     (was found)
+         ST    R4,UIFLENG          result
+         END   ,                     (hexdump)
+         ELSEIF TVTUIRAW,BEGIN     Raw UCB
+         ST    R7,UIUPTR           UCB address
+         MVC   UIBASE,0(R7)        UCB base segment
+         MVC   UICOMX,UCBCMEXT     UCB common extension
+         CLEAR UIDCE
+         IF    UCBDVCLS.DEVCLDA,BEGIN   DISK
+         WITH  (UCBCMEXT,R4),BEGIN    address comm ext
+         L     R3,DCEUCBEX(R4)          ->DCE
+         IF    (R3,NZ),BEGIN       Got DCE
+         MVC   UIDCE,@R3           copy it
+         END   ,                      (got DCE)
+         END   ,                      (with UCBCMEXT)
+         END   ,                      (DA)
+         IF    UCBDVCLS.DEVCLUR,BEGIN   Unit Record
+         L     R3,UCBXTADR         ->UCS/3800 ext.
+         MVC   UIUCSE,0(R3)        Copy UCS/3800 EXT
+         END   ,                      (U.R.)
+         LA    R0,UI#BUF           Length of result
+         ST    R0,UIFLENG
+         END   ,                      (RAW)
+         PEND  ,
+*            Direct-Access Device Table
+DISKTBLE DC    CL20' '              ZEROTH ENTRY
+         DC    CL20'2311'
+         DC    CL20'2301'
+         DC    CL20'2303'
+         DC    CL20'2302'
+         DC    CL20'2321'
+         DC    CL20'2305-1'
+         DC    CL20'2305-2'
+         DC    CL20'2314'
+         DC    CL20'3330'
+         DC    CL20'3340'
+         DC    CL20'3350'
+         DC    CL20'??'
+         DC    CL20'3330-1'
+         DC    CL20'3380'
+         DC    CL20'3390'
+*  END OF TABLE
+#DISKTBL DC    A((*-DISKTBLE)/20-1)   LAST ENTRY NUMBER
+         SPACE
+URTABLE  DC    CL20' '             UNIT-RECORD TABLE
+         DC    CL20'2540 Card Reader'            01
+         DC    CL20'2540 Card Punch'             02
+         DC    CL20'1442 Card Read Punch'        03
+         DC    CL20'2501 Card Reader'            04
+         DC    CL20'2520 Card Reader'            05
+         DC    CL20'3505 Card Reader'            06
+         DC    CL20' '                           07
+         DC    CL20'1403 Printer'                08
+         DC    CL20'3211 Printer'                09
+         DC    CL20'1443 Printer'                0A
+         DC    CL20'3203 Printer'          ???   0B
+         DC    CL20'3525 Card Punch'             0C
+         DC    CL20'?'                           0D
+         DC    CL20'3800 Printer'                0E
+         DC    CL20'?'                           0F
+         SPACE
+#URTABL  DC    A((*-URTABLE)/20-1) LAST ENTRY NO.
+
+         TITLE 'Internal Dataset Enqueue'
+*
+*  ENQ (within this WINGS job) on a dataset
+*
+*  On entry:   TVTPBDSNAME = dataset name
+*              R0, low byte:  bit TDNQSHR or TDNQEXC indicates type
+*              of enqueue desired.
+*
+*  mcl  1996/02/29
+*  On return:  If successful, RC=0 set, TVTNQDSN set to dataset name.
+*                             TVTNQFLG set with flag bit for exc/shr
+*              If unsuccessful, RC=8 set, error message seg'd ERRSCB
+*
+
+DSNQWK   RECORD BEGIN
+QTIMERL  STIMERM SET,MF=L
+#QTIMERL EQU   *-QTIMERL           L'list
+DSNQWTID DS    F                   ID from STIMERM
+DSNQWKNT DS    F                   wait loop count
+DSNQOLNB DS    H                   line-number of queue holder
+DSNQFLG0 DS    X                   enqueue type flags
+DSNQOWNR DC    C'GG.UUU (nnnn)'    for inuse msg
+DSNQOGRP EQU   DSNQOWNR,2          GG
+DSNQOUSR EQU   DSNQOWNR+3,3        UUU
+DSNQOLIN EQU   DSNQOWNR+8,4        nnnn  (line number)
+         END   ,                      (DSNQWK)
+
+DSNENQ   XPROC DSNQWK
+
+DSNQSTART LABEL ,
+         CLEAR R5                  loop counter
+         STC   R0,DSNQFLG0         save type flags
+         CLEAR DSNQWKNT
+         MVC   DSNQOWNR,=C'gg.uuu (nnnn)'  for inuse msg
+
+*  Lock the dataset queue
+
+DSNQL    SR    R3,R3
+         LA    R5,1(,R5)           count this pass
+         C     R5,NQLLIM           getting out of hand?
+         BH    NQLFAIL             don't spin forever
+
+         CS    R3,TVTR,GVTQLOCK    queue lock word: 0 if available,
+*                                  ->owner's TVT if not
+
+         BNE   DSNQL               Loop till we get it
+
+* !!! don't get hung here, other servers will loop!!!
+
+*  scan the TVT chain to look for conflicts
+
+         L     R4,GVTTVTQH         ->first TVT
+XTVT     USING TVT,R4              addressability for "other" TVT
+
+DSTVL    CR    R4,TVTR             is this *our own* TVT?
+         IF    EQ,XITVT            so skip it
+         CLI   XTVT.TVTNQDSN,C' '  any name there?
+         BNH   XITVT               nope, don't bother
+         CLC   TVTPBDSNAME,XTVT.TVTNQDSN   yes, is it the one we want
+         BNE   XITVT               no, keep looking
+*  someone has it
+         TM    DSNQFLG0,TDNQEXC   we want exclusive?
+         BO    DSNQF               yes, give up
+         TM    XTVT.TVTNQFLG,TDNQEXC   do they have exclusive?
+         BO    DSNQF                   give up if so
+XITVT    L     R4,XTVT.TVTLINK     ->next TVT
+         IF    (R4,NZ),DSTVL       loop thru if not end of chain
+
+*  fell, thru, is good, we can get it
+
+         MVC   TVTNQDSN,TVTPBDSNAME  Copy our dsname to our q entry
+         STC   R0,TVTNQFLG           set our flags share/exclusive
+         CLEAR R15                 RC for success
+         CLEAR GVTQLOCK            release queue lock word
+         EXIT  DSNENQ              done
+
+*  failed.
+
+DSNQF    LABEL ,
+*  Copy holder info before we unlock queue
+         MVC   DSNQOGRP,XTVT.TVTGROUP       GG
+         MVC   DSNQOUSR,XTVT.TVTUSER        .UUU
+         MVC   DSNQOLNB,XTVT.TVTLINE     holder's line number
+         CLEAR GVTQLOCK            release queue lock
+
+*  See if we should try again.
+
+         IF    (DSNQWKNT,LE,3),BEGIN  wait up to 3 times
+         STIMERM SET,BINTVL=TVTQWTIM,WAIT=YES,                         X
+               ID=DSNQWTID,MF=(E,QTIMERL)
+         INCR  R0,DSNQWKNT         count this try
+         B     DSNQL               ok, look again.
+         END   ,                      (3 times)
+*  Here if 3 times unlucky.
+
+         SEGCLR ERRSCB
+         SEGB  'ERRID=INUSE'
+         SEGB  'ERRMSG=''Dataset '
+         LA    R15,ERRSCB
+         LA    R1,TVTFILPB         ->FILPB
+         ACALL FMTDSN
+         SEG   ' is in use by '
+         LH    R0,DSNQOLNB         line number (halfword)
+         BTD   DSNQOLIN,4,(R0)     make printable
+         SEG   DSNQOWNR            userid/line to msg
+         SEG   ''''                closing quote
+         SET   TPATERR+TERRMSG
+         LA    R15,8               RC for fail
+         EXIT  DSNENQ              out
+
+*  failed to obtain lock after "N" passes
+
+NQLFAIL  QSNAP 'DSNENQ lock failed, offending TVT is '
+         QSNAP GVTQLOCK            ->holding TVT
+
+*  OK, if he won't share, we gotta call Mommy
+
+*                                  GET BUFFER FOR CMD/RESPONSE
+         IF    (TVTRSPLN,NZ),BEGIN
+         L     R1,TVTRSPBF
+         VCALL FREECORE
+         CLEAR TVTRSPLN
+         END
+         L     R0,=A(4096)
+         VCALL GETCORE
+         ST    R1,TVTRSPBF
+         ST    R0,TVTRSPLN
+
+         CLEAR TVTMONCM            CLEAR COMPLETION ECB
+         SET   TVTFPOST            subtask post monitor
+         SET   TVTFQLFAIL          Show queue lock failure
+         L     R1,GVTECBPT
+         POST  (R1),0              POST MONITOR
+         LA    R1,TVTMONCM
+         WAIT  ECB=(R1)            WAIT FOR RESPONSE
+
+*  maybe check a return code here?
+
+         B     *+12                **debug** skip these---
+         MVI   XTVT.TVTNQDSN,0     clear queued dsname
+         MVI   XTVT.TVTNQFLG,0     and flags (offendor's TVT)
+
+*                                  FREE BUFFER
+         IF    (TVTRSPLN,NZ),BEGIN
+         L     R1,TVTRSPBF
+         QSNAP @R1,256
+         VCALL FREECORE
+         CLEAR TVTRSPLN
+         END
+         B     DSNQSTART           start over...
+
+         PEND
+         DROP  XTVT
+NQLLIM   DC    F'100000'           absurd number of spins thru loop
+         LTORG ,
+         TITLE 'Wings: Dynamic allocation routines'
+*box
+*
+*  DYNINIT - Dynamic allocation initialization routine
+*
+*        Allocate a dynamic allocation control buffer used
+*        for pooling dynamic text units and pointers.
+*
+*        Error if a buffer previously exists.
+*
+*  On entry:   R0  Contains the required length of the table
+*              R1  Contains the address of a fullword to receive
+*                  the allocated table address.  The word should
+*                  contain zeros to indicate that no table currently
+*                  exits.
+*
+*  On exit:        The allocated and initialized dynamic allocation
+*                  table address is returned to the fullword
+*                  indicated by the R1 entry parameter.
+*
+         SPACE 2
+DYNINIT  XPROC ,
+         LR    R3,R0               Save required length of table
+         LR    R2,R1               Save address of table pointer
+         LT    R15,@R2             Retrieve any previous table addr
+         IF    NZ,'FAIL "Previous DYNINIT buffer address present"'
+         VCALL GETCORE             Allocate memory for buffer
+         LR    R4,R1               Save table address
+         LR    R0,R1               Move address of table for clear
+         LR    R1,R3                 Copy length for buffer clear
+         CLEAR R15                     Zero from length
+         MVCL  R0,R14                    Clear table to zeroes
+         ST    R4,@R2              Save table address for caller
+         SPACE ,
+         WITH  (DYNTABLE,R4),BEGIN Addressability to table
+         MVC   DYNTID,=CL4'DYNB'   Set eye-catcher in buffer
+         STH   R3,DYNTLEN          Save total buffer length
+         LA    R3,DYN99CB          Address of SVC99 parameter list
+         ST    R3,DYN99CBP         Save in parameter list
+         WITH  (S99RB,R3),BEGIN    address SVC99 RB
+         OI    DYN99CBP,X'80'      Mark as only one parameter
+         LA    R4,DYNRBX           ->RB extension
+         ST    R4,S99S99X          in RB
+         WITH  (S99RBX,R4),BEGIN   address extension
+         CLEAR (S99RBX,36)         clear the whole thing
+         MVC   S99EID,=C'S99RBX'   ID
+         MVI   S99EVER,S99RBXVR    version
+         OI    S99EOPTS,S99ERMSG
+         MVI   S99EMGSV,4          minimum error severity
+         END   ,                   (with extension)
+         END   ,                   (with SVC99 RB)
+         DYNCLEAR TABLE=(R2)       Clear table for use
+         END   ,
+         SPACE ,
+         CLEAR R15                 Clear return code
+         PEND  ,
+         EJECT ,
+*box
+*
+*  Dynamic allocation: Invoke SVC 99 processing with set
+*                      options in dynamic allocation buffer
+*
+*  On entry:   R15 contains the address of a fullword which
+*                  points to the DYNTABLE control block
+*  On exit:    R15 contains the dynamic allocation return
+*                  code.
+         SPACE 2
+DYNCALL  XPROC ,
+         L     R2,@R15             Load address of dynamic buffer
+         WITH  (DYNTABLE,R2)       Addressability to table
+         L     R1,DYNTUNIT         Next available text unit pointer
+         S     R1,=A(4)            Back off to previous entry
+         OI    @R1,X'80'           Mark as last pointer in list
+         LA    R1,DYN99CBP         Address of parameter block pointer
+         DYNALLOC ,                Request SVC 99 service
+         ST    R15,DYNTRETC        Save return code
+         PEND  ,
+         EJECT ,
+*box
+*
+*  Dynamic allocation:  Add text unit pointer and text unit to
+*                       dynamic allocation buffer
+*
+*                       On return R1 points to the added text
+*                       unit.  Purpose is to be able to retrieve
+*                       certain values which SVC99 places in the
+*                       text units.
+*
+         SPACE 2
+DYNADD   XPROC ,
+         L     R2,@R15             Load address of dynamic buffer
+         WITH  (DYNTABLE,R2),BEGIN
+         OC    @R1+2(2),@R1+2      Test for number of parameters
+         IF    Z,BEGIN             No parameter data
+         LA    R3,4                Set default length of four
+         END   ELSE,BEGIN
+         LH    R3,@R1+4            Load parameter data length
+         A     R3,=A(6)            Adjust for header data
+         END   ,
+         L     R4,DYNTTEXT         Load next available text address
+         SLR   R4,R3               Compute address for text unit
+         L     R7,DYNTUNIT         ->where pointer will go
+         LA    R7,4(R7)            ->next byte that will be free
+         CR    R7,R4               ...compare where text goes
+         IF    NL,BEGIN            out of room, text overlaps ptrs
+         BOMB  ,
+         END   ,                      (out of room)
+         DEX   R3,'MVC @R4(0),@R1' Move in completed text unit
+         L     R3,DYNTUNIT         Address of next avail tu pointer
+         ST    R4,@R3              Save in parameter list
+         ST    R4,DYNTTEXT         Save updated text unit pointer
+         LA    R3,@R3+4            Bump to next available pointer
+         ST    R3,DYNTUNIT         Save for next call
+         LR    R1,R4               Move address of current text unit
+         PRETURN (R1)              Return register 1 value
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+*  Dynamic allocation: Clear dynamic allocation buffer
+*
+*  On entry:   R1  Contains the address of a fullword which points
+*                  to the dynamic allocation buffer.
+*
+*  On exit:        The dynamic allocation buffer is re-initialized
+*                  and set for DSNAME allocation.
+*
+         DC    0F'0'
+DYNCLWK  RECORD BEGIN
+##EMLINK LINK  EP=IEFDB476,SF=L    area for link parm list
+#EMLINK  EQU   *-##EMLINK          length
+EMLINK   EQU   ##EMLINK,#EMLINK    define area
+EMLINK@  DC    A(0)                parmlist pointer
+         END   ,                   (DYNCLWK)
+         SPACE 2
+DYNCLEAR XPROC DYNCLWK
+         L     R2,@R1              Load address of dynamic buffer
+         WITH  (DYNTABLE,R2),BEGIN Addressability to dynamic buffer
+         IF    (DYNTID,NE,'DYNB'),'FAIL "Invalid DYNTABLE address"'
+         LA    R3,DYN99CB          Address of parameter list
+         WITH  (S99RB,R3),BEGIN    Addressability to SVC99 parameter
+         CLEAR (DYN99CB,12)        Clear control block to zeros
+         CLEAR S99FLAG2            flags area
+*  don't wipe out @RBX!
+         MVI   S99RBLN,20          Set length of control block
+         MVI   S99VERB,S99VRBAL    Set for allocation request
+         MVI   S99FLG11,S99NOMNT   Don't mount a volume
+         IF    ~TVTFDBUG,BEGIN     If not debugging, then
+         OI    S99FLG11,S99MSGL0   No %!@$** allocation messages
+         END   ,                      (not debug)
+         LA    R1,DYNTUST          Address of first unit pointer
+         ST    R1,S99TXTPP         Save address in list
+         LA    R1,DYNTUST          Set address of first unit
+         ST    R1,DYNTUNIT         Save address of first available
+         LR    R1,R2               Copy address of buffer start
+         AH    R1,DYNTLEN          Add total buffer length
+         ST    R1,DYNTTEXT         Save address of next avail text
+         LA    R4,DYNRBX           ->extension
+         WITH  (S99RBX,R4),BEGIN   mapping RBX
+         MVI   S99ERCO,0           error code
+         IF    (S99EMSGP,NZ),BEGIN Leftover messages?
+         QSNAP 'DYNCLEAR - PREVIOUS MESSAGE NOT CLEARED'
+         QSNAP S99EMSGP
+         CLEAR TVTEMBFA
+         LA    R5,TVTEMBFA         ->EMBUF area
+         WITH  (EMPARMS,R5),BEGIN  address it
+         MVI   EMFUNCT,0           just flush the messages
+         MVI   EMIDNUM,EMSVC99     we are caller with SVC99 err
+         MVC   EMNMSGBK,0          number of msgs
+         ST    R3,EMS99RBP         ->SVC99 RB
+         CLEAR EMBUFP              no message buffers
+         CLEAR EMRETCOD
+         MVC   EMLINK,EMLINK#      (pgm) parmlist for link
+         ST    R5,EMLINK@          (data) parmlist for link
+         PTRACE S99notCL
+         LINK  SF=(E,EMLINK),MF=(E,EMLINK@)   call IEFDB476
+         END   ,                   (with EMPARMS)
+         END   ,                   (leftover msgs)
+         END   ,                   (with RBX)
+         END   ,                   (with S99RB)
+         END   ,                   (with DYNTABLE)
+         CLEAR R15                 Zero return code
+         PEND  ,
+         SPACE 2
+EMLINK#  LINK  EP=IEFDB476,SF=L
+*box
+*
+*  Dynamic allocation: Set allocation verb for allocate/de-allocate
+*
+*  On entry:   R1  Contains the address of a fullword which points
+*                  to the dynamic allocation buffer.
+*
+*  On exit:        The dynamic allocation verb is set to the passed
+*                  value.
+*
+         SPACE ,
+DYNSET   XPROC ,
+         L     R2,@R1              Load address of dynamic buffer
+         WITH  (DYNTABLE,R2),BEGIN Addressability to dynamic buffer
+         IF    (DYNTID,NE,'DYNB'),'FAIL "Invalid DYNTABLE address"'
+         LA    R3,DYN99CB          Address of SVC99 request block
+         WITH  (S99RB,R3),BEGIN    Addressability to SVC99 RB
+         IF    ((R0,NE,S99VRBAL),AND,(R0,NE,S99VRBUN)),                x
+               'FAIL "Invalid verb passed"'
+         STC   R0,S99VERB          Reset SVC99 request verb
+         END   ,
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+*  Dynamic allocation: Release dynamic allocation buffer
+*
+*  On entry:   R15 Contains the address of a fullword which points
+*                  to the dynamic allocation buffer.
+*
+*  On exit:        The dynamic allocation table has been released
+*                  and the table pointer cleared to zero.
+*
+         SPACE 2
+DYNFREE  XPROC ,
+         L     R1,@R15             Load address of dynamic buffer
+         WITH  (DYNTABLE,R1),BEGIN Addressability to dynamic buffer
+         IF    (DYNTID,NE,'DYNB'),'FAIL "Invalid DYNTABLE address"'
+         XC    @R15(4),@R15        Clear pointer to buffer
+         VCALL FREECORE            Release dynamic buffer
+         END   ,
+         CLEAR R15                 Zero return code
+         PEND  ,
+         EJECT ,
+*box
+*
+*   Locate specified DDNAME in TIOT
+*        R1  ->  Eight character right padded DDNAME
+*        R1  ->  On return is address of TIOT entry if found
+*        R15 ->  On return 0, DDNAME found
+*                          4, DDNAME not found
+*
+*   Notes:     This routine should really enq on the SYSZTIOT
+*              resource.
+*
+         SPACE ,
+FINDDD   XPROC ,TRACE=NO           Enter and save calling registers
+         L     R2,CVTPTR           Address of CVT
+         L     R2,CVTTCBP-CVTMAP(,R2)  TCB DOUBLE WORDS
+         L     R2,@R2+4            Current TCB address, ours namely
+         L     R2,TCBTIO-TCB(,R2)  TIOT address from TCB
+         LA    R2,TIOENTRY-TIOT1(,R2)
+         WITH  (TIOENTRY,R2),BEGIN
+         LC    R3,TIOELNGH         Length of current entry or zero
+         WHILE (R3,NZ),BEGIN       Loop through non-zero entries
+         IF    (TIOEDDNM,EQ,@R1),EXIT  Exit loop if DDNAME found
+         LA    R2,TIOELNGH(R3)     Next possible ddname entry
+         IC    R3,TIOELNGH         Length of next entry
+         END   ,
+         LA    R15,4               Set not found return code
+         IF    (R3,NZ),BEGIN       Found ddname set return regs
+         LR    R1,R2               Address of TIOT entry
+         CLEAR R15                 Zero return code
+         END   ,
+         END   ,
+         PRETURN (R1)              Return to caller
+         PEND  ,
+         TITLE 'WINGS: PRTDYN - FORMAT AND PRINT DYNAMIC ALLOCATION'
+*box
+*
+*  Format and print dynamic allocation parameter.
+*
+*  On Entry:   R15 contains the address of a valid SEGCB
+*              R1 points to the DYNTABLE.
+*
+*  On Exit:    Formated dynamic allocation paramter list SEG'd
+*              to passed SEGCB
+*
+*  Revised 1994/06/03 mcl:  moved here from OSFILE
+*
+         SPACE ,
+PRTDYNWK RECORD BEGIN
+DYNBUF   DS    A
+PTDSEGP  DS    A                   ->SEGCB
+         END   ,
+         SPACE
+PRTDYN   XPROC PRTDYNWK
+         ST    R15,PTDSEGP         Save address of SEGCB
+         ST    R1,DYNBUF           Save address of dynamic alloc buf
+         LR    R6,R1               Address of dynamic allocation bf
+         WITH  (DYNTABLE,R6)       Addressability to buffer
+         SEGLD L:PTDSEGP           SEGCB pointer
+         SEG   'Dynamic allocation control:'
+         SEGWR ,                   Write to file
+         SEGWR ,                   Write to file
+         SEG   'SVC99RBP  SVC99RB' Report address of SVC99RB
+         SEG   '  Dynamic allocation block at '
+         SEGHX (R6),8              Seg address of SVC99 request blk
+         SEG   ', Code='           REPORT LAST RETURN CODE
+         SEGDC DYNTRETC            Report return code
+         SEGWR ,                   Write to file
+         SEGHX DYN99CBP,8          Convert control block pointer
+         SEG   ' '                 Write line
+         CLC   DYNTID,=C'DYNB'     Check I.D.
+         IF    NE,BEGIN            not a valid DYNTABLE
+         SEG   '**not a valid DYNTABLE**'
+         SEGWR ,
+         EXIT  PRTDYN
+         END   ,                      (not valid)
+         LA    R2,DYN99CB          Address of SVC99 RB
+         LA    R3,5                Set for five words
+         LOOP  BEGIN               Convert all five words
+         SEG   ' '                 Provide a space
+         SEGHX L:@R2,8             Convert word into message
+         LA    R2,@R2+4            Bump to next work
+         UNTIL (BCT,R3),END        Loop until all words done
+         SEGWR ,                   Write line
+         SEGWR ,                   Blank line
+         SPACE ,
+         SEG   'Text units follow:'
+         SEGWR ,                   Write line
+         SEG   '        '
+         SEG   '  Pointer   Verb          Count '
+         SEG   'Len  Parm'
+         SEGWR ,                   Write file
+         SPACE ,
+*-
+*-       R2 -> Address of text unit pointers
+*-       R3 -> Address of actual text unit
+*-             Then follows (len,parm) pairs
+*-       R4 -> Count of (len,parm) pairs in text unit
+*-       R5 -> Work register
+*-       R6 -> Address of parm conversion routine
+*-
+         SPACE ,
+         LA    R2,DYNTUST          First text unit pointer
+         L     R7,DYNTUNIT         ->end of table pointer area
+         DROP  R6                  Release dyntable addressability
+         LOOP  BEGIN               Report on all text units
+         SEGHX (R2),8              Address of text unit point
+         SEG   '  '                Add spaces to report
+         SPACE ,
+         L     R3,@R2              Address of actual unit
+         SEGHX (R3),8              Convert address of text unit ptr
+         SEG   '  '                Add spaces to report
+         SPACE ,
+         IF    (R3,NZ),BEGIN       pointer is nonzero:  do it
+         L2    R1,@R3              Load verb code
+         SEGHX (R1),4              Convert verb code into message
+         SEG   ' '                 Add spaces to report
+         SPACE ,
+         L2    R1,@R3              Load verb code for english trans
+         L     R15,DYNBUF          Address of dynamic alloc buffer
+         WITH  (DYNTABLE,R15),'LA R15,DYN99CB'
+         ACALL VERBTRAN            Translate verb to english
+         IF    Z,BEGIN             Reporta translation if found
+         OC    @R1+2(2),@R1+2      Test for character parm
+         ICM   R6,15,@R1+10        Load address of parm conversion
+         SEG   @R1+2,8             Report english translation
+         END   ELSE,BEGIN
+         CLEAR R6                  Zero parm translation routine
+         SEG   '        '          Skip english translation
+         END   ,
+         SEG   '  '                Add another space for neatness
+         L2    R4,@R3+2            Load parm count
+         SEGHX (R4),4              Convert parm count into message
+         SEG   ' '                 Add spaces to report
+         SPACE ,
+         IF    (R4,NZ),BEGIN       Report parms if any present
+         LA    R3,@R3+4            Point to first (len,parm) pair
+         L2    R5,@R3              Load length of current parm
+         SEGHX (R5),4              Convert parm length into msg
+         SEG   ' '                 Add spaces to report
+         SPACE ,
+         LA    R3,@R3+2            Point to start of parm
+         IF    (R6,NZ),BEGIN       Enter parameter translation
+         L     R15,PTDSEGP         Move current segcb control
+         LR    R1,R3               Move address of parm
+         LR    R0,R5               Move length of parm
+         BALR  RAR,R6              Enter parameter translation
+         END   ELSE,BEGIN
+         LOOP  BEGIN
+         SEGHX LC:@R3,2            Convert into message
+         LA    R3,@R3+1            Bump to next character
+         UNTIL (BCT,R5),END
+         END   ,
+         END   ,
+         SEGWR ,
+         END   ,                      (pointer nonzero)
+         SPACE
+         ELSEIF (R2,GE,R7),BEGIN   pointer zero and past end
+         SEG   '** last pointer **'
+         SEGWR ,
+         EXIT  PRTDYN              all done...
+         END   ,                      (pointer zero, past end)
+*        else  loop back    (pointer zero but not past end)
+         TM    @R2,X'80'           Test for last unit pointer
+         LA    R2,@R2+4            Bump to next unit
+         UNTIL ONES,END            Process all pointers
+         PEND  ,
+         EJECT ,
+*box
+*
+*  Convert dynamic allocation verb to english
+*
+*  On entry:   R1 contains the dynamic allocation verb code
+*              R15 contains address of the SVC99 request block
+*
+*  On exit:    For condidition code ZERO R1 contains address
+*              of translation.
+*              Verb not-found condition indiced by NON-ZERO return
+*
+         SPACE ,
+VERBTRAN PROC  TRACE=NO
+         LR    R3,R15              Copy svc99 request block pointer
+         WITH  (S99RB,R3),BEGIN
+         LA    R15,4               Assume verb not found
+         IF     (S99VERB,EQ,S99VRBAL),'L R2,=A(DYNVERBS)'
+         ELSEIF (S99VERB,EQ,S99VRBUN),'L R2,=A(DYNVERBU)'
+         ELSE  'EXIT VERBTRAN'     Unknow allocation type
+         L2    R0,@R2              Load verb code
+         WHILE (R0,NZ),BEGIN
+         IF    (R0,EQ,R1),BEGIN    Test for verb code match
+         LR    R1,R2               Save address of verb entry
+         CLEAR R15                 Zero return code
+         PRETURN (R1)              Return register r1
+         EXIT  VERBTRAN            Exit translation routine
+         END   ,
+         LA    R2,@R2+14           Bump to next verb code
+         L2    R0,@R2              Load verb code
+         END   ,
+         END   ,
+         PEND  ,
+         TITLE 'Wings: Dynamic allocation translation routines'
+*box
+*
+*  The following series of routines convert SVC99 parameters
+*  into a more readable format.
+*
+*  On entry:   R0  contains the length of the parameter
+*              R1  contains the address of the parameter start
+*              R15 contains a valid SEGCB in which to use
+*
+         SPACE 2
+DFMTSTAT PROC  ,                   Format DALSTATS verb
+         LR    R7,R15              Move segcb pointer
+         SEGDEF (R7)               Define segcb pointer
+         LR    R2,R1               Move paramter ADDRESS
+         LC    R1,@R2              LOAD PARAMETER VALUE
+         SEGHX (R1),2              Report parameter
+         SEG   '  '                Add a space
+         IF     (@R2,EQ,X'01'),'SEG "(disp=old)"'
+         ELSEIF (@R2,EQ,X'02'),'SEG "(disp=mod)"'
+         ELSEIF (@R2,EQ,X'04'),'SEG "(disp=new)"'
+         ELSEIF (@R2,EQ,X'08'),'SEG "(disp=shr)"'
+         ELSE   'SEG "(unknown)"'
+         PEND  ,
+         SPACE 2
+DFMTDISP PROC  ,                   FORMAT DALNDISP/DALCDISP
+         LR    R7,R15              Move sebcb pointer
+         SEGDEF (R7)               Declare segcb pointer
+         LR    R2,R1               Move paramter value
+         LC    R1,@R2              LOAD PARAMETER VALUE
+         SEGHX (R1),2              Report parameter
+         SEG   '  '                Add a space
+         IF     (@R2,EQ,X'01'),'SEG "(uncatlg)"'
+         ELSEIF (@R2,EQ,X'02'),'SEG "(catlg)"'
+         ELSEIF (@R2,EQ,X'04'),'SEG "(delete)"'
+         ELSEIF (@R2,EQ,X'08'),'SEG "(keep)"'
+         ELSE   'SEG "(unknown)"'
+         PEND  ,
+         SPACE 2
+DFMTCHAR PROC  ,                   Format verbs with textual data
+         SEGDEF (R15)              Set segcb for use
+         SEG   (R1),(R0),(R15)     Add textual parameter
+         PEND  ,
+         EJECT ,
+DFMTBLK  PROC  ,                   Format DALLRECL/DALBLKSZ
+         LR    R7,R15              Move sebcb pointer
+         SEGDEF (R7)               Declare segcb pointer
+         LR    R2,R1               Move paramter value
+         L2    R1,@R2              Load parameter value
+         SEGHX (R1),4              Report parameter
+         SEG   '  ('               Add a space
+         L2    R1,@R2              Reload parameter value
+         SEGDC (R1)                Convert into message
+         SEG   ')'                 Terminate parend
+         PEND  ,
+         SPACE 2
+DFMTTRK  PROC  ,                   Format DALLRECL/DALBLKSZ
+         LR    R7,R15              Move sebcb pointer
+         SEGDEF (R7)               Declare segcb pointer
+         LR    R2,R1               Move paramter value
+         L3    R1,@R2              Load parameter value
+         SEGHX (R1),6              Report parameter
+         SEG   '  ('               Add a space
+         L3    R1,@R2              Reload parameter value
+         SEGDC (R1)                Convert into message
+         SEG   ')'                 Terminate parend
+         PEND  ,
+         SPACE 2
+DFMTDSRG PROC  ,
+         LR    R7,R15              Move sebcb pointer
+         SEGDEF (R7)               Declare segcb pointer
+         LR    R2,R1               Move paramter value
+         L2    R1,@R2              LOAD PARAMETER VALUE
+         SEGHX (R1),4              Report parameter
+         SEG   '  '                Add a space
+         IF     (@R2,EQ,=X'0004'),'SEG "(dsorg=tcam)"'
+         ELSEIF (@R2,EQ,=X'0008'),'SEG "(dsorg=vsam)"'
+         ELSEIF (@R2,EQ,=X'0200'),'SEG "(dsorg=po)"'
+         ELSEIF (@R2,EQ,=X'0300'),'SEG "(dsorg=pou)"'
+         ELSEIF (@R2,EQ,=X'2000'),'SEG "(dsorg=da)"'
+         ELSEIF (@R2,EQ,=X'4000'),'SEG "(dsorg=ps)"'
+         ELSEIF (@R2,EQ,=X'4100'),'SEG "(dsorg=psu)"'
+         ELSE   'SEG "(unknown)"'
+         PEND  ,
+         EJECT ,
+         LTORG ,
+         COPY  DYNVERBS
+         TITLE 'WINGS RACF Protection Processing'
+*
+*  RACF ACCESS CHECKING NOTES:
+*
+*  The following several routines are concerned with RACF protection
+*  checking.
+*
+*  the only routine that should be called is the CHKRACFA (check
+*  read/update/write); RAC... AND ...CACH routines should not be
+*  called directly as they need to do appropriate enq/deq management
+*  or some form of locking.
+*
+*  OK TO CALL   CHKREAD, CHKWRITE, CHK---- ROUTINES.  DO NOT CALL
+*  RCHECK, RAC---- ROUTINES DIRECTLY
+*
+*  As of now 5/28/93 we do gross enq/deq processing.  All WINGS
+*  subtask servers serialize on RACF checking.  this should be no
+*  big deal.  it is simple but overkill.
+*
+*  For WINGS there is a doubly linked list of all users that have
+*  ever called WINGS.  This list is ordered by least recently called
+*  (LRU fashion).  only the first <n> entries in the list have
+*  actual pointers to RACF ACEES.  this is because RACF ACEE entries
+*  can be quite large.   see the TIMOCACH routine for details.
+*
+*  Note:  there are several WINGS cache entries do not all point to
+*  RACF cach entries.  they are separate but related entities.
+*
+*  Note: as of June 1993, if you own a dataset,  you will bypass
+*  RACF checking.  ie. account gg.xxx will not check if it is using
+*  dataset wyl.gg.xxx.yyyy.  RACF has been modified to bypass this
+*  checking internally (see sal) so we bypass it externally for
+*  performance.
+*
+*  some ideas if serialization on this list becomes a problem:
+*
+*  to improve.  have a cache array of entries.  obtain entire memory
+*  area at once/ free at termination.  zero entries are unused.
+*  give each entry a lock word to be locked with tcb address.  lock
+*  entry to use or change.  multiple entries are not a problem.
+*  time out entries.  use least recently used algorithm for
+*  replacement.  make cache about 64 to 128 entries long.
+*
+*  simpler idea.  do same as above. but with no locks.  let each
+*  subtask have own cache.  this uses more core, but needs no locks.
+*  it will work fine.  cache display routine needs to be subtask
+*  specific.
+*
+         EJECT
+*
+*   Check RACF protection for a dataset (read, update, or write)
+*
+*   If no access is allowed, we refresh RACF profile cache
+*   If still no access, we return with RC=8.
+*
+*   Revised 1997/08/14 mcl:  Single routine for all types of
+*   access, with access type set in FILPB
+*
+*   ON ENTRY:
+*    TVTACCT - ACCOUNT
+*    R1  ->  FILPB (note:  requested access type in FILPB)
+*
+*   RETURNS:    RC=0  if access allowed
+*               RC=8  if not, msg in ERRSCB            ml 1994/11/23
+*               RC=12 account not defined to RACF      ml 1997/08/14
+*
+*
+*
+CHKRWA   RECORD BEGIN
+CHKRCACH DS    A                   WINGS RACF CACHE ENTRY
+CHKRLOGS DS    XL1                 Logstring for RACF: length
+CHKRLINE DS    CL4                 Line-number (chars.)
+CHKRUSER DS    CL20                User name
+*  end of RACF log string
+CHKRJOBN DS    CL8                 caller's jobname
+CHKR#LGS EQU   *-CHKRLINE          length of log string
+
+CHKRFLAG FLAG  ,
+         FLAG  CHKFLUSH            cache has been flushed
+         END
+*
+*
+CHKRACFA XPROC CHKRWA
+*
+         LR    R7,R1               FILPB ptr
+         WITH  (FILPB,R7)
+         CLEAR CHKFLUSH
+
+         ACALL CHKOURS             see if user's own, priv, etc.
+         IF    (R15,Z),EXIT        done if so
+
+*  Build an identifying string for RACF logging -- user name, lineno
+
+         MVI   CHKRLOGS,CHKR#LGS       length of string
+         L     R6,TVTUPATH         Address of path control block
+         WITH  (UPATH,R6),BEGIN    Addressability to upath
+         MVC   CHKRJOBN,UPATPJOB   Report subsystem or jobname
+         LH    R0,UPATPLNO         WYLBUR line number
+         BTD   CHKRLINE,4,(R0)     Line number, printable
+         MVC   CHKRUSER,UPATPNAM   user name field
+         END   ,                      (with R6)
+*                                  DO ENQ,
+         RECVRY ROUT=RACCRCVY      IF ERROR, RECOVERY DEQ ROUTINE
+         ACALL RACCENQ             ENQ
+*
+*box
+*  CAUTION -- we now hold a job-wide lock!  Following code up until
+*  the DEQ (and all it calls) must not die while holding the lock.
+*
+
+
+         LA    R1,TVTACCT          ->caller's account
+         ACALL GETCACH             get WINGS ACEE cache entry
+         ST    R1,CHKRCACH
+         IF    (R15,NZ),BEGIN      GETCACH failed - unusual error
+*                                  e.g. user not defined to RACF
+*  Error message should already be seg'd
+         ACALL RACCDEQ             release our lock
+         LA    R15,12              reset bad RC
+         EXIT  CHKRACFA            quit now with the bad RC
+         END   ,                      (unusual error)
+
+*  Check READ access (for any request)
+
+         LA    R2,RACF_READ        set type of access wanted
+         IF    FILPBFREQVERIFY,'SET FILPBRACNOLOG'  don't log dsnver
+         LR    R0,R7               ->FILPB
+         LA    R1,CHKRWA           ->data area
+         ACALL RCHECK              CHECK ACCESS
+         IF    (R15,NZ),BEGIN            IF NO ACCESS,
+         IF    (R15,GE,12),BEGIN   If unusual error, e.g. user not
+*                                  defined to RACF
+*  Error message should already be seg'd
+         ACALL RACCDEQ             release our lock
+         LA    R15,12              reset bad RC
+         EXIT  CHKRACFA            quit now with the bad RC
+         END   ,                      (unusual error)
+
+*  "normal" error, i.e., access not permitted
+
+         L     R1,CHKRCACH         UPDATE CACHE ENTRY
+         ACALL UPDTCACH
+         SET   CHKFLUSH            remember we did that
+         SET   FILPBRACNOLOG       don't log it this time
+         LR    R0,R7               ->FILPB
+         LA    R1,CHKRWA
+         ACALL RCHECK              CHECK ACCESS
+         IF    (R15,NZ),BEGIN            IF STILL NO ACCESS, ERROR
+         IF    (R15,GE,12),BEGIN            not likely here, would
+         ACALL RACCDEQ                      have happened above...
+         LA    R15,12              Restore the bad RC
+         EXIT  CHKRACFA            bail out
+         END   ,                      (not likely)
+
+         ACALL RACCDEQ             Dequeue the WING ACEE chain
+         SEGCLR ERRSCB
+         SEGB  'ERRID=NOACCESS ERRMSG=''Access not allowed for'
+         LA    R15,ERRSCB
+         LR    R1,R7               ->FILPB
+         ACALL FMTDSN
+         SET   TPATERR+TERRMSG
+         SEG   ''''
+         LA    R15,8               RC for fail
+         EXIT  CHKRACFA            done
+         END   ,
+         END   ,
+
+*  OK, we have READ access.  If request was for READ, that's enough;
+*  if request was for UPDATE or WRITE, it's enough if we also have
+*  PASSCHK=YES.
+
+         IF    FILPBRACFLG.RACF_READ,CHKWDEQ   if only want READ
+         IF    FILPBFOPASSCHK,CHKWDEQ  Allow access if PASSCHK=YES
+
+*  UPDATE or ALTER access needed, PASSCHK=NO -- do further RACF check
+
+         IF    FILPBFREQVERIFY,'SET FILPBRACNOLOG'  don't log dsnver
+         ELSE  'CLEAR FILPBRACNOLOG'
+         LR    R0,R7               ->FILPB
+         LA    R1,CHKRWA
+         CLEAR R2
+         IC    R2,TVTPBRACFLG      actual access type wanted
+         ACALL RCHECK              CHECK ACCESS
+
+         IF    (R15,NZ),BEGIN            IF NO ACCESS,
+         IF    ~CHKFLUSH,BEGIN     haven't updated cache yet, do it
+         L     R1,CHKRCACH
+         ACALL UPDTCACH            UPDATE CACHE
+         SET   FILPBRACNOLOG       don't log it this time
+         LR    R0,R7               ->FILPB
+         LA    R1,CHKRWA
+         ACALL RCHECK              Check access again after update
+         END   ,                      (haven't updated cache)
+
+         IF    (R15,NZ),BEGIN      No access (after cache update, if
+*                                  not done earlier)... no access
+         ACALL RACCDEQ             Dequeue the WINGS ACEE chain
+         SEGCLR ERRSCB
+         SEG   'ERRID=NOTYOURS ERRMSG='''
+         LA    R15,ERRSCB
+         LR    R1,R7               ->FILPB
+         ACALL FMTDSN
+         SEG   ' is not yours.'''
+         SET   TPATERR+TERRMSG
+         LA    R15,8               RC for error            ml 950607
+         EXIT  CHKRACFA            Back to caller
+         END   ,                      (still no access)
+         END   ,                      (no access)
+*
+*
+*                                  DEQ
+CHKWDEQ  ACALL RACCDEQ
+         SPACE
+         CLEAR R15
+         PEND
+         TITLE 'Check to see if we can bypass RACF'
+*  Preliminary checks to see if we need to call RACF
+*  Check "bypass RACF" privilege, check to see if user's own
+*  dataset.
+*
+*  On Entry:
+*        R7 -> FILPB
+*        TVT addressable, we use USER/GROUP fields and some flags
+*  On Exit:  R15 has RC
+*        0 for OK, bypass RACF
+*       NZ for check RACF
+*
+
+CHKOREC  RECORD BEGIN
+CHKPREF  DS    CL11
+         END   CHKOREC
+
+CHKOURS  PROC  CHKOREC
+         WITH (FILPB,R7)
+         CLEAR R15
+
+         IF    FILPBFONRACF,EXIT      If bypassing RACF
+
+*  Check for WYL-type dsname.
+
+         MVC   CHKPREF,=C'WYL.GG.UUU.'
+         MVC   CHKPREF+4(2),TVTGROUP
+         MVC   CHKPREF+7(3),TVTUSER
+         CLC   CHKPREF,FILPBDSNAME
+         IF    E,EXIT              DSN is WYL.GG.UUU... (same acct)
+         MVC   CHKPREF(2),TVTGROUP Now try TSO-style
+         MVI   CHKPREF+2,C'$'
+         MVC   CHKPREF+3(3),TVTUSER  GG$UUU
+         MVC   CHKPREF+6,C'.'      GG$UUU.<name>
+         CLC   CHKPREF(7),FILPBDSNAME  is it ours (TSO-style)?
+         IF    E,EXIT              yes, don't bother RACF with it
+
+         LA    R15,8               RC for not ours
+         PEND  ,
+         QLTORG
+         TITLE 'Delete RACF Profile for Dataset'
+*
+*   ON ENTRY:
+*    TVTACCT - ACCOUNT
+*    TVTPBDSNAME - FILE NAME
+*
+*
+*   RETURNS:
+*
+*
+*
+*
+*
+RACGWA   RECORD BEGIN
+RACGCACH DS    A                   WINGS RACF CACHE ENTRY
+RACGPDSN DS    0CL44               profile name (dsname)
+RACGPRGG DS    CL2'GG'             GG
+RACGPR$  DS    CL1'$'              $
+RACGPRUU DS    CL3'UUU',C'.'       UUU.
+RACGPRWY DS    CL3'WYL'            WYL (transformed)
+RACGPRXX DS    CL34                remainder of dsn
+         SPACE
+RACGREMD RACROUTE REQUEST=DEFINE,TYPE=DELETE,ENTITY=*-*,DSTYPE=N,      *
+               WORKA=*-*,RELEASE=1.9,GENERIC=YES,MF=L
+         SPACE 2
+RACGREME RACROUTE REQUEST=EXTRACT,TYPE=EXTRACT,               ,        *
+               RELEASE=1.9,ENTITY=*-*,GENERIC=YES,                     *
+               WORKA=*-*,MATCHGN=NO,MF=L
+         END
+*
+*
+RACGREM  XPROC RACGWA
+*
+*
+         L     R1,=A(RACDMODL)     ADDRESS OF RACROUTE MODEL
+         MVC   RACGREMD(L'RACDMODL),@R1      MOVE IN MODEL LIST
+         L     R1,=A(RACEMODL)        ...
+         MVC   RACGREME(L'RACEMODL),@R1      MOVE IN MODEL LIST
+         MVC   RACGPDSN,TVTPBDSNAME  DSN whose profile to delete
+         CLC   =C'WYL.',TVTPBDSNAME   WYL. name?
+         IF    (EQ),BEGIN          have WYL.xxx name
+         MVC   RACGPRGG,TVTPBDSNAME+4     group code GG
+         MVI   RACGPR$,C'$'               GG$
+         MVC   RACGPRUU,TVTPBDSNAME+7     GG$UUU
+         MVC   RACGPRWY,=C'WYL'           GG$UUU.WYL.xxx
+         END   ,                     (WYL type name)
+*                                  DO ENQ,
+         RECVRY ROUT=RACCRCVY      IF ERROR, RECOVERY DEQ ROUTINE
+         ACALL RACCENQ             ENQ
+*
+*                                  GET WINGS RACF CACHE ENTRY
+         LA    R1,TVTACCT
+         ACALL GETCACH
+         ST    R1,RACGCACH
+         LR    R2,R1               ->WINGACEE
+         WITH  (WINGACEE,R2)       Addressability for wings ACEE
+         IF    (WACEEEYE,NE,'ACEE'),BEGIN  Bad WINGACCE pointer
+         QSNAP 'Bad WINGACEE pointer'
+         QSNAP (R2)
+         QSNAP WINGACEE,16
+         SEGCLR ERRSCB
+         SEGB  'ERRID=RACFERR'
+         SEG   'ERRMSG='''
+         SEG   'Unusual WINGS RACF error, bad ACEE'''
+         SET   TPATERR+TERRMSG
+         LA    R15,12              RC
+         EXIT  RACGREM             get out
+         END   ,                      (bad WINGACEE)
+         STCK  WACEELTM
+         L     R4,WACEEPTR         Load address of ACEE pointer
+         WITH  (ACEE,R4)           Addressability to ACEE
+         IF    (ACEEACEE,NE,'ACEE'),BEGIN  Bad RACF ACEE pointer
+         QSNAP 'Bad RACF ACEE pointer'
+         QSNAP (R4)
+         QSNAP ACEE,16
+         SEGCLR ERRSCB
+         SEGB  'ERRID=RACFERR'
+         SEG   'ERRMSG='''
+         SEG   'Unusual WINGS RACF error, bad ACEE'''
+         SET   TPATERR+TERRMSG
+         LA    R15,12              RC
+         EXIT  RACGREM             get out
+         END   ,                      (bad RACF ACEE)
+         L     R3,TVTOSFWK         ->work area
+
+*  Check to see if there is the profile exists.  We only want to
+*  delete a specific profile for this dsname.
+
+         RACROUTE REQUEST=EXTRACT,TYPE=EXTRACT,CLASS=RACGCLAS,         *
+               RELEASE=1.9,ENTITY=RACGPDSN,GENERIC=YES,ACEE=(4),       *
+               WORKA=(3),MATCHGN=NO,MF=(E,RACGREME)
+         SPACE ,
+         IF    (R15,Z),BEGIN       Got a profile, zorch it
+         RACROUTE REQUEST=DEFINE,TYPE=DELETE,ENTITY=RACGPDSN,          *
+               WORKA=(3),ACEE=(4),MF=(E,RACGREMD)
+         SPACE
+         END   ,                      (got a profile)
+         SPACE 2
+** MAYBE WANNA DELETE FROM THE ACEE CACHE???????????????????
+*
+*                                  DEQ
+         ACALL RACCDEQ
+*
+RACGDONE LABEL ,
+         PEND
+RACGCLAS DC    CL8'DATASET'
+         TITLE 'Wings: RACF_REFRESH: Refresh RACF profiles.'
+*box
+*
+*  RACF_REFRESH - Refresh the passed account's RACF profiles.
+*
+*        The user's ACEE RACF control block is removed and then
+*        re-created.  This allows future RACHECK calls to use
+*        updated profiles, not the ones buffered in CSA.,
+*
+*        Currently no parameters are accepted and only the
+*        logged on account can reset his RACF protection.
+*
+*        Wings racf acee chain resource must be enq/dequeued.
+*
+*
+         SPACE 2
+XRACREFR XPROC ,                   Enter RACF profile refresh
+**#      MVC   TVTPATCM,@R15       Set current command
+**#      CLEAR TVTPATNX            Clear next command name
+**#      SET   TPATCMND            Set command in progress
+**#      ACALL LOGCMND             Log command
+**#      INCR  R0,TVTCNTREQ        Count OSFILE command request
+*
+*                                  FIND DELETE, AND RESET
+         RECVRY ROUT=RACCRCVY
+         ACALL RACCENQ
+         LA    R1,TVTACCT          Address of true client
+         ACALL GETCACH            Obtain user's wingacee pointer
+         IF    (R15,Z),BEGIN       Release current ACEE
+         ACALL RACDEL              Delete current profiles
+         LA    R1,TVTACCT          Address of true client
+         ACALL GETCACH            Reset racf acee pointer
+         END   ,
+         ACALL RACCDEQ
+*
+         LR    R2,R1               Save address of wingacee pointer
+         PRETURN (R2)
+**#      WITH  (WINGACEE,R2)       Addressability to wingacee
+**#      WINGSHDR SET,HEADER='RACF_REFRESH:'
+**#      SEGLD TVTSCB              Set for client path
+**#      SEG   'MSG=''RACF profiles have been reset for '
+**#      LC    R0,WACEEACT         Load length of account
+**#      LA    R1,WACEEACT+1       Point to user id
+**#      SEG   (R1),(R0)           Report user id
+**#      SEG   ''''                Terminate message
+**#      SEGWR ,                   Send response back to the client
+**#      SPACE ,
+**#      ACALL RECOVERY            PROCESS RECOVERY STACK
+**#      CLEAR TPATCMND            Clear command in progress
+**#      CLEAR TVTPATCM            Clear command name
+**#      CLEAR TVTPATNX            Clear next command name
+**#      ACALL SETPATH             Close and requeue client path
+         PEND  ,                   Return to command loop
+         LTORG ,
+         TITLE 'Wings: SHOW_ACEE: Display Wings ACEE chain'
+*box
+*
+*  SHOW_ACEE - Display Wings ACEE chain
+*
+*  On entry:   R0  contains length of optional parameters
+*              R1  contains address of optional parameters
+*              R15 points to command name (SHOW_ACEE:)
+*
+*  On exit:    The ACEE chain is returned.
+*
+         SPACE 2
+XRACSACE XPROC ,                   Command entry point
+**#      LR    R2,R0               Save parameter length
+**#      LR    R3,R1               Save parameter address
+*
+**#      MVC   TVTPATCM,@R15       Set current command
+**#      SET   TPATCMND            Set command in progress
+**#      ACALL LOGCMND
+**#      INCR  R0,TVTCNTREQ        Count OSFILE command request
+*-
+*-       Enqueue on wings global resource ACEE-CHAIN
+*-
+         RECVRY ROUT=RACCRCVY       Set recovery routine
+         L     R1,=A(ENQMODL)      Address of ENQ model parameter
+         MVC   OSFENQL(L'ENQMODL),@R1  Initialize parameter list
+         L     R2,=A(RACENQ)       ADDRESS OF MINOR NAME
+         ENQ   (GVTJOBNM,(R2),S,L'RACENQ,STEP),                        X
+               RET=NONE,MF=(E,OSFENQL)
+*-
+*-       ACEE-CHAIN is acquired, return chain
+*-
+         WINGSHDR SET,HEADER='DATA:'
+         SEGCLR TVTSCB             Clear cleint seg control block
+         IF    (GVTACEE,Z),BEGIN
+         SEG   'No elements on the GVTACEE queue'
+         SEGWR ,                   Return message to client
+         END   ELSE,BEGIN
+         SEG   'Address  '         Title for wingacee address
+         SEG   'ACEE     '         Address of acutal acee
+         SEGB  'Created '          Creation time of acee
+         SEGB  'Updated '          Updated time of acee
+         SEGB  '    Idle'          Idle time for this ACEE
+         SEG   'Checks   '         Total number of accesses
+         SEG   'User ID'           User identification
+         SEGWR ,                   Return title line
+         L     R6,GVTACEE          Set anchor address to acee chain
+         WITH  (WINGACEE,R6)       Addressability to acee chain
+         WHILE (R6,NZ),BEGIN       Report all allocated acee's
+         SEGHX (R6),8              Report current wingacee address
+         SEG   ' '                 Set filler characters
+         SEGHX L:WACEEPTR,8        Report address of acee
+         SEG   ' '
+         XPUSH ,,32,PTR=R5         Obtain return area storage
+         LM    R0,R1,WACEECTM      Set wingacee create time
+         LR    R15,R5              Set work area pointer
+         XCALL FMTTIME             Convert time to characters
+         S     R0,=A(3)            drop hudredths of seconds
+         SEGB  (R1),(R0)           Set into message
+         LM    R0,R1,WACEEUTM      Set wingacee update time
+         LR    R15,R5              Set work area pointer
+         XCALL FMTTIME             Convert time to characters
+         S     R0,=A(3)            drop hudredths of seconds
+         SEGB  (R1),(R0)           Set into message
+         LR    R15,R5              Set work area pointer
+         STCK  OSFMISCD            Save current time
+         MVC   OSFMISCD+8(8),WACEELTM  set last access time
+         LA    R1,OSFMISCD             address of time values
+         XCALL FMTIDLE             Compute idle time
+         SEG   @R5+2,8             Add to message
+         XPOP  PTR=R5              Return stack work area
+         SEGDC WACEECNT,9          Report block access count
+         SEG   ' '                 Set filler characters
+         LC    R0,WACEEACT         Length of account
+         LA    R1,WACEEACT+1       Point to account
+         SEG   (R1),(R0)           Add account to message
+         SEGWR ,                   Return line to client
+         L     R6,WACEENXT         Chain to next acee
+         END   ,
+         END   ,
+
+         PEND  ,                   Return to caller
+         LTORG ,
+         TITLE 'Error Recovery Stack Overflow'
+*box
+*
+*  Error recovery stack overflow
+*  (COPY of the one in OSFILE)
+*
+         SPACE ,
+STCKOVFL LABEL ,
+         FAIL  'Error Recovery stack overflow.'
+*-
+*-       Release WING ACEE pointers
+*-
+STCKWRK  RECORD BEGIN
+OSFTENQ  ENQ   (*-*,*-*,S,8,STEP),MF=L
+         END   ,
+XRACRACE XPROC STCKWRK
+         L     R2,=A(RACENQ)       Address of minor queue name
+         L     R1,=A(ENQMODL)      Address of enq model parameters
+         MVC   OSFTENQ(L'ENQMODL),@R1  MOVE IN PARAMETER LIST
+         ENQ   (GVTJOBNM,(R2),E,L'RACENQ,STEP),                        X
+               RET=NONE,MF=(E,OSFTENQ)
+         L     R3,GVTACEE          Free allocated ACEE's
+         CLEAR GVTACEE             Clear GVT ACEE pointer
+         WHILE (R3,NZ),BEGIN       Free each chained ACCE
+         WITH  (WINGACEE,R3),BEGIN
+         LR    R1,R3               Move address of wingacee
+         ACALL RACDEL              Delete this entry
+         LR    R1,R3               Address of wingacee block to free
+         L     R3,WACEENXT         Chain to next block
+         XCALL FREECORE            Release wingacee block
+         END   ,                    (with WINGACEE)
+         END   ,                    (free each acee)
+         L     R1,=A(DEQMODL)      Address of deq model parameters
+         MVC   OSFTENQ(L'DEQMODL),@R1  MOVE IN PARAMETER LIST
+         DEQ   (GVTJOBNM,(R2),L'RACENQ,STEP),MF=(E,OSFTENQ)
+         PEND  ,
+         TITLE 'RACF ENQ/DEQ'
+*
+*  ENQ/DEQ  on wings racf cache
+*
+RACCENQ  PROC ,
+         L     R2,=A(RACENQ)       Address of minor queue name
+         L     R1,=A(ENQMODL)      Address of enq model parameters
+         MVC   OSFENQL(L'ENQMODL),@R1  MOVE IN PARAMETER LIST
+         ENQ   (GVTJOBNM,(R2),E,L'RACENQ,STEP),                        X
+               RET=NONE,MF=(E,OSFENQL)
+         PEND
+*
+*
+RACCDEQ  PROC ,
+         L     R2,=A(RACENQ)       Address of minor queue name
+         L     R1,=A(DEQMODL)      Address of deq model parameters
+         MVC   OSFENQL(L'DEQMODL),@R1  MOVE IN PARAMETER LIST
+         DEQ   (GVTJOBNM,(R2),L'RACENQ,STEP),MF=(E,OSFENQL)
+         PEND  ,
+         EJECT
+*
+*  Recovery routine for wings racf cache ENQ/DEQ.
+*  We do a conditional DEQ.  If we have it we DEQ it.
+*
+*
+RACCRCVY PROC ,
+         L     R1,=A(DEQMODL)          address of model deq parm
+         MVC   OSFENQL(L'DEQMODL),@R1  set model deq parameter list
+*-
+*-       Issue conditional DEQ request for resource
+*-
+         DEQ   (GVTJOBNM,RACENQ,L'RACENQ,STEP),                        X
+               RET=HAVE,MF=(E,OSFENQL)
+         PEND  ,
+         SPACE 2
+RACENQ   DC    C'ACEE-CHAIN'       Minor queue name for enq
+         TITLE 'Get WINGS RACF Cache Entry'
+*
+*
+*  GETCACH - GET WINGS RACF CACHE ENTRY
+*
+*  CAUTION: wings racf cache enq/deq must be done prior
+*           to any call.
+*
+*  ON ENTRY:
+*      R1 - POINTS TO RACF USER ID, PASSED IN UUUGG 5-CHAR FORMAT.
+*
+*  ON EXIT:
+*      R1 - WINGS CACHE ENTRY  (CONTAINS ACEE PTR)
+*
+*      R15 - return code, 0 or not
+*      (nonzero means RACINIT failed, msg has ben seg'd by RACINIT)
+*
+*
+GETCWA   RECORD BEGIN
+GETCACCT DS    A
+         END
+*
+*
+GETCACH  PROC GETCWA
+*
+         ST    R1,GETCACCT
+*
+*                                  GET WINGS ENTRY,,
+         L     R1,GETCACCT
+         ACALL FINDCACH
+         IF    Z,BEGIN             IF GOT ONE, GET OFF LIST
+         ACALL REMCACH
+         END
+         IF    NZ,BEGIN            IF WE DO NOT HAVE, MAKE ONE
+         L     R1,GETCACCT
+         ACALL MAKECACH
+         END
+*
+*                                  WE NOW HAVE ENTRY (R1)
+         LR    R2,R1
+         WITH  (WINGACEE,R2)
+         INCR  R3,WACEECNT         CACH CHECKS
+
+         IF    (WACEEPTR,Z),BEGIN  NO RACF ACEE ENTRY, CREATE
+         ACALL RACINIT
+         IF    (R15,NZ),BEGIN      init failed
+         CLEAR R1                  no pointer to return
+         PRETURN (R1)                 so return 0
+         EXIT  GETCACH             quit, R15 has bad RC
+         END   ,                      (init failed)
+         END   ,                      (no RACF ACEE entry)
+
+*  PUT ON CHAIN
+         ACALL INSCACH
+
+*  TIME OUT OLD ENTIES
+         ACALL TIMOCACH
+
+         LA    R1,WINGACEE         Return pointer
+         CLEAR R15                 RC=0
+         PRETURN (R1)
+         PEND
+         TITLE 'Remove RACF ACEE'
+*
+*
+*  RACDEL - remove RACF ACEE element pointed to by
+*           this wings racf cache entry
+*
+*
+*  CAUTION: wings racf cache enq/deq must be done prior
+*           to any call.
+*
+*  ON ENTRY:
+*      R1 - wings racf cache entry,
+*
+*  No Errors returned.
+*
+*
+*  Note:
+*  ACEE pointer should be valid.
+*
+*
+         SPACE ,
+RACDWRK  RECORD BEGIN
+RACDPRM  RACROUTE REQUEST=VERIFY,LOC=ANY,WORKA=*-*,                    X
+               RELEASE=1.9,MF=L
+#RACDWRK EQU   *-RACDWRK
+         END   ,
+*
+RACDEL   PROC  RACDWRK
+         LR    R2,R1               Move address of wingacee pointer
+         WITH  (WINGACEE,R2)       Addressabilty to wingacee
+         IF    (WACEEPTR,Z),EXIT   No ACEE, can not delete.
+         STCK  WACEEUTM            set update time
+         L     R3,TVTOSFWK         ->work area
+         L     R1,=A(RACIMODL)     Address of model parameter list
+         MVC   RACDPRM(L'RACIMODL),@R1         Set parameter list
+         RACROUTE REQUEST=VERIFY,LOC=ANY,WORKA=(3),                    X
+               RELEASE=1.9,                                            X
+               LOG=ALL,ENVIR=DELETE,                                   X
+               ACEE=WACEEPTR,MF=(E,RACDPRM)
+         IF    (R15,NZ),BEGIN
+*-
+*-       If we are abending don't FAIL again
+*-
+         IF    TVTFABND,EXIT       If abending just continue
+         QSNAP 'RACINIT failure during ENVIR=DELETE processing'
+         QSNAP (R0,R15)
+         QSNAP RACDWRK,#RACDWRK
+         END   ,
+         IF    TVTREPT,BEGIN       Log acee delete if report active
+         SEGLD OSFSCB              log's SCB
+         LA    R15,OSFSCB          ADDRESS OF SEGCB CONTROL
+         ACALL LOGTIME             LOG TIME OF ACEE RELEASE
+         SEG   'ACEE element released at '
+         L     R1,WACEEPTR         Set acee pointer from wingacee
+         SEGHX (R1),8              Convert address into message
+         SEG   ' for '             Report owning account
+         LC    R0,WACEEACT         Load length of account
+         LA    R1,WACEEACT+1       And address of account
+         SEG   (R1),(R0)           Report account for release
+         SEGWR ,                   Write to log file
+         END   ,
+         CLEAR WACEEPTR            Clear ACEE pointer in WINGACEE
+*
+         PEND  ,
+         TITLE 'Find WINGS Cache Entry for Account'
+*
+*
+*   FINDCACH  -  FIND WINGS CACHE ENTRY FOR ACCOUNT
+*
+*  ON ENTRY:
+*      R1 - POINTS TO RACF USER ID, PASSED IN UUUGG 5-CHAR FORMAT.
+*
+*  ON EXIT:
+*      R1 - WINGS CACHE ENTRY  (CONTAINS ACEE PTR)
+*      R15 - Z, ITEM FOUND,
+*      R15 - NZ, ITEM NOT FOUND,,
+*
+*
+*
+FINDWA   RECORD BEGIN
+FINDACCT DS    CL8' '              RACF STYLE ACCT
+         END
+*
+FINDCACH PROC  FINDWA
+         CLEAR FINDACCT            Zero default racf user id
+         MVI   FINDACCT,6            Set length of racf user id
+         MVC   FINDACCT+1(2),@R1+3     Set group code into id
+         MVI   FINDACCT+3,C'$'           Add $ separator
+         MVC   FINDACCT+4(3),@R1           Set user code into id
+*
+         L     R2,GVTACEE          Load anchor to ACEE chain
+         WITH  (WINGACEE,R2)       Addressability to ACEE block
+         WHILE (R2,NZ),BEGIN       Locate required ACCE block
+         IF    (FINDACCT,EQ,WACEEACT),EXIT   Found entry
+         L     R2,WACEENXT         Chain to next block
+         END   ,
+*
+         IF    (R2,NZ),BEGIN       IF ENTRY,,,
+         LA    R1,WINGACEE
+         CLEAR R15
+         END
+         ELSE  BEGIN               IF NO ENTRY,,,
+         CLEAR R1
+         LA    R15,4
+         END
+*
+         PRETURN (R1)
+         PEND  ,
+         TITLE 'Make WINGS RACF Cache Entry'
+*
+*
+*   MAKECACH - MAKE WINGS CACHE ENTRY
+*
+*   DOES NOT CREATE ACEE,  JUST WINGS CONTROL BLOCK..
+*
+*   ON ENTRY:
+*      R1 - POINTS TO RACF USER ID, PASSED IN UUUGG 5-CHAR FORMAT.
+*
+*
+*   ON EXIT:
+*      R1 - WINGS CACHE ENTRY
+*
+*
+MAKEWA   RECORD BEGIN
+MAKEACCT DS    CL8' '              RACF STYLE ACCT
+         END
+*
+MAKECACH PROC  MAKEWA
+*
+         CLEAR MAKEACCT            Zero default racf user id
+         MVI   MAKEACCT,6            Set length of racf user id
+         MVC   MAKEACCT+1(2),@R1+3     Set group code into id
+         MVI   MAKEACCT+3,C'$'           Add $ separator
+         MVC   MAKEACCT+4(3),@R1           Set user code into id
+*
+*                                  GET MEMORY
+         LA    R0,L'WINGACEE       Length for WINGACEE block
+         VCALL GETSHARE            Get shared mem for WINGACEE blk
+         LR    R2,R1               Save address of block
+         WITH  (WINGACEE,R2)
+*
+         CLEAR WINGACEE            Clear acee block to zeroes
+         MVC   WACEEEYE,=C'ACEE'   Set eye-catcher
+         ST    R2,@R3              Chain to end of list
+         MVC   WACEEACT,MAKEACCT   Set RACF user id
+         STCK  WACEECTM            Save ACEE create time
+         STCK  WACEELTM            Save last access time
+         CLEAR WACEECNT            Set total block access
+*
+         LA    R1,WINGACEE
+         PRETURN (R1)
+*
+         PEND  ,
+         SPACE 2
+         TITLE 'Insert WINGS RACF Cache Entry'
+*
+*   INSERT - INSERT WINGS CACHE ENTRY (AT START!)
+*
+*   ON ENTRY:
+*      R1 - WINGS CACHE ENTRY
+*
+*   ON EXIT:
+*      ITEM IS INSERTED AT START OF WINGS ACEE LIST
+*
+*
+*
+INSWA    RECORD BEGIN
+INSCUR   DS    A
+         END
+*
+*
+INSCACH  PROC  INSWA
+         CLEAR INSWA
+         ST    R1,INSCUR           CURRENT ENTRY
+*
+*                                  SET CURRENT ENTRY
+         LR    R2,R1
+         WITH  (WINGACEE,R2)
+         L     R1,GVTACEE
+         ST    R1,WACEENXT
+         CLEAR R1
+         ST    R1,WACEEPRV
+*
+*                                  SET NEW HEAD OF LIST
+         L     R1,INSCUR
+         ST    R1,GVTACEE
+*
+*                                  SET CURRENT IS PREV TO NEXT,,
+         L     R2,WACEENXT
+         IF    (R2,NZ),BEGIN
+         ST    R1,WACEEPRV
+         END
+         L     R1,INSCUR
+*
+         PEND
+         TITLE 'Remove WINGS RACF Cache Entry'
+*
+*   REMOVE  - REMOVE WINGS CACHE ENTRY
+*
+*   ON ENTRY:
+*      R1 - WINGS CACHE ENTRY TO REMOVE
+*
+*   ON EXIT:
+*      ITEM IS TAKEN OFF LIST.  NO FREECORE, NO FREE ACEE.
+*
+*
+*
+REMWA    RECORD BEGIN
+REMNEXT  DS    A
+REMPREV  DS    A
+REMNEWP  DS    A
+REMNEWX  DS    A
+         END
+*
+*
+REMCACH  PROC  REMWA
+         CLEAR REMWA
+*
+*                                  GET CURRENT ENTRY PREV,NEXT
+         LR    R2,R1
+         WITH  (WINGACEE,R2)
+         L     R1,WACEEPRV
+         ST    R1,REMPREV
+         L     R1,WACEENXT
+         ST    R1,REMNEXT
+*
+         L     R2,REMPREV          UPDATE PREVIOUS ENTRY
+         IF    (R2,Z),BEGIN
+         L     R1,REMNEXT
+         ST    R1,GVTACEE
+         END
+         ELSE  BEGIN
+         L     R1,REMNEXT
+         ST    R1,WACEENXT
+         END
+*
+*                                  UPDATE NEXT ENTRY
+         L     R2,REMNEXT
+         IF    (R2,NZ),BEGIN
+         L     R1,REMPREV
+         ST    R1,WACEEPRV
+         END
+*
+         PEND  ,
+*
+*  UPDTCACH - UPDATE RACF ACEE IN WINGS CACH ENTRY
+*
+*  ON ENTRY:
+*        R1 - WINGS CACHE ENTRY TO UPDATE
+*
+*
+UPDTCACH PROC  ,
+         LR    R2,R1
+         WITH  (WINGACEE,R2)
+*
+         IF    (WACEEPTR,NZ),BEGIN
+         ACALL RACDEL              DELETE OLD RACF ACEE
+         END
+         ACALL RACINIT             GET NEW RACF ACEE
+*
+         PEND
+         TITLE 'Time Out WINGS RACF Cache Entries'
+*
+*
+*  TIMOCACH - TIME OUT WINGS CACHE ENTRIES
+*
+*
+*  WE DO NOT DELETE ACTUAL ENTRY, JUST THE THE RACF
+*  ACEE ENTRY IN CACHE ENTRY.
+*
+*  WE KEEP ALL PEOPLE WHO EVER USED WINGS ON CHAIN
+*  . CHAIN IS ORDERED.   WE LET ONLY FIRST XXX HAVE
+*  ACTUAL RACF ACEES.   WE DO NOT CHECK ALL THE WAY
+*  TO THE END OF THE CHAIN TO FREE ACEES.  BECAUSE IT
+*  IS ORDERED WE ONLY CHECK FIRST YYY.  TECHNICALY
+*  WE ONLY NEED TO CHECK XXX+1 ENTRY.  BUT WE PLAY
+*  IT SAFE AND CONSERVATIVE FOR NOW.
+*
+CACHECNT EQU   512                 NUMBER OF CACHED ACEE ENTRIES
+CACHECHK EQU   1024                NUMBER TO CHECK WHEN CLEARING
+*
+*
+TIMOCACH PROC  ,
+*
+         L     R2,GVTACEE          Load anchor to ACEE chain
+         LA    R3,1
+         WITH  (WINGACEE,R2)       Addressability to ACEE block
+         WHILE (R2,NZ),BEGIN       Locate required ACCE block
+         IF    ((R3,GT,CACHECNT),AND,(WACEEPTR,NZ)),BEGIN
+         LA    R1,WINGACEE
+         ACALL RACDEL
+         END
+         IF    (R3,GT,CACHECHK),EXIT
+         INCR  R3
+         L     R2,WACEENXT         Chain to next block
+         END   ,
+*
+         PEND
+         SPACE 2
+         LTORG ,
+         TITLE 'Create RACF ACEE for User'
+*box
+*
+*  RACINIT - Create ACEE for user.  set wings racf cache
+*            block to point at it.
+*
+*
+*  CAUTION: wings racf cache enq/deq must be done prior
+*           to any call.
+*
+*  ON ENTRY:
+*      R1 - wings racf cache entry,
+*
+*  ON EXIT:
+*  ACEE pointer added to wings ACEE chain.
+*
+*
+*  No Errors returned.
+*
+*
+RACIWRK  RECORD BEGIN
+RACIPRM  RACROUTE REQUEST=VERIFY,LOC=ANY,                              X
+               WORKA=*-*,RELEASE=1.9,MF=L
+         END   ,
+*
+*
+RACINIT  PROC  RACIWRK
+         LR    R5,R1               Move address of wingacee pointer
+         WITH  (WINGACEE,R5)       Addressabilty to wingacee
+         STCK  WACEEUTM            set update time
+         STCK  WACEELTM            set last access time
+         L     R3,TVTOSFWK         ->work area
+         L     R1,=A(RACIMODL)     Address of model parameter list
+         MVC   RACIPRM(L'RACIMODL),@R1         Set parameter list
+         RACROUTE REQUEST=VERIFY,LOC=ANY,WORKA=(3),                    X
+               USERID=WACEEACT,PASSCHK=NO,                             X
+               RELEASE=1.9,                                            X
+               LOG=ALL,ENVIR=CREATE,                                   X
+               ACEE=WACEEPTR,MF=(E,RACIPRM)
+         PTRACE RacInit            Trace return codes from RACINIT
+*  RC=0...all ok, user defined to RACF
+*  RC=4, then check RACF rcode in workarea:
+*        0  no SAF installation exit processing
+*        4  user not defined to RACF
+*       20  RACF is not active
+*
+*  The RACF return code and reason codes are in the parmlist area
+*  (RACIWRK here)
+*
+         IF    (R15,NZ),BEGIN      Process RACINIT errors
+         LR    R2,R15              Save racinit return code
+         LM    R3,R4,RACIWRK       RACF return, reason codes
+         SEGCLR ERRSCB             Clear error segcb control
+         IF    ((R2,EQ,4),AND,(R3,EQ,4)),BEGIN user not defined to RACF
+         SEGB  'ERRID=NORACF'      Indicate no racf profile
+         SEGB  'ERRMSG=''No RACF profile exists'
+         SEG   'for user '         Add user indication
+         SEG   WACEEACT+1,2        Add group code
+         SEG   '.'                 Add a period
+         SEG   WACEEACT+4,3        Add the user
+         SEG   ' - contact your system administrator.'
+         SEG   ''''                Terminate quoted message
+         END   ELSE,BEGIN             (not defined) /  unknown RC
+         SEGB  'ERRID=RACFERR'     Indicate racf failure
+         SEGB  'ERRMSG=''Unexpected return code from RACINIT, code='
+         SEGDC (R2)                Report return code
+         SEG   '.  RACF return code='
+         SEGDC (R3)                Report return code
+         SEG   ', reason='         Report reason code
+         SEGDC (R4)                Convert reason code into message
+         SEG   ''''                Complete error message
+         END   ,                      (unknown RC)
+         SET   TPATERR+TERRMSG     Indicate path re-queue and msg
+         LA    R15,12              Set RC
+         END   ,                      (process RACINIT error)
+         PEND  ,
+*
+*  RCHECK - Perform RACF resource check
+*
+*        Issue a RACHECK macro to validate an access to a
+*        DATASET RACF resource.
+*
+*  On Entry:   R1 contains the address of the CHKRWA record ml970922
+*
+*              R0 contains the address of a FILPB
+*                 FILPBDSNAME has the dsname
+*              R2 (low byte) has required access level:
+*                           (see RACFEQU)
+*                 x'02' indicates READ access
+*                 x'04' indicates UPDATE access
+*                 x'08' indicates CONTROL access
+*                 x'80' indicates ALTER access
+*
+*              If FILPBRACNOLOG is set, LOG=NONE is used
+*              on the RECROUTE request (done when retesting after
+*              previous access denial)
+*
+**? check following in logic below ***************************???
+*  On Exit:    R15 contains the result of the RACHECK call.
+*              0 - RACF defined resource, access okay
+*              4 - Resource is unknown to RACF
+*              8 - RACF defines resource, access denied
+*
+*
+RCHECKWA RECORD BEGIN
+RCHECKMD RACROUTE REQUEST=AUTH,WORKA=*-*,                              X
+               ENTITY=*-*,CLASS=RACLASS,                               X
+               LOG=ASIS,                                               X
+               DSTYPE=M,RACFIND=NO,GENERIC=ASIS,                       X
+               RELEASE=1.9,MF=L
+         END   ,
+*
+*
+RCHECK   PROC  RCHECKWA
+         LR    R3,R2               Save access level wanted  ml970814
+         LR    R6,R1               Save CHKRWA pointer
+         WITH  (CHKRWA,R6)
+         L     R2,CHKRCACH         Address of WINGACEE pointer
+         LR    R7,R0               Save FILPB pointer
+         WITH  (FILPB,R7)
+         L     R1,=A(RACCMODL)     ADDRESS OF RACROUTE MODEL
+         MVC   RCHECKMD(L'RACCMODL),@R1      MOVE IN MODEL LIST
+         WITH  (WINGACEE,R2)       Addressability for wings ACEE
+         IF    (WACEEEYE,NE,'ACEE'),BEGIN  Bad WINGACCE pointer
+         QSNAP 'Bad WINGACEE pointer'
+         QSNAP (R2)
+         QSNAP WINGACEE,16
+         SEGCLR ERRSCB
+         SEGB  'ERRID=RACFERR'
+         SEG   'ERRMSG='''
+         SEG   'Unusual WINGS RACF error, bad ACEE'''
+         SET   TPATERR+TERRMSG
+         LA    R15,12              RC
+         EXIT  RCHECK ,            get out
+         END   ,                      (bad WINGACEE)
+         STCK  WACEELTM
+         L     R4,WACEEPTR         Load address of ACEE pointer
+         WITH  (ACEE,R4)           Addressability to ACEE
+         IF    (ACEEACEE,NE,'ACEE'),BEGIN  Bad RACF ACEE pointer
+         QSNAP 'Bad RACF ACEE pointer'
+         QSNAP (R4)
+         QSNAP ACEE,16
+         SEGCLR ERRSCB
+         SEGB  'ERRID=RACFERR'
+         SEG   'ERRMSG='''
+         SEG   'Unusual WINGS RACF error, bad ACEE'''
+         SET   TPATERR+TERRMSG
+         LA    R15,12              RC
+         EXIT  RCHECK ,            get out
+         END   ,                      (bad RACF ACEE)
+*-
+*-       R6    Contains the CHKRWA area address            ml970922
+*-       R2    Contains the WINGACEE control block address
+*-       R7    points to the FILPB
+*-       R4    Contains the address of the RACF ACEE control block
+*-       R3    Contains the access level code (low byte)
+
+         L     R5,TVTOSFWK         ->work area
+
+         IF    ~FILPBRACNOLOG,BEGIN        Normal mode (log=asis)
+         RACROUTE REQUEST=AUTH,                                        X
+               WORKA=(R5),                                             X
+               ENTITY=FILPBDSNAME,                                     X
+               LOG=ASIS,APPL=CHKRJOBN,LOGSTR=CHKRLOGS,     ml970922    X
+               CLASS=RACLASS,                                          X
+               ATTR=(R3),ACEE=(R4),                                    X
+               DSTYPE=M,RACFIND=NO,                                    X
+               GENERIC=ASIS,                                           X
+               RELEASE=1.9,MF=(E,RCHECKMD)
+         END   ,
+         ELSE  BEGIN               nolog mode              ml940323
+         RACROUTE REQUEST=AUTH,                                        X
+               WORKA=(R5),                                             X
+               ENTITY=FILPBDSNAME,                                     X
+               LOG=NONE,           we logged it last time              X
+               CLASS=RACLASS,                                          X
+               ATTR=(R3),ACEE=(R4),                                    X
+               DSTYPE=M,RACFIND=NO,                                    X
+               GENERIC=ASIS,                                           X
+               RELEASE=1.9,MF=(E,RCHECKMD)
+         END
+         PTRACE racheck            Trace RACHECK return code
+         IF    (R15,NZ),BEGIN      Process SAF return codes
+         IF    (R15,EQ,4),BEGIN    SAF-router err, no RACF profile
+*                 if not in racf system, allow read access not write
+*                 this is what OLDIBM did.
+         IF    (R3,EQ,RACF_READ),BEGIN  Read ok w/no profile ml970930
+         CLEAR R15
+         END
+         ELSE  BEGIN               No profile, no write
+         SEGCLR ERRSCB
+         SEGB  'ERRID=BADACCT'
+         SEG   'ERRMSG='''
+         LA    R15,ERRSCB          Address of error segcb
+         LR    R1,R7               Address of FILPB
+         ACALL FMTDSN              Convert file name into message
+         SEG   ': access not permitted.'
+         SEG   ''''                Terminate message
+         SET   TPATERR+TERRMSG     Indicate path-requeu and msg
+         LA    R15,12              RC
+         EXIT  RCHECK ,            get out
+         END
+         END
+         ELSE  BEGIN
+         LM    R15,R0,RCHECKMD     Load racf return and reason codes
+         END   ,
+         END   ,
+         PRETURN (R0)              Return reason code also
+         PEND  ,
+         SPACE ,
+RACLASS  DC    X'07',C'DATASET'    Define racheck class
+         LTORG
+         TITLE 'Log Time of Day'
+** following are duplicates of code in OSFILE, should be moved
+*box
+*
+*  Set current time of day (local) into passed segcb file
+*
+*  On entry:   R15 contains the address of a valid SEGCB.
+*
+*  On exit:    The current time of day has been added
+*
+         SPACE ,
+LOGTIME  PROC  ,
+         LR    R2,R15              MOVE SEGCB POINTER
+         XPUSH ,,12,PTR=R4         Get stack space
+         STCK  TVTSTCK             Current time of day
+         LM    R0,R1,TVTSTCK       Set into parameter registers
+         L     R5,CVTPTR
+         WITH  (CVT,R5),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,TVTSTCK          save adjusted time
+         LR    R15,R4              Move address of work area
+         XCALL FMTNDATE            Convert date            ml960102
+         LA    R1,5(R1)            skip year
+         S     R0,=F'5'             ...
+         SEGB  (R1),(R0),(R2)      Set mm/dd into message
+         LM    R0,R1,TVTSTCK       Set into parameter registers
+         LR    R15,R4              Move address of work area
+         XCALL FMTTIME             Convert time
+         SEGB  (R1),(R0),(R2)      Set into message
+         XPOP  ,,PTR=R4            Restore stack pointer
+         PEND  ,
+         LTORG ,
+         TITLE 'Wings: FMTDSN - Seg data set name'
+*box
+*
+*  FMTDSN - Seg data set name
+*
+*  On entry:   R15 contains the address of a valid SEGCB
+*              R1 contains the address of a FILPB
+*  On exit:    FILPBDSNAME is SEG'd
+*
+         SPACE ,
+FMTDSN   PROC  ,
+         LR    R7,R1               ->FILPB
+         WITH  (FILPB,R7)
+         LA    R1,FILPBDSNAME      Default dsn address start
+         LA    R0,44               Default dsn maximum length
+         IF    ~FILPBFTYPEXACT,BEGIN   DSN is either type WYL or TSO
+         IF    FILPBFTYPTSO,BEGIN
+*-
+*-       Adjust name for TSO format
+*-
+         IF    (FILPBDSACCT,EQ,TVTACCT),BEGIN  acct match
+         LA    R1,FILPBDSNAME+7    Eliminate header
+         LA    R0,44-7             Set maximum length
+         END   ,                      (acct match)
+         END   ,                      (FTYPTSO)
+         IF    FILPBFTYPWYL,BEGIN  WYL-type
+*-
+*-       Adjust name for WYLBUR format
+*-
+         IF    (FILPBDSACCT,EQ,TVTACCT),BEGIN acct match
+         LA    R1,FILPBDSNAME+11   Eliminate header
+         LA    R0,44-11            Set maximum length
+         END   ,                      (acct match)
+         END   ,                      (WYL-type)
+         END   ,                      (~exact)
+         SPACE ,
+         SEGLD (R15)               Set segcb address
+         SEGT  (R1),(R0)           Seg to passed buffer
+         PEND  ,
+         TITLE 'Misc. Data Areas'
+ENQMOD#  ENQ   (*-*,*-*,E,*-*,SYSTEMS),RET=USE,MF=L
+ENQMODL  EQU   ENQMOD#,*-ENQMOD#,C'C'
+         SPACE ,
+DEQMOD#  DEQ   (*-*,*-*,*-*,SYSTEMS),RET=NONE,MF=L
+DEQMODL  EQU   DEQMOD#,*-DEQMOD#,C'C'
+         SPACE ,
+RACCMOD# RACROUTE REQUEST=AUTH, KAREA=*-*,                             X
+               RELEASE=1.9,MF=L
+RACCMODL EQU   RACCMOD#,*-RACCMOD#,C'C'
+         SPACE 2
+RACIMOD# RACROUTE REQUEST=VERIFY,LOC=ANY, KAREA=*-*,                   X
+               RELEASE=1.9,MF=L
+RACIMODL EQU   RACIMOD#,*-RACIMOD#,C'C'
+         SPACE 2
+RACDMOD# RACROUTE REQUEST=DEFINE,RELEASE=1.9,TYPE=DELETE,DSTYPE=N,     *
+               WORKA=*-*,ENTITY=*-*,GENERIC=YES,MF=L
+RACDMODL EQU   RACDMOD#,*-RACDMOD#,C'C'
+         SPACE 2
+RACEMOD# RACROUTE REQUEST=EXTRACT,TYPE=EXTRACT,                        *
+               FIELDS=*-*,RELEASE=1.9,ENTITY=*-*,GENERIC=YES,          *
+               WORKA=*-*,MATCHGN=YES,MF=L
+RACEMODL EQU   RACEMOD#,*-RACEMOD#,C'C'
+         EJECT ,
+*BOX
+*
+*  Final literal pool
+*
+         SPACE 2
+         LTORG ,
+         EJECT ,
+MVSUTIL@ EQU   *-MVSUTILS,,C'N'       Module length
+*-
+*-       Our symbols.
+*-
+         ENTRY SYMMVSUT            Utils' symbol table entries
+         DC    0D'0'               Force double word alignment
+SYMMVSUT DC    CL8'MVSUTILS',A(MVSUTILS,MVSUTIL@)
+         DC    A(0)                End of table
+         END   .

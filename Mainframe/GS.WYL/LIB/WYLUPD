@@ -1,0 +1,554 @@
+;  wylupd - update wylbur source
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLUPD as  "xcall wyl.gs.wyl.lib#wylupd /" rep
+;
+;  command syntax:
+;      wylupd <subsys>
+;
+;  <subsys>:
+;      name of subsystem; there is no default; values allowed are
+;      WYLBUR, TESTWYL, MILTEN, and TESTMIL
+;  <NOPROMPT|PROMPT>:
+;      determines whether to verify actions about to be taken;
+;      default is NOPROMPT for non-destructive acitons, PROMPT for
+;      destructive actions
+;  <DEBUG>:
+;      sets debug mode for this invocation; it will not run, but
+;      will report what it would have run
+;
+;  Updated:
+;
+;  07/22/94  slp  Clean up documentation.
+;  04/08/96  mpd  Add C support
+;  01/28/97  mpd  Fixed get_cat_like to use INTERNAL format
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl boolean x.debug
+  dcl string x.program, x.stem
+  dcl string subsys, prompt
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; initialize variables
+  subsys = ''
+  prompt = 'NO'
+  x.program = 'WYLBUR'
+  x.debug = FALSE
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wylupd tit 'wylupd temporary active' temp
+  x.temp = actno                   ; save temp active file number
+  pick &(x.act)                    ; but go back to original
+
+  ; scan command
+  pcall scan_command (parm_count, parm_string, \
+    subsys, prompt);
+  if (x.program eq 'WYLBUR') x.stem = 'WYL'
+  else x.stem = 'MIL'
+
+  ; get list of modules to update
+  pick &(x.temp)                   ;switch to temp active
+  pcall get_module_lists (subsys)
+  pick &(x.act)                    ;switch back to user active
+
+  ; go update module (or modules)
+  pcall update_all (subsys,prompt)
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+;<.page>
+;
+;  scan parameters passed on invoking command
+;
+proc scan_command (pc,ps,subsys,prompt) \
+  begin
+
+  dcl string token,remain,type
+  dcl string delims
+
+  delims = ' ,;=''"'               ; define parm delimiters
+
+  ;  check for at least one parameter
+  remain = ps
+  if (ps eq '') \
+    begin
+    comm Subsys parameter is required.
+    ps = '?'
+    end
+  if (strip(ps) eq '?') pcall error_msg( \
+    'Command syntax: wylupd <subsys> <NOPROMPT|PROMPT>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan:  <subsys> <NOPROMPT|PROMPT>
+  while (remain ne '') \
+    begin
+    syscall scan_parm(token,remain,type,' ,',delims)
+
+    cases \
+      begin
+      case (upper(token) eq 'WYLBUR') \
+        begin
+        subsys = 'WYLBUR'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'TESTWYL') \
+        begin
+        subsys = 'TESTWYL'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'MILTEN') \
+        begin
+        subsys = 'MILTEN'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'TESTMIL') \
+        begin
+        subsys = 'TESTMIL'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'NOPROMPT') prompt = 'NO'
+      case (upper(token) eq 'PROMPT') prompt = 'YES'
+      case (upper(token) eq 'DEBUG') x.debug = TRUE
+      case (TRUE) pcall error_msg('invalid parm '||token)
+      end
+    end
+  if (subsys eq '') pcall error_msg('subsys parm is required')
+  return(subsys,prompt)
+  end
+
+;<.page>
+;
+;  build list of modules in production subsystem, in test subsystem,
+;  and under user account to validate module names
+;
+proc get_module_lists (subsys) \
+  begin
+
+  pcall get_directory('wyl.gs.&(x.stem).&(x.program).source', 'x.prod')
+;  pcall get_directory('wyl.gs.&(x.stem).&(x.program).c', 'x.cprod')
+
+  pcall get_directory('wyl.gs.&(x.stem).test&(x.stem).source', 'x.test')
+;  pcall get_directory('wyl.gs.&(x.stem).test&(x.stem).c', 'x.ctest')
+  if ((subsys eq 'WYLBUR') or (subsys eq 'MILTEN')) \
+    return                         ; if doing production, done
+
+  pcall get_cat_like('WYL.&(group).&(user).&(x.stem)', 'x.user')
+;  pcall get_directory('wyl.&(group).&(user).&(x.program).c', 'x.cuser')
+
+  if ((bounds('x.user') eq -1) and (bounds('x.cuser') eq -1)) \
+    begin
+      pcall error_msg('no user modules found')
+    end
+
+ end
+
+;<.page>
+;
+;  Get catalog entries matching the stem into array.
+;
+;
+proc get_cat_like(s, arrayname) \
+  begin
+     try quietly dump cat like &(s) internal
+     if (tryattn) pcall attn
+
+     if (~ tryerr) \
+       begin
+          try quietly change 47/235 to '' in all nolist
+          try quietly change 1/2 to '' in all nolist
+          try quietly change '&(s)' to 'WYL' in all nol
+          try quietly del '.'              ; remove red herrings
+          try quietly del '&(program)'     ; that aren't subsystem
+          try quietly del ~ ' '9           ; modules
+          try quietly ch 1/3 to '' nol     ; remove module name prefix
+
+          if (last gt 0) \
+            begin
+              dcl string &(arrayname)[&(lines)]  ; allocate array to hold names
+              dcl string text
+
+              i = 1
+              lno = 0
+              syscall line_next(lno,text)
+
+              while (lno gt 0) \
+                 begin
+                   &(arrayname)[i] = text
+                   syscall line_next(lno,text)
+                   i = i+1
+                 end
+            end
+          try quietly delete first/last  ; clear out working active file
+       end
+    else  \
+        begin
+          try quietly delete first/last  ; clear out working active file
+        end
+  end
+
+;<.page>
+;
+;  Get directory members into array except for
+;  any member named 'DSECT'.
+;
+;
+proc get_directory(s, arrayname) \
+  begin
+     try quietly dump dir for &(s)
+     if (tryattn) pcall attn
+
+     if (~ tryerr) \
+        begin
+          try quietly delete f (3)       ; delete headings
+          try quietly ch 9/235 to '' nol ; remove comments
+
+          if (last gt 0) \
+             begin
+               dcl string &(arrayname)[&(lines)]  ; allocate array to hold names
+               dcl string text
+
+               i = 1
+               lno = 0
+               syscall line_next(lno,text)
+
+               while (lno gt 0) \
+                  begin
+                    &(arrayname)[i] = text
+                    syscall line_next(lno,text)
+                    i = i+1
+                  end
+             end
+          try quietly delete first/last  ; clear out working active file
+        end
+    else  \
+        begin
+          try quietly delete first/last  ; clear out working active file
+        end
+  end
+
+;<.page>
+;
+;  update all modules for this subsystem
+;
+proc update_all (subsys,prompt) \
+  begin
+  dcl number i
+
+  ; if a test system, move from user to test source
+  if (substr(subsys,1,4) eq 'TEST') \
+    begin
+    i = 1
+    while (i le bounds('x.user')) \
+      begin
+      pcall upd_&(x.stem)_module (subsys,x.user[i],prompt)
+      i = i+1
+      end
+
+;    i = 1
+;    while (i le bounds('x.cuser')) \
+;      begin
+;      pcall upd_&(x.stem)_cmodule (subsys,x.cuser[i],prompt)
+;      i = i+1
+;      end
+
+    end
+
+  ; if a production system, move from test to prod source
+  else \
+    begin
+    i = 1
+    while (i le bounds('x.test')) \
+      begin
+      pcall upd_&(x.stem)_module (subsys,x.test[i],prompt)
+      i = i+1
+      end
+    end
+
+  end
+
+;<.page>
+;
+;  move one wylbur module
+;
+proc upd_wyl_module (subsys,module,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  ; make sure the module is in wylbur source
+  found = FALSE
+  i = 1
+  while ((i lt bounds('x.prod')) and (not found)) \
+     begin
+        if (x.prod[i] ne module) i = i+1
+        else found = TRUE
+     end
+
+  if (i gt bounds('x.prod')) pcall error_msg(module||' not found')
+  ;                                okay for now -- replace w/prompt
+
+  if (subsys eq 'WYLBUR') \
+     use wyl.gs.wyl.testwyl.source#&(module) keep
+  else \
+     use WYL&(module) keep
+
+  p ' TITLE '9 (1) nol
+  if (* lt 0) pcall error_msg('No title line in '||module)
+  modname = strip(substr(line(*),1,9))
+  if (modname eq '') pcall error_msg('No name found in line &(line(*))'
+  if ((substr(line(last),9,4) ne ' END ') and  \
+      (substr(line(last),7,6) ne ' $$END ')) \
+    pcall error_msg('No end card found in '||module)
+  p ' IDENT '9 (1) nol
+  if (* gt 0) \
+    begin
+    if (ver(substr(line(*),16,4),'0123456789') eq 0) \
+      putline * &(substr(line(*),1,9))IDENT &(substr(date,21,1)||substr(date,23,3))                &(substr(date,1,17))  (&(user))
+    end
+
+  if (subsys eq 'WYLBUR') \
+    begin
+    if (not x.debug) \
+      begin
+         save wyl.gs.wyl.wylbur.source#&(module) rep
+         scratch wyl.gs.wyl.testwyl.source#&(module)
+         scratch wyl.gs.wyl.testwyl.object#WYL&(module)
+      end
+    else \
+      begin
+         comm save wyl.gs.wyl.wylbur.source#&(module) rep
+         comm scratch wyl.gs.wyl.testwyl.source#&(module)
+         comm scratch wyl.gs.wyl.testwyl.object#WYL&(module)
+      end
+    end
+  else \
+    begin
+    if (not x.debug) \
+      begin
+         save wyl.gs.wyl.testwyl.source#&(module) rep
+         scratch WYL&(module)
+         scratch OBJECT.WYL&(module)
+      end
+    else \
+      begin
+         comm save wyl.gs.wyl.testwyl.source#&(module) rep
+         comm scratch WYL&(module)
+         comm scratch OBJECT.WYL&(module)
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  move one WYLBUR C module
+;
+proc upd_wyl_cmodule (subsys,module,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  ; make sure the module is in wylbur C source
+  found = FALSE
+  i = 1
+  while ((i lt bounds('x.cprod')) and (not found)) \
+     begin
+        if (x.cprod[i] ne module) i = i+1
+        else found = TRUE
+     end
+;  if (i gt bounds('x.cprod')) pcall error_msg(module||' not found')
+;                                okay for now -- replace w/prompt
+
+  if (subsys eq 'WYLBUR') \
+     use wyl.gs.wyl.testwyl.c#&(module) keep
+  else \
+     use WYLBUR.C(&(module)) keep
+
+  if (subsys eq 'WYLBUR') \
+    begin
+    if (not x.debug) \
+      begin
+         save wyl.gs.wyl.wylbur.c#&(module) rep
+         scratch wyl.gs.wyl.testwyl.c#&(module)
+         scratch wyl.gs.wyl.testwyl.c.obj#&(module)
+      end
+    else \
+      begin
+         comm save wyl.gs.wyl.wylbur.c#&(module) rep
+         comm scratch wyl.gs.wyl.testwyl.c#&(module)
+         comm scratch wyl.gs.wyl.testwyl.c.obj#&(module)
+      end
+    end
+  else \
+    begin
+    if (not x.debug) \
+      begin
+         save wyl.gs.wyl.testwyl.c#&(module) rep
+         scratch WYLBUR.C(&(module))
+         scratch WYLBUR.C.OBJ(&(module))
+      end
+    else \
+      begin
+         comm save wyl.gs.wyl.testwyl.c#&(module) rep
+         comm scratch WYLBUR.C(&(module))
+         comm scratch WYLBUR.C.OBJ(&(module))
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+; move one milten module
+;
+proc upd_mil_module (subsys,module,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  ; make sure the module is in milten source
+  found = FALSE
+  i = 1
+  while ((i lt bounds('x.prod')) and (not found)) \
+    begin
+    if (x.prod[i] ne module) i = i + 1
+    else found = TRUE
+    end
+
+  if (i gt bounds('x.prod')) pcall error_msg(module||' not found')
+  ;                                okay for now -- replace w/prompt
+
+  if (subsys eq 'MILTEN') \
+     use wyl.gs.mil.testmil.source#&(module) keep
+  else \
+     use MIL&(module) keep
+
+  p ' TITLE '9 (1) nol
+  if (* lt 0) pcall error_msg('No title line in '||module)
+  modname = strip(substr(line(*),1,9))
+  if (modname eq '') pcall error_msg('No name found in line &(line(*))'
+  if ((substr(line(last),9,4) ne ' END ') and  \
+      (substr(line(last),7,6) ne ' $$END ')) \
+    pcall error_msg('No end card found in '||module)
+  p ' IDENT '9 (1) nol
+  if (* gt 0) \
+    begin
+    if (ver(substr(line(*),16,4),'0123456789') eq 0) \
+      putline * &(substr(line(*),1,9))IDENT &(substr(date,21,1)||substr(date,23,3))                &(substr(date,1,17))  (&(user))
+    end
+
+  if (subsys eq 'MILTEN') \
+    begin                          ; move from testmil to milten
+    if (not x.debug) \
+      begin
+      save wyl.gs.mil.milten.source#&(module) rep
+      scratch wyl.gs.mil.testmil.source#&(module)
+      scratch wyl.gs.mil.testmil.object#MIL&(module)
+      end
+    else \
+      begin
+      l ' IDENT '9 (1) unn
+      comm save milten.source#&(module)
+      comm scr testmil.source#&(module) and testmil.object#MIL&(module)
+      end
+    end
+  else \
+    begin                          ; move from user to testmil
+    if (not x.debug) \
+      begin
+      save wyl.gs.mil.testmil.source#&(module) rep
+      scratch MIL&(module)
+      scratch OBJECT.MIL&(module)
+      end
+    else \
+      begin
+      l ' IDENT '9 (1) unn
+      comm save testmil.source#&(module)
+      comm scr MIL#&(module) and OBJECT#MIL&(module)
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+xpause
+  xreturn err errid=&(ERRID) errmsg='Exec wylupd failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WUPDERR errmsg='&(msg)'
+  end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=wupderr errmsg="wylupd failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

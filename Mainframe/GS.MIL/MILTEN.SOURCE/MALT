@@ -1,0 +1,408 @@
+MALT     TITLE 'MILTEN''s Memory Allocation Routines'                           
+*******************************************************************             
+*                                                                 *             
+*     MILTEN/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+MILMALT  CSECT                                                                  
+MALT     IDENT 2047                10:16:23 02/16/02  (SLP)                     
+         REGS  ,,FSR,,,,,,BR,,MPGR,(MATR,LSR),CVR,SPR,RAR                       
+         EJECT                                                                  
+         PUSH  DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+CVDSECT  DSECT                                                                  
+         COPY  CV                                                               
+         EJECT                                                                  
+CELLBLOK RECORD BEGIN                                                           
+         CELLBLOK DSECT=YES                                                     
+         END                                                                    
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+TRC#     EQU   100                 No. of trace entries                         
+         SPACE 2                                                                
+TRC      RECORD BEGIN                                                           
+TRCCLCK  DS    D                   Stck clock                                   
+*                                                                               
+TRCTYPE  DS    0C                  Trace type:                                  
+*                                    g=getcore, f=freecore                      
+TRCADDR  DS    A                   Memory address                               
+TRCRTN   DS    A                   Callers address                              
+         END                                                                    
+         EJECT                                                                  
+         TITLE 'Memory Allocation Routines'                                     
+*box                                                                            
+*                                                                               
+*  COREINIT -- Routine to do memory management initialization.                  
+*                                                                               
+COREINIT XPROC                                                                  
+         GETMAIN R,LV=CVRCLEN*2    force 'no core' abend if close               
+         FREEMAIN R,A=(1),LV=CVRCLEN*2                                          
+*                                                                               
+         GETMAIN R,LV=CVRCLEN      Get reserved core                            
+         ST    R1,CVRCLOC          Save address                                 
+*                                                                               
+         LA    R0,L'TRC                                                         
+         LA    R1,TRC#                                                          
+         LA    R15,TRCP                                                         
+         VCALL GETTRC              Get trace table                              
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  GETCORE -- Routine to get memory.                                            
+*    (Note: This routine can also be called from a subtask.)                    
+*                                                                               
+*    On entry:                                                                  
+*      R0 - no. of bytes needed                                                 
+*                                                                               
+*    On exit:                                                                   
+*      R0 - no. of bytes obtained (ge needed)                                   
+*      R1 - addr of memory                                                      
+*                                                                               
+*-                                                                              
+GETCORE  XPROC ,                                                                
+         LR    R2,RAR                                                           
+         SLR   R1,R1                                                            
+         ACALL NGETCORE                                                         
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  NGETCORE -- Routine to get memory.                                           
+*    (Note: This routine can also be called from a subtask and                  
+*           MUST BE REENTRANT!)                                                 
+*                                                                               
+*    On entry:                                                                  
+*      R0 - no. of bytes needed                                                 
+*      R1 - subpool number to obtain the core from                              
+*      R2 - Identifier of the requestor.                                        
+*                                                                               
+*    On exit:                                                                   
+*      R0 - no. of bytes obtained (ge needed)                                   
+*      R1 - addr of memory                                                      
+*                                                                               
+NCOREWA  RECORD BEGIN                                                           
+NCORESP  DS    F                   Subpool                                      
+         END                                                                    
+*-                                                                              
+NGETCORE XPROC NCOREWA                                                          
+         LR    R9,R2               Save requestor ID                            
+         ST    R1,NCORESP          Save subpool                                 
+*                                                                               
+         FAIL  ((R0,NP),OR,(R0,GT,128*1024)),'Bad GETCORE length'               
+         LR    R6,R0                                                            
+         AH    R6,=H'7'                                                         
+         N     R6,=F'-8'           Doubleword                                   
+*                                                                               
+         INCRR R2,R3,CVMPGCNT      Count call                                   
+NGETCMLP LM    R2,R3,CVMPGCUR      Current, max no. of bytes used               
+         LR    R4,R2                                                            
+         AR    R4,R6               New current                                  
+         LR    R5,R3                                                            
+         FLOOR R5,R4               Max so far                                   
+         CDS   R2,R4,CVMPGCUR      Update cur, max                              
+         BNZ   NGETCMLP                                                         
+*                                                                               
+         AH    R6,=H'32'           Prefix and Suffix overhead                   
+*                                                                               
+NGETCLP  L     R5,CVRCLOC          Reserved core addr                           
+         LC    R3,NCORESP+3        Get subpool                                  
+         GETMAIN RC,LV=(R6),SP=(R3),LOC=ANY                                     
+         IF    (R15,NZ),BEGIN      Out of memory...                             
+         FAIL  (R5,Z),'Out of memory'                                           
+         CLEAR R15                                                              
+         CS    R5,R15,CVRCLOC      Dequeue reserved memory                      
+         BNZ   NGETCLP             Something changed                            
+         FREEMAIN R,A=(R5),LV=CVRCLEN  release reserved memory                  
+         INCR  R15,CVMNLOWM        Count low core                               
+         B     NGETCLP                                                          
+         END                                                                    
+*                                                                               
+         LR    R7,R1               Addr of our memory                           
+         LA    R7,@R7                                                           
+         MVC   @R7(4),=C'MEMS'     Identifier                                   
+         ST    R6,@R7+4            Len                                          
+         ST    R9,@R7+8            Caller's addr (for debugging)                
+         MVC   12(4,R7),NCORESP    Save subpool number                          
+         LA    R15,@R6(R7)                                                      
+         SH    R15,=H'16'                                                       
+         XC    0(16,R15),0(R15)    Zero out trailer                             
+         MVC   @R15(4),=C'MEND'    Ending identifier                            
+*                                                                               
+         LA    R7,@R7+16           Skip past memory prefix                      
+*                                                                               
+         XTRACE TRCP                                                            
+         IF    NZ,BEGIN                                                         
+         WITH  (TRC,R15)                                                        
+         ST    R7,TRCADDR          Memory addr                                  
+         ST    R9,TRCRTN           Caller's addr                                
+         MVI   TRCTYPE,C'G'        G = getcore                                  
+         END                                                                    
+*                                                                               
+         LR    R1,R7                                                            
+         LR    R0,R6                                                            
+         SH    R0,=H'32'                                                        
+         CLEAR R15                 (Neatness)                                   
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  FREECORE -- Routine to release memory.                                       
+*    (Note: This routine can also be called from a subtask.)                    
+*                                                                               
+*    On entry:                                                                  
+*      R1 - address of memory being released                                    
+*                                                                               
+FREECORE XPROC                                                                  
+         LR    R15,RAR                                                          
+         VCALL NFRECORE                                                         
+         CLEAR R0,R1,R15           (Neatness)                                   
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  NFRECORE -- Routine to release memory.                                       
+*    (Note: This routine can also be called from a subtask.)                    
+*                                                                               
+*    On entry:                                                                  
+*      R1 - address of memory being released                                    
+*      R15 - address of caller (for tracing)                                    
+*                                                                               
+NFRECORE XPROC ,                                                                
+         LR    R9,R15              Save caller for tracing                      
+*                                                                               
+         LR    R7,R1                                                            
+         SH    R7,=H'16'           Backup for prefix                            
+         FAIL  (@R7,NE,'MEMS'),'FREECORE error'                                 
+         L     R6,@R7+4            Len                                          
+*                                                                               
+         LA    R15,@R6(R7)                                                      
+         SH    R15,=H'16'                                                       
+         IF    (@R15,NE,'MEND'),BEGIN                                           
+         MVC   CVNIZSAV(16),0(R15)                                              
+         FAIL  (@R15,NE,'MEND'),'FREECORE overrun error'                        
+         END                                                                    
+         MVC   @R7(4),=C'FRMX'     Tag as free                                  
+         MVC   @R15(4),=C'FEND'                                                 
+         L     R2,12(,R7)          Get subpool number                           
+         FREEMAIN RU,A=(R7),LV=(R6),SP=(R2)  Release memory                     
+*                                                                               
+         IF    ('LT R2,CVRCLOC',Z),BEGIN  regain reserve...                     
+         GETMAIN RC,LV=CVRCLEN                                                  
+         IF    (R15,NZ),EXIT       Can't, scram                                 
+         LR    R3,R1                                                            
+         CS    R2,R3,CVRCLOC       Re-queue reserve                             
+         IF    Z,EXIT              A-ok                                         
+         FREEMAIN R,A=(R3),LV=CVRCLEN                                           
+         END                                                                    
+*                                                                               
+FREECMLP L     R2,CVMPGCUR         Current no. of bytes allocated               
+         LR    R3,R2                                                            
+         SR    R3,R6               Deduct amount released                       
+         LA    R3,@R3+32           (Not including header)                       
+         CS    R2,R3,CVMPGCUR                                                   
+         BNZ   FREECMLP                                                         
+*                                                                               
+         XTRACE TRCP                                                            
+         IF    NZ,BEGIN                                                         
+         WITH  (TRC,R15)                                                        
+         LA    R1,@R7+16                                                        
+         ST    R1,TRCADDR          Memory addr                                  
+         ST    R9,TRCRTN           Caller's addr                                
+         MVI   TRCTYPE,C'F'        F = freecore                                 
+         END                                                                    
+*                                                                               
+         CLEAR R0,R1,R15           (Neatness)                                   
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*  trace table ptrs...                                                          
+TRCP     DC    4A(0)               Trace ptrs: len,cur,first,end                
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  GETPOOL -- Get a cell from a pool.                                           
+*                                                                               
+*    On entry:                                                                  
+*      R15 - points to cell block.                                              
+*                                                                               
+*    On exit:                                                                   
+*      R0 - size of cell                                                        
+*      R1 - addr of cell                                                        
+*                                                                               
+*    Note: This code is from the IBM ESA/390 Principles                         
+*          of Operation pg A-48 with embellishments for                         
+*          counters.                                                            
+*                                                                               
+*          When we make use of trimming the free list                           
+*          back, we'll need to switch to the Perform                            
+*          Locked Operation instruction.                                        
+*                                                                               
+GETPOOL  XPROC                                                                  
+         FAIL  (@R15,NE,'CELLBLOK'),GETPOOL,'Not a cell block'                  
+         LR    R6,R15                                                           
+         WITH  (CELLBLOK,R6)                                                    
+         LM    R2,R3,CELFHDR                                                    
+GTPLAGN  LABEL                                                                  
+         IF    (R2,NZ),BEGIN                                                    
+         L     R0,0(,R2)                                                        
+         LR    R1,R3               Copy the counter                             
+         CDS   2,0,CELFHDR         Update the free list                         
+         BNE   GTPLAGN             Try again if update failed                   
+         LR    R1,R2               Copy address to R1                           
+*                                                                               
+*  Update the count of free cells                                               
+*                                                                               
+         LA    R2,1                Update the count of                          
+         L     R3,CELFCNT            free cells                                 
+GTPUPD0  LR    R4,R3                                                            
+         SR    R4,R2                                                            
+         CS    R3,R4,CELFCNT                                                    
+         BNE   GTPUPD0                                                          
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         L     R0,CELSIZE          Size we need                                 
+         L     R3,CELSUBP          and subpool                                  
+*gen                                                                            
+         GETMAIN RU,LV=(0),SP=(R3),LOC=ANY  Get memory                          
+*nogen                                                                          
+         LA    R2,1                Update the count of                          
+         L     R3,CEL#GET            GETMAINs                                   
+GTPUPD1  LR    R4,R3                                                            
+         AR    R4,R2                                                            
+         CS    R3,R4,CEL#GET                                                    
+         BNE   GTPUPD1                                                          
+         END                                                                    
+*                                                                               
+* Update the count of GETs for this pool                                        
+*                                                                               
+         LA    R2,1                Update the count of                          
+         L     R3,CEL#REQ            requests                                   
+GTPUPD2  LR    R4,R3                                                            
+         AR    R4,R2                                                            
+         CS    R3,R4,CEL#REQ                                                    
+         BNE   GTPUPD2                                                          
+*                                                                               
+         L     R0,CELSIZE                                                       
+         PEND                                                                   
+         QLTORG ,                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  FREEPOOL -- Release cell                                                     
+*                                                                               
+*    On entry:                                                                  
+*      R1  - address of cell being released                                     
+*      R15 - address of cell block                                              
+*                                                                               
+*    Note: This code is from the IBM ESA/390 Principles                         
+*          of Operation pg A-48 with embellishments for                         
+*          counters.                                                            
+*                                                                               
+*          When we make use of trimming the free list                           
+*          back, we'll need to switch to the Perform                            
+*          Locked Operation instruction.                                        
+*                                                                               
+FREEPOOL XPROC                                                                  
+         FAIL  (@R15,NE,'CELLBLOK'),FREEPOOL,'Not a cell block'                 
+         LR    R6,R15                                                           
+         WITH  (CELLBLOK,R6)                                                    
+         LR    R2,R1               Copy address                                 
+         LM    R0,R1,CELFHDR                                                    
+FREEAGN  ST    R0,0(,R2)           Link element to list head                    
+         LR    R3,R1                                                            
+         BCTR  R3,0                Decrement header counter                     
+         CDS   0,2,CELFHDR         Put at head of list                          
+         BNE   FREEAGN             Try again if failed                          
+*                                                                               
+*  Update the count of free cells                                               
+*                                                                               
+         LA    R2,1                Update the count of                          
+         L     R3,CELFCNT            free cells                                 
+FREEUPD0 LR    R4,R3                                                            
+         AR    R4,R2                                                            
+         CS    R3,R4,CELFCNT                                                    
+         BNE   FREEUPD0                                                         
+*                                                                               
+         PEND                                                                   
+         QLTORG ,                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  COREFMT -- Routine to do control block formatting.                           
+*                                                                               
+*    On entry:                                                                  
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+COREFMT  XPROC                                                                  
+         LR    R7,R15              Segcb ptr                                    
+         WITH  (SEGCB,R7)          ##                                           
+         SEGDEF (R7)                                                            
+*                                                                               
+         SEGWR 'Memory allocation:'                                             
+         SEGWR CVBLANKS,1                                                       
+*                                                                               
+         SEGDC L:CVMNLOWM                                                       
+         SEGB  ' low memory,'                                                   
+         SEGDC L:CVMNNOM                                                        
+         SEGWR ' no memory'                                                     
+         SEGWR CVBLANKS,1                                                       
+*                                                                               
+         SEGB  'Buffers:'                                                       
+         CLEAR R14                                                              
+         L     R15,CVMPGCUR                                                     
+         LA    R15,@R15+512                                                     
+         D     R14,=F'1024'                                                     
+         SEGDC (R15),3                                                          
+         SEG   'K paged ('                                                      
+         CLEAR R14                                                              
+         L     R15,CVMPGMAX                                                     
+         LA    R15,@R15+512                                                     
+         D     R14,=F'1024'                                                     
+         SEGDC (R15),3                                                          
+         SEGB  'K max),'                                                        
+         SEGDC L:CVMPGCNT,6                                                     
+         SEGWR ' requests'                                                      
+*                                                                               
+         SEGWR CVBLANKS,2                                                       
+         SEGWR CVBLANKS,2                                                       
+         SEGWR 'Memory trace table:'                                            
+         L     R15,=A(TRCP)                                                     
+         LM    R3,R6,@R15          R3=len, r4=next, r5=first, r6=end            
+         LOOP  BEGIN                                                            
+         SR    R4,R3               Back up                                      
+         IF    (R4,LT,R5),'LR R4,R6; SR R4,R3'  last                            
+         WITH  (TRC,R4)            ##                                           
+         IF    (TRCCLCK,Z),EXIT    All done                                     
+         LM    R0,R1,TRCCLCK                                                    
+         PUSH  11,PTR=R15          l'hh:mm:ss.hh                                
+         VCALL FMTTIME                                                          
+         SEGB  (R1),(R0)                                                        
+         POP   11                                                               
+         SETMSG '????????'                                                      
+         IF    (TRCTYPE,EQ,'G'),'LA R1,=C"GETCORE "'                            
+         IF    (TRCTYPE,EQ,'F'),'LA R1,=C"FREECORE"'                            
+         SEGB  (R1),(R0)                                                        
+         SEGHX L:TRCADDR,8                                                      
+         SEG   ' caller='                                                       
+         L     R1,TRCRTN                                                        
+         LA    R15,SEGCB                                                        
+         VCALL SEGPSW                                                           
+*                                                                               
+         SEGWR                                                                  
+         L     R15,=A(TRCP)                                                     
+         C     R4,@R15+4                                                        
+         UNTIL EQ,END                                                           
+*                                                                               
+         PEND                                                                   
+*                                                                               
+         END   .                                                                

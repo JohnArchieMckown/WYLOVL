@@ -1,0 +1,1660 @@
+; BITMAIL - BITNET mail exec
+;
+; Saved as WYL.GS.NET.MAILEXEC#BITMAIL
+;
+; Process incoming Bitnet mail from JES2 queue
+;
+; On entry:
+;
+;   node_name   - our node name
+;   domain_name - our domain-style name
+;   postmast    - address (ONE ONLY) which receives mail to postmaster
+;   bounce      - addresses which receive mail bounce info
+;   maint       - addresses which receive processing error info
+;   options     - option string
+;                 'debug'   - scan mail but don't process it
+;                 'verbose' - turns on extra logging
+;                 'save'    - save backup copy of mail
+;
+; Modifications:
+;   01/10/89  jws  New version
+;   03/01/89  jws  Fix BSMTP mail error loop
+;   03/10/89  jws  Fix up '.EARN' addresses
+;   05/30/89  jws  Mail bounce changes; misc changes
+;   06/13/89  jws  Change from address editing
+;   06/29/89  jws  Handle user%host@stanford.edu
+;   06/30/89  jws  hdr/nohdr option on mail command
+;   07/19/89  jws  allow wrapped bsmtp header lines
+;   09/21/89  jws  allow 'user @ host' in BSMTP header
+;   01/10/90  jws  Keep mail from HONE systems
+;   01/24/90  jws  Fix for bad BSMTP mail loop; wont_fit change
+;   01/25/90  jws  Fix for mail id with single quote
+;   03/19/90  jws  Take out 3-byte userid check
+;   10/29/90  jws  Check for 'mail not sent' error code
+;   03/05/91  jws  Recognize 5-digit job number
+;   04/10/91  jws  Changes for new VMFILE, NETDATA changes
+;   08/20/91  jws  Don't mail Netdata/Diskdump files with control chars
+;   11/05/91  jws  Check for ROUTTAB mail
+;   01/28/92  jws  More checking for Orvyl failure
+;   03/16/92  jws  Check for null bsmtp mail
+;   03/20/92  jws  Handle binary files to pseudo-nodes (suwatson, etc)
+;   08/05/92  jws  Handle SYSA as node name (get around Wylbur bug)
+;   04/14/93  jws  Don't bounce mail to MAILER back to sender (avoid loops)
+;   02/18/94  jws  Turn off list archive
+;   05/05/94  jws  Batch internet mail by host name
+;   01/16/96  jws  Check for 'errors-to' in header
+;   01/23/96  jws  Log mail to '.bitnet' address
+;   05/31/96  jws  Take out pub.bitnet_hosts refs, turn off logging
+
+xproc (node_name,domain_name,postmast,bounce,maint,options) begin
+
+   dcl str  x.jobno, x.rcpt[250]
+   dcl num  x.exec_errs, x.bitmailq_time
+   dcl bool x.debug, x.save, x.verbose, x.in_orvyl
+
+   x.max_exec_errs = 10
+
+   x.start_date = sub(date,10,8)   ;current date
+
+; Save calling parms and scan options
+
+   x.node_name = upp(node_name)
+   x.domain_name = domain_name
+   x.postmast = postmast
+   x.bounce = bounce
+   x.maint = maint
+
+   stemp = low(options)
+   opt = ''
+   while (strip(stemp) ne '') begin
+      syscall scan(opt,stemp)
+      if (match('debug',opt)) \
+         x.debug = true
+      elseif (match('verbose',opt)) \
+         x.verbose = true
+      elseif (match('save',opt)) \
+         x.save = true
+      else begin
+         comm &(opt) - Invalid parm
+         xreturn
+      end
+   end
+
+; Open working active files
+
+   open mailact                    ;mail text
+   x.mailact = actno
+   open scanhdr                    ;scan_mailhdr output file
+   x.scanhdr = actno
+   open getmail                    ;$GETMAIL response lines
+   x.getmail = actno
+;; open bitlog
+;; x.bitlog = actno
+;; try use wyl.gs.net.bitmail.log
+
+; Enable error routine (return here after exec error)
+
+error_retry:
+   if (group eq 'GS') \
+      on error cmd = 'pcall exec_error' reenable
+;<.page>
+;;
+;; Main loop - get mail file from JES2 and process it
+;;
+
+next_job:
+
+; Poll JES2 for mail job; on return, job info returned in x. variables
+
+   comm
+   show cost
+   comm
+
+   pick &(x.mailact)
+   quiet try del all
+   pcall get_job
+
+; Initialize job info variables
+
+   x.return = x.org_addr
+   x.reply  = x.org_addr
+   x.errors_to = x.org_addr
+   x.reply_name = ''
+   x.subject = ''
+   x.num_rcpt = 0
+   x.keep_job = false
+
+; Fetch job
+
+   try fetch &(x.jobno) sysout=e
+   if (lines eq 0) begin
+      if (~x.debug) pcall cant_mail ('No lines after FETCH')
+      goto next_job
+   end
+   if (~x.debug) \
+      try alter &(x.jobno) sysout=e to prio l
+
+; Convert job if DISKDUMP or NETDATA format
+
+   x.vmfile = false
+   x.netdata = false
+   if (sub(line(f),1,4) eq s'02'||'CMS' or \
+         sub(line(f),2,7) eq '\INMR01') begin
+      x.vmfile = true
+      if (sub(line(f),1,4) eq s'02'||'CMS') \
+         x.subject = strip(sub(line(f),58,8)) || ' ' || \
+         strip(sub(line(f),66,8))
+      else \
+         x.netdata = true
+
+      if (~orvyl_up) begin
+         pcall requeue_job
+         goto next_job
+      end
+
+      vmfile_fuid = ''             ;From userid
+      vmfile_tuid = ''             ;To userid
+      vmfile_dsorg = ''            ;DSORG if not PS
+      vmfile_dsn = ''              ;Filename
+      vmfile_filemode = ''         ;CMS filemode character
+      vmfile_notify = false        ;Notify record found
+
+      stemp = line(f)
+      x.in_orvyl = true
+      call vmfile clr
+      x.in_orvyl = false
+
+      if (~orvyl_up) begin
+         pcall requeue_job
+         goto next_job
+      end
+
+      show vars like vmfile        ;** TEMP **
+
+      if (vmfile_filemode ne '') begin
+         vmfile_dsn = sub(vmfile_dsn,3)
+         vmfile_dsn = translate(vmfile_dsn,' ','.')
+      end
+
+      if (vmfile_dsn ne '') \
+         x.subject = 'File '||vmfile_dsn
+
+;    Get origin and target userid from NETDATA info
+
+      if (x.org_user eq 'UNKNOWN' and vmfile_fuid ne '') begin
+         x.org_user = vmfile_fuid
+         x.return = vmfile_fuid||'@'||x.org_node
+         x.reply = x.return
+      end
+
+      if ((x.dest_user eq 'UNKNOWN' or x.dest_user eq 'MAILER') \
+            and vmfile_tuid ne '') begin
+         x.dest_user = vmfile_tuid
+         x.dest_addr = x.dest_user||'@'||x.dest_node
+      end
+
+;    Check if need to keep Netdata/Diskdump file
+
+      if (x.vmfile and ~vmfile_notify) begin
+
+         x.binary = false
+         stemp = xrange(s'06',s'0a') || xrange(s'0e',s'24') || xrange(s'28',s'3f')
+         if (find(line(f),stemp) ne 0) \
+            x.binary = true
+
+         if (vmfile_dsorg ne '' or x.binary) begin
+
+            ; The next code traps binary files for the pseudo-bitnet nodes (ie suwatson)
+
+            if (x.dest_node ne x.node_name) begin
+               try del all
+               putline 1 Binary data file &(vmfile_dsn)
+               putline 99000 Binary data file cannot to transmitted to this system.
+               pcall mail_error (x.dest_addr)
+               try send gg.jws JOB &(x.jobno)  Binary file for &(x.dest_addr)
+               try send &(x.dest_addr) \
+                  Bitnet data file from &(x.org_user)@&(x.org_node) could not be delivered.
+               goto next_job
+            end
+
+            $WTJ &(x.jobno) File &(vmfile_dsn) from &(x.org_user)@&(x.org_node)
+            stemp = x.dest_user
+            if (size(stemp) eq 6 and sub(stemp,3,1) eq '.') \
+               stemp = sub(stemp,1,2)||'$'||sub(stemp,4)
+            try alt &(x.jobno) sysout=s writer=&(stemp) nocheck
+            try send &(x.dest_user) \
+               JOB &(x.jobno) contains file &(vmfile_dsn) received from &(x.org_user)@&(x.org_node)
+            goto next_job
+         end
+      end
+
+;    Check if file can't be mailed
+
+      if (lines eq 0 or line(f) eq stemp) begin
+         if (vmfile_notify) goto next_job
+         if (vmfile_dsorg ne '') begin
+            if (x.dest_user ne 'MAILER') \
+               try send &(x.dest_user) \
+               JOB &(x.jobno) contains file &(vmfile_dsn) from &(x.org_user)@&(x.org_node)
+            goto next_job
+         end
+         pcall cant_mail('VMFILE convert error')
+         goto next_job
+      end
+
+   end
+
+; If 'save' option specified, save backup copy of mail
+
+   if (x.save) begin
+      putline .001 &(x.getmail_info)
+      try put bitmail.save append
+      del .001
+   end
+
+; Discard mail if BSMTP reply file with no error message
+
+   if (sub(line(1),1,3) eq '220' and \
+         sub(line(last),1,3) eq '221') begin
+      purge = false
+      if (x.dest_user eq 'MAILER') \
+         purge = true
+      p 'reason mailed to sender'(1) nol
+      if (* gt 0) \
+         purge = true
+      p '4'1 or '5'1 nolist   ;look for 4xx or 5xx messages
+      if (* lt 1) \
+         purge = true
+
+      if (purge) begin
+         if (~x.debug) \
+            purge &(x.jobno) sysout=e
+         goto next_job
+      end
+
+      try mail to &(x.maint) \
+         sub 'Job &(x.jobno) BSMTP reply file to &(x.dest_addr)'
+   end
+
+; Process BSMTP envelope if present
+
+   x.bsmtp = false
+   if (x.dest_user eq 'MAILER' and \
+         upp(sub(line(f),1,4)) eq 'HELO') begin
+      rc = ''
+      pcall scan_bsmtp(rc)
+      if (rc ne 'OK') \
+         goto next_job
+      if (lines eq 0) begin
+         pcall keep_job('Null BSMTP mail file')
+         goto next_job
+      end
+      x.bsmtp = true
+   end
+
+; Process RFC-822 mail header
+
+   pcall scan_header
+
+; Edit source addresses
+
+   if (x.return ne '') \
+      pcall fix_return_addr (x.return)
+
+   if (x.errors_to ne '') \
+      pcall fix_return_addr (x.errors_to)
+   else \
+      x.errors_to = x.return
+
+;; if (x.return ne x.errors_to) \
+;;    comm  ** RETURN PATH &(x.return) DIFFERENT FROM ERRORS-TO &(x.errors_to)
+
+   pcall fix_from_addr (x.reply)
+   pcall fix_string (x.reply)
+
+; Get the recipient address if not BSMTP mail.
+
+   if (~x.bsmtp) \
+      pcall get_rcpt
+
+; Send mail to each recipient
+
+   n = 1
+   while (n le x.num_rcpt) begin
+      if (rmatch(x.rcpt[n],'.bitnet','c') or \
+         rmatch(x.rcpt[n],'@rlg','c') or \
+         rmatch(x.rcpt[n],'@stanford','c') or \
+         rmatch(x.rcpt[n],'@forsythe','c')) \
+      ;;;pcall log_bitnet(x.rcpt[n])
+      pcall fix_rcpt_addr(x.rcpt[n])
+      n = n+1
+   end
+
+   n = 1
+   while (n le x.num_rcpt) begin
+      pcall send_mail ( x.rcpt[n], n )
+      n = n+1
+   end
+
+; Purge job if keep flag not set
+
+   if (~x.keep_job and ~x.debug) \
+      quiet try purge &(x.jobno) sysout=e
+
+   goto next_job
+
+end
+;<.page>
+;;
+;; GET_JOB - get next mail job from queue
+;;
+
+proc get_job () begin
+
+   asave = actno
+   pick &(x.getmail)
+   x.jobno = ''
+
+   while (lines eq 0) begin
+      pcall set_line ('BITMAIL  Idle')
+
+      if (x.debug) wait 2
+
+      ; If more than 5 minutes since last pass through jobs in
+      ; BITMAILQ, try them now.  Otherwise poll main queue.
+
+      minutes = sub(time,1,2)*60 + sub(time,4,2)
+      if (abs(minutes-x.bitmailq_time) ge 5) begin
+         x.bitmailq_time = minutes
+         try dump $getmail dest=bitmailq
+      end
+
+      else \
+         try dump $getmail wait=300
+
+
+      if (sub(date,10,8) ne x.start_date) begin  ;Force reload
+         ses.return_code = 'RELOAD'              ; if date changed
+         xreturn
+      end
+
+      quiet try del ~'MAIL '1
+
+      if (lines eq 0) wait 2
+
+   end
+
+   comm
+   comm
+   comm &(xdate)
+   comm
+   list f unn
+
+   x.getmail_info = upp(line(f))
+   del f
+
+   x.getmail_info = trans(x.getmail_info,'??','''"')   ;get rid of any quotes
+
+   x.jobno = strip(sub(x.getmail_info,9,5))
+   x.jobname = strip(sub(x.getmail_info,15,8))
+   x.org_node = strip(sub(x.getmail_info,24,8))
+   x.org_user = strip(sub(x.getmail_info,33,8))
+   if (x.org_user eq '') \
+      x.org_user = 'UNKNOWN'
+   x.org_addr = x.org_user||'@'||x.org_node
+   x.dest_user = strip(sub(x.getmail_info,42,8))
+   x.dest_node = strip(sub(x.getmail_info,51,8))
+   if (x.dest_node eq 'FORSYTHE') x.dest_node = 'STANFORD'
+   if (x.dest_node eq 'SYSA') x.dest_node = 'STANFORD'
+   if (x.dest_user eq 'MAILER' or x.dest_user eq 'UNKNOWN') \
+      x.dest_node = x.node_name
+   x.dest_addr = x.dest_user||'@'||x.dest_node
+
+   pcall set_line ('Mailing job &(x.jobno)')
+
+   pick &(asave)
+end
+;<.page>
+;;
+;;  SEND_MAIL -- send mail file to specified recipient
+;;
+;;  Parms are   rcpt - recipient address
+;;              rptr - pointer to x.rcpt array (added for the
+;;                      patch to group mail by host)
+
+proc send_mail (rcpt, rptr) begin
+
+   if (rcpt eq '') return
+
+; Clean up active file and edit recipient address
+
+   del 99000/99999
+
+; Check for mail loop
+
+   quiet count c'received: by &(x.domain_name)' and '&(sub(xdate,1,14))' in f/1000
+   if (count gt 10) begin
+      pcall cant_mail ('Too many received lines--possible mail loop')
+      return
+   end
+
+; Check for mail to MAILER
+
+   if (rcpt eq 'MAILER') begin
+      pcall cant_mail ('Invalid mail to mailer')
+      return
+   end
+
+; Check for mail to ROUTTAB (BITNET routing table)
+
+   if (rcpt eq 'ROUTTAB') begin
+      alt &(x.jobno) dest r99 nocheck
+      try $WTJ &(x.jobno) Bitnet routing table
+      x.keep_job = true
+      try send gg.jws JOB &(x.jobno) ROUTTAB info
+      return
+   end
+
+; Check for mail to BITINFO archive account
+
+   if (rcpt eq 'GA.PUB') begin
+      asave = actno
+      if (~x.debug) \
+         try xcall wyl.gs.net.bitinfo.exec /&(x.subject)
+      pick &(asave)
+      return
+   end
+
+; Check for mail to list archive
+
+;; if (ind(' IBMNETS LINKFAIL LIAISON APPLICAT LICENSE GGUIDE INFONETS S-COMPUT ', \
+;;       ' '||rcpt||' ') gt 0 or \
+;;       rmatch(rcpt,'-L','c')) begin
+;;    pcall archive (rcpt)
+;;    return
+;; end
+
+; Check for mail to system or to postmaster
+
+   if (ind(' POSTMASTER POSTMAST POSTMAN HELP BITINFO SYSTEM OPERATOR \
+         GS.NET GS.WYL ',' '||rcpt||' ') gt 0) begin
+      if (x.subject eq '') \
+         x.subject = 'BITNET Mail to &(rcpt)'
+      rcpt = x.postmast
+   end
+
+; Convert gg$uuu to gg.uuu so wylbur will accept it
+
+   if (size(rcpt) eq 6 and \
+         sub(rcpt,3,1) eq '$') begin
+      stemp = sub(rcpt,1,2)||'.'||sub(rcpt,4,3)
+      rcpt = stemp
+;;    quiet try sho name &(stemp)
+;;    if (~tryerror) \
+;;       rcpt = stemp
+   end
+
+; If 5-character id, see if it matches a gg.uuu account
+
+   if (size(rcpt) eq 5) begin
+      stemp = sub(rcpt,1,2)||'.'||sub(rcpt,3,3)
+      quiet try sho name &(stemp)
+      if (~tryerror) \
+         rcpt = stemp
+   end
+
+; Catch 3-char id before Wylbur converts it to GS.xxx
+
+;; if (size(rcpt) eq 3 and ind(rcpt,'@') eq 0) begin
+;;    putline 99000 Unknown user id: &(rcpt)
+;;    pcall mail_error(rcpt)
+;;    return
+;; end
+
+; Add 'Received:' line if network mail and mail header present
+
+   if (ind(rcpt,'@') gt 0 and x.mailhdr) \
+      putline .001 Received: by &(x.domain_name); &(xdate)
+   else \
+      del .001
+
+; Set return option for mail command
+
+   if (x.return ne '' and x.return eq x.reply) \
+      retopt = ''
+   else \
+      retopt = "return '" || x.return || "'"
+
+; Avoid Wylbur command length overflow
+
+   if (size(rcpt)+size(retopt)+size(x.reply)+size(x.reply_name) \
+         +size(x.subject) gt 170) begin
+      x.subject = ''
+      if (size(rcpt)+size(retopt)+size(x.reply)+size(x.reply_name) gt 170) \
+         x.reply_name = ''
+   end
+
+; Issue Wylbur mail command
+
+   hdropt = ''
+   if (x.mailhdr) \
+      hdropt = 'noh'
+
+   if (x.debug) return
+
+   syscall mail_info('init')
+   syscall mail_info('rcpt',rcpt)
+   comm
+   comm Recipient is &(rcpt)
+
+;  Attempt to batch network mail to same host
+
+   n = ind(rcpt,'@')
+   if (n ge 2 and x.mailhdr) begin
+      host = sub(rcpt,n)
+      n = rptr+1
+      while (n le x.num_rcpt) begin
+         if (rmatch(x.rcpt[n],host,'c')) begin
+            syscall mail_info('rcpt',x.rcpt[n])
+            COMM Adding recipient &(x.rcpt[n])
+            x.rcpt[n] = ''
+         end
+         n = n+1
+      end
+   end
+
+
+   comm
+   show cost
+   comm
+
+   comm Mail &(hdropt) &(retopt) sender '&(x.reply)' \
+      name '&(x.reply_name)' subject '&(x.subject)'
+
+   try Mail col 99000 &(hdropt) &(retopt) send '&(x.reply)' \
+      name '&(x.reply_name)' sub '&(x.subject)' MAILINFO
+
+; Check for unusual Wylbur errors
+
+   if (last lt 99000) begin
+      comm NO RESPONSE FROM MAIL COMMAND!!
+      pcall keep_job('Mail error - probable stack overflow')
+      try sen gg.jws BITMAIL Job &(x.jobno) No response from mail command
+      return
+   end
+
+   list 99000/99999 unn
+
+   p c'Mail not sent'  in 99000/99999 nol
+   if (* lt 0) return
+
+; If mail to dist list, just send rejection
+
+   stemp = ''
+   try stemp = rec_get(pub.mail_distno,upp(rcpt))
+   if (stemp ne '') goto senderr
+
+; Check for disk error responses
+
+   p c'Mail not sent' and c'error code' in 99000/99999 nol
+   if (* gt 0) begin
+      ;;;pcall requeue_job
+      return
+   end
+
+; Check for mailbox full
+
+   p c'mailbox is full' in 99000/99999 nol
+   if (* gt 0) begin
+      if (x.bsmtp) goto senderr
+      pcall wont_fit (rcpt,'mailbox full')
+      return
+   end
+
+; Check for mail file too big
+
+   p c'too much mail' in 99000/99999 nol
+   if (* gt 0) begin
+      if (x.bsmtp) goto senderr
+      pcall wont_fit(rcpt,'mail too big')
+      return
+   end
+
+; Check for delivery error caused by temporary condition
+
+   p c'volume not available' in 99000/99999 nol
+   if (* gt 0) begin
+      if (x.num_rcpt gt 1) \
+         pcall cant_mail('volume not available')
+      else \
+         pcall requeue_job
+      return
+   end
+
+; Send error reply
+
+senderr:
+   del c'mail sent to'1 in 99000/99999
+   pcall mail_error(rcpt)
+
+end
+;<.page>
+;;
+;;  MAIL_ERROR -- error sending mail to recipient
+;;
+;;   On entry active file contains mail message, with Wylbur
+;;   mail command error messages starting at line 99000
+;;
+
+proc mail_error (rcpt) begin
+
+; Hold job and keep in queue
+
+   pcall keep_job ('Undelivered mail to '||rcpt)
+
+; Don't send message if have null return path address or if mail
+;  looks like it contains one of our rejection notices
+
+   if (x.return eq '') return
+   p 'From:' and c'MAILER@&(x.node_name)'(1) nol
+   if (* gt 0) return
+
+; Send local notification message
+
+   putend
+
+   if (x.bounce ne '') begin
+      fixrcpt = rcpt
+      pcall fix_string (fixrcpt)
+      stemp = '1/15'
+      if (mach eq 'RLG') stemp = '1/89999'
+      try mail 99000/99999 &(stemp) to &(x.bounce)  \
+         tit 'Job &(x.jobno) BITMAIL Mail error to &(fixrcpt) from &(x.return)'
+   end
+
+; Check for rejection message sent to mailer
+
+   if (rcpt eq 'MAILER') begin
+      p 'Subject:' and c'undeliver'(1) nol
+      if (* gt 0) return
+      p 'Subject:' and c'returned mail'(1) nol
+      if (* gt 0) return
+   end
+
+; Send rejection notice to error address
+
+   putline 98000 The mail listed below, sent to
+   putline 98001
+   putline 98002     &(rcpt)
+   putline 98003
+   putline 98004 could not be delivered to some of its recipients:
+   putline 98005
+
+   putline 99101 Send mail to POSTMASTER@&(x.node_name) for assistance.
+   putline 99102
+   putline 99103 ----------- Undelivered mail file follows ------------
+
+   if (~x.debug) \
+      try  Mail 98000/l f/200 to &(x.errors_to) \
+      sen 'MAILER@&(x.node_name)'  nam 'Mail system' return '' \
+      sub 'Undelivered mail' col 99900
+
+   list 99900/99999 unn
+
+   del 98000/last
+
+end
+
+
+;;
+;;  CANT_MAIL -- mail processing error
+;;
+
+proc cant_mail(msg) begin
+
+   try send &(x.bounce) BITMAIL error on job &(x.jobno) \
+      to &(x.dest_addr) - &(msg)
+
+   pcall keep_job ('Mail error -'||msg)
+end
+;<.page>
+;;
+;; WONT_FIT -- mail file too big or mailbox full
+;;
+
+proc wont_fit (rcpt,msg) begin
+
+   if (x.debug) return
+
+   asave = actno
+   open
+   putend Job &(x.jobno) in the output queue contains mail to you
+   putend from &(x.reply).  This mail would not fit into your
+   putend WYLBUR mailbox.  To put this mail in your WYLBUR active
+   putend file, enter the following command:
+   putend
+   putend       FETCH &(x.jobno)
+
+   If (x.vmfile) begin
+      putend
+      putend This mail was received in an encoded format.  To convert
+      putend the mail to a format that you can read, issue the following
+      putend command after you have the mail in your active file:
+      putend
+      putend       CALL VMFILE
+   end
+
+   putend
+   putend After you have the mail in your active file you can delete it
+   putend from the system output queue by issuing the following command:
+   putend
+   putend       PURGE &(x.jobno)
+
+   try mail to &(rcpt) sub 'Undelivered mail' \
+      sender 'MAILER@&(x.node_name)' name 'Mailer program' return ''
+
+   close
+   pick &(asave)
+
+   pcall keep_job ('Undelivered mail (&(msg)) from '||x.reply)
+
+end
+;<.page>
+;;
+;;  ARCHIVE -- add mail file to Bitnet list archive file
+;;
+
+proc archive (id) begin
+
+   if (x.node_name ne 'STANFORD') return
+
+; Copy mail and edit mail header
+
+   open
+   copya &(x.mailact): all to &(actno):
+
+   ln = first
+   while (line(ln) ne '') begin
+      stemp = low(line(ln))
+      if (sub(stemp,1,9) eq 'received:' or \
+            sub(stemp,1,8) eq 'comment:') begin
+         del &(ln)
+         while (line(ln+1) ne '' and \
+               sub(line(ln+1),1,1) eq ' ') begin
+            ln = ln+1
+            del &(ln)
+         end
+      end
+      ln = ln+1
+   end
+
+   num plu 90001
+   info =  sub(date,10,5)||'  '||sub(date,1,5)|| \
+      ' '||sub(id,1,8)||' '||x.subject
+
+   putline  90000.0,
+   putline  90000.1 --------------------------------------------------------------------
+   putline  90000.2,$$ &(info)
+   putline  90000.3 --------------------------------------------------------------------
+
+   file = 'wyl.gs.net.listserv'
+
+   try cop from &(file) com
+   if (first eq 90000) begin
+      try send &(x.maint) BITMAIL archive error   job &(x.jobno)
+      goto archive_exit
+   end
+
+   if (line(10) ne '') begin
+      del 95
+      num 10/94 plu 1
+   end
+
+   set * 90000
+   ln = prev+1
+   num prev/last
+   putline 10 &(right(ln,5)) &(info)
+   if (~x.debug) \
+      try save &(file) rep col 99000
+   l 99000/99999 unn
+archive_exit:
+   close
+   pick &(x.mailact)
+end
+;<.page>
+;;
+;;  SCAN_BSMTP -- process BSMTP header
+;;
+
+proc scan_bsmtp (rc) begin
+
+   ln = f
+
+; Skip HELO line if present
+
+   if (upp(sub(line(ln),1,4)) eq 'HELO') \
+      ln = ln+1
+
+; Skip TICK or VERB lines
+
+   while (upp(sub(line(ln),1,4)) eq 'TICK' or \
+      upp(sub(line(ln),1,4)) eq 'NOOP' or \
+      upp(sub(line(ln),1,4)) eq 'VERB') \
+      ln = ln+1
+
+; Scan MAIL FROM line
+
+   if (upp(sub(line(ln),1,10)) ne 'MAIL FROM:') \
+      goto bsmtp_error
+
+   while (sub(line(ln),size(line(ln)),1) eq s'15') begin
+      set * &(ln)
+      putline &(ln) &(sub(line(ln),1,size(line(ln))-1)||(line(next)))
+      del next
+   end
+
+   stemp = strip(sub(line(ln),11))
+   if (sub(stemp,1,1) ne '<') goto bsmtp_error
+   n = ind(stemp,'>')
+   if (n eq 0) goto bsmtp_error
+   stemp = strip(sub(stemp,2,n-2))
+   if (stemp ne '' and ind(stemp,'@') eq 0) \
+      goto bsmtp_error
+   n = ind(stemp,' @ ')
+   if (n gt 0) \
+      stemp = sub(stemp,1,n-1)||'@'||sub(stemp,n+3)
+   x.return = stemp
+   if (ln eq last) goto bsmtp_error
+   set * &(ln)
+   ln = next
+
+; Scan RCPT TO lines
+
+   while (upp(sub(line(ln),1,8)) eq 'RCPT TO:') begin
+
+      while (sub(line(ln),size(line(ln)),1) eq s'15') begin
+         set * &(ln)
+         putline &(ln) &(sub(line(ln),1,size(line(ln))-1)||(line(next)))
+         del next
+      end
+
+      x.num_rcpt = x.num_rcpt+1
+      stemp = strip(sub(line(ln),9))
+      if (size(stemp) lt 3) goto bsmtp_error
+      if (sub(stemp,1,1) ne '<') goto bsmtp_error
+      n = ind(stemp,'>')
+      if (n lt 3) goto bsmtp_error
+      stemp = strip(sub(stemp,2,n-2))
+      if (ind(stemp,'@') eq 0) \
+         goto bsmtp_error
+      n = ind(stemp,' @ ')
+      if (n gt 0) \
+         stemp = sub(stemp,1,n-1)||'@'||sub(stemp,n+3)
+      x.rcpt[x.num_rcpt] = stemp
+      if (ln eq last) goto bsmtp_error
+      set * &(ln)
+      ln = next
+   end
+
+   if (x.num_rcpt eq 0) goto bsmtp_error
+
+; Check for DATA line
+
+   if (upp(sub(line(ln),1,4)) ne 'DATA') goto bsmtp_error
+
+; Delete BSMTP from mail and return
+
+   if (upp(line(last)) eq 'QUIT ') \
+      del last
+   if (line(last) eq '.') \
+      del last
+;;;if (ln eq last) goto bsmtp_error
+   ch '..'1 to '.' nol
+   comm
+   list f/&(ln) unn
+   del f/&(ln)
+
+   rc = 'OK'
+   return (rc)
+
+;;
+;; BSMTP error - send error message to sender
+;;
+
+bsmtp_error:
+   comm
+   comm
+   comm Invalid BSMTP
+   list f/&(ln) unn
+
+   putline 99000 Invalid BSMTP header in mail
+
+   pcall fix_return_addr (x.return)
+   pcall mail_error (x.return)
+
+   rc = 'ERROR'
+   return(rc)
+end
+;<.page>
+;;
+;;  GET_RCPT --  Get mail recipients for non-BSMTP mail.
+;;
+
+proc get_rcpt () begin
+
+; If 2 character dest userid, may be truncated 'gg.uuu'.  Check for
+;  unique matching 'gg.uuu@' recipient address in the header
+
+   if (size(x.dest_user) eq 2) begin
+      pick &(x.scanhdr)
+      p 't'18 and c'&(x.dest_user).'20 and c'@&(x.dest_node)'26(1) nol
+      if (* gt 0) begin
+         ln = *
+         p 't'18 and c'&(x.dest_user).'20 and '@&(x.dest_node)'26(1) \
+            in &(ln+1)/99999 nol
+         if (* lt 0) begin
+            comm
+            comm Changing &(x.dest_addr) to &(sub(line(ln),20))
+            x.rcpt[1] = sub(line(ln),20)
+            x.num_rcpt = 1
+         end
+      end
+   end
+
+; If 8 character dest userid, may be truncated mail address.  Check for
+;  unique matching recipient address in the header
+
+   elseif (size(x.dest_user) eq 8) begin
+      pick &(x.scanhdr)
+      p 't'18 and c'&(x.dest_user)'20(1) nol
+      if (* gt 0) begin
+         ln = *
+         p 't'18 and c'&(x.dest_user)'20 in &(ln+1)/99999 nol
+         if (* lt 0) begin
+            comm
+            comm Changing &(x.dest_addr) to &(sub(line(ln),20))
+            x.rcpt[1] = sub(line(ln),20)
+            x.num_rcpt = 1
+         end
+      end
+   end
+
+; If dest userid is 'MAILER', look for recipient in mail header
+
+   elseif (x.dest_user eq 'MAILER') begin
+      pick &(x.scanhdr)
+      p 't'18 and ~c'mailer@'20(1) nol
+      if (* gt 0) begin
+         ln = *
+         p 't'18 and ~c'mailer@'20 in &(ln+1)/99999 nol
+         if (* lt 0) begin
+            comm
+            comm Changing &(x.dest_user) to &(sub(line(ln),20))
+            x.rcpt[1] = sub(line(ln),20)
+            x.num_rcpt = 1
+         end
+      end
+   end
+
+; Return now if have recipient
+
+   pick &(x.mailact)
+   if (x.num_rcpt ne 0) return
+
+; Set recipient from NJE info. If dest userid is 'MAILER',
+;  look for 'To:' line at start of mail body.  This check
+;  is done because the header scan will miss the 'to:' line
+;  if it doesn't start in column 1
+
+   x.num_rcpt = 1
+   x.rcpt[1] = x.dest_addr
+   if (x.dest_user ne 'MAILER') return
+
+   set * f
+   stemp = lower(strip(line(f)))
+   if (sub(stemp,1,2) ne 'to' or ind(stemp,'mailer@') gt 0) begin
+      p ''(1) nol
+      if (* lt 1 or * eq last) return
+      p ~''(1) in next/last nol
+      if (* lt 0) return
+   end
+   stemp = strip(line(*))
+   if (lower(sub(stemp,1,2)) ne 'to') return
+   stemp = strip(sub(stemp,3))
+   if (sub(stemp,1,1) ne ':') return
+   stemp = strip(sub(stemp,2))
+   n = ind(stemp,' ')
+   if (n gt 0) \
+      stemp = sub(stemp,1,n-1)
+   if (ind(stemp,'@') eq 0) return
+
+   x.rcpt[1] = stemp
+
+   comm
+   comm Mail body contains 'To:' line, address is &(stemp)
+end
+;<.page>
+;;
+;;  CHECK_MAILER -- Set return address to null if mailer
+;;
+
+proc check_mailer (addr) begin
+
+   n = ind(addr,'@')
+   userid = upp(sub(addr,1,n-1))
+   domain = upp(sub(addr,n+1))
+
+   if (userid eq 'MAILER' or \
+         userid eq 'MAILER-DAEMON' or \
+         userid eq 'BSMTP' or \
+         userid eq 'POSTMAN' or \
+         sub(userid,1,4) eq 'SMTP' or \
+         userid eq 'UNKNOWN') begin
+      addr = ''
+      return (addr)
+   end
+
+   if (rmatch(domain,'.BITNET')) \
+      domain = sub(domain,1,size(domain)-7)
+
+;; stemp = ''
+;; try stemp = rec_get (pub.bitnet_hosts,domain)
+;; n = ind(stemp,' ')
+;; if (n gt 0) \
+;;    stemp = sub(stemp,1,n-1)
+;; if (stemp eq addr) \
+;;    addr = ''
+
+   return (addr)
+end
+;<.page>
+;;
+;;  KEEP_JOB -- Keep current job in JES2 queue; called after mail error
+;;
+
+proc keep_job (msg) begin
+
+   x.keep_job = true
+
+   if (x.debug) return
+
+   if (msg ne '') \
+      try $wtj &(x.jobno) &(msg)
+
+   try hold &(x.jobno) sysout=e
+   try alter &(x.jobno) sysout=e to sysout=a
+end
+
+
+;;
+;;  REQUEUE_JOB -- Requeue current job for later retry
+;;
+
+proc requeue_job () begin
+
+   try alter &(x.jobno) sysout=e to dest=bitmailq prio s
+   x.keep_job = true
+end
+
+
+;;
+;; SET_LINE -- Set Milten line info
+;;
+
+proc set_line (text) begin
+
+   if (group ne 'GG') \
+      try set line '&(text)'
+end
+;<.page>
+;;
+;;  EXEC_ERROR -- Routine to handle an error in the exec.
+;;                Exit to label next_job in main loop.
+;;
+
+proc exec_error () begin
+
+   if (x.in_orvyl) begin           ; If we were in orvyl,
+      x.in_orvyl = false
+      pcall requeue_job
+      xexit error_retry
+   end
+
+   open
+   putend BITMAIL exec error:
+   putend  errmsg:  &(errmsg)
+   putend  errinfo: &(errinfo)
+   putend
+   dump vars lik x.
+   dump vars type err
+   comm
+   list unn
+;;;try mail to &(x.maint) tit 'BITMAIL exec error - job &(x.jobno)'
+   close
+
+   x.exec_errs = x.exec_errs + 1
+   if (x.exec_errs ge x.max_exec_errs) xreturn
+
+   if (x.jobno eq '') xreturn
+   if (x.debug) xreturn
+
+   pcall keep_job ('Job held, BITMAIL exec error')
+
+   xexit error_retry
+end
+;<.page>
+;;
+;;  SCAN_HEADER -- Scan RFC-822 header
+;;
+;;
+;;   Call header scan routine in Wylbur.  Results of scan are
+;;   returned in x.scanhdr active file, with the field name in
+;;   columns 1-19 and the field value starting in column 20.
+;;   Address fields have 't' or 'f' in column 18 to identify
+;;   'from' or 'to' address type.
+;;
+;;   If RFC-822 header is present, sender addresses are edited
+;;   and a 'received' line is added
+;;
+
+proc scan_header () begin
+
+; Get rid of leading null line or VM ':READ' line
+;  or line of nulls (get these from JNET)
+
+   if (line(f) eq '' and lines gt 1) \
+      del f
+   if (line(f) ne '' and ver(line(f),s'00') eq 0) \
+      del f
+   if (sub(line(f),1,5) eq ':READ') \
+      del f
+
+; Call header scan routine
+
+   comm
+   comm SCAN_MAILHDR call
+   comm
+
+   stemp = line_delete (0,99999,x.scanhdr)
+   rc = ''
+   x.hdr_end = 0
+   syscall scan_mailhdr(x.scanhdr,'',x.hdr_end,rc)
+
+   x.mailhdr = false
+
+   pick &(x.scanhdr)
+
+   if (lines eq 0) begin
+      putend
+      pick &(x.mailact)
+      return
+   end
+
+;; if (x.verbose) begin
+;;    comm
+;;    comm SCAN_MAILHDR output file:
+;;    comm
+;;    list ~'pointer'1 unn
+;; end
+
+; Flag header present if both 'from' and 'to' lines scanned
+
+   p 't'18(1) nol
+   if (* gt 0) \
+      p 'f'18(1) nol
+   if (* gt 0) \
+      x.mailhdr = true
+
+; Get subject text
+
+   p 'subject'1/20(1) nol
+   if (* gt 0) begin
+      x.subject = sub(line(*),20)
+      pcall fix_string (x.subject)
+   end
+
+; If not BSMTP mail, get return address from header
+
+   if (~x.bsmtp) begin
+      p 'errors-to'1/20(1) nol
+      if (* lt 0) \
+         p 'resent-sender'1(1) nol
+      if (* lt 0) \
+         p 'sender'1(1) nol
+      if (* lt 0) \
+         p 'resent-from'1(1) nol
+      if (* lt 0) \
+         p 'from'1(1) nol
+      if (* gt 0) \
+         x.return = sub(line(*),20)
+   end
+
+; Get error return addr
+
+   x.errors_to = x.return
+   p 'errors-to'1/20(1) nol
+   if (* gt 0) \
+      x.errors_to = sub(line(*),20)
+
+; Get reply address and name
+
+   if (x.return ne '') \
+      x.reply = x.return
+
+   p 'resent-reply-to'1(1) nol
+   if (* lt 0) \
+      p 'reply-to'1(1) nol
+   if (* lt 0) \
+      p 'resent-from'1(1) nol
+   if (* lt 0) \
+      p 'from'1(1) nol
+
+   if (* gt 0) begin
+      x.reply = sub(line(*),20)
+      if (sub(line(*+1),1,4) eq 'name') begin
+         x.reply_name = sub(line(*+1),20)
+         if (sub(x.reply_name,1,1) eq '(' and \
+            rmatch(x.reply_name,')')) \
+            x.reply_name = sub(x.reply_name,2,size(x.reply_name)-2)
+         pcall fix_string (x.reply_name)
+      end
+   end
+
+; Edit 'from' addresses in mail header (do in reverse order so that multiple
+;  addresses on the same line will be done right to left).
+
+   changed = false
+   ln = last
+   while (ln gt first) begin
+      ln = ln-1
+      if (sub(line(ln),18,1) eq 'f') begin
+         addr = sub(line(ln),20)
+         if (sub(line(ln+1),1,8) eq 'pointers') \
+            ptrs = sub(line(ln+1),20)
+         else \
+            ptrs = sub(line(ln+2),20)
+
+         oldaddr = addr
+         pcall fix_from_addr (addr)
+
+         if (addr ne oldaddr) begin
+            pick &(x.mailact)
+            pcall rewrite_addr (addr,ptrs)
+            pick &(x.scanhdr)
+            changed = true
+         end
+      end
+   end
+
+   pick &(x.mailact)
+
+; Wrap long header lines
+
+   pcall wrap_header (x.hdr_end)
+
+; List new header if addresses changed
+
+   if (changed and x.verbose) begin
+      comm
+      comm New mail header:
+      comm
+      list f/&(x.hdr_end) unn
+   end
+
+   return
+end
+;<.page>
+;;
+;;  FIX_RETURN_ADDR -- Edit return address
+;;
+
+proc fix_return_addr (addr) begin
+
+   if (addr eq '') return
+   pcall fix_from_addr (addr)
+   pcall check_mailer (addr)
+   pcall fix_string (addr)
+   if (size(addr) gt 68) \
+      addr = ''
+   return (addr)
+end
+
+;;
+;;  FIX_FROM_ADDR -- Edit sender or reply address
+;;
+
+proc fix_from_addr (addr) begin
+
+   dcl str route, userid, domain
+
+; Split address into components
+
+   pcall split_addr (addr, route, userid, domain)
+
+; Clean up compound '%' address
+
+   if (ind(userid,'%') gt 0) begin
+      repeat begin
+         oldu = userid
+         if (upp(domain) eq 'PUCC.PRINCETON.EDU' or \
+            upp(domain) eq 'CUNYVM.CUNY.EDU' or \
+            rmatch(userid,'.BITNET','c') or \
+            rmatch(userid,'.NET','c') or \
+            rmatch(domain,'.BITNET','c')) \
+            pcall split_local (userid,domain)
+      end
+      until (oldu eq userid)
+   end
+
+; Process route
+
+   while (route ne '') begin
+      n = ind(rev(domain),'.')
+      stemp = ' '||upp(sub(domain,size(domain)-n+2))||' '
+      if (ind(' EDU NET ORG COM GOV ARPA BITNET ',stemp) gt 0) \
+         route = ''
+      else begin
+         n = ind(rev(route),',')      ;check for list
+         if (n eq 0) begin            ;if not list, use whole route
+            rtemp = sub(route,2)
+            route = ''
+         end
+         else begin                   ;else have list, use last entry
+            rtemp = sub(route,size(route)-n+3)
+            route = sub(route,1,size(route)-n)
+         end
+         userid = userid || '%' || domain
+         domain = rtemp
+      end
+   end
+
+; Fix up '.EARN' address
+
+   if (rmatch(domain,'.EARN','c')) \
+      domain = sub(domain,1,size(domain)-5)
+
+; Add '.BITNET' to unqualified BITNET node name
+
+;; if (ind(domain,'.') eq 0) begin
+;;    stemp = ''
+;;    try stemp = rec_get (pub.bitnet_hosts,upp(domain))
+;;    if (stemp ne '') \
+;;       domain = domain || '.BITNET'
+;; end
+
+; Generate new address
+
+   addr = userid || '@' || domain
+   return (addr)
+end
+;<.page>
+;;
+;;  FIX_RCPT_ADDR -- Edit recipient address
+;;
+
+proc fix_rcpt_addr (addr) begin
+
+   dcl str route, userid, domain
+
+; Split address into components
+
+   pcall split_addr (addr, route, userid, domain)
+
+; Process route.
+
+   while (route ne '') begin
+      n = ind(rev(domain),'.')
+      stemp = ' '||upp(sub(domain,size(domain)-n+2))||' '
+      if (ind(' EDU NET ORG COM GOV ARPA BITNET ',stemp) gt 0) \
+         route = ''
+      else begin
+         n = ind(rev(route),',')      ;check for list
+         if (n eq 0) begin            ;if not list, use whole route
+            rtemp = sub(route,2)
+            route = ''
+         end
+         else begin                   ;else have list, use last entry
+            rtemp = sub(route,size(route)-n+3)
+            route = sub(route,1,size(route)-n)
+         end
+         userid = userid || '%' || domain
+         domain = rtemp
+      end
+   end
+
+; Set null domain if local mail
+
+   dtemp = upp(domain)
+   if (rmatch(dtemp,'.BITNET')) \
+      dtemp = sub(dtemp,1,size(dtemp)-7)
+
+   if (dtemp eq 'SYSA') \
+      dtemp = 'STANFORD'
+
+   if (dtemp eq x.node_name or \
+      dtemp eq upp(x.domain_name) or \
+      (dtemp eq 'FORSYTHE' and x.node_name eq 'STANFORD')) \
+      domain = ''
+
+; Fix up '%' address
+
+   if (ind(userid,'%') gt 1 and domain eq '') \
+      pcall split_local (userid,domain)
+
+; Wylbur messes up '@SYSA' addresses...
+
+   if (x.node_name eq 'STANFORD' and upp(domain) eq 'SYSA') \
+      domain = ''
+
+; Fix up '.STANFORD' address
+
+   if (rmatch(domain,'.STANFORD','c')) begin
+      if (ind(sub(domain,1,size(domain)-9),'.') eq 0) \
+         domain = domain || '.EDU'
+   end
+
+; Fix up user%host@stanford.edu address
+
+   if (upp(domain) eq 'STANFORD.EDU') \
+      pcall split_local (userid,domain)
+
+; Generate new address
+
+   if (domain eq '') \
+      addr = upp(userid)
+   else \
+      addr = userid || '@' || domain
+
+   return (addr)
+end
+;<.page>
+;;
+;; FIX_STRING -- Fix up string quotes for Wylbur MAIL command
+;;
+
+proc fix_string (s) begin
+
+   if (sub(s,1,1) eq '"') begin
+      if (s ne '"' and \
+         ind(sub(s,2),'"') eq size(s)-1) \
+         s = sub(s,2,size(s)-2)
+   end
+
+   if (ind(s,"'") gt 0) begin
+      putend &(s)
+      ch "'" to "''" in last nol
+      s = line(l)
+      del last
+   end
+
+   return (s)
+end
+
+
+;;
+;;  REWRITE_ADDR -- Rewrite address in mail header
+;;
+;;    On entry:
+;;      addr  - address to be inserted in header
+;;      ptrs  - string containing pointers to address to be
+;;               replaced (provided by scan_mailhdr syscall)
+;;
+
+proc rewrite_addr (addr,ptrs) begin
+
+   dcl num ln1, col1, ln2, col2
+
+; Scan active file pointers
+
+   syscall scan (ln1,ptrs)
+   syscall scan (col1,ptrs)
+   syscall scan (ln2,ptrs)
+   syscall scan (col2,ptrs)
+
+; Handle case where address does not span multiple active file lines
+
+   if (ln1 eq ln2) \
+      putline &(ln1) &(sub(line(ln1),1,col1-1) || addr || sub(line(ln1),col2+1))
+
+; Handle case where address spans multiple lines
+
+   else begin
+      putline &(ln1) &(sub(line(ln1),1,col1-1) || addr)
+      try del &(ln1)+.001/&(ln2)-.001
+      if (col2 eq size(line(ln2))) \
+         del &(ln2)
+      else begin
+         n = ver(line(ln2),' '||s'05')
+         putline &(ln2) &(sub(line(ln2),1,n-1) || sub(line(ln2),col2+1))
+      end
+   end
+end
+;<.page>
+;;
+;;  WRAP_HEADER -- Wrap header lines longer than 80 characters
+;;
+;;    On entry:  endln = header end line
+;;
+
+proc wrap_header (endln) begin
+
+   ln = first
+   while (true) begin
+      p ~'          '81/90(1) in &(ln)/&(endln) nol
+      if (* lt 0) \
+         return (endln)
+      ln = *
+      stemp = rev(sub(line(ln),1,80))
+      n = ind(stemp,',')
+      if (n eq 0 or n gt 50) begin
+         n2 = ind(stemp,' ')
+         if (n eq 0 or (n2 gt 0 and n2 lt n)) \
+            n = n2
+      end
+      if (n eq 0 or n gt 70) return
+      n = 81-n
+      putline &(ln+.001)  &(sub(line(ln),n+1))
+      putline &(ln) &(sub(line(ln),1,n))
+      if (ln eq endln) \
+         endln = ln+.001
+   end
+end
+
+
+;;
+;; SPLIT_LOCAL -- split local part if has the format user%domain
+;;
+
+proc split_local (local,domain) begin
+   lrev = reverse(local)
+   n = ind(lrev,'@')
+   if (n lt 2 or n eq size(lrev)) \
+      n = index(lrev,'%')
+   if (n lt 2 or n eq size(lrev)) return
+   if (index(sub(lrev,1,n),'"') gt 0) return
+   n = size(local)+1-n
+   domain = sub(local,n+1)
+   local = sub(local,1,n-1)
+   return (local,domain)
+end
+
+
+;;
+;;  SPLIT_ADDR -- split address into components
+;;
+
+proc split_addr(addr,route,local,domain) begin
+
+   route = ''
+   local = ''
+   domain = ''
+
+; Strip off route if present
+   if (sub(addr,1,1) eq '@') begin
+      n = index(addr,':')
+      if (n gt 0) begin
+         route = sub(addr,1,n-1)
+         addr = sub(addr,n+1)
+      end
+   end
+
+; Split address into local part and domain
+
+   n = index(rev(addr),'@')        ;get string position
+   n = size(addr)+1-n              ; of last '@'
+   local = sub(addr,1,n-1)         ;local part
+   domain = sub(addr,n+1)          ;get domain
+
+   return (route,local,domain)
+end
+
+;;
+;; LOG_BITNET -- Log addresses coming to '.BITNET' addresses
+;;
+
+proc log_bitnet (addr) begin
+
+   text = addr
+   if (size(text) lt 40) text = sub(text,1,40)
+   text = text || '  ' || x.errors_to
+   text = translate(text,' ',"'")
+
+   n = ind(addr,'@')
+   if (n gt 1) \
+      u = sub(addr,1,n-1)
+   else \
+      u = ''
+
+   d = sub(date,10,5)
+
+   asave = actno
+   pick &(x.bitlog)
+
+   quiet try p' &(text) '(1) nol
+   ln = *
+
+
+   if (ln gt 0) begin
+
+      pick &(asave)
+      return
+      ;***********
+      if (sub(line(ln),1,5) ne d) begin
+         del &(ln)
+         quiet num by 1 from 1
+         ln = -1
+      end
+   end
+
+   quiet try show name &(u)
+
+   if (~tryerror and ln lt 0) begin
+      putend &(d)  &(text)
+      comm LOG_BITNET &(line(last))
+      try save * replace
+   end
+
+   pick &(asave)
+
+   return
+end

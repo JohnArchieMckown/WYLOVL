@@ -1,0 +1,940 @@
+;EXEC ID:  WYL.GA.PUB.RACF#SHOWPROT
+;
+;AUTHOR:   SUNNY BIRKHEAD AND BILL BAURIEDEL
+;
+;DATE:     03/24/87
+;
+;          REMARKS:  This EXEC receives control from Wylbur whenever
+;          a user issues a SHOW PROTECT command.  It parses
+;          and processes the command, issues appropriate RACF LISTRP
+;          commands, and formats the response to the user.
+;
+;          The program only processes one SHOW PROTECT command at a
+;          time.  The full syntax for the command is detailed in the
+;          HELP SHOW PROTECT command.
+;
+;          A new ACTIVE file is opened to build and run the JCL.
+;
+;          This program may be called directly or indirectly from
+;          the SET PROTECT command.  When it is called from the
+;          SET PROTECT command, all output is suppressed and is
+;          put into the current active file instead.
+;
+;          The program is organized into  main functions;
+;          edit, process, and display.
+;
+;          The uplow convention used in this program is to use upper
+;          case for all Wylbur, JCL and RACF command syntax and lower
+;          case for everything else (labels, variables, proc names, etc.)
+;
+;          For further details on RACF commands please refer to the
+;          IBM document SC28-0733-5 MVS Resource Access Control Facility
+;          (RACF) Command Language Reference Version 1 Release 7.
+;
+;          This program uses several session variables defined as
+;          follows:
+;
+;              ses.racf_debug     = TRUE to enable debugging info.
+;
+;              ses.racf_fromset   = TRUE whenever SET PROTECT is
+;                                   calling this program.  FALSE or
+;                                   UNDEFINED otherwise.
+;
+;              ses.racf_profname  = profile name passed from SET PROTECT
+;
+;              ses.racf_test      = TRUE if WYLBUR = 'TESTWYL'.  This
+;                                   variable should be used to execute
+;                                   new code within the TESTWYL
+;                                   environment, but not in production
+;                                   WYLBUR.
+;
+;              ses.racf_withdsn   = TRUE if SET PROTECT is calling this
+;                                   program with the WITH DSN option.
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          03/24/87  JBB    Initial Installation.
+;
+;          04/28/87  JBB    Implement 'ALL' option.
+;
+;          10/20/87  WJB    Major restructuring and integration of LOG
+;                           information.
+;
+;          12/01/87  WJB    Add logic to bypass scan and edit logic
+;                           if entry is via SET PROTECT.  Also
+;                           suppresses display if entry via SET PROTECT.
+;
+;          04/02/88  Niz    Remove check that disables this exec
+;                           from working in production Wylbur.
+;
+;          04/29/88  WJB    Remove ambiguity associated with use of
+;                           "*"  It now means most recent dsname and
+;                           is consistent with Wylbur definition.
+;                           Use as alternate way to specify DEFAULT
+;                           profile has been removed.
+;
+;          06/06/88  Niz    Add check for Stanford security
+;                           protected files.
+;
+;<.page>
+;*******************************************************************
+;                                                                  *
+;  The mainline driver first executes the parsing PROC to          *
+;  determine what options have been requested and to set certain   *
+;  x. variables.                                                   *
+;                                                                  *
+;  It then executes the process and display PROCs and formats      *
+;  the output based on whether the 'ALL' or 'WITH DSN' options     *
+;  were requested.                                                 *
+;                                                                  *
+;  It finally executes the cleanup PROC to restore the original    *
+;  environment.                                                    *
+;                                                                  *
+;*******************************************************************
+
+XPROC () BEGIN
+
+;********** Set Session Variables
+
+   IF (VARTYPE('ses.racf_debug') EQ 'UNDEFINED') \
+      ses.racf_debug = FALSE
+
+   IF (NOT ses.racf_debug) BEGIN
+      ON ERROR CMD 'PCALL errorexit'
+      ON ATTN  CMD 'PCALL attnexit'
+   END
+
+   IF (VARTYPE('ses.racf_fromset') EQ 'UNDEFINED') \
+      ses.racf_fromset = FALSE
+
+   IF (VARTYPE('ses.racf_withdsn') EQ 'UNDEFINED') \
+      ses.racf_withdsn = FALSE
+
+   IF (VARTYPE('ses.racf_profname') EQ 'UNDEFINED') \
+      ses.racf_profname = ''
+
+;********** Before doing anything else, check to see if this is
+;           really a SHOW PROTECT for a Stanford security system
+;           protected file.
+
+   if (wylbur eq 'NIZWYL' or wylbur eq 'CHAZWYL') begin
+      sprot_rc = ''
+      try xcall wyl.ga.pub.racf#scipprot \
+         ('show sprotect', parm_string, sprot_rc)
+      if (sprot_rc eq 'OURS') xreturn
+   end
+
+;**********  Set up test environment.  New features testable from TESTWYL
+
+   ses.racf_test = TRUE
+   IF (WYLBUR EQ 'WYLBUR') BEGIN
+      ses.racf_test = FALSE
+   END
+
+;********** Set Global Variables
+
+   x.all_opt  = FALSE              ; TRUE if ALL option requested
+   x.default  = FALSE              ; default profile specified
+   x.del      = delta              ; original delta
+   delta      = 1                  ; set delta for this EXEC
+   x.dsnspec  = ''                 ; dsn specification before DSNFORMAT
+   x.group    = '&(GROUP)'         ; Logged on group or group specified
+;                                    in profile.
+   x.limit    = ''                 ; EXEC limit - saved and restored
+   x.logon_act= SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3)
+;                                    identify logged on account separate
+;                                    from set account
+   x.maint    = 'gn.ome'           ; List of maintenance accounts
+;                                    to whom error messages are sent.
+   x.origact  = actno              ; Original active number - EXEC
+;                                    restores to this one at end.
+   x.origparm = PARM_STRING        ; The full unedited parm string
+;                                    passed to this program by WYLBUR.
+   x.parm     = UPP(PARM_STRING)   ; Used by SCAN to parse parm
+   x.pgm      = 'SHOW PROTECT'     ; Program name to be displayed in
+;                                    error messages.
+   x.priv     = FALSE              ; privileged accounts
+   x.profname = ''                 ; Fully qualified dataset name.
+   x.stop     = FALSE              ; Attention in RUNWAIT
+   x.user     = '&(USER)'          ; Logged on user or user specified
+;                                    in profile.
+   x.vsamdsns = FALSE              ; TRUE if user has profiles for VSAM datasets.
+   x.vstems   = ''                 ; Will contain current list of VSAM stems
+   x.with_opt = FALSE              ; TRUE if WITH DSNames option requested
+
+;********** Dump EXEC limit, set to NOLIMIT and restore upon exit
+
+   DUMP EXEC
+   READ STR x.limit USING LAST DELETE ; e.g. LOG LIMIT=1000 - EXEC Options
+   x.limit = SUB(x.limit,IND(x.limit,' ')+1,IND(x.limit,'-')-IND(x.limit,' ')-2)
+   SET EXEC NOLIMIT
+
+;********** Set various x. variables based on ses. variables
+
+   IF (ses.racf_withdsn) x.with_opt = TRUE
+
+   IF (ses.racf_profname NE '') BEGIN
+      x.profname = ses.racf_profname
+      IF (SIZE(x.profname) EQ 8) BEGIN
+         IF (SUB(x.profname,3,1)||SUB(x.profname,8,1) EQ '$*') BEGIN
+            x.default = TRUE
+         END
+      END
+   END
+
+
+;********** set x.priv which controls which accounts can SHOW PROTECT
+;********** across account boundaries.  Only accounts with RACF SPECIAL
+   IF (IND('OME$GN,SEC$GB,PJG$GG,AOS$GG,SLP$GG,WYL$GS,ORV$GG',ACCOUNT) GT 0) x.priv = TRUE
+
+;<.page>
+;********** Edit command and set ALL and WITH DSNAMES options.
+
+   IF (NOT ses.racf_fromset) PCALL edit
+
+;********** Write SMF record of edited command
+
+   IF (NOT ses.racf_fromset) SMF RACF "SHOW PROT &(x.profname)"
+
+;********** Create JCL, run and fetch it.
+
+   PCALL process
+
+;********** Report results to user (either online or at end of ACTIVE)
+
+   PCALL display
+
+;********** Finished.  Return control to user.
+
+   PCALL cleanup ('')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; edit -- This PROC processes the unedited SHOW PROTECT command.   *
+;     The SCAN function parses the command one word at a time      *
+;     starting from the left.  x.parm is used up by the SCAN       *
+;     function.  x.origparm remains intact and may be used         *
+;     anywhere to display or further process the original parm.    *
+;                                                                  *
+;     After the scanning is completed, the individual parts are    *
+;     edited.  If errors are found, the &(errid) and &(errmsg)     *
+;     variables are passed as parameters in the error PCALL's.     *
+;                                                                  *
+;     This PROC scans for and returns the following variables:     *
+;                                                                  *
+;          x.parm     = PARM_STRING used as input to SCAN function *
+;          x.profname = RACF profile name or full OS dsname of     *
+;                          target                                  *
+;          x.all_opt  = TRUE if ALL specified; else FALSE          *
+;          x.with_opt = TRUE if WITH DSN specified; else FALSE     *
+;          x.default  = TRUE if default profile requested.         *
+;                                                                  *
+;*******************************************************************
+
+PROC edit () BEGIN
+
+;********** If debug on, then display info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'EDIT               : '
+      WRITE '            x.parm : '||x.parm
+   END
+
+   token      = 'dummy'           ; local scan variable
+
+scan_loop:
+
+;**********  General syntax is:
+;**********  SHOW PROTECT [{dsname|{DEFAULT|profile-name}[WITH DSNames]|ALL}
+;**********               [account-options] [collect-options]]           .
+;**********
+;**********  Both the DUMP PROTECT and the collect-options are
+;**********  handled by Wylbur external to RACF#SHOWPROT PUB
+
+   WHILE (token NE '' AND token NE ';') BEGIN
+
+      SYSCALL SCAN(token, x.parm)
+
+      token = UPPER(token)
+
+      IF (NOT x.with_opt) x.with_opt = (token EQ 'WITH')
+
+      IF (NOT x.all_opt)  x.all_opt  = (token EQ 'ALL')
+
+      IF ((token EQ 'DEFAULT') AND NOT (DSNVERIFY('DEFAULT') NE 'NOT THERE')) BEGIN
+         token = '%' ; Change 'Show protect default' to 'Show protect %'
+      END
+
+      IF (token EQ 'FOR') GOTO scan_loop
+
+      IF ((x.with_opt) AND (ABBREV('DSNAMES',token,3) OR \
+         ABBREV('DSNS',token,4))) GOTO scan_loop
+
+      IF (((ABBREV('ACCOUNT',token,3)) OR (token EQ 'ACCT')) AND \
+         ((x.all_opt) OR (x.dsnspec NE ''))) GOTO scan_loop
+
+      IF ((token EQ 'WITH') OR (token EQ 'ALL')) GOTO scan_loop
+
+      IF ((ABBREV('COLLECT',token,3)) AND (x.dsnspec NE '')) BEGIN
+         PCALL error('RACFCOLL','COLLECT option not yet available.')
+      END
+
+      IF (((ABBREV('CLEAR',token,3)) OR (token EQ 'CLR')) AND \
+            (x.dsnspec NE '')) BEGIN
+         PCALL error('RACFCLR','CLEAR option not yet available.')
+      END
+
+      IF ((ABBREV('LIST',token,3)) AND (x.dsnspec NE '')) BEGIN
+         PCALL error('RACFLIST','LIST option not yet available.')
+      END
+
+      IF ((SIZE(token) EQ 6) AND (SUB(token,3,1) EQ '$')) BEGIN
+         token = SUB(token,1,2)||'.'||SUB(token,4)
+      END
+
+      IF ((SIZE(token) EQ 6) AND (SUB(token,3,1) EQ '.')) BEGIN
+         IF (DSNVERIFY('&(token)') EQ 'NOT THERE') BEGIN
+            QUIET TRY SHOW NAME &(token)
+            IF (TRYID EQ 'OK') token = 'ACCOUNT '|| token
+         END
+      END
+
+      x.dsnspec = x.dsnspec || token || ' '
+      GOTO scan_loop
+
+   END
+
+;**********  Finished scanning command, now check for inconsistencies.
+;**********  Check for errors of omission or garbage input
+
+   IF ((x.all_opt) AND (DSNVERIFY('ALL') NE 'NOT THERE')) BEGIN
+      x.all_opt = FALSE
+      x.dsnspec = 'ALL'
+   END
+
+   IF ((x.with_opt) and (DSNVERIFY('WITH') NE 'NOT THERE')) BEGIN
+      x.with_opt = FALSE
+      x.dsnspec = 'WITH'
+   END
+
+   IF ((x.all_opt) AND (x.with_opt)) BEGIN
+      PCALL error('RACFWALL','CanQuOtEt use ALL and WITH options \
+         at same time.')
+   END
+
+   IF ((x.with_opt) AND (SIZE(x.dsnspec) GT 0) AND (FIND(x.dsnspec,'%*') LE 0)) BEGIN
+      PCALL error('RACFWTHX','Can only use WITH option for profiles \
+         with wildcards (e.g. QuOtE*QuOtE or QuOtE%QuOtE)')
+   END
+
+;---------- NOTE: If the user has specified ALL [ACCOUNT gg.uuu] then
+;           a temporary trick is used to extract the user and group
+;           from the account and to validate the account.  The trick
+;           is to set the profile to the default.  Because x.all_opt
+;           is TRUE, we can always tell the difference between ALL and
+;           DEFAULT.  This becomes important later in the SEARCH MASK
+;           command.
+
+   IF (x.all_opt) x.dsnspec = '% ' || x.dsnspec ; x.dsnspec has account-options
+
+   IF (x.dsnspec EQ '') BEGIN
+      prot = dsnprot('ACTIVE')
+      COMM Your account is protected by (Stanford or RACF): &(prot)
+      PCALL cleanup('')
+   END
+
+;********** No omission errors found.  Now check for valid syntax.
+
+   TRY XCALL racf#editprof (x.dsnspec,x.profname,x.user,x.group) PUB
+
+   IF (TRYERROR) PCALL error(TRYID,'Dataset/profile name not properly formatted.')
+
+   IF (TRYATTN) PCALL attnexit
+
+   IF (x.profname EQ '&(x.group)$&(x.user).*') x.default=TRUE
+
+   IF ((x.all_opt) AND (NOT x.default)) BEGIN
+      PCALL error('RACFALLD','No other options allowed when ALL specified.')
+   END
+
+;********** Test to see if the account exists:
+
+   QUIET TRY SHOW NAME &(x.group).&(x.user)
+
+   IF (TRYID NE 'OK') PCALL error ('&(TRYID)','&(TRYMSG)')
+
+
+;********** Test to see if relative GDG or library member name.
+;********** Error if user has specified library member name.
+
+   IF (FIND(x.profname,'(') GT 0) BEGIN
+      IF ((IND(x.profname,'(0') EQ 0) AND \
+            (IND(x.profname,'(-') EQ 0) AND \
+            (IND(x.profname,'(+') EQ 0)) BEGIN
+         PCALL error('RACFMEMB', 'RACF doesnQuOtEt support individual \
+            library member protection.')
+      END
+;         not a library member name, therefore must be a GDG
+      x.profname = SUB(x.profname,1,FIND(x.profname,'(')-1)
+   END
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; process -- Put LISTRP job in active, run and fetch it.           *
+;     Build SEARCH MASK and SHOPROF statements as appropriate.     *
+;                                                                  *
+;*******************************************************************
+
+PROC process () BEGIN
+
+;********** If debug on, then display info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'PROCESS            : '
+      WRITE '            x.user : '||x.user
+      WRITE '           x.group : '||x.group
+      WRITE '        x.profname : '||x.profname
+      WRITE '        x.with_opt : '||x.with_opt
+      WRITE '         x.all_opt : '||x.all_opt
+      WRITE '         x.default : '||x.default
+   END
+
+   OPEN jcl TEMP
+
+;********** Dump all catalogues if ALL options specified
+;********** Also if default and with DSN option specified.
+
+   IF ((x.all_opt) OR ((x.default) AND (x.with_opt)))  BEGIN
+      DUMP CAT LIK $V
+      DEL '$VTST' OR '$VMVS003'
+      CH 6/10 TO '' N ;shouldn't be any lines, but just in case...
+      ALI F/L LEN 200
+      CH ' $' to '' N
+      CH '$' to '' N ; remove leading $
+      READ STR x.vstems USING LAST DEL
+
+      vstem_count=1            ; Starting position of stem in x.vstems
+      WHILE (vstem_count LT SIZ(x.vstems)) BEGIN
+         vstem=SUB(x.vstems,vstem_count,4)
+         DUMP CAT LIK $&(vstem).&(x.group).&(x.user) INTERNAL
+         vstem_count=vstem_count+4
+      END
+
+      DUMP CAT LIK WYL.&(x.group).&(x.user). DISK INT
+      DEL 'No data sets found in the catalog.'
+
+      IF (LAST GT 0) BEGIN
+         DEL ~'A'1 AND ~'C'1 ; A=non-VSAM disk, C=VSAM cluster
+         CH 47/235 TO '' N
+         CH 1/2 to ' SHOPROF ' N
+      END
+
+   END
+
+;********** Dump matching catalog entries if WITH option specified
+
+   IF ((x.with_opt) AND (NOT x.default)) BEGIN
+      x.catmatch = x.profname
+      IF (FIND(x.catmatch,'*%') GT 0) x.catmatch = SUB(x.catmatch,1,FIND(x.catmatch,'*%')-1)
+      DUMP CAT LIK $&(x.catmatch) INTERNAL DISK
+      TRY DEL 'No data sets found in the catalog.'
+      IF (LAST GT 0) BEGIN
+         DEL ~'C'1 AND ~'A'1 AND ~'M'1 AND ~'U'1
+;              C=VSAM cluster, A=non-VSAM, M=Master cat, U=User cat
+         CH 47/235 TO '' N
+         CH 1/2 TO ' SHOPROF ' N
+      END
+
+   END
+
+   PUTLINE .01 //&RACF    JOB ,'SHOWPROT',CLASS=F
+   PUTLINE .02 /*JOBPARM   CLASS=F,JCL=NO,LOG=NO
+   IF (NOT x.priv) PUTLINE .03 //LISTRP  EXEC PGM=LISTRP
+   IF (x.priv)     PUTLINE .03 //LISTRP  EXEC PGM=LISTRP,PARM='NOCHECK'
+   PUTLINE .04 //STEPLIB  DD  DSN=SYS3.LINKLIB,DISP=SHR
+   PUTLINE .05 //*STEPLIB  DD  DSN=WYL.GG.SLP.LINKLIB,DISP=SHR
+   PUTLINE .06 //SYSTSPRT DD  DSN=&&LISTRP,DISP=(NEW,PASS),
+   PUTLINE .07 //            UNIT=SYSDA,SPACE=(TRK,(1,1))
+   PUTLINE .08 //SYSPRINT DD  SYSOUT=A
+   PUTLINE .09 //PRINTER  DD  SYSOUT=A
+   PUTLINE .10 //SYSUDUMP DD  SYSOUT=A
+   PUTLINE .11 //SYSUT1   DD  UNIT=VIO,SPACE=(CYL,(10,05))
+   PUTLINE .12 //PROFILE  DD  SYSOUT=A
+   PUTLINE .13 //SYSTSIN  DD  *
+
+   IF (x.all_opt) BEGIN
+      PUTEND  SEARCH MASK (&(x.group)$&(x.user))
+   END
+
+   IF (NOT x.all_opt) BEGIN
+      IF (FIND(x.profname,'%*') GT 0) BEGIN
+         PUTEND  SEARCH MASK (&(x.profname))
+      END
+      ELSE PUTEND  SHOPROF &(x.profname)
+   END
+
+;********** Run LISTRP job
+
+   XCALL racf#runwait('&(x.pgm)','&(user)RACF','RUN HOLD QUIET NONOTIFY',x.stop,x.user,x.group) PUB
+
+   IF (x.stop) PCALL cleanup ('')
+
+;********** FETCH listrp JOB
+
+   TRY DEL F/L ; Keep same active number
+   FETCH * NOMSG
+   PURGE * QUIET
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; display -- Reformat and display output from LISTRP job.          *
+;            This routine works with sections of the output one    *
+;            section at a time.  It calls the "reformat" procedure *
+;            once for each sub-section of the report.              *
+;                                                                  *
+;            There are three main types of sections within the     *
+;            report defined as follows:                            *
+;                                                                  *
+;            noprofile - The first section lists as errors those   *
+;                        datasets with no RACF profile             *
+;            dsnames   - The second section lists each dataset     *
+;                        and the profile which protects it         *
+;            profile   - The third section lists all the profiles  *
+;                        requested including the log and access    *
+;                        rules.                                    *
+;                                                                  *
+;            The datasets from section two are combined with the   *
+;            profiles from section three.  Then the unmatched      *
+;            datasets are appended to the end of the report.       *
+;                                                                  *
+;*******************************************************************
+
+PROC display () BEGIN
+
+;********** If debug on, then display info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'DISPLAY            : '
+   END
+
+;********** Initialize local variables
+
+   start    = 0 ; beginning line number for section to be reformatted
+   finish   = 0 ; ending line number for sectin to be reformatted
+   type     = ''; current section type (noprofile, dsnames, profile)
+
+;********** Make global changes to ACTIVE file first
+
+   TRY  CH '***' TO '' IN ' ERROR ' N
+   TRY  DEL '***' OR ''
+   NUM
+
+;********** Reformat section one - catalog list and errors
+;           First must see if any profiles at all were found.
+
+   P 'PROFILE ACCESS NOT PERMITTED' N
+
+   IF (* GT 0) BEGIN
+      PUTEND Profile access not permitted
+      IF (NOT ses.racf_fromset) LIST L UNN
+      SAVE WYL.&(x.logon_act).SPRESULT LINES L/L REP QUIET ; ### Temp until DUMP works.
+      DEL LAST
+      PCALL cleanup ('')
+   END
+
+   P 'PROFILE NAME' 1 (1) N; Any profiles?
+
+   IF  (* LE 0) BEGIN
+      PUTEND Profile does not exist
+      IF (NOT ses.racf_fromset) LIST L UNN
+      SAVE WYL.&(x.logon_act).SPRESULT LINES L/L REP QUIET ; ### Temp until DUMP works.
+      DEL LAST
+      PCALL cleanup ('')
+   END
+
+   P 'NO ENTRIES MEET SEARCH CRITERIA' (1) N; Any profiles?
+
+   IF  (* GT 0) BEGIN
+      PUTEND Profile does not exist
+      IF (NOT ses.racf_fromset) LIST L UNN
+      SAVE WYL.&(x.logon_act).SPRESULT LINES L/L REP QUIET ; ### Temp until DUMP works.
+      DEL LAST
+      PCALL cleanup ('')
+   END
+
+   P 'PROFILE NAME' 1 (1) N; Must reset line pointer again.
+   start  = FIRST
+   finish = *-2
+   type = 'noprofile'
+   PCALL reformat (type,start,finish)
+
+;********** Now work with datasets
+
+   done = FALSE
+   WHILE (NOT done) BEGIN
+      start = finish+1
+      POINT 'PROFILE NAME'1 (2) IN &(start)/LAST N
+      IF (* GT 0) BEGIN
+         finish = *-2
+         type = 'dsnames'
+         PCALL reformat (type,start,finish)
+      END
+
+      ELSE done = TRUE
+   END
+
+;********** Now handle profile section
+
+   DEL 'SHOPROF'1 OR 'SEARCH'1 OR 'PROFILE'1 OR '______'1 IN &(finish)/LAST
+   IF (finish LE LAST) BEGIN
+      POINT ~' '1 (1) IN &(finish)/LAST NOL
+      finish=*-1
+      done = FALSE
+      WHILE (NOT done) BEGIN
+         start = finish+1
+         POINT ~' '1 (2) IN &(start)/LAST N
+         IF (* GT 0) BEGIN
+            finish = *-1
+            type = 'profile'
+            PCALL reformat (type,start,finish)
+         END
+
+         ELSE BEGIN
+            finish = LAST
+            type   = 'profile'
+            PCALL reformat (type,start,finish)
+            done = TRUE
+         END
+
+      END
+
+   END
+
+;********** Now finish reformat and display results
+
+   POINT 'Profile does not exist' 1 N ; Any datasets w/o profiles?
+   IF (* GT 0) BEGIN
+      PUTEND blank
+      PUTEND Profile: Profile does not exist for the following datasets:
+      MOV 'Profile does not exist   ' TO END
+      CH 1/44 to '                   ' in 'Profile does not exist'1 N
+   END
+
+   CH 'blank'1 TO '' NOL
+   POINT 'Profile'1 (1) NOL
+   IF (* GT 0) DEL F/*-.001
+   CH '(READ)' TO '' IN 'Log   :' NOL ; remove (READ) from ALL(READ) and FAILURES(READ)
+   CH '(UPDATE)' TO '' IN 'Log   :' NOL ; remove (UPDATE) from SUCCESS(UPDATE)
+   CH 'SUCCESS FAILURES' TO 'WRITE' IN 'Log   :' NOL
+   CH 'FAILURES'         TO 'FAILURE' IN 'Log   :' NOL
+   SAV WYL.&(x.logon_act).SPRESULT REP QUIET ; ### Temp til DUMP works
+   IF (NOT ses.racf_fromset) LIST UNN
+END
+
+;<.page>
+;*******************************************************************
+;                                                                  *
+; reformat   -- Reformat a single section of LISTRP output.        *
+;            Routine determines type of display depending upon     *
+;            value of type.                                        *
+;                                                                  *
+;*******************************************************************
+
+PROC reformat (type,start,finish) BEGIN
+
+;********** If debug on, then display info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'REFORMAT           : '
+      WRITE '       type        : '||type
+   END
+
+   CASES BEGIN
+
+;********** Section one logic.  Type = 'noprofile'
+
+      CASE (type EQ 'noprofile') BEGIN
+         done=FALSE
+         WHILE (NOT done) BEGIN
+            POINT 'NO CORRESPONDING PROFILE' IN &(start)/&(finish) N
+            IF (* LE 0) BEGIN
+               POINT ' ERROR' N
+               IF (* GT 0) BEGIN
+                  DEL ~'ERROR' N
+                  CH 'ERROR' TO '' N
+                  SAV WYL.&(x.logon_act).SPRESULT REP QUIET ; ### Temp til DUMP works
+                  LIST UNN
+                  PCALL cleanup('')
+               END
+
+               done = TRUE
+               DEL ~'Profile does not exist' IN &(start)/&(finish)
+            END
+
+            ELSE BEGIN
+               current = *
+               CH 'SHOPROF' to 'Profile does not exist                     ' in &(current)-1 N
+               DEL &(current)
+            END
+         END
+      END
+
+;********** Section two logic.  Type = 'dsnames'
+
+      CASE (type EQ 'dsnames') BEGIN
+         profile = ''
+         dsn    = ''
+         READ STR dsn     USING &(start) COL 9/52 ; 44 char of dsn
+
+;---------- Reformat profile name
+         COUNT '$'3 AND 'WYL.'8 IN &(start)+3 QUIET ; Wylbur profile?
+         IF (COUNT EQ 1) BEGIN
+            gguuu = ''
+            READ STR gguuu USING &(start)+3 COL 1/6
+            gguuu = SUB(gguuu,1,2)||'.'||SUB(gguuu,4,3) ; gg$uuu to gg.uuu
+            CH 'WYL.' to 'WYL.&(gguuu).' IN &(start)+3 N
+            CH 1/7 TO '' IN &(start)+3 N
+         END
+
+         COUNT '$'3 AND 'V'8 AND '.'12 IN &(start)+3 QUIET ; VSAM profile
+         IF (COUNT EQ 1) BEGIN
+            CH 1/7 TO '' IN &(start)+3 N
+         END
+
+         POINT &(start)+3 N ; profile line
+         READ STR profile USING * COL 1/44
+         DEL &(start)/&(finish)
+         PUTLINE &(start) &(profile)
+         CH  45 to '&(dsn)' IN &(start) N
+      END
+
+;********** Section three logic.  Type = 'profile'
+
+      CASE (type EQ 'profile') BEGIN
+         profile = ''
+         public  = ''
+         log     = ''
+         log2    = '' ; needed in case log info is split onto two lines
+
+;---------- Reformat profile name
+         COUNT '$'3 AND 'WYL.'8 IN &(start) QUIET ; Wylbur profile?
+         IF (COUNT EQ 1) BEGIN
+            gguuu = ''
+            READ STR gguuu USING &(start) COL 1/6
+            gguuu = SUB(gguuu,1,2)||'.'||SUB(gguuu,4,3) ; gg$uuu to gg.uuu
+            CH 'WYL.'8 to 'WYL.&(gguuu).' IN &(start) N  ;insert 7 char.
+            CH 1/7 TO '' IN &(start) N  ; remove 7 characters
+         END
+
+         COUNT '$'3 AND 'V'8 AND '.'12 IN &(start) QUIET ; VSAM profile
+         IF (COUNT EQ 1) BEGIN
+            CH 1/7 TO '' IN &(start) N ;remove 7 characters
+            CH 45 TO '       ' IN &(start) N ; insert 7 characters
+         END
+
+         READ STR profile USING &(start) COL 1/44 ; 44 char of profile
+         profile = STRIP(profile) ; remove trailing blanks
+         COUNT '**'52 IN &(start) QUIET ; is this a discrete profile?
+         IF (COUNT GE 1) BEGIN
+            notify = 'This is a discrete profile'
+            log    = 'No logging possible'
+            GOTO format_profile
+         END
+         READ STR public  USING &(start) COL 54/61; public access
+         READ STR log     USING &(start) COL 82/120 ; log option
+         IF (start+1 LE finish) READ STR log2 USING &(start)+1 COL 82/120
+         log = STRIP(log)||' '||STRIP(log2)
+         IF (log EQ 'NONE ') BEGIN
+            COUNT 'LOGPROT   NONE'63 IN &(start)/&(finish) QUIET
+            IF (COUNT EQ 1) BEGIN
+               log = 'PROTECT'
+            END
+         END
+
+;---------- Get notify account  (only if log level NE NONE)
+
+         notify = 'GB.SEC' ; default
+         IF (log NE 'NONE ') BEGIN
+            XCALL racf#notify(x.pgm,profile,x.group,x.user,notify) PUB
+         END
+
+format_profile:
+         CH 82/120 TO '' IN &(start)/&(finish) NOL
+         CH 1/61   TO '        ' IN &(start)/&(finish) NOL
+         CH '$'12 TO '.' NOL ; change gg$uuu to gg.uuu
+         DEL 'LOGPROT'10 IN &(start)/&(finish)
+
+         cnt = 0 ; needed in case no active file
+         IF (LAST GT 0) BEGIN
+            COUNT ~'' IN &(start)/&(finish) QUIET
+            cnt = COUNT
+            DEL '' ; get rid of null lines
+         END
+
+         IF ((cnt EQ 0) AND ((SUB(public,1,4) EQ 'NONE') OR (SUB(public,1,4) EQ '    '))) BEGIN
+            PUTLINE &(start)          No non-owner accesses allowed
+         END
+
+         PUTLINE &(start)-.005 blank
+         PUTLINE &(start)-.004 Profile: &(profile)
+         IF (SIZE(profile) EQ 8) BEGIN
+            IF (SUB(profile,3,1)||SUB(profile,8,1) EQ '$*') BEGIN
+               CH '&(profile)' TO 'DEFAULT ACCOUNT &(x.group).&(x.user)' IN &(start)-.004 NOL
+               IF ((USER EQ x.user) AND (GROUP EQ x.group)) BEGIN
+                  CH 'ACCOUNT &(x.group).&(x.user)' TO '' IN &(start)-.004 NOL
+               END
+            END
+         END
+         IF (NOT ABBREV(log,'NONE',4)) PUTLINE &(start)-.003  Log   : &(log)
+         IF (NOT ABBREV(log,'NONE',4)) PUTLINE &(start)-.002  Notify: &(notify)
+
+         IF ((SUB(public,1,4) NE 'NONE') AND (SUB(public,1,4) NE '    ')) BEGIN
+            PUTLINE &(start)-.001          PUBLIC    &(public)
+         END
+
+         IF ((x.with_opt) OR (x.all_opt)) BEGIN
+            PUTLINE &(finish)+.001                    Datasets covered by this profile:
+            MOV '&(profile) '1 IN F/&(start)-.005 TO &(finish)+.002 BY .001
+            CH 1/44 TO '                   ' IN '&(profile) '1 NOL
+            COUNT &(finish)+.002/&(finish)+.999 QUIET
+            IF (COUNT EQ 0) CH 'Datasets' to 'No datasets' IN &(finish)+.001 NOL
+         END
+
+      END
+
+   END
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  errorexit -- Error exit.  This routine gets control if a command*
+;     fails unexpectedly.  Not much we can do but complain.        *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC errorexit() BEGIN
+
+   WRITE 'An error has occurred in the ' || x.pgm || ' command.'
+   IF (ses.racf_debug) BEGIN
+      WRITE ''
+      WRITE 'Debugging information:'
+      WRITE '   errmsg: '||errmsg
+      WRITE '  errinfo: '||errinfo
+   END
+
+;**********  Mail debugging information to maintenance people.
+
+   ff = first
+   ll = last
+   PUTEND An error occurred in the &(x.pgm) command.
+   PUTEND
+   PUTEND Debugging information:
+   PUTEND
+   DUMP DATE
+   DUMP ACCOUNT
+   PUTEND command = &(x.origparm)
+   PUTEND errmsg = &(errmsg)
+   PUTEND errinfo = &(errinfo)
+   PUTEND first = &(ff)
+   PUTEND last  = &(ll)
+   PUTEND
+   PUTEND ---
+   PUTEND
+   PUTEND >>> show vars type ses
+   dump vars type ses
+   PUTEND
+   PUTEND >>> show vars type x
+   dump vars type x
+   PUTEND
+   PUTEND >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   PUTEND
+   PUTEND End of dump.
+
+   TRY MAIL TO (&(x.maint)) TITLE '&(x.pgm) error' QUIET
+   POINT 'An error occurred'1(1) N
+   DEL */L
+
+;**********  Call it quits.
+
+   PCALL error('RACFEXER','The systems programming staff has been \
+      notified.')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  attnexit -- Attention exit.  This routine gets control if the   *
+;      user presses ATTN.   Actives are closed until the original  *
+;      active has been restored.                                   *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC attnexit() BEGIN
+
+   ON ATTN REENABLE
+   ON ATTN  CMD 'PCALL attnexit' NOINTERRUPT
+
+   WHILE (actno GT x.origact) BEGIN
+      CLOSE ; close temporary actives if any still open
+   END
+
+   ON ATTN  CMD 'PCALL attnexit' INTERRUPT
+
+   PCALL cleanup('')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  error -- Routine to quit command because of an error.           *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC error(errid, errmsg) BEGIN
+
+   SMF RACF "PROT ERR Show Protect &(x.origparm)//ERRMSG=&(errmsg)"
+
+   PCALL cleanup('errid=&(errid), errmsg="&(errmsg)"')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  cleanup -- Routine to do final command cleanup.                 *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC cleanup(opt) BEGIN
+
+   PICK &(x.origact)
+
+quote_loop:
+   IF (INDEX(opt,'QuOtE') GT 0) BEGIN
+      opt = SUB(opt,1,IND(opt,'QuOtE')-1)||"'"||SUB(opt,IND(opt,'QuOtE')+5)
+      GOTO quote_loop
+   END
+
+   SET EXEC &(x.limit)
+
+   DELTA = x.delta ; return DELTA to original
+
+   XRETURN &(opt)
+
+END

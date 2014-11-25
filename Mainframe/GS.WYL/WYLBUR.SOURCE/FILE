@@ -1,0 +1,1341 @@
+FILE     TITLE 'WYLBUR''s File Access Commands'                                 
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+WYLFILE  CSECT                                                                  
+FILE     IDENT 2025                11:49:23 01/25/02  (SLP)                     
+*                                                                               
+         REGS   FSR,,,,,,IOWAR,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR             
+         SPACE 2                                                                
+         SYSDEFN ,                 Define installation params                   
+         GBLC  &PUBUSER,&PUBGRP,&INSTALN                                        
+         GBLB  &PROTECT                                                         
+         SPACE 2                                                                
+         PUSH  DSECTS                                                           
+         EJECT                                                                  
+         COPY  CONTROL                                                          
+*                                                                               
+         COPY  SYSDSNS                                                          
+         EJECT                                                                  
+IOWA     IOWA  DSECT                                                            
+*                                                                               
+         COPY  RTNCODES                                                         
+         TITLE 'DSECTS'                                                         
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         COPY  FFINFO                                                           
+         EJECT                                                                  
+VOLDSECT VOLUME DSECT=YES                                                       
+VOLENTSZ EQU   *-VOLDSECT                                                       
+VARFLG1  DC    X'00'               Reset vflg1 flags                            
+VARFLG2  DC    X'00'               Request flags                                
+VRF2ON   EQU   X'80'               Vary online request                          
+VRF2OFF  EQU   X'40'               Vary offline request                         
+VRF2SLOT EQU   X'20'               Used spare slot for volume                   
+*                                                                               
+         DS    0F                  To fullword boundary                         
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT 1                                                                
+         COPY  LUVHDR                                                           
+         SPACE 3                                                                
+         COPY LUVENTRY                                                          
+         TITLE 'SAVE Command'                                                   
+*box                                                                            
+*                                                                               
+*  SAVE -- SAVE/RESAVE commands.                                                
+*                                                                               
+OLDSAVE  GENTER                                                                 
+SAVEBASE LABEL ,                   Value in base register                       
+         CLEAR (DSNWADSN,DSAVSIZ)                                               
+*                                                                               
+         SET   CPLFLG1.CPFALL      Set ALL ok for range                         
+         IF    (CPCMNM,EQ,'RES'),BEGIN  Resave...                               
+         SET   CPLFLG2.CPFSCRTC    Resave                                       
+         END                                                                    
+*                                                                               
+         MVC   CPCMNM,=C'SAV'      SAVE from now on                             
+*-                                                                              
+*-       Check for no operands.                                                 
+*-                                                                              
+         OSCSAVE                                                                
+         VCALL SCANTOK             Pick up next token                           
+         IF    Z,'OSCRSTR'        We have one, yeah                             
+         ELSE  BEGIN               No dsname...                                 
+         OSCINIT '* VERIFY'        Default is "SAVE * VERIFY"                   
+         END                                                                    
+*                                                                               
+         VCALL ZODSNM              Go get either or both                        
+         OSCINFO                   Bump new scanner ptrs                        
+         SCINIT (R1),(R0)            for SCNEXFR call                           
+         VCALL SCNEXFR             See if execute file range                    
+*                                                                               
+         IF    CPFRDACT,BEGIN      Saving Active...                             
+         SET   CPLFLG3.CPFSET      SET is the default                           
+         END                                                                    
+*                                                                               
+         CLEAR R3,CPNREC           Set nrecs to 0                               
+GOTOSCN  OSCAN L:=A(SAVEPRT)       Go scan                                      
+         L     R6,CPLRCL           Set r6 to type specified                     
+         LTR   R0,R3               Nrecs given?                                 
+         BZ    CHKFRMT             No                                           
+         OSCINIT (R4),(R0)         Init scan                                    
+         OSCAN L:=A(NRECPRT)       Get "nrec"                                   
+         B     CVABSENT            Error if missing                             
+CHKFRMT  LTR   R6,R6               Lrecl given                                  
+         BM    BESTER              None given, do no checking now               
+         BZ    CHKEDT              Yes EDIT format                              
+CHKLREC  IF    (^CPLFLG5.CPFFOPT,OR,CPLFLG5.CPFUNUM),CHKBLK  Unn                
+         LH    R0,CPSEQLN          Get length of seq field                      
+         TM    CPSEQFLD,X'80'      Seq field at end                             
+         BO    CHKLREC2            Yes                                          
+         AH    R0,CPSEQFLD         Add start col for seq                        
+         DECR  R0                  Set for compare to lrecl                     
+CHKLREC2 IF    (R0,GT,R6),BEGIN    Seq field out of bounds...                   
+         ERROR 'Sequence field greater than lrecl specified.'                   
+         END                                                                    
+CHKBLK   L     R1,CPNREC           Get block factor                             
+         LTR   R1,R1               Default block factor needed                  
+         BZ    BESTER              Yes                                          
+         MR    R0,R6               Mult block factor & lrecl                    
+         CH    R1,=AL2(&BUFRMAX)   Too big?                                     
+         BNH   BESTER              No                                           
+         ERROR 'Blocksize is too big.'                                          
+*                                                                               
+CHKEDT   IF    CPLFLG5.CPFFOPT,BEGIN   Number with EDIT format...               
+         TSEG  'Sequence number can''t be added to '                            
+         ERROR 'EDIT format data sets.'                                         
+         END                                                                    
+*                                                                               
+BESTER   ACALL SAVEOPTS            Check for consistent SAVE options            
+*                                                                               
+         IF    (^CPFXMULT,AND,^DSNWAF3.DSNFLIN),'VCALL ZDETRNG'                 
+         VCALL ZSNFIN              Finish dsname parameters                     
+*-                                                                              
+*-       Do verification prompt for SAVE VERIFY.                                
+*-                                                                              
+         IF    CPFVER,BEGIN        Verify...                                    
+         TSEG  'OK to '                                                         
+         SETMSG 'save'                                                          
+         IF    CPLFLG2.CPFSCRTC,'SETMSG "resave"'                               
+         TSEG  (R1),(R0),B                                                      
+         IF    ((DSNWAMBR,NZ),AND,(DSNWAMBR,NE,CVBLANKS)),BEGIN                 
+         TSEG  DSNWAMBR,,TB                                                     
+         TSEG  'in '                                                            
+         END                                                                    
+         ACALL SEGDSN              Dsname                                       
+         IF    (DSNON,NZ),'TSEG "on "; TSEG DSNON,,TB'                          
+         DECR  R15,CPSEGLENF       Unseg trailing blank (kludge)                
+         CLEAR R0                                                               
+         VCALL YESREQ              Get Yes/No                                   
+         END                                                                    
+*-                                                                              
+*-       Do external device open if it's not for a disk.  Eventually            
+*-      disk opens should go through this mechanism too, but for now            
+*-       it uses the same old code which follows.                               
+*-                                                                              
+*         IF    (DSNDTYPE,NE,DSNDDISK),BEGIN  Not a disk...                     
+*         IF    ^DSNWAF3.DSNFLIN,BEGIN  Saving entire file...                   
+*         IF    CPFRDACT,'MVC DSNLTOT,CPALNCT'  No. lines                       
+*         END                                                                   
+**                                                                              
+*         VCALL EXTOPEN             Open an external file for output            
+*         IF    (R15,NZ),CVNEXT                                                 
+*         B     SAVECOM                                                         
+*         END                                                                   
+*-                                                                              
+*-       Our Disk driver doesn't know about "APPEND".                           
+*-                                                                              
+         IF    DSNFAPP,BEGIN                                                    
+         ABORT 'APPEND option is not supported for this file type.'             
+         END                                                                    
+*                                                                               
+ROPENN   DOPEN CPLRCL,=A(GETSIZE),SAVE  Open data set                           
+*                                                                               
+         IF    ('ACALL CHKVOL',Z),ROPENN  Retry operation                       
+*                                                                               
+         IF    (R15,NZ),PROBOPN    Something's wrong                            
+*                                                                               
+         XPUSH R15,R1              (Safety)                                     
+         IF    CPLFLG3.CPFSET,'VCALL SETPFXNS'  Set prefix                      
+         XPOP  R15,R1                                                           
+*                                                                               
+         LA    R2,2                Assume EDIT save                             
+         L     R3,CPLRCL           Get lrecl                                    
+         LTR   R3,R3               Is it EDIT or fixed                          
+         BZ    ROPENN2             Br if EDIT                                   
+         DECR  R3                  Set lrecl for ex moves                       
+         ST    R3,CPNREC           Put in nrec                                  
+         CLEAR R2                  Set displacement for fixed                   
+ROPENN2  ST    R1,CPDRED           Save external I/O buff addr                  
+         ST    R0,CPRCSZ           Save output record size                      
+         AR    R1,R2               Point to addr for first text byte            
+         ST    R1,CPNXAD           Save                                         
+         ST    R2,CPNWCT           Into current count                           
+*                                                                               
+SAVECOM  SET   CPFNCUR             Set not to change current                    
+         CLEAR CPNEDPFX            Always start of with zeros                   
+*-                                                                              
+*-       SAVE MULTIPLE.                                                         
+*-                                                                              
+         IF    CPFXMULT,BEGIN      Save multiple...                             
+         MVC   CPSAVACT,CPACTNO    Save current Active file number              
+*-                                                                              
+*-       First save all Actives (except the current).                           
+*-                                                                              
+         CLEAR R4                  R4 = external set number                     
+         CLEAR R3                  R3 = working set number                      
+         LOOP  BEGIN                                                            
+         LA    R1,=CL8'TEXT'                                                    
+         LR    R15,R3                                                           
+         VCALL ACTNEXT             Find next Active                             
+         IF    Z,EXIT              No more Actives, scram                       
+         LR    R3,R15              Save new working set number                  
+         VCALL ACTPICK             Select this Active                           
+*                                                                               
+         IF    (CPALNCT,NZ),BEGIN  Save this Active...                          
+         IF    (R3,EQ,CPSAVACT),EXIT  Current Active is saved last              
+         LA    R4,@R4+1            Kick working set counter                     
+         ST2   R4,CPNEDSET         Save set number                              
+*                                                                               
+         CLEAR CPFSLN                                                           
+         MVC   CPLSLN,CVMAXLNO     Set range=ALL                                
+         CLEAR CPFRDRNG                                                         
+         SET   CPFEXPRG            Explicit range                               
+         SET   CPFSOME             (Avoid "no lines found" message)             
+*                                                                               
+         L     R15,SAVEWRK                                                      
+         VCALL DESPOT              Save this Active file                        
+         END                                                                    
+         END                                                                    
+*-                                                                              
+*-       Save the current Active file last.                                     
+*-                                                                              
+         L     R15,CPSAVACT                                                     
+         VCALL ACTPICK             Switch back to orig Active                   
+*                                                                               
+         IF    (CPATYPE,EQ,=CL8'TEXT'),BEGIN  Save current Active...            
+         CLEAR CPNEDSET            Set number is zero                           
+         CLEAR CPFSLN                                                           
+         MVC   CPLSLN,CVMAXLNO     Set range=ALL                                
+         CLEAR CPFRDRNG                                                         
+         SET   CPFEXPRG            Explicit range                               
+         SET   CPFSOME             (Avoid "no lines found" message)             
+*                                                                               
+         L     R15,SAVEWRK                                                      
+         VCALL DESPOT              Save this Active file                        
+         END                                                                    
+         END                                                                    
+*-                                                                              
+*-       SAVE.                                                                  
+*-                                                                              
+         ELSE  BEGIN               Save current Active/Exec...                  
+         L     R15,SAVEWRK         Set addr for despot                          
+         IF    ^CPFRDACT,BEGIN     Is it active or exec range                   
+         O     R15,=AL1(LEXATRTN,0,0,0)  Set for exec range                     
+         END                                                                    
+         VCALL DESPOT              Go to despot                                 
+         IF    ^CPFSOME,DOCLOSVD   Was range void                               
+         COMMENT ,                 Branch yes for special close                 
+         END                                                                    
+*                                                                               
+         VCALL EXTCLOSE                                                         
+         CLEAR CPACHCT             Clear change count                           
+*                                                                               
+         CLEAR R2,R3               Compatibility with DCLOSE                    
+         IF    (DSNDTYPE,EQ,DSNDDISK),BEGIN  DCLOSE passed rc...                
+         LR    R2,R15              Save return code                             
+         LR    R3,R0               Also save second return code                 
+         END                                                                    
+*                                                                               
+         TCCR                                                                   
+         IF    CPFRCVY,BEGIN       Recovery save...                             
+         SET   CPGFLG2.CPFACTSV    Set flag that recovery saved                 
+         END                                                                    
+*                                                                               
+         IF    CPFTRUNC,BEGIN      Lines truncated...                           
+         TSEG  'Lines truncated to '                                            
+         TNUM  L:CPLRCL                                                         
+         TSEG  ' characters when saved.',,CR                                    
+         END                                                                    
+*                                                                               
+         LR    R0,R3               Restore R0 return code                       
+         LTR   R15,R2              Restore and test return code                 
+         BZ    GOODCLOS            Br if everything normal                      
+         IF    NEG,BEGIN           EOV or out of dir space...                   
+         IF    (R15,EQ,-2),'LA R15,RTNDIRFL; B PROBOPNA'  Dir                   
+         ACALL NORMPDS             EOV -- no more space                         
+         END                                                                    
+         CH    R15,=AL2(RTNCATER)  Test for cater                               
+         BE    BADOPEN             if yes it's error on stow                    
+**  otherwise it's a catlg error                                                
+GOODCLOS IF    ((DSAVTITL,NZ),AND,^DSNWAF2.DSNFPDS),BEGIN                       
+         TSEG  'TITLE option ignored.',,CR                                      
+         TSEG  'The TITLE option is only '                                      
+         TSEG  'allowed when saving into a library.',,CR                        
+         END                                                                    
+*                                                                               
+         IF    CPFRDACT,BEGIN  Only for Active file...                          
+         IF    CPFXMULT,BEGIN      Multiple...                                  
+         IF    CPFCLEAR,BEGIN      Clear specified...                           
+         SET   CPFNWARN            Must have NOWARN too                         
+*        VCALL CLRMULT             Clear all                                    
+         VCALL ACTRESET            Wipe them out - MPD                          
+         IF    (CPATTEXT,NZ),BEGIN  Temporary???...    !!!!                     
+         CLEAR CPATTEXT                                !!!!                     
+         END   ,                                       !!!!                     
+         END                                                                    
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Just clear current Active...                 
+         IF    CPFCLEAR+CPFKEEP,'VCALL CLRTEXT'  Clear/Keep                     
+         END                                                                    
+         END                                                                    
+*                                                                               
+         VCALL CHKMBRIG            Check member ignored                         
+         BAS   R4,DSNORMEM         Go tseg first part of message                
+         SETMSG 'saved'                                                         
+         IF    CPLFLG2.CPFSCRTC,'SETMSG "replaced"'                             
+         IF    DSNFAPP,'SETMSG "appended"'                                      
+         TSEG  (R1),(R0),B                                                      
+*                                                                               
+         IF    CPFNOCAT,BEGIN                                                   
+         IF    DSNWAF2.DSNFPDS,EXIT                                             
+         SETMSG 'but not'                                                       
+         IF    (DSNON6,EQ,DSNCATV),BEGIN                                        
+         IF    CPLFLG2.CPFSCRTC,SAVINO  replaced                                
+         SETMSG 'and already'                                                   
+         END                                                                    
+         TSEG  (R1),(R0),B                                                      
+         ACALL CAT                                                              
+         END                                                                    
+*                                                                               
+SAVINO   BAS   R4,INORON           Put out in or on msg                         
+         IF    (DSNBADV,NE,CVBLANKS),BEGIN  We had to improvise...              
+         TSEG  ' (instead of '                                                  
+         SETMSG DSNBADV                                                         
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),B                                                      
+         TSEG  'which is full) '                                                
+         END                                                                    
+*                                                                               
+CHKCATD  IF    CPFRDEXE,'TSEG " from EXEC"'                                     
+         TCR                                                                    
+         IF    ('LTR R15,R2',NZ),BEGIN                                          
+         BAL   R4,DSNORMEM                                                      
+         LR    R15,R2                                                           
+         ACALL NTGDCAT                                                          
+         END                                                                    
+*                                                                               
+         LA    R0,SDSNNEWS         Our news                                     
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         IF    (@R1,EQ,'$'),'INCR R1; DECR R0'                                  
+         IF    (R0,EQ,DSNWANL),BEGIN                                            
+         LR    R2,R0                                                            
+         TDEX  R2,'CLC @R1(*-*),DSNWADSN'                                       
+         IF    EQ,'VCALL SETWNEWS; B UTILMSG'                                   
+         END                                                                    
+*-                                                                              
+*-       Local Stanford checks for RLGNEWS and SUH.NEWS.                        
+*-                                                                              
+         AIF   ('&INSTALN' NE 'STANFORD').NOT4S                                 
+         IF    (DSNWADSN,EQ,'WYL.GA.PUB.RLGNEWS'),BEGIN                         
+         IF    ^CVFRLG,EXIT        Not RLG machine                              
+         VCALL SETWHELP            Update help file                             
+         B     UTILMSG                                                          
+         END                                                                    
+*                                                                               
+         IF    (DSNWADSN,EQ,'WYL.GA.PUB.SUH.NEWS'),BEGIN                        
+         IF    (CVMACHID,NE,'SYSC'),EXIT  Not SUH/SYSC machine                  
+         VCALL SETWHELP            Update help file                             
+         B     UTILMSG                                                          
+         END                                                                    
+.NOT4S   ANOP                                                                   
+*                                                                               
+*                                                                               
+         LA    R0,SDSNHDIR         Help directory                               
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         IF    (@R1,EQ,'$'),'INCR R1; DECR R0'                                  
+         IF    (R0,EQ,DSNWANL),BEGIN                                            
+         LR    R2,R0                                                            
+         TDEX  R2,'CLC @R1(*-*),DSNWADSN'                                       
+         IF    EQ,'VCALL SETWHELP; B UTILMSG'                                   
+         END                                                                    
+*                                                                               
+         LA    R0,SDSNHOSA         SYSA host table                              
+         IF    CVFRLG,'LA R0,SDSNHOSR'  RLG host table                          
+         IF    (CVMACHID,EQ,'SYSC '),'LA R0,SDSNHOSC'  SYSC host                
+         IF    (CVMACHID,EQ,'SYSD '),'LA R0,SDSNHOSD'  SYSD host                
+         IF    (CVMACHID,EQ,'SYSH '),'LA R0,SDSNHOSH'  SYSH host                
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         IF    (@R1,EQ,'$'),'INCR R1; DECR R0'                                  
+         IF    (R0,EQ,DSNWANL),BEGIN                                            
+         LR    R2,R0                                                            
+         TDEX  R2,'CLC @R1(*-*),DSNWADSN'                                       
+         IF    EQ,'VCALL SETWHOST; B UTILMSG'                                   
+         END                                                                    
+*                                                                               
+         LA    R0,SDSNTERM         Terminal table                               
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         IF    (@R1,EQ,'$'),'INCR R1; DECR R0'                                  
+         IF    (R0,EQ,DSNWANL),BEGIN                                            
+         LR    R2,R0                                                            
+         TDEX  R2,'CLC @R1(*-*),DSNWADSN'                                       
+         IF    EQ,'VCALL SETWTERM; B UTILMSG'                                   
+         END                                                                    
+*                                                                               
+         LA    R0,SDSNPRIN         Printer table                                
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         IF    (@R1,EQ,'$'),'INCR R1; DECR R0'                                  
+         IF    (R0,EQ,DSNWANL),BEGIN                                            
+         LR    R2,R0                                                            
+         TDEX  R2,'CLC @R1(*-*),DSNWADSN'                                       
+         IF    EQ,'VCALL SETWPRT; B UTILMSG'                                    
+         END                                                                    
+*box                                                                            
+*                                                                               
+* Display percent utilized for PDS                                              
+*                                                                               
+UTILMSG  IF    DSNWAF2.DSNFPDS,BEGIN                                            
+         AIF   ('&INSTALN' EQ 'STANFORD').NOPRCT                                
+         L     R4,CPWK8            Load library utilization                     
+         IF    (R4,LT,80),EXIT     Skip if under warn limit                     
+         TSEG  'Library is '    Print out first part of message                 
+         BTD   CPDOUB,0,(R4)       Convert percentage to printable              
+         TSEG  (R1),(R0)           Print out percentage                         
+         TSEG  '% full.',,WR       Print out rest of message                    
+.NOPRCT  ANOP                                                                   
+         END                                                                    
+*                                                                               
+         B     CVNEXT                                                           
+         EJECT                                                                  
+*-                                                                              
+*-       Routine to put out member name or dsname depending on pds.             
+*-                                                                              
+DSNORMEM TM    DSNWAF2,DSNFPDS     Was this a pds save                          
+         BZ    DSNOR1              Br no                                        
+         ACALL MEMBERED            Put out member name                          
+         BR    R4                  Return                                       
+*                                                                               
+DSNOR1   ACALL SEGDSN                                                           
+         BR    R4                  Return                                       
+*                                                                               
+*routine to put out in dsname or on volume depending on pds                     
+INORON   IF    DSNWAF2.DSNFPDS,'TSEG "in "; ACALL SEGDSN'  Library              
+*                                                                               
+         IF    (DSNON,NZ),'TSEG "on "; TSEG DSNON,,T'                           
+         BR    R4                  Return                                       
+* scratch with save code                                                        
+*                                                                               
+SCRTGO   SET   CPLFLG2.CPFSCRTC    Set scratch bit                              
+         B     ROPENN              Go open                                      
+*                                                                               
+* the range specified for a pds save was void -- close data                     
+* set and go issue aborted message -- note that the void range                  
+* message has already been issued by despot                                     
+DOCLOSVD VCALL EXTCLOSE                                                         
+         LA    R15,ABRTCODE        Set code for abort                           
+         B     BADOPEN             Go do message                                
+         EJECT                                                                  
+**  if eov (no more space) during save go here.  the dcb is                     
+**       already closed.                                                        
+**                                                                              
+**  This is a very non-standard interface; see code in the DISK                 
+**  module which calls this routine.                                            
+*                                                                               
+         ENTRY EOV                                                              
+EOV      LR    R3,R15              Save return code                             
+         BASR  R15,0                                                            
+         WITH  (*,R15),'L BR,=A(SAVEBASE)'  Set correct base reg                
+*                                                                               
+         VCALL INITSTK             Reset stack                                  
+         LR    R15,R3              Restore rc                                   
+*                                                                               
+         CLEAR CPRFEXT             Turn off external data set open              
+         B     PROBOPNA                                                         
+*-                                                                              
+*-       Handle DOPEN error codes for SAVE here.                                
+*-                                                                              
+PROBOPN  BM    CHTYPE              Type being changed if minus                  
+PROBOPNA CH    R15,=AL2(RTNNOSPC)  Was it no space?                             
+         BH    PROBOPNB            Check for access violation                   
+         BE    PROBNOSP                                                         
+         CH    R15,=AL2(RTNDUPDS)  Is it dup data set                           
+         BE    ALREDDY             Yes                                          
+         B     BADOPEN             No, must be ds not on cat                    
+*                                                                               
+PROBOPNB ACALL ACSCHECK            See if it was an access prob                 
+         BZ    ROPENN              It was and its ok now                        
+         CH    R15,=AL2(RTNNTPDS)  Type conflict?                               
+         BE    BADTYPSV            Yes, isssue error msg                        
+         B     BADOPEN             it wasn't - check others                     
+*                                                                               
+PROBNOSP TM    DSNWAF2,DSNFPDS     Was it a pds save?                           
+         IF    NZ,BEGIN                                                         
+         ACALL NORMPDS             Br if yes                                    
+         END                                                                    
+*                                                                               
+         INCR  R15,DSNVOLCT        Count number of attempts                     
+         IF    (R15,LT,15),BEGIN   Try a different volume...                    
+         MVC   DSNBADV,DSNON6      Save the volume which is ng                  
+         IF    ^CPFNOCAT,'SET CPFRECAT'  Must recatalog                         
+         CLEAR DSNON               Pick an alternate volume                     
+         B     ROPENN                                                           
+         END                                                                    
+*-                                                                              
+*-       We can't save the data set.                                            
+*-                                                                              
+         IF    CPLFLG2.CPFSCRTC,BEGIN  Scratched...                             
+         TSEG  'After scratch '    Scratch was done                             
+         IF    (DSNON,NZ),'TSEG "on "; TSEG DSNON,,CR'                          
+         TSEG  ', '                                                             
+         END                                                                    
+*                                                                               
+         LA    R15,RTNNOSPC        Reset return code                            
+BADOPEN  ACALL NTGDOPN             Error msg (no return)                        
+         SPACE 2                                                                
+**  data set already there                                                      
+ALREDDY  TSEG  'Replace '                                                       
+         IF    DSNWAF2.DSNFPDS,'ACALL MEMBERED'  Just member name               
+         ELSE  'BAS R4,DSNORMEM'   Otherwise, dsname                            
+         BAS   R4,INORON           On vol/in dsn                                
+         CLEAR R0                  Use current stuff as prompt                  
+         VCALL YESREQ              Get permission                               
+         B     SCRTGO                                                           
+*                                                                               
+CHTYPE   LR    R3,R0               Save blocksize returned                      
+         TSEG  'Warning: Data set type will be changed to '                     
+         SETMSG 'PO'                Assume partitioned data set                 
+         TM    DSNWAF2,DSNFPDS     Is it a pds                                  
+         BO    CHTYPE1             Br yes                                       
+         SETMSG 'PS'                No, set for sequential                      
+CHTYPE1  TSEG  (R1),(R0),B         Put in ps or po                              
+         TM    CPLRCL+3,X'FF'      Is it EDIT or fixed save?                    
+         BNZ   CHTYPE2             Br if fixed                                  
+         TSEG  'U/'                Set recfm=u                                  
+         LR    R15,R3              Set r15 to lrecl                             
+         B     CHTYPE3             Go finish                                    
+*                                                                               
+CHTYPE2  TSEG  'FB/'               Set fixed part                               
+         L     R15,CPLRCL          Get lrecl                                    
+CHTYPE3  BTD   CPDOUB,0,(15)       Do lrecl                                     
+         TSEG  (R1),(R0)           Put in buffer                                
+         TSEG  '/'                 Put in /                                     
+         BTD   CPDOUB,0,(R3)       Do blksize                                   
+         TSEG  (R1),(R0),CR                                                     
+         SETMSG 'OK'                Set prompt                                  
+         VCALL YESREQ              Go see if ok to change                       
+         OI    DSNWAF3,DSNFCHT     Yes, set change flag                         
+         B     ROPENN              Do open again                                
+         SPACE 2                                                                
+BADTYPSV TSEG  'Data set '                                                      
+         ACALL SEGDSN                                                           
+         TSEG  'is not a library.',,CR                                          
+         LA    R15,ABRTCODE        Issue abort msg                              
+         B     BADOPEN                                                          
+         SPACE 2                                                                
+SAVERB   ERROR 'Blocksize is invalid.'                                          
+         EJECT                                                                  
+NRECDOO  ST    R15,CPNREC          Set nrecs                                    
+         OSCAN L:=A(NRECPRT)       Make sure ok                                 
+         LTR   R6,R6               Any lrecl given                              
+         BP    CHKFRMT             Yes, go do normal check                      
+         IF    Z,BEGIN             Nrecs with EDIT specified...                 
+         TSEG  'Blocking factor can''t be specified with '                      
+         ERROR 'EDIT format data sets.'                                         
+         END                                                                    
+         LA    R6,80               Set for card                                 
+         ST    R6,CPLRCL           Save card format                             
+         B     CHKFRMT             Go do check                                  
+*                                                                               
+NRCTRY   CLI   @R1,C'('            Need left paren for nrecs                    
+         BNE   CVNVALID            Need left paren                              
+         LA    R4,1(R1)            Save ptr                                     
+         SH    R0,=H'2'            Decrement for parens                         
+         LTR   R3,R0               Save count                                   
+         BNP   CVNVALID            Nix                                          
+         BR    RAR                 More?                                        
+*                                                                               
+EXPDT    OI    DSNWAF3,DSNFEXP     Set expdt override ok                        
+         IF    ^CPSFSPR,CVNVALID   priv'd request                               
+         BR    RAR                                                              
+*                                                                               
+SAVRECAT SET   CPFRECAT                                                         
+         BR    RAR                                                              
+*                                                                               
+STITLE   LENTER                                                                 
+         VCALL DEQUOTE                                                          
+         IF    NEG,BEGIN                                                        
+         ABORT 'The text after TITLE must be enclosed in quotes.'               
+         END                                                                    
+         MVC   DSAVTIT,CVBLANKS                                                 
+         IF    (R0,Z),'SETMSG CVBLANKS,1'                                       
+         LR    R15,R0                                                           
+         CEIL  R15,L'DSAVTIT                                                    
+         STH   R15,DSAVTITL        Title length                                 
+         MOVE  R15,DSAVTIT,@R1     Title text                                   
+         SH    R0,=AL2(L'DSAVTIT)  Too long?                                    
+         IF    POS,BEGIN           Yes...                                       
+         XPUSH R0                                                               
+         TSEG  'Title is too long, the last '                                   
+         XPOP  R15                                                              
+         BTD   CPDOUB,0,(R15)                                                   
+         TSEG  (R1),(R0),B                                                      
+         TSEG  'characters have been ignored.',,CR                              
+         END                                                                    
+         LEXIT                                                                  
+*                                                                               
+LINES    IF    CPFXMULT,BEGIN      MULTIPLE also specified...                   
+         ABORT 'MULTIPLE and LINES are mutually exclusive.'                     
+         END                                                                    
+         VCALL ZDETRNG             Go do range                                  
+         OI    DSNWAF3,DSNFLIN     Set lines specified                          
+         TM    CPLFLG1,CPFALL      Was range null                               
+         BZ    CVNVALID            Yes, it is invalid                           
+         B     GOTOSCN             Continue scan                                
+*                                                                               
+SNOCAT   SET   CPFNOCAT                                                         
+         BR    RAR                                                              
+*                                                                               
+STREAM   SET   DSNFSTRM            Stream                                       
+         BR    RAR                                                              
+*                                                                               
+APPEND   SET   DSNFAPP             Append                                       
+         BR    RAR                                                              
+*                                                                               
+MULT     SET   CPFXMULT            Multiple                                     
+         CLEAR CPLRCL              Edit                                         
+         SET   CPFNEWED            NEWEDIT                                      
+         BR    RAR                                                              
+*                                                                               
+NOCOND   SET   CPFNCOND            No condense                                  
+         BR    RAR                                                              
+         DROP  BR                                                               
+*                                                                               
+         DS    0F                                                               
+SAVEWRK  DC    AL1(DESRTRN+LOCATRTN+PREST),AL3(SAVERTN)                         
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SAVEOPTS -- Local routine to make sure that no inconsistent                  
+*    SAVE options have been specified.  The only reason this is a               
+*    separate routine is that the main SAVE routine is almost out               
+*    of addressablity.                                                          
+*                                                                               
+SAVEOPTS PROC                                                                   
+         IF    (CPFXMULT,AND,DSNWAF3.DSNFLIN),BEGIN  Error...                   
+         ABORT 'MULTIPLE and LINES are mutually exclusive.'                     
+         END                                                                    
+*                                                                               
+         IF    (CPFRDEXE,AND,CPFXMULT),BEGIN                                    
+         ABORT 'MULTIPLE and EXEC are mutually exclusive.'                      
+         END                                                                    
+*                                                                               
+         IF    (CPLFLG2.CPFSCRTC,AND,DSNFAPP),BEGIN                             
+         ERROR 'REPLACE and APPEND are mutually exclusive.'                     
+         END                                                                    
+*                                                                               
+         IF    DSNFUFMT,BEGIN      Unformatted...                               
+         ERROR 'UNFORMATTED option not allowed on the SAVE command.'            
+         END                                                                    
+*                                                                               
+         IF    DSNFTEXTONLY,BEGIN  Textonly...                                  
+         ERROR 'TEXTONLY option not allowed on the SAVE command.'               
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*-                                                                              
+*-       SAVE options                                                           
+*-                                                                              
+SAVEPRT  OSCKW EXPDT,EXPDT,A                                                    
+         OSCKW TITLE,STITLE,(A,P)                                               
+         OSCKW LINES,LINES,A                                                    
+         OSCKW LINS,LINES                                                       
+         OSCKW EXECUTE,,A                                                       
+         OSCKW CATLG,,A            (Compatability)                              
+         OSCKW CATALOG,,A          (Compatability)                              
+         OSCKW RECATLG,SAVRECAT,A                                               
+         OSCKW RECATALOG,SAVRECAT,A                                             
+         OSCKW UNCATLG,,A          (Compatability)                              
+         OSCKW UNCATALOG,,A        (Compatability)                              
+         OSCKW NOCATALOG,SNOCAT,A                                               
+         OSCKW STREAM,STREAM,A                                                  
+         OSCKW APPEND,APPEND,A                                                  
+         OSCKW MULTIPLE,MULT,A                                                  
+         OSCKW NOCONDENSE,NOCOND,A                                              
+         OSCKW ,V(CLSCRPRT),PUSH                                                
+         OSCKW ,V(DSNPRTF),PUSH                                                 
+         OSCKW ,V(VERPRT),PUSH                                                  
+         OSCKW ,V(COLLPRT),PUSH                                                 
+         OSCKW ,V(QUIETPRT),PUSH                                                
+         OSCKW ,NRCTRY             Check for nrec (blocking factor)             
+*                                                                               
+NRECPRT  OSCKW ,NRECDOO,PI,1000                                                 
+NRECERT  OSCKW ,V(INVALID)                                                      
+         EJECT                                                                  
+*-                                                                              
+*-       No room in library.  Give error or prompt for condense.                
+*-                                                                              
+NORMPDS  XENTER R0,R8,,LOCAL       Routine does not return                      
+         IF    CPFNCOND,BEGIN                                                   
+         ACALL SEGDSN                                                           
+         TSEG  ' is full. Member '                                              
+         ACALL MEMBERED                                                         
+         ERROR 'not saved.',,LIBFULL                                            
+         END                                                                    
+         ELSE  BEGIN                                                            
+         TSEG  'Not enough space in '                                           
+         ACALL SEGDSN                                                           
+         IF    CPFDUMP,CVABORT                                                  
+         TCR                                                                    
+         SETMSG 'Condense'                                                      
+         VCALL YESREQ              Go check if ok                               
+         MVC   CPCMNM(2),=C'C*'    Condense command simulated                   
+         VCALL CONDENSE            Go do condense (in RJE)                      
+         END                                                                    
+         EJECT                                                                  
+SRTNWA   RECORD BEGIN                                                           
+SRTNLINE DS    CL(&LINESZ)         Working line area                            
+         DS    XL(&PRESSZ-&LINESZ)                                              
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  SAVERTN -- Range co-routine to SAVE lines for the SAVE command.              
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line text location, length                                       
+*      CPLCNO - line number                                                     
+*                                                                               
+*                                                                               
+*  PREST option removed by CH 05/91.  EXTWRITE does not want                    
+*  pressed records as of 05/91.  Universal harmony.                             
+*                                                                               
+*                                                                               
+SAVERTN  PROC  SRTNWA                                                           
+*                                                                               
+         XPUSH R0,R1               Save text loc, len                           
+*                                                                               
+         CLEAR CPNEDL                                                           
+*-                                                                              
+*-       This code should eventually be moved.                                  
+*-                                                                              
+         IF    CPFRDACT,BEGIN  From ACTIVE file...                              
+         IF    (CPSAVOLD,NE,CPACTNO),BEGIN  New Active file...                  
+         IF    (DSNDTYPE,NE,DSNDDISK),EXIT  Not a disk, scram                   
+         IF    ((CPLRCL,NZ),OR,^CPFNEWED),EXIT  Not NEWEDIT, scram              
+*                                                                               
+         SET   CPNEDSET.X'80'      We are writing internal lines                
+*                                                                               
+         SETMSG SRTNLINE                                                        
+         VCALL GETVINFO            Get current VIEW info                        
+         CLEAR R2                  "Line-number"                                
+         VCALL EXTWRITE            Put VIEW info line into buffer               
+         END                                                                    
+*                                                                               
+         CLEAR CPNEDSET.X'80'      Reset                                        
+         MVC   CPSAVOLD,CPACTNO    Save current Active file number              
+         END                                                                    
+*-                                                                              
+*-       Write the line text.                                                   
+*-                                                                              
+         IF    CPFRDACT,BEGIN  From ACTIVE file...                              
+         CLEAR CPNEDL              Neatness                                     
+         IF    ^CPFNEWED,EXIT      Not NEWEDIT, forget it                       
+         SETMSG CPNEDL              Put line prefix info here                   
+         L     R15,CPLCNO                                                       
+         VCALL GETLINFO            Get prefix info (for DSKWRITE)               
+         END                                                                    
+*                                                                               
+         XPOP  R0,R1               Text location, length                        
+         L     R2,CPLCNO           Line number                                  
+         VCALL EXTWRITE            Put line into I/O buffer, etc.               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  GETSIZE -- This is a co-routine called by DOPEN (in DISK) to                 
+*    estimate the amount of space needed for a file.  Only a rough              
+*    estimate is needed.                                                        
+*                                                                               
+*    On entry:                                                                  
+*      R15 - block size for SAVE                                                
+*                                                                               
+*    On exit:                                                                   
+*      DSNLTOT - number of lines                                                
+*      DSAVBLK - number of blocks needed                                        
+*                                                                               
+GETSIZE  PROC                                                                   
+         LR    R5,R15              Save block size                              
+*-                                                                              
+*-       R2 = number of lines                                                   
+*-       R3 = byte count                                                        
+*-                                                                              
+         L     R2,CPALNCT          Number of lines                              
+         L     R3,CPABYCT          Number of bytes                              
+*                                                                               
+         IF    CPFXMULT,BEGIN      Saving All Actives...                        
+         L     R2,CPATLINS         Total number of lines                        
+         L     R3,CPATBYTS         Total number of bytes                        
+         END                                                                    
+*                                                                               
+         IF    CPFRDEXE,BEGIN  SAVE EXEC...                                     
+         L     R2,=F'2000'         (Simply)                                     
+         L     R3,=F'300000'       (Guess)                                      
+         END                                                                    
+*                                                                               
+         ST    R2,DSNLTOT          Save total number of lines                   
+*-                                                                              
+*-       Edit format.                                                           
+*-                                                                              
+         IF    (CPLRCL,Z),BEGIN    Edit format...                               
+         LR    R15,R3              Total byte count                             
+         SRL   R15,4               Worst case pressed text count                
+         AR    R3,R15              Get new "total byte count"                   
+*                                                                               
+         LA    R15,5               Overhead per line-number                     
+         IF    CPFNEWED,'LA R15,15'  Newedit needs more                         
+         CLEAR R14                                                              
+         MR    R14,R2              Bytes for overhead                           
+         AR    R3,R15              Total byte count incl overhead               
+*                                                                               
+         SH    R5,=H'256'          Assume worst case unused space               
+         IF    NP,'LA R5,1'        (Shouldn't ever happen)                      
+         CLEAR R2                                                               
+         DR    R2,R5               Calc number of blocks                        
+         IF    (R2,NZ),'LA R3,@R3+1'                                            
+         STH   R3,DSAVBLK          Save block count estimate                    
+         END                                                                    
+*-                                                                              
+*-       Fixed (LRECL=xxx) format.                                              
+*-                                                                              
+         ELSE  BEGIN               Fixed format...                              
+         LR    R3,R2               No. of lines                                 
+         CLEAR R2                                                               
+         D     R2,CPNREC           No. of blocks                                
+         IF    (R2,NZ),'LA R3,@R3+1'                                            
+         STH   R3,DSAVBLK          Save block count estimate                    
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DSNAUTH -- Routine to get permission to SCRATCH/UNCATALOG a                  
+*    data set.                                                                  
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - ok                                                                   
+*      nz- can't                                                                
+*                                                                               
+DSNAUTH  XENTER R0,R8,*+L'KWR                                                   
+         IF    CPGFLG4.CPFAUSET,BEGIN  set auth...                              
+         IF    (('CLC CPAUTHUS(3),DSNWAUSR',EQ),AND,                   *        
+               ('CLC CPAUTHUS+3(2),DSNWAGRP',EQ)),SCRALL  it's ok               
+         END                                                                    
+*                                                                               
+         IF    (CPPACCT,NZ),BEGIN  Check pseudo account...                      
+         IF ((CPPGRP,EQ,DSNWAGRP),AND,(CPPUSER,EQ,DSNWAUSR)),SCRALL             
+         END                                                                    
+*                                                                               
+         ACALL SEGDSN                                                           
+         TSEG  'is not yours.',,CR                                              
+*                                                                               
+         IF    CPFKOK,TESTOK       Get only yes or ok                           
+         TM    DSNWAF1,DSNFSTD     Is this standard dsn                         
+         BZ    TESTPRIV            Br no, only priv access                      
+*                                                                               
+         LA    R1,40(R8)           Point to password area                       
+         WITH  (KWR,R1),BEGIN                                                   
+         CLEAR KWR                 Init area                                    
+         MVC   KWRUSER,DSNWADSN+DSNXU set user inits in area                    
+         MVC   KWRGRP,DSNWADSN+DSNXG  Set group                                 
+         CLEAR R0                  Standard options                             
+         VCALL CHKKW               Go see if ok to access                       
+         BZ    SCRALL              Zero return means ok                         
+         END                                                                    
+NOTMYNO  LA    R15,ABRTCODE        Return a no reply                            
+         B     NOTMYRTN            Br if not his                                
+*                                                                               
+TESTPRIV IF    ^CPSFSPR,CVERROR    priv'd request                               
+TESTOK   SETMSG 'OK'                Set prompt                                  
+         VCALL YESREQ              Go check if ok                               
+         BNZ   NOTMYNO             Br if not his                                
+SCRALL   OI    DSNWAF1,DSNFMYDS+DSNFACCS   indicate ds access                   
+*                                  ok/has been verified                         
+         CLEAR R15                 Zero indicate it is ok                       
+NOTMYRTN XEXIT R0,R8,LTR                                                        
+         DROP  BR                                                               
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'CHKVOL Routine'                                                 
+*box                                                                            
+*                                                                               
+*  CHKVOL -- Routine to check to see if the user want's to                      
+*    go ahead and SAVE/SCRATCH/USE the data set, even                           
+*    though it is cataloged on a different volume.                              
+*                                                                               
+*    On entry:                                                                  
+*      R15 - contains RTNCODE (same as for NTGDOPN)                             
+*      R0  - LOCATE return code                                                 
+*                                                                               
+*    On exit, cc:                                                               
+*      Z - retry operation                                                      
+*                                                                               
+CHKVOL   XENTER R15,R8,,LOCAL                                                   
+         LA    R2,1                flag: don't retry                            
+         LR    R3,R0               LOCATE rc                                    
+*                                                                               
+         IF    (R15,EQ,RTNCATDV),BEGIN  It's a vol mismatch...                  
+         ACALL SEGDSN                                                           
+         IF    (R3,NZ),BEGIN       Problem locating data set...                 
+         TSEG  'will not be cataloged'                                          
+         SETMSG '.'                                                             
+         IF    (R3,EQ,16),BEGIN                                                 
+         SETMSG ' because another data set starts with this name.'              
+         END                                                                    
+         IF    (R3,EQ,12),BEGIN                                                 
+         SETMSG ' because of conflicting data set level names.'                 
+         END                                                                    
+         TSEG  (R1),(R0),CR                                                     
+         IF    (^CPFTYPED,OR,CPSTVIRT),CHKVSKIP                                 
+         SETMSG 'Do you want to use this data set name anyway'                  
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         TSEG  'is already on '                                                 
+         TSEG  DSNCATV,,CR                                                      
+         TSEG  'Do you want to use '                                            
+         TSEG  DSNON,,TB                                                        
+         SETMSG 'anyway'                                                        
+         END                                                                    
+*                                                                               
+         VCALL YESREQ              Get yes/no                                   
+CHKVSKIP SET   CPFNOCAT            don't use the catalog this time              
+         CLEAR R2                                                               
+         END                                                                    
+         LTR   R2,R2               Set cc                                       
+         XEXIT R15,R8                                                           
+         DROP  BR                                                               
+         TITLE 'NTGDCAT Routine'                                                
+NTGDCAT  BASE                                                                   
+         XTRACE NTGDCAT,REGS=ALL                                                
+* note that the r15 code is the return code from the catlg                      
+* function.  however, if the catlg function code was 8 then                     
+* 32 was added to the locate return code in r1 and this value                   
+* appears in r15.                                                               
+         LPR    R2,R15             Save rc                                      
+         TSEG  'not '                                                           
+         ACALL CAT                                                              
+         DECR  R15,CPSEGLENF       Unseg trailing blank                         
+         TSEG  '.  '                                                            
+         IF    ((R2,Z),OR,(R2,GT,68)),RTNERR  bad error                         
+*                                                                               
+         B     *(R2)               Take proper branch                           
+         B     CATRC4              Cvol not available                           
+         B     CATSKIP             can't happen - locate rc used                
+         B     CATSKIP             can't happen - not used                      
+         B     CATRC16             Index does not exist                         
+         B     CATRC20             No space on cvol                             
+         B     CATRC24             Invalid dsname                               
+         B     CATRC28             I/O error                                    
+         B     LOCRC0              Already cataloged                            
+         B     CATRC4              Cvol no t available                          
+         B     LOCRC8              Not in catlg                                 
+         B     LOCRC12             Name is index                                
+         B     LOCRC16             Data set at lower level                      
+         B     LOCRC20             Bad dsname                                   
+         B     CATRC28             I/O error                                    
+         B     CATSKIP             Bad ttr -- can't happen                      
+         B     CATRC64             Vol unrecognized, no UNIT parm               
+         B     CATRC68             No access to master catlg                    
+*                                                                               
+CATRC4   SETMSG 'CVOL is not available.'                                        
+         MVC   CPERRID,=CL8'CATNCVOL'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC16  SETMSG 'Index does not exist.'                                         
+         MVC   CPERRID,=CL8'CATNINDX'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC20  SETMSG 'No space in catalog.'                                          
+         MVC   CPERRID,=CL8'CATNSP'                                             
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC24  SETMSG 'Invalid dsname.'                                               
+         MVC   CPERRID,=CL8'CATBDGDG'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC28  SETMSG 'I/O error.'                                                    
+         MVC   CPERRID,=CL8'CATIOERR'                                           
+         B     NTGDCATX                                                         
+         SPACE 3                                                                
+LOCRC0   SETMSG 'Already cataloged.'                                            
+         MVC   CPERRID,=CL8'CATALRDY'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+LOCRC8   IF    ((CPCMNM,EQ,'OSR'),OR,(CPCMNM,EQ,'REN')),LOCRC0                  
+         SETMSG 'Not in catalog.'                                               
+         MVC   CPERRID,=CL8'CATNOT'                                             
+         B     NTGDCATX                                                         
+*                                                                               
+LOCRC12  SETMSG 'Dsname is index.'                                              
+         MVC   CPERRID,=CL8'CATINDEX'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+LOCRC16  SETMSG 'Dsname at lower level.'                                        
+         MVC   CPERRID,=CL8'CATLOWER'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+LOCRC20  SETMSG 'Dsname syntax error.'                                          
+         MVC   CPERRID,=CL8'CATBDDSN'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC64  SETMSG 'Missing UNIT parameter'                                        
+         MVC   CPERRID,=CL8'CATUNREQ'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATRC68  SETMSG 'Master catalog cannot be updated'                              
+         MVC   CPERRID,=CL8'CATMASNA'                                           
+         B     NTGDCATX                                                         
+*                                                                               
+CATSKIP  TSEG  'Catalog error='                                                 
+         TNUM  (R2)                                                             
+         MVC   CPERRID,=CL8'CATBDRET'                                           
+         B     RTNERR                                                           
+*                                                                               
+NTGDCATX TSEG  (R1),(R0)           Put message in buffer                        
+         B     RTNERR                                                           
+         QLTORG                                                                 
+         TITLE 'Open Error Message Routine'                                     
+NTGDOPN  GENTER                                                                 
+         LR    R6,R15              Save error condition                         
+         LR    R5,R0               Save any parm passed back                    
+         IF    ((CPCMNM,EQ,'HEL'),OR,(CPCMNM,EQ,'?  ')),BEGIN                   
+         TSEG  'No help available -- '                                          
+         END                                                                    
+         CH    R6,=AL2(RTNCATER)   Is it possible catastrphe?                   
+         BNL   CATER                                                            
+         CH    R6,=AL2(TALOCODE)   Talo on dopen?                               
+         BNL   THISEN(R6)          don't print dsname                           
+         ACALL SEGDSN                                                           
+THISEN   B     THISEN(R6)          Branch to proper continuation                
+         B     NOSUCH              4                                            
+         B     EXISTS              8                                            
+         B     NOROOM              12                                           
+         B     BATCH               16                                           
+         B     ILLBLKSZ            20                                           
+         B     DSILLEG             24                                           
+         B     ILLORG              28                                           
+         B     RTNERR              32    talo                                   
+         B     ABORTMS             36    abort                                  
+         B     BDVOLM              40                                           
+         B     ILLMEMB             44                                           
+         B     NODIRSPC            48                                           
+         B     EXPDTPRO            52                                           
+         B     OUTOFSP             56                                           
+         B     DIRIOERR            60                                           
+         B     ILLCATRF            64                                           
+         B     ABORTMS             68   seq ds with mem specified               
+         B     NOACCESS            72   (restricted volume)                     
+         B     BUSYMSG             76   allocation busy                         
+         NOP   0                   80   sho rtn err not handled here            
+         B     NOSTORE             84   no disk usage allowed                   
+         B     ALLOCERR            88   allocation error                        
+         B     NOTAVAIL            92   volume not available                    
+         B     NOPATHS             96   no volume paths available               
+         B     WRONGVOL            100  not the same vol as catalog             
+         B     BACKUPS             104  volume in backup status                 
+*                                                                               
+ILLORG   SETMSG 'DSORG or RECFM not valid for WYLBUR.'                          
+         MVC   CPERRID,=CL8'BADDSORG'                                           
+         B     RTNERRMS                                                         
+DSILLEG  SETMSG ': invalid dsname'                                              
+         MVC   CPERRID,=CL8'INVDSN'                                             
+         B     RTNERRMS                                                         
+BDVOLM   TSEG  DSNON,,T                                                         
+         SETMSG ': volume/host not found.'                                      
+         MVC   CPERRID,=CL8'BADVOL'                                             
+         B     RTNERRMS                                                         
+*                                                                               
+NOSUCH   IF    ((CPCMNM,EQ,'EXE'),AND,CPFQUIET),BEGIN                           
+         TCLEAR                                                                 
+         B     CVNEXT                                                           
+         END                                                                    
+         IF    (DSNON,Z),BEGIN                                                  
+         MVC   CPERRID,=CL8'NOTINCAT'                                           
+         SETMSG 'does not exist in the catalog.'                                
+         IF    (DSNWAF2,EQ,DSNFSHOW+DSNFCAT),CVNXTMSG                           
+         B     CVERRMSG                                                         
+         END                                                                    
+         TSEG  'not '                                                           
+         MVC   CPERRID,=CL8'NOTONVOL'                                           
+         B     VOLTOMSG                                                         
+*                                                                               
+EXISTS   TSEG  'already '                                                       
+         MVC   CPERRID,=CL8'ONVOL'                                              
+*                                                                               
+VOLTOMSG IF    (DSNON,NZ),'TSEG "on "; TSEG DSNON,,T'                           
+         IF    CPFRCVY,'TCLEAR; B RTNERR'                                       
+         CLI   DSNWAF2,DSNFSHOW+DSNFCAT  Is cmd show catalog?                   
+         BE    CVNEXT              No error then                                
+         B     CVERROR                                                          
+*                                                                               
+NOROOM   TSEG  'can''t find space '                                             
+         MVC   CPERRID,=CL8'NOROOM'                                             
+         B     VOLTOMSG                                                         
+*                                                                               
+WRONGVOL ACALL SEGDSN                                                           
+         TSEG  'is already cataloged'                                           
+*                                                                               
+         IF    (R5,Z),BEGIN                                                     
+         TSEG  ' on '                                                           
+         ERROR DSNCATV,,NOTINCAT                                                
+         END                                                                    
+*                                                                               
+         IF    (R5,EQ,16),BEGIN                                                 
+         ERROR ' as part of another data set name.',,INCATIND                   
+         END                                                                    
+         IF    (R5,EQ,12),BEGIN                                                 
+         SETMSG ' and conflicts with another data set level name.'              
+         ERROR (R1),(R0),INCATLOW                                               
+         END                                                                    
+         ERROR '.',,INCAT                                                       
+*                                                                               
+BACKUPS  TSEG  DSNON,,T                                                         
+         TSEG  ': Volume currently undergoing system backup.',,CR               
+         MVC   CPERRID,=CL8'VOLBKUP'                                            
+         B     ABORTMS                                                          
+*                                                                               
+CATER    TSEG  'Error #'                                                        
+         ST    R5,CPDOUB           Save formatted error number                  
+         TSEG  CPDOUB+1,3          And write it                                 
+         SETMSG '.  Command incomplete.'                                        
+         MVC   CPERRID,=CL8'CATER'                                              
+         B     RTNERRMS                                                         
+BATCH    SETMSG 'data set is in use.'                                           
+         MVC   CPERRID,=CL8'DSNINUSE'                                           
+         B     RTNERRMS                                                         
+*                                                                               
+OUTOFSP  TSEG  'Allowed disk space exceeded.',,CR                               
+         MVC   CPERRID,=CL8'OUTOFSP'                                            
+         B     CVNOACTN            No retry (even if recovery)                  
+*                                                                               
+NOSTORE  TSEG  'Disk storage not allowed.',,CR                                  
+         MVC   CPERRID,=CL8'NOSTORE'                                            
+         B     CVNOACTN            No retry (even if recovery)                  
+*                                                                               
+EXPDTPRO ACALL SEGDSN                                                           
+         TSEG  'is date protected.',,CR                                         
+         MVC   CPERRID,=CL8'DSNEXPDT'                                           
+         B     RTNERRMS                                                         
+*                                                                               
+ABORTMS  SETMSG 'No action taken.'                                              
+         IF    (CPERRID,Z),'MVC CPERRID,=CL8"NOACTION"'                         
+         B     RTNERRMS                                                         
+*                                                                               
+NOACCESS SETMSG 'Access not permitted'                                          
+         MVC   CPERRID,=CL8'NOACCESS'                                           
+         B     RTNERRMS                                                         
+*                                                                               
+ILLMEMB  TM    DSNWAMBR,X'BF'      Was member specified?                        
+         BZ    ILLMEMB2            no - that's what's wrong                     
+         IF    ((CPCMNM,EQ,'EXE'),AND,CPFQUIET),BEGIN                           
+         TCLEAR                                                                 
+         B     CVNEXT                                                           
+         END                                                                    
+         IF    ((CPCMNM,EQ,'HEL'),OR,(CPCMNM,EQ,'?  ')),BEGIN                   
+         TCLEAR                                                                 
+         TSEG  'No help available for '                                         
+         SETMSG DSNWAMBR                                                        
+         B     RTNERRMS                                                         
+         END                                                                    
+         ACALL MEMBERED            Go tseg member name                          
+         TSEG  'not in '                                                        
+         MVC   CPERRID,=CL8'NOTINPDS'                                           
+         B     DIRDSN              Put out dsname                               
+ILLMEMB2 SETMSG 'Member not specified'                                          
+         MVC   CPERRID,=CL8'NOMEMBER'                                           
+         B     RTNERRMS                                                         
+*                                                                               
+ILLBLKSZ TSEG  ': '                                                             
+         BTD   CPDOUB,0,(R5)       Get invalid blocksize                        
+         TSEG  (R1),(R0),B                                                      
+         SETMSG 'Block size too large'                                          
+         MVC   CPERRID,=CL8'BIGBLKSZ'                                           
+         B     RTNERRMS                                                         
+*                                                                               
+NODIRSPC TSEG  'No more directory space in '                                    
+         MVC   CPERRID,=C'DIRNOSPC'                                             
+DIRDSN   ACALL SEGDSN                                                           
+         B     RTNERR                                                           
+*                                                                               
+DIRIOERR TSEG  'Directory I/O error in '                                        
+         MVC   CPERRID,=CL8'DIRIOERR'                                           
+         B     DIRDSN              Go put in dsname                             
+*                                                                               
+ILLCATRF SETMSG 'Specific volume must be specified.'                            
+         B     RTNERRMS                                                         
+*                                                                               
+ALLOCERR TSEG  'Error in allocation',,CR                                        
+         B     ABORTMS                                                          
+*                                                                               
+NOTAVAIL TSEG  'Volume not currently available to WYLBUR.',,CR                  
+         B     ABORTMS                                                          
+*                                                                               
+NOPATHS  TSEG  'No volume paths available. '                                    
+         B     TRYAGAIN                                                         
+*                                                                               
+BUSYMSG  TSEG  'Volume busy. '                                                  
+TRYAGAIN TSEG  ' Try again later.',,CR                                          
+         B     ABORTMS                                                          
+         EJECT                                                                  
+RTNERRMS BASE                                                                   
+         TSEG  (R1),(R0)                                                        
+*                                                                               
+RTNERR   BASE                                                                   
+         IF    (CVFRCVY,AND,(CPSEGLENF,NZ)),BEGIN                               
+         TSEG  ' - Account '                                                    
+         TSEG  CPSGRP                                                           
+         TSEG  '.'                                                              
+         TSEG  CPSUSER                                                          
+         END                                                                    
+         B     CVERROR                                                          
+         DROP  BR                                                               
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'Access Check Subroutine'                                        
+*box                                                                            
+*                                                                               
+*  ACSCHECK -- Routine to check to see if the user can access                   
+*    the data set.                                                              
+*                                                                               
+*                                                                               
+ACSCHECK XENTER R0,R8                                                           
+         CH    R15,=AL2(RTNNOACS)  No access return code?                       
+         BNE   ACSEXIT             No, exit to caller                           
+         LTR   R0,R0               No access allowed?                           
+         BZ    NOTPERMT            Not permitted at all                         
+         IF    (CPSFSPR,AND,(CPSPROJ,EQ,'NC')),ACSSKIP  niz, kludge             
+         VCALL DSNAUTH             Check if ok to use dsname                    
+         BNZ   ACSABRT             No, abort                                    
+ACSSKIP  OI    DSNWAF1,DSNFMYDS    Its ok - tell the world                      
+         CLEAR R15                                                              
+ACSEXIT  XEXIT R0,R8,LTR                                                        
+*                                                                               
+NOTPERMT IF    ((CPCMNM,EQ,'HEL'),OR,(CPCMNM,EQ,'?  ')),BEGIN                   
+         TSEG  'No help available -- '                                          
+         END                                                                    
+         TSEG  'Access not permitted for '                                      
+         ACALL SEGDSN                                                           
+         B     CVERROR             Good bye cruel world                         
+*                                                                               
+ACSABRT  VCALL NTGDOPN             Abort the command                            
+*                                                                               
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SEGDSN -- Routine to seg dsname.                                             
+*                                                                               
+SEGDSN   XPROC ,                                                                
+*                                                                               
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*                                                                               
+         IF    ((CPFINFOP,NE,0),AND,^FFFOLD),BEGIN                              
+         COMMENT                   GET NAME LOC, LEN                            
+         SETMSG FFRNAME,L:FFRNAMEL  FULL NAME                                   
+         IF    (R0,Z),BEGIN        IF NONE, TYPED NAME                          
+         SETMSG FFNAME,L:FFNAMEL                                                
+         END                                                                    
+         IF    ((R0,EQ,1),AND,(@R1,EQ,'*')),BEGIN  IF NAME '*'                  
+         SETMSG FFPNAME,L:FFPNAMEL  PREVIOUS (CURRENT) FULL NAME                
+         END                                                                    
+         IF    (R0,Z),BEGIN        IF NONE, TYPED NAME                          
+         SETMSG FFNAME,L:FFNAMEL                                                
+         END                                                                    
+         COMMENT                   SUPPRESS WYL.GG.UUU IF NEEDED                
+         IF    ((R0,GE,11),AND,(@R1,EQ,'WYL.'),AND,                    X        
+               (@R1+6,EQ,'.'),AND,(@R1+10,EQ,'.'),AND,                 X        
+               (CPSGRP,EQ,@R1+4),AND,(CPSUSER,EQ,@R1+7)),BEGIN                  
+         LA    R1,@R1+11           Skip past the standard prefix                
+         SH    R0,=H'11'                                                        
+         END                                                                    
+         TSEG  (R1),(R0)                                                        
+         END                                                                    
+*                                                                               
+* ** DEBUG ** OLD DSN FILE SCANNING, USE NAME IN DSNWA IN CP                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         IF    (DSNDTYPE,EQ,DSNDDISK),BEGIN  Disk...                            
+         IF    DSNFBADN,'TSEG '''''                                             
+         IF    ^DSNWAF1.DSNFSTD,'TSEG "$"'  Non-WYLBUR dsname                   
+         END                                                                    
+*                                                                               
+         SETMSG DSNWADSN            Dsname                                      
+         IF    DSNWAF1.DSNFSTD,BEGIN  WYLBUR dsname...                          
+         IF    ((DSNWAGRP,NE,CPSGRP),OR,(DSNWAUSR,NE,CPSUSER)),EXIT             
+         IF    CVFINIT,EXIT        (Show full dsname if recovery)               
+*                                                                               
+         LA    R1,@R1+DSNXN        Skip past WYLBUR prefix                      
+         SH    R0,=AL2(DSNXN)                                                   
+         IF    NEG,'CLEAR R0'                                                   
+         END                                                                    
+         TSEG  (R1),(R0),T                                                      
+*                                                                               
+         IF    (DSNDTYPE,EQ,DSNDDISK),BEGIN  Disk...                            
+         IF    DSNFBADN,'TSEG '''''                                             
+         END                                                                    
+         END                                                                    
+*                                                                               
+         TSEG  CVBLANKS,1                                                       
+         PEND                                                                   
+         DROP  R6                                                               
+         EJECT                                                                  
+***  routine to tseg variable length member with trailing blank                 
+*                                                                               
+MEMBERED XENTER                                                                 
+         LA    R3,DSNWAMBR         Get member addr                              
+         LA    R2,L'DSNWAMBR                                                    
+         LA    R1,@R3+L'DSNWAMBR-1                                              
+         WHILE ((R2,POS),AND,(@R1,EQ,' ')),'DECR R1; DECR R2'                   
+         DROP  BR                                                               
+         BASE                                                                   
+         TSEG  (R3),(R2),B                                                      
+         LR    R1,R3                                                            
+         LR    R0,R2                                                            
+         XEXIT R2,R8               Rtrn                                         
+         DROP  BR                                                               
+         EJECT                                                                  
+CAT      XENTER R2,R8,,LOCAL                                                    
+         CLEAR R0                                                               
+         IF    CPFRECAT,'SETMSG "re"'                                           
+         IF    CPFUNCAT,'SETMSG "un"'                                           
+         TSEG  (R1),(R0)                                                        
+         TSEG  'cataloged '                                                     
+         XEXIT                                                                  
+         DROP  BR                                                               
+         SPACE 2                                                                
+CHKMBRIG XENTER R15,R8                                                          
+         TM    DSNWAF2,DSNFPDS     Was pds accessed?                            
+         BO    CHKMIX              Exit if so                                   
+         TM    DSNWAMBR,X'BF'      Was a member specified?                      
+         BNM   CHKMIX              br if not or if x'ff'                        
+         ACALL MEMBERED            Go seg member name                           
+         TSEG  'ignored.',,CR                                                   
+CHKMIX   XEXIT R15,R8                                                           
+         DROP  BR                                                               
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+         VLTORG                                                                 
+         END   .                                                                

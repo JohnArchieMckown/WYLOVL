@@ -1,0 +1,2430 @@
+This document is meant to be printed on the Xerox 9700 printer in
+Forsythe Hall rather than read online.  However, you can read it
+online without much difficulty if you ignore the printing OPTIONS:
+line and the printing control characters (the 1s and +s) that appear
+in column one.  To print a copy, type the PRINT 1/LAST command.
+options: cc unn forms=3hol chars=tn12 indent=12 duplex noeject
+1
+
+
+ University of Utah Symbolic Computation Group               August 1978
+ Technical Report No.  TR-6                                       (#663)
+
+
+
+
+
+
+
+
+
+
+                                  MANUAL
+                                   for
+                              STANDARD LISP
+                                    on
+                          IBM SYSTEM 360 AND 370
+
+                                    by
+
+                                John Fitch
+
+                            University of Utah
+                         Salt Lake City, UT 84112
+
+
+
+
+
+
+
+
+
+
+                                 ABSTRACT
+
+
+
+         An implementation of Standard Lisp on the IBM System 360
+         and  370  computers  is  presented.   The  program  is a
+         further modification of the  Utah  version  of  Lisp/360
+         from Stanford University.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370
+
+
+                            Table of Contents
++                           _____ __ ________
+
+
+ 1.0  GENERAL DESCRIPTION..................................  1
+ 1.1  Organization Of Storage..............................  2
+ 1.1.1  Free Cell Storage..................................  3
+ 1.1.2  Push Down Stack....................................  3
+ 1.1.3  System Functions...................................  3
+ 1.1.4  Binary Program Space...............................  4
+ 1.1.5  Input/Output Buffers...............................  4
+ 1.2  JCL And The PARM String..............................  4
+ 1.2.1  Distribution Between FCS And BPS...................  4
+ 1.2.2  Initializing The Stack Size........................  4
+ 1.2.3  Buffers Space......................................  5
+
+ 2.0  DATA TYPES AND REPRESENTATIONS.......................  6
+ 2.1  Atoms................................................  6
+ 2.2  Identifiers..........................................  6
+ 2.3  Numbers..............................................  7
+ 2.4  Strings..............................................  8
+ 2.5  Property Lists.......................................  8
+ 2.6  The Oblist...........................................  8
+
+ 3.0  EXTENSIONS AND DIFFERENCES FROM STANDARD LISP........  9
+ 3.1  Standard Lisp Functions..............................  9
+ 3.2  Shortcomings.........................................  9
+ 3.3  Differences..........................................  9
+ 3.4  Extra Functions...................................... 12
+ 3.5  Special Atoms........................................ 17
+
+ 4.0  THE GARBAGE COLLECTOR AND SPACE CONTROL.............. 18
+ 4.1  Garbage Collection................................... 18
+ 4.2  Binary Program Allocation Control.................... 19
+
+ 5.0  MESSAGES............................................. 20
+ 5.1  Error Messages....................................... 20
+ 5.2  System Messages and Warnings......................... 25
+ 5.3  Supervisor Messages.................................. 26
+ 5.4  Reading Interrupt Messages........................... 26
+
+ 6.0  INPUT/OUTPUT FUNCTIONS............................... 28
+ 6.1  Basic Data handling Functions........................ 28
+ 6.2  Partitioned Datasets................................. 29
+
+ 7.0  CHECKPOINT FACILITIES................................ 31
+
+ 8.0  DIFFERENCES BETWEEN LISP/360 AND SLISP/360........... 32
+
+ 9.0  THE INTERPRETER...................................... 33
+
+ 10.0 REFERENCES........................................... 35
+
+ Appendix-Deciphering PSW Traps............................ 36
+
+ INDEX .................................................... 40
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 1
+
+
+ 1.0  GENERAL DESCRIPTION
+
+ This  manual  describes  a  substantial  modification  to  the  Stanford
+ LISP/360  for  the IBM System 360 and 370 computers in order to bring it
+ into agreement with the Standard LISP  Report  [1].   Thus  this  manual
+ supersedes  both the old manual [2] and the Utah modifications [3].  All
+ relevant information from these documents has been included here.   This
+ manual  is  intended  to  be  read in conjunction with the Standard LISP
+ Report, which it complements.
+
+      Users of the previous Utah  version  of  LISP/360  should  note  in
+ particular that Standard Lisp is an EVAL system.
+
+      LISP/360  operates  under  the  IBM  System/360  operating  systems
+ OS/360.   It  will also run on other operating systems that simulate OS.
+ The basic operation is to:
+
+      1.  Read a LISP S-expression.
+
+      2.  Start the Timer
+
+      3.  Pass the expression read to the function EVAL
+
+      4.  Print the execution time and the value of then expression.
+
+      5.  Start again at step 1.
+
+ The LISP system consists of a body of predefined functions, some written
+ in  machine  code for the core system, others in LISP and compiled to be
+ loaded by a RESTORE.  Statements in  the  LISP  language  are  evaluated
+ interpretively by the function EVAL, or by the compiled code system.
+
+      The system has a number of data areas, such as  Free  Cell  Storage
+ (FCS)  a  push  down  stack  (PDS)  and  binary program space (BPS).  In
+ addition there are areas reserved for I/O buffers  to  be  used  by  the
+ operating system.  The general organization of system memory is given in
+ figure 1.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 2
+
+
+                  _________________________
+                 |                         |
+                 |     System Programs     |
+                 |                         |
+                 |    (LISP Interpreter    |
+                 |     and predefined      |
+                 |      functions )        |
+                 |_________________________|
+                 |                         |
+                 |      Push Down Stack    |
+                 |_________________________|
+                 |                         |
+                 |   Initial Oblist        |
+                 | _ _ _ _ _ _ _ _ _ _ _ _ |
+                 |                         |
+                 |                         |
+                 |      Remainder          |
+                 |           of            |
+                 |   Free Cell Storage     |
+                 |                         |
+                 |                         |
+                 |_________________________|
+                 |                         |
+                 |                         |
+                 |     Binary Program      |
+                 |        Space            |
+                 |_________________________|
+                 |                         |
+                 |     Given back to OS    |
+                 |       for buffers       |
+                 |_________________________|
+
+
+
+
+
+           Figure 1: Initial Organization of LISP System Memory
+
+
+
+ 1.1  Organization Of Storage
+
+      Within the LISP system computer memory is subdivided  into  several
+ functional  areas.   The  largest  portion  of  the  available memory is
+ devoted to the Free Cell Storage  (FCS),  which  is  the  area  used  to
+ contain  all working data structures.  The remaining parts of the memory
+ are used for the Push Down  Stack  (PDS)  Binary  Program  Space  (BPS),
+ Input/Output Buffers, and the core LISP system.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 3
+
+
+ 1.1.1  Free Cell Storage - A large portion of the LISP memory is devoted
+ to  the  storage  of  working  data structures in the Free Cell Storage.
+ Each word of FCS is called a LISP Cell, and is made  from  a  System/360
+ double  word.  These 64 bits are divided into two 32 bit entities.  LISP
+ cells can have up to four fields, two 24 bit address fields, and two tag
+ fields.   Initially all available words in the FCS are in one Free list.
+ As cells are used to create data structures they are removed  from  this
+ list until removal of the last word forces a garbage collection.
+
+      Normally cells contain  pointers  to  other  LISP  cells,  but  one
+ special  type of cell is the Full Word.  Here the first 32 bits are used
+ as immediate data rather than a pointer plus tag.  The  second  32  bits
+ contains  a  tag  to  indicate  this fact.  A full word may contain four
+ EBCDIC characters as part of a print  name,  a  32  bit  number  or  the
+ address of a binary LISP program.
+
+      The allocation of bits in a cell are given in the table below.
+
+
+
+     bit position           meaning
+        0               Atomhead marker
+        1               Number marker
+        2               Floating point marker
+        3               Logical number marker
+        4               Big number marker
+        5               Sign bit for big numbers
+        6               Spare
+        7               Trace bit
+        8-31            Address position
+        32              Garbage collection bit
+        33              Full cell marker
+        34              Full cell contents marker
+         35-39          Spare
+        40-63           Second address field
+
+
+
+
+
+ 1.1.2  Push Down Stack - The PDS is used to save active data  structures
+ and  addresses during program execution, especially form recursion.  The
+ size of the PDS is normally 6K words, and can be changed by SETSIZE,  or
+ the initial PARM field.
+
+
+
+ 1.1.3  System Functions - The  system   function   area   contains   the
+ interpreter,  control  program  predefined  LISP  functions, the garbage
+ collector and the error handler.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 4
+
+
+ 1.1.4  Binary Program Space - This  area  contains  all  compiled   LISP
+ functions  not  part  of  the  initial  core  system.   It includes some
+ Standard LISP functions, and may  well  contain  the  compiler  and  LAP
+ system.
+
+
+ 1.1.5  Input/Output Buffers - An area of 8K bytes  is  returned  to  the
+ operating  system  for  use  as  input/output buffers.  The size of this
+ region can be changed by an appropriate PARM field (see 1.2.3).
+
+
+ 1.2  JCL And The  PARM  String  -  The  availability  of the  following
+ catalogued procedure is assumed.
+
+        //****************************************************************
+        //*
+        //* PROC:     LISP
+        //* PURPOSE:  EXECUTE LISP
+        //*
+        //****************************************************************
+        //LISP      PROC  RESTORE='SLISP',
+        //            REG=512K,                ** DEFAULT REGION
+        //            RELEASE=3,               ** REDUCE RELEASE NUMBER
+        //            VERSION=V83              ** VERSION NUMBER
+        //*
+        //REDUCE   EXEC  PGM=LISP,REGION=&REG
+        //FEND     DD DSN=SYS4.REDUCE&RELEASE..&VERSION..IMAGE.&RESTORE,
+        //   DISP=SHR                          ** AUTO RESTORE
+        //LISPIN   DD DDNAME=SYSIN             ** INPUT FILE
+        //LISPOUT  DD SYSOUT=*                 ** OUTPUT FILE
+        //STEPLIB  DD DSN=SYS4.REDUCE&RELEASE..&VERSION..LOADLIB,DISP=SHR
+        //****************************************************************
+
+ The JCL to run Standard LISP thus becomes:
+
+        // JOB
+        // EXEC LISP
+        (RESTORE (QUOTE FEND))
+            .
+            LISP PROGRAM
+            .
+
+ This PROC may also be used to run RLISP by coding a  RESTORE=RLISP  parameter
+ on  the EXEC statement. As a convenience to users whose primary usage of LISP
+ is with REDUCE, LISP may also be accessed from the REDUCE3 proc, see "Running
+ Reduce on IBM 360 and Derivative Computers" for further information.
+
+ Additional DD statements can be included for the compiler and for  input  and
+ output   with  other  datasets.  See  Batch  Processing  (#240)  for  general
++                                      _____  __________
+ information on coding DD statements. The legal forms in the PARM  string  are
+ given below.
+
+
+
+
+
+1
+ STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 5
+
+
+
+      LISP returns condition codes of
+          0  for normal completion
+          4  for termination after a nonfatal error because of EXITERR(T)
+          8  for fatal error
+          12 for serious error while initializing.
+
+
+ 1.2.1  Distribution Between FCS And BPS - The   parameter    F=n    will
+ allocate n% of the available space to the free space and (100-n)% to the
+ binary program space.  Similarly one can specify the proportion of store
+ to  be  given  to  the  BPS  by B=n.  The default is B=34.  However if a
+ RESTORE is used to make the compiler available,  or  to  use  the  extra
+ Standard  LISP  functions, the values are taken from the creation of the
+ RESTOREd file, and the B and F parameters are ignored.
+ 1.2.2  Initializing The Stack Size - The default size of the stack (PDS)
+ is 3000 words.  This can be altered by
+
+          S=n
+
+ in the PARM string.  The size of the stack has a minimum of 100 words.
+
+
+
+ 1.2.3  Buffers Space - The size of the buffer space given  back  to  the
+ operating system can be controlled by
+
+          R=n
+
+          R=nK
+
+ or
+          R=nP
+
+ In the first form n bytes are reserved for  buffers.   The  second  form
+ allows units of 1024 bytes, while the third yields pages of 4096 bytes.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 6
+
+
+ 2.0  DATA TYPES AND REPRESENTATIONS
+
+ LISP handles a number of different data  types.   In  this  section  the
+ types available are described, and their representations are presented.
+
+
+
+ 2.1  Atoms
+
+ There are a number of types of atom available in  LISP/360.   These  are
+ identifiers,  numbers,  big  numbers  and  strings.   Each  of  these is
+ described below.  They are all kept in Free Cell Memory in a  number  of
+ car/cdr  pairs.  They can all be distinguished as atoms because they all
+ have the top bit of the car word on.  The next three bits indicate which
+ type  of  atom  it  is.   The second bit indicates a number, the third a
+ floating point number and the fourth  a  logical  number.   Strings  are
+ represented as a special type of identifier.
+
+
+       bit 0     bit 1   bit 2   bit3    bit4
++      ___ _     ___ _   ___ _   ____    ____
+
+         1         0       0       0       0     EBCDIC characters
+         1         1       0       0       0     Fixed point number
+         1         1       1       0       0     Floating point number
+         1         1       0       1       0     Logical number
+         1         1       0       0       1     Big number
+
+
+
+ If an identifier has a function definition, and that function  is  being
+ traced, then bit 7 of the atomheader is set on.
+
+
+
+ 2.2  Identifiers
+
+ Lisp identifiers are as described in [1] #.#.  They are  represented  in
+ memory  in  the Free Cell Memory as an atomheader, together with a print
+ name and possibly a property list.  The atomheader is a car/cdr pair  in
+ memory,  with the top byte of the first cell having the most significant
+ bit on, and the next three bits off.  The address part of the car points
+ to  the print name, while the cdr is the property list of the identifier
+ (see below).  The print name is a series  of  pairs,  with  up  to  four
+ characters  of  the  name in the car, and the cdr being a pointer to the
+ next part of the name, with the tag 011 in the top three bits.  The name
+ is  padded  with  the  character  00  (hex)  and  the print name list is
+ terminated with NIL.
+
+      For example:
+
+
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 7
+
+
+    _____________________________
+   |    |          |             |
+   |1000|          |    NIL      |
+   |____|_____|____|_____________|
+              |
+    __________|__________________     _____________________________
+   |               |             |   |                |            |
+   |  E  X  A  M   |011 |    ----|-->| P  L  E        |011 |  NIL  |
+   |_______________|_____________|   |________________|____________|
+
+
+
+ In this example we have the atom EXAMPLE with no property list.
+
+
+
+ 2.3  Numbers
+
+ There are three kinds of numbers.
+
+      1.  Fixed point (integers)
+
+      2.  Floating point
+
+      3.  Logical (hexadecimal)
+
+ Of these fixed point  numbers  subdivide  into  small  numbers  and  big
+ numbers.   Small  numbers, floating point and logical numbers are stored
+ as 32 bit binary numbers using  a  full  cell.   The  representation  is
+ rather like identifiers, except that there can not be any property list,
+ and so the second word of the header is NIL.
+
+      A small number is a signed or unsigned  decimal  number  without  a
+ decimal point in the range -2**31 < number < 2**31-2.
++                                  _        _
+
+      A floating point number is a single precision floating point number
+ in  the normal format for IBM System/360.  This is approximately 10**-75
+ < number < 10**75 in absolute value.
++_        _
+
+      A logical number is up to 8 hexadecimal digits.   On  input  it  is
+ terminated by the character X, and may include the digits 0 through 9 as
+ well as A through F.  Most numerical  functions  treat  logical  numbers
+ like fixed point numbers, the exceptions being logical operations.
+
+      Fixed point  numbers  larger  than  2**31  in  absolute  value  are
+ represented  with  a separate tag, and then a chain of digits as a list,
+ each super digit being 32 binary digits.  The transition from  small  to
+ big  fixed  point  numbers is automatic, and so need not worry the user.
+ The sign of a big number is in bit 5 of the header, 0 for positive and 1
+ for negative.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 8
+
+
+ 2.4  Strings
+
+ A string is represented as an uninterned identifier with the flag STRING
+ as  the  first  thing  on  the object list, and with an APVAL of itself.
+ Thus it evaluates to itself whenever handed to EVAL.  The flag  is  seen
+ by  the  printing  functions PRIN1 and PRINT, and so strings are printed
+ with the double quote mark.
+
+
+
+ 2.5  Property Lists
+
+ Any identifier may have a property list.   This  is  a  list  made  from
+ pairs,  of  which  the cars may be indicators (flags) or properties.  In
+ the case of a property the next item on the list is  the  value  of  the
+ property.   This  can lead to unfortunate puns and confusion if the same
+ identifier is used both as a flag and a property.  The property list  is
+ terminated with NIL.
+
+
+
+ 2.6  The Oblist
+
+ Pointers to some LISP identifiers  are  chained  together  to  form  the
+ oblist  (object  list).   The system searches this list in order to find
+ identifiers referenced on input.  The format of the oblist is  a  simple
+ list  of  identifiers,  with  NIL  as  the  first object.  The oblist is
+ available to the LISP programmer as the value of the identifier  OBLIST.
+ Identifiers  that  are created by COMPRESS or MKATOM are not normally on
+ this list.  They can be added  to  the  list  by  the  function  INTERN.
+ However  small  numbers created by READ or by MKATOM are interned on the
+ oblist.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                           Page 9
+
+
+ 3.0  EXTENSIONS AND DIFFERENCES FROM STANDARD LISP
+
+ This section describes functions that differ from those in Standard Lisp
+ and new functions.
+
+
+
+ 3.1  Standard Lisp Functions
+
+ The following Standard LISP functions are implemented exactly  according
+ to their definitions in [1].
+ AND, APPEND, ATOM, CAR, C..R, C...R, CDR, CODEP, COND, CONS, DIFFERENCE,
+ EJECT,  EQ,  EQUAL,  EVLIS,  EXPT,  FIXP,  FLAG,  FLAGP,  FLOAT, FLOATP,
+ GREATERP, IDP, LESSP,  LIST,  LITER,  MAPCAR,  MAPLIST,  MEMBER,  MINUS,
+ NCONC,  NOT,  NULL, NUMBERP, OR, PAIR, PLUS2, POSN, PRINT, PRIN1, PRIN2,
+ QUOTE, QUOTIENT, READ,  REMAINDER,  REMFLAG,  REMOB,  REMPROP,  REVERSE,
+ RPLACA, RPLACD, SASSOC, SET, SETQ, STRINGP, TERPRI, TIMES2.
+ Some functions are implemented in LISP  and  are  loaded  by  use  of  a
+ RESTORE of the appropriate file.  These functions are:
+ ABS, ASSOC, C....R, COMPRESS, CONSTANTP, DE,  DELETE,  DF,  DIVIDE,  DM,
+ EQN,  EXPAND,  EXPLODE,  FLUID,  FLUIDP,  GENSYM, GETD, GLOBAL, GLOBALP,
+ MAPCAN, MAX, MAX2, MEMQ, MIN, MIN2,  PLUS,  PRINC,  PROGN,  PUTD,  REMD,
+ SUBLIS, SUBST, TIMES and UNFLUID.
+
+
+
+ 3.2  Shortcomings
+
+ The major feature of the language described in [1] that is missing  from
+ this  implementation  is vectors.  Thus the functions GETV, PUTV, MKVECT
+ and UPBV are not available, neither is VECTORP.  Thus  ATOM,  PAIRP  and
+ the like do not test for vectors, with the subsequent changes to EVAL.
+ There is a vector package in the restored front end,  but  this  is  not
+ totally integrated into the predicates as it works by using lists.
+ The functions LPOSN and PAGELENGTH are not implemented either.
+
+
+
+ 3.3  Differences
+
+ A number of functions do not agree with the description in  [1].   These
+ are   described   in  this  section.   Some  of  these  differences  are
+ restrictions and some are extensions.  Others are just different.
+
+      DIGIT(CH:id):boolean
++     ____________________
+ Type:  EVAL, SPREAD
+ CH must be a character id, such as read by READCH.  The result is  T  if
+ the  identifier  is  a single character, and that character is a digit 0
+ through  9.   Other  character  objects  give  NIL.   Use  of  DIGIT  on
+ identifiers  which  are  not single characters, or other structures will
+ usually give the answer NIL, but not always, depending on details of the
+ store state.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 10
+
+
+      DEFLIST(U:dlist, IND:id):list
++     ________________ ____________
+ Type:  EVAL, SPREAD
+ DEFLIST is  like  the  Standard  function  except  that  as  PUT  allows
+ properties EXPR, FEXPR and MACRO, so does DEFLIST.
+
+      ERRORSET(U:any, MSGP:boolean, TR:boolean):any
++     _______________ _____________ _______________
+ Type:  EVAL, SPREAD
+ ERRORSET is mainly as described in [1] 3.8,  except  that  on  an  error
+ fluid variables are not unbound correctly.
+
+      FIX(U:number):integer
++     _____________________
+ Type:  EVAL, SPREAD
+ FIX behaves generaly as in the standard, except that a very large bignum
+ when fixed will give the answer 0 rather than an imprecise integer.
+
+      FUNCTION(FN:function):list
++     __________________________
+ Type:  NOEVAL, NOSPREAD
+ SLISP/360 is capable of handling fnargs, as the system uses an alist for
+ the  normal  bindings.   This is achieved by FUNCTION returning the list
+ (FNARG function alst) where alst is the current alist.  The  FNARG  form
+ is  interpretted  by %APPLY and APPLY as a function with the association
+ list replaced by the list given in the FNARG.  Thus, FUNCTION, in effect
+ saves  the current bindings along with the function, so that later calls
+ will use current variable bindings.
+
+      GET(U:any, IND:any):any
++     __________ ____________
+ Type:  EVAL, SPREAD
+ GET can be used to access functions under the tags  EXPR,  SUBR,  FEXPR,
+ FSUBR and MACRO, despite what the standard says.
+
+      GO(L:atom):
++     ___________
+ Type:  EVAL, SPREAD
+ GO causes a jump to the label in the last PROG in which the  context  is
+ dynamically.   Thus it is more general that the GO defined in [1].  Note
++___________
+ that it can be used as the argument of a function,  and  the  jump  will
+ occur before the function is evaluated in the case of an EXPR or SUBR.
+
+      INTERN(U:atom):atom
++     ___________________
+ Type:  EVAL, SPREAD
+ If INTERN is given an identifier then the result will be an  identifier.
+ However  if  the  argument  is  a  string  then  the  result  will be an
+ identifier if an identifier already exists with the same print name,  or
+ a string if not.  Interning a string returns an identifier with the same
+ characters in the print  name.   Numbers  can  be  interned  and  remain
+ numbers.
+
+      LENGTH(U:extended-list):integer
++     _______________________________
+ Type:  EVAL, SPREAD
+ If U is a regular list then the value returned is the length of the  cdr
+ chain.   However it can also be applied to the CAAR of an bignum to find
+ out how long the number is, or to the CAR of an identifier to  find  the
+ length of the printname of the atom.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 11
+
+
+      LINELENGTH(U:¬NIL,integer,list­):integer
++     ________________________________________
+ Type:  EVAL, SPREAD If the argument is NIL then the current line  length
+ is  returned.   In the case of an integer then the line length is set to
+ max(U,120) and the old value is returned.  If U is a list it should be a
+ list  of  just one number.  This number is used as the line length, with
+ the extra facility that if  the  currently  selected  output  devise  is
+ LISPOUT  then lines will be terminated 20 characters short of the length
+ given to stop atoms overflowing lines.
+
+      PUT(U:id, IND:id, PROP:any):any
++     _________ _______ _____________
+ Type:  EVAL, SPREAD
+ PUT can be used to define functions with  the  tag  EXPR,  SUBR,  FEXPR,
+ FSUBR and MACRO, despite what the standard says.
+
+      READCH():character
++     __________________
+ Type:EVAL, SPREAD
+ READCH reads a  single  character  from  the  input  dataset.   The  256
+ possible  EBCDIC  characters are mapped on to the 64 characters given in
+ the table below.  Note that  this  translates  lower-case  letters  into
+ upper-case,  and  many characters get turned into 'unprintable'.  On the
+ other hand READ does not do this translation.
+
+      RETURN(U:any):any
++     _________________
+ Type:  EVAL, SPREAD
+ Like GO, RETURN can be used in a more general context than is  envisaged
+ in [1].
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 12
+
+
+ Character objects.
+
+
+
+ blank        (            !            X            4
+ A            +            $            Y            5
+ B            |            *            Z            6
+ C            &            )            unprintable  7
+ D            J            ;            ,            8
+ E            K            ã            %            9
+ F            L            -            _            :
+ G            M            /            >            #
+ H            N            S            ?            @
+ I            O            T            0            '
+              P            U            1            =
+ .            Q            V            2            "
+ <            R            W            3
+
+
+ The unprintable character is the non graphic character whose punch  code
+ is 12-11.
+
+
+
+ 3.4  Extra Functions
+
+      ACONC(U:list, V:list):list
++     _____________ ____________
+ Type:  EVAL, SPREAD
+ ACONC is best described as (NCONC U (CONS V NIL))
+
+      ADD1(U:any):number
++     __________________
+ Type:  EVAL, SPREAD
+ ADD1 takes a number as its argument and returns that number plus 1.   If
+ U  is a fixed point number then the result will be fixed point.  If U is
+ floating point then the result is floating point.
+
+      BIGP(N:any):boolean
++     ___________________
+ Type:  EVAL, SPREAD
+ Returns T if the argument is represented as a bignum.
+
+      COUNT(N:integer):NIL
++     ____________________
+ Type:  EVAL, SPREAD
+ COUNT turns on a counter that automatically causes a trap when CONS  has
+ been  performed  more  than  N  times.   Any  CONS  performed  by system
+ functions is included in the count.  The counter is turned  off  by  the
+ function UNCOUNT.  Every new call to COUNT resets the counter.  If COUNT
+ is called with argument NIL is resume s the count stopped by a  call  to
+ UNCOUNT.   The  function  SPEAK  gives the current value of the counter,
+ which counts down towards zero.
+
+      CSET(U:id, V:any):any
++     __________ __________
+ Type:  EVAL, SPREAD
+ CSET is used to create a constant by putting the value V on the property
+ list  of the atom U under the tag APVAL .  Subsequently EVAL will return
+ this value when given the identifier.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 13
+
+
+      CSETQ(U:id, V:any):any
++     ___________ __________
+ Type:  NOEVAL, SPREAD
+ The second argument is evaluated and put on the  property  list  of  the
+ first argument under the tag APVAL.
+
+      DEFINE(U:list):list
++     ___________________
+ Type EVAL, SPREAD
+ The argument of DEFINE is a list of pairs  ((u1  v1)(u2  v2)...(un  vn))
+ where  each  u  is an identifier and each v is a lambda expression for a
+ function.  For each pair DEFINE puts the v on the  property  list  of  u
+ under  the  tag EXPR.  The value of DEFINE is a list of the names.  This
+ function is more usual in an EVALQUOTE system.
+
+      EVCON(U:list, V:list):any
++     _____________ ___________
+ Type:  NOEVAL, NOSPREAD
+ The first argument to EVCON is a list of the form ((p1 e1)(p2  e2)...(pn
+ en))  where  each  p  and  e  are  valid  LISP expressions.  The p's are
+ evaluated in  order  until  a  non-NIL  value  is  obtained.   Then  the
+ corresponding  e  is  evaluated  and returned as the value.  For each of
+ these evaluations the second argument is used as the Alist.
+
+      EXITERR(U:boolean):NIL
++     ______________________
+ Type:  EVAL, SPREAD
+ If U is T then the run terminates after any error in  the  execution  of
+ the  program.   EXITERR(NIL)  turns  this  off,  and  is also the system
+ default.
+
+      EXPLODEC(U:id):list
++     ___________________
+ Type:  EVAL, SPREAD
+ EXPLODEC returns a list of character  atoms  of  the  printname  of  the
+ identify U.
+
+      GENSYM1(U:id):id
++     ________________
+ Type:  EVAL, SPREAD
+ GENSYM1 creates a new identifier that is no EQ to any  other  identifier
+ in  the  system,  and whose initial letters up to four of the print name
+ are the same as that of U.
+
+      LEFTSHIFT(N1:integer, N2:integer):logical-number
++     _____________________ __________________________
+ Type:  EVAL, SPREAD
+ LEFTSHIFT returns the result of shifting the first  argument  N2  binary
+ places  left  if  N2 if positive, and -N2 place right if it is negative.
+ Note that the result is a logical number, and so is always positive  and
+ restricted to 32 bits.
+
+      LIST2(U:any, V:any):list
++     ____________ ___________
+ Type:  EVAL, SPREAD
+ LIST2 is an efficient form of LIST for only two arguments.
+
+      LIST3(U:any, V:any, W:any):list
++     ____________ ______ ___________
+ Type:  EVAL, SPREAD
+ LIST3 is an efficient form of LIST for 3 arguments.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 14
+
+
+      LOGAND2(N1:number, N2:number):logical-number
++     __________________ _________________________
+ Type:  EVAL, SPREAD
+ Returns the logical number formed by bit  wise  logical  AND  operations
+ between its arguments.
+
+      LOGOR2(N1:number, N2:number):logical-number
++     _________________ _________________________
+ Type:  EVAL, SPREAD
+ Returns the logical number formed by  bit  wise  logical  OR  operations
+ between its arguments.
+
+      LOGXOR2(N1:number, N2:number):logical-number
++     __________________ _________________________
+ Type:  EVAL, SPREAD
+ Returns the logical number formed  by  bit  wise  logical  Exclusive  OR
+ operations between its arguments.
+
+      LOGP(U:any):boolean
++     ___________________
+ Type:  EVAL, SPREAD
+ Returns T if U is a logical number, or NIL otherwise.
+
+      MINUSP(U:number):number
++     _______________________
+ Type:  EVAL, SPREAD
+ Returns the negation of its argument.
+
+      MKATOM():¬id,number­
++     ____________________
+ Type:  EVAL, SPREAD
+ MKATOM makes an uninterned  identifier  from  the  characters  given  by
+ previous calls to RLIT.  Note however that READ used the same mechanism,
+ and so correct use of MKATOM will not  have  any  top  level  operations
+ between  the  first RLIT and the MKATOM call.  MKATOM will make a number
+ from previous calls to RNUMB.  The same provisos apply.  Note that small
+ numbers so created will be interned on the object list.
+
+      MKSTRING():string
++     _________________
+ Type:  EVAL, SPREAD
+ MKSTRING is like MKATOM except that a string is created.
+
+      NCONS(U:any):list
++     _________________
+ Type:  EVAL, SPREAD
+ NCONS is the same as (CONS U NIL)
+
+      ORDERP(U:any, V:any):boolean
++     _____________ ______________
+ Type:  EVAL, SPREAD
+ ORDERP imposes an arbitrary ordering on  its  arguments,  based  on  the
+ position  in  store  where  the object is to be found.  The order can be
+ relied on for identifiers to produce a total ordering  for  the  current
+ run.   The  result  is  T is either the arguments are EQ or if the first
+ argument comes before the second.
+
+      PHEX(N1:integer, W:integer):integer
++     ________________ __________________
+ Type:  EVAL, SPREAD
+ The number N1 is printed in hexadecimal right justified in  a  field  of
+ width  of W columns.  If W is too narrow then the rightmost W digits are
+ printed.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 15
+
+
+      PRBUFFER(U:extra-boolean):extra-boolean
++     _______________________________________
+ Type:  EVAL, SPREAD
+ Depending on the value of U a flag is either switched on (for  non  NIL)
+ or  off  (for NIL) so every time a card is read it is echoed prefixed by
+ the characters ' =>     '.  Compare with  the  *ECHO  flag.   The  value
+ returned is the argument.
+
+      PREVALQT(P:extra-boolean):extra-boolean
++     _______________________________________
+ Type:  EVAL, SPREAD
+ (PREVALQT NIL) will turn off the printing of the messages from  the  top
+ level  supervisor  that  echo  the  input  and print the answer for each
+ S-expression that  is  evaluated.   A  non  NIL  argument  switches  the
+ messages  back  on.  Initially the messages are printed.  Note that user
+ output via PRINT and other functions,  as  well  as  garbage  collection
+ messages are not affected by this function.
+
+      PROG2(U:any, V:any):any
++     ____________ __________
+ Type:  EVAL, SPREAD
+ PROG2 returns the second argument.  Because arguments are evaluated in a
+ left to right order this gives a simple sequencing function.
+
+      RLIT(C:char):NIL
++     ________________
+ Type:  EVAL, SPREAD
+ RLIT places the character into the internal buffer for the use of MKATOM
+ or  MKSTRING.  Note that the argument must be a single character object,
+ one of the 64 characters that READCH can read.
+
+      RNUMB(C:char):NIL
++     _________________
+ Type:  EVAL, SPREAD
+ RNUMB is rather like RLIT except that it  is  used  to  create  numbers.
+ Thus  the  only  legal  characters  are  the digits 0 through 9, +, -, A
+ through F and X.  The syntax is as for reading numbers.
+
+      SPACES(N:integer):NIL
++     _____________________
+ Type:  EVAL, SPREAD
+ Advances the current output cursor N positions.  The argument must be  a
+ positive number.
+
+      SPEAK():number
++     ______________
+ Type:  EVAL, SPREAD
+ Speak gives the number of CONS's executed since the last call  of  COUNT
+ with a number argument.
+
+      STAYSLOW(U:extra-boolean):extra-boolean
++     _______________________________________
+ Type:  EVAL, SPREAD
+ Normally SLISP/360 converts links from  compiled  functions  into  fast,
+ that  is  to  say  direct, links.  This makes tracing and redefinition a
+ little harder.  (STAYSLOW T) inhibits this, while (STAYSLOW NIL)  allows
+ it.
+
+      SUB1(U:any):number
++     __________________
+ Type:  EVAL, SPREAD
+ SUB1 takes a number as its argument and returns that number minus 1.  If
+ U  is a fixed point number then the result will be fixed point.  If U is
+ floating point then the result is floating point.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 16
+
+
+      TIME():integer
++     ______________
+ Type:  EVAL, SPREAD
+ TIME returns the number of milliseconds  that  have  elapsed  since  the
+ beginning   of  the  run,  excluding  overhead  times  such  as  garbage
+ collection.
+
+      TRACE(U:¬list-of-ids,T,NIL­):NIL
++     ________________________________
+ Type:  EVAL, SPREAD
+ U is a a list of functions to be  traced.   Subsequently  calls  to  the
+ functions  in  the list cause the name of the function and the values of
+ the arguments to be printed.  If the argument is NIL  then  the  tracing
+ action  is  suspended  without  removing  the  trace  indicator  on  the
+ functions.  A subsequent call of TRACE(T) will  reinstate  the  tracing.
+ See also UNTRACE.
+
+      TTAB(N:integer):NIL
++     ___________________
+ Type:  EVAL, SPREAD
+ TTAB moves the current output cursor to the Nth position in  the  output
+ buffer.  Whatever is printed next will start from that position.
+
+      UNCOUNT():NIL
++     _____________
+ Type:  EVAL, SPREAD
+ Turns off the CONS counter.  See also COUNT and SPEAK.
+
+      UNTRACE(U:¬list,id­):list
++     _________________________
+ Type:  EVAL, SPREAD
+ U is a list of functions which are no longer to be traced.  It does  not
+ matter  if  the  functions  are  not  currently  traced.  If U is T then
+ backtrace is turned off, but not the error messages.  This  is  restored
+ to the default of giving a backtrace by UNTRACE(NIL).
+
+      VERBOS(U:boolean):NIL
++     _____________________
+ Type:  EVAL, SPREAD
+ VERBOS controls the printing of garbage collection messages.   If  U  is
+ NIL  the messages are turned off, anything else causes them to be turned
+ on.
+
+      XCONS(U:any, V:any):list
++     ____________ ___________
+ Type:  EVAL,SPREAD
+ XCONS is like CONS except that its arguments are  in  the  other  order.
+ (XCONS U V) is the same as (CONS V U)
+
+      %APPLY(FN:any, ARGS:list, ALST:alist):any
++     ______________ __________ _______________
+ Type:  EVAL, SPREAD
+ %APPLY is like APPLY except that it  uses  its  third  argument  as  the
+ association list for the current bindings.
+
+      %EVAL(F:any, ALST:alist):any
++     ____________ _______________
+ Type:  EVAL, SPREAD
+ %EVAL is like EVAL except that the second argument  is  the  association
+ list used for current bindings.
+
+      %READCH(U:extra-boolean):character-object
++     _________________________________________
+ Type:  EVAL, SPREAD
+ If the argument to %READCH is NIL then the effect is the same as READCH.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 17
+
+
+ However  a  non  NIL  argument  has  the  effect  of  a backspace of the
+ character stream, so the next call to READCH  or  to  %READCH(NIL)  will
+ give the previous character.  The value of %READCH(T) is the same as the
+ next to last READCH or %READCH(NIL).  %READCH(T) should only be used  to
+ backspace on character.
+
+      %ZEROP(N:number):boolean
++     ________________________
+ Type:  EVAL, SPREAD
+ Returns T if the argument is less than 10**-20.
+
+      ! ! (B:extra-boolean):NIL
++     _________________________
+ Type:  EVAL, SPREAD
+ This function, whoses name is two spaces, causes an ABEND dump.  If  the
+ argument  if  NIL  then the dump is deferred until the system terminates
+ with condition code 4 or greater.  In the case of normal  exit  no  dump
+ occurs.  An argument of T causes an immediate dump.
+
+
+
+ 3.5  Special Atoms
+
+ A number of atoms have predefined meaning.  Some of these can be changed
+ by  the user (by CSET) while other, if changed would cause the system to
+ misbehave.
+
+      ALIST
++     _____
+ The current association list.  Should only be changed by EVAL and APPLY.
+
+      BPS
++     ___
+ Start and end of the binary program space.  Should only  be  altered  by
+ the appropriate functions.  See section on the compiler.
+
+      F
++     _
+ Initially has the value NIL, for compatibility with older LISP systems.
+
+      OBLIST
++     ______
+ Has the value of the object list.  This is updated as  more  identifiers
+ are read or interned.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 18
+
+
+ 4.0  THE GARBAGE COLLECTOR AND SPACE CONTROL
+
+ In normal use whenever the FCS is exhausted the  garbage  collection  is
+ invoked.   This  retains  list  structures  that are pointed at from the
+ object list or from the PDS.  This is achieved by  a  recursive  marking
+ phase,  and a simple linear sweep.  This garbage collection is automatic
+ and need not concern the user.  However on occasions it is desirable  to
+ initiate a garbage collection by the user program.  In addition the user
+ can control various aspects of the space administration.   This  section
+ describes the options.
+
+
+
+ 4.1  Garbage Collection
+
+ The garbage collector can be invoked at a variety  of  levels,  and  the
+ sizes of the various areas can be controlled.
+
+      CLEAN():NIL
++     ___________
+ Type:  EVAL, SPREAD
+ CLEAN is a variant of RECLAIM that does not reclaim the  internal  saved
+ list  bases  including  the  alist.  Thus it can be only used at the top
+ level, but can potentially produce a cleaner space recovery.  CLEAN also
+ removes  atoms  from  the  oblist  that  are not referenced, and have no
+ properties.  In particular this removes interned numbers from the oblist
+ as well as local variables to functions subsequently compiled.  This can
+ cause trouble with forward references to functions not yet defined  from
+ compiled  code.  This could cause compiled code to point at non existent
+ structures, with consequent disaster.   This  error  should  be  noticed
+ internally,  and  the  message *** NON-ATOM SLOWLINK should be produced,
+ but it is possible to get wrong results.
+
+      CONDENSE(STS:integer, FS:integer):
++     _____________________ ____________
+ Type:  EVAL, SPREAD
+ Condense sets the size of the PDS to STS and then tries to condense  the
+ FCS  into  FS  cells,  by  moving items at high store addresses to lower
+ ones, that is towards the PDS.  When finished the free  list  should  be
+ linear in store.  This operation may destroy the ordering implied by the
+ ORDERP function.  CONDENSE exits directly to the interpreter  loop,  and
+ so  does  not  return a value.  CONDENSE involves relocating atomheaders
+ and other FCS cells, and updating  the  in-core  FCS  and  BPS  pointers
+ accordingly.  Thus a use of BPSRESTR later may have incorrect addresses,
+ and thus lead to unpredictable results.
+
+      RECLAIM():NIL
++     _____________
+ Type:  EVAL, SPREAD
+ RECLAIM causes a normal garbage collection to occur and returns NIL.  If
+ the global (APVAL) of the atom GC* is non NIL then the garbage collector
+ will give the GC2-STORAGE EXHAUSTED message if the number  of  cells  on
+ the new free chain is less than the number of the APVAL.
+
+      SETSIZE(STS:integer, FS:integer):
++     ____________________ ____________
+ Type:  EVAL, NOSPREAD
+ SETSIZE tries to reset the allocation of space between the  stack,  free
+ cells  and  binary  program.  SETSIZE cannot reduce the size of the FCS,
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 19
+
+
+ which  can  be  done  by  CONDENSE.   SETSIZE  exits  directly  to   the
+ interpreter loop, and so returns no value after doing a CLEAN.
+
+
+
+ 4.2  Binary Program Allocation Control
+
+ In general once a binary program has been  created  it  is  not  garbage
+ collected  if  all the references to it are removed.  Thus in a long run
+ or system build the BPS can silt up.  A number of functions are provided
+ to give a limited control over the BPS.
+
+      BPSLEFT():integer
++     _________________
+ Type:  EVAL, SPREAD
+ Returns the number of words of binary program space still available.
+
+      BPSMOVE(N:integer):logical-number
++     _________________________________
+ Type:  EVAL, SPREAD
+ The entire binary program area is moved to within N words of  the  limit
+ provided,  with any store so freed being made available to the FCS area.
+ The value returned is the number of bytes that the BPS was  moved.   The
+ amount  moved will always be a multiple of 8 bytes to ensure double word
+ alignment.  BPSMOVE can only move the  BPS  away  from  the  FCS.   c.f.
+ CONDENSE.
+
+      BPSWIPE(FN:id):boolean
++     ______________________
+ Type:  EVAL, SPREAD
+ The identifier passed as an argument should have a compiled function  as
+ its  value,  either  an  SUBR  or  an  FSUBR.   The function removes the
+ compiled code starting from that function until  the  end  of  the  BPS.
+ This  allows a limited amount of recovery of BPS.  Note however that the
+ functions them selves, in the  form  of  SUBR  or  FSUBR  properties  of
+ identifiers  are  not removed, and so subsequent calls to them will lead
+ to anomalous results.  BPSWIPE can be used in conjunction with  BPSCHKPT
+ to make multiple use of the BPS, but it must be used with caution.
+
+      BPSZ():NIL
++     __________
+ Type:  EVAL, SPREAD
+ Returns all the BPS to the FCS.  This function is used if the system  is
+ being  used  with  no  compiled  functions  (including the Standard Lisp
+ functions loaded by RESTORE).
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 20
+
+
+ 5.0  MESSAGES
+
+ The system is capable of producing a number of messages for  information
+ and  for  error  conditions.   This  section  lists  these  messages and
+ explains their meaning.
+
+
+
+ 5.1  Error Messages
+
+ The Lisp system checks for some error  conditions  and  prints  messages
+ accordingly.   Many  erroneous conditions (e.g.  illegal CAR or CDR) are
+ not checked and so may lead  to  wrong  answers  or  subsequent  errors.
+ Normally after an error has occurred the system prints two S-expressions
+ followed by a backtrace.  These can be suppressed  by  suitable  use  of
+ ERRORSET.  In the brief description below the meaning of the expressions
+ printed is described.
+
+
+      ***** ERROR: UNEXPECTED INTERRUPT
+
+ This error occurs due to so malfunction of the system.  The error  is  a
+ machine  interrupt.   To  interpret  the error and trouble see the later
+ section on diagnostics (section 5.4 and appendix).
+
+
+      *** A1-CALL TO ERROR:
+
+ The user has called ERROR explicitly.  Following this message the second
+ argument to ERROR is printed.
+
+
+      *** A2-FUNCTION NOT DEFINED
+
+ The atom given to APPLY does not  have  a  function  definition  on  its
+ property  list or on the association list.  The first expression printed
+ is the atom which  has  given  rise  to  the  problem,  and  the  second
+ expression is the association list.
+
+
+      *** A6-UNDEF LABEL IN GO.
+
+ The label given as the argument of GO has not been defined.   The  first
+ expression  printed  is  the  label,  and the second the list of labeled
+ statements.
+
+
+      *** A7-MORE THAN 22 ARGS
+
+ Functions may only have 22 arguments.  The system prints a list  of  the
+ arguments that have been provided.
+
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 21
+
+
+      *** A8-UNDEFINED VARIABLE
+
+ A variable is not bound on the association list, nor  does  it  have  an
+ APVAL  or FLUID value.  This error occurs in EVAL.  The first expression
+ printed is the undefined variable, the second is the association list.
+
+
+      *** A9-FUNCTION NOT DEFINED
+
+ The atom given to EVAL does  not  have  a  function  definition  on  its
+ property  list or on the association list, nor has a FLUID binding.  The
+ first expression printed is  the  atom  which  has  given  rise  to  the
+ problem, and the second expression is the association list.
+
+
+      *** A10-CONS COUNT EXCEEDED
+
+ The counter in CONS, set by the function COUNT, has exceeded  the  limit
+ given.
+
+
+      *** D1-FILE CANNOT BE OPENED - DD STATEMENT MISSING
+
+ A DD card must be supplied for each dataset used.
+
+
+      *** D2-FILE CANNOT BE OPENED - NO I/O SPACE LEFT
+
+ OPEN was asked to open a dataset when there was no storage available  in
+ the  buffer area for the DCB.  The solution is to either CLOSE a dataset
+ not being used, or to re-run the program with a larger buffer area.
+
+
+      *** D3-RDS FILE NOT OPENED.
+      *** D4-WRS FILE NOT OPENED.
+
+ A dataset must be OPEN before it can be used  for  reading  or  writing.
+ The expression printed is the argument to RDS or WRS.
+
+
+      *** D7:  WRONG CHKPT FILE, OR NOT ENOUGH ROOM
+
+ The dataset provided was not a checkpoint file, or there is insufficient
+ room  in  the  BPS  to  accommodate  it.   This  message is generated by
+ RESTORE.
+
+
+      *** F2-TOO MANY ARGUMENTS-EXPR
+      *** F3-TOO FEW ARGUMENTS-EXPR
+
+ The wrong number of arguments was supplied for an interpretted function.
+ The  first expression printed is list of dummy variables required by the
+ function, the second is the actual parameters provided.
+
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 22
+
+
+      *** F2-TOO MANY ARGUMENTS-SUBR
+      *** F3-TOO FEW ARGUMENTS-SUBR
+
+ The wrong number of arguments was supplied  for  an  compiled  function.
+ The  first expression printed is the function being called the second is
+ the actual parameters provided.  This error is detected  by  APPLY,  and
+ not by the linkage between compiled functions.
+
+
+      *** G2-PUSHDOWN STACK OVERFLOW.
+
+ Recursion is very  deep,  possibly  a  non-terminating  recursion.   The
+ expressions printed depend precisely on where the error was detected.
+
+
+      *** G3-PDS OVERFLOW WHILE GARBAGE COLLECTING.
+
+ The stack  was  exhausted  while  in  the  mark  phase  of  the  garbage
+ collector,  which  is  a recursive one.  This error is fatal, and causes
+ the program to terminate.
+
+
+      *** GC2-STORAGE EXHAUSTED
+
+ Even after garbage collection there was insufficient store to do a  CONS
+ that was requested.
+
+
+      *** I3-BAD ARITH ARG
+
+ An arithmetic routine was given a non-numeric argument.  The  expression
+ printed depend on exactly which function was being abused.
+
+
+      *** I5-ATTEMPT TO RAISE 0 TO 0
+
+ This error occurs if (EXPT 0 0) or (EXPT 0.0 0) is obeyed.
+
+
+      *** I6-ATTEMPT TO RAISE 0 TO NEGATIVE POWER
+
+ This error is caused by obeying (EXPT 0 n) or (EXPT 0.0 n) where n is  a
+ negative integer.
+
+
+      *** I8-EXPT CANNOT TAKE REAL EXPONENT
+
+ The function EXPT is only defined  for  the  second  argument  being  an
+ integer.
+
+
+      *** ZERO DIVISOR.
+
+ Division by zero is an error.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 23
+
+
+      *** OPEN:  PDS NOT SYSIN OR SYSFILE (80,1600)
+
+ The partitioned dataset handler can only deal with  datasets  that  have
+ the characteristics of SYSIN (that is 80 character records unblocked) or
+ SYSFILE (80 character records blocked into 20 records per block).   This
+ error occurs if OPEN is given any other characteristics.
+
+
+      *** BPSMOVE -- BAD ARG OR TOO BIG
+
+ BPSMOVE can only be given an integer argument that is sufficiently small
+ that the BPS can be moved by that amount.
+
+
+      *** BFLT OVFL
+
+ A big number is being floated, and the result is larger than  4.3E68  in
+ magnitude.
+
+
+      *** EXPT- BIGNUM EXPONENT
+
+ EXPT can only raise numbers to the power less than  2**31.   This  error
+ occurs if the second argument is a bignum.
+
+
+      *** L8-BPS FULL
+
+ The storage reserved for the BPS has been exhausted.   Use  one  of  the
+ PARM string options to give more space, or use BPSMOVE.
+
+
+      *** L9-EXCEEDED MAX.  LAP ROUTINE SIZE
+
+ The routine being assembled is too large  to  be  covered  by  one  base
+ resister.   There  is  no  provision  in  the assembler or in the binary
+ program system to allow for multiple bases.  The function should  broken
+ into smaller parts.
+
+
+      *** PDS DDNAME/ARG INCORRECT
+
+ The member name of a partitioned dataset cannot be NIL, and  must  be  a
+ single name.
+
+
+      *** PDS MEMBER NOT FOUND OR I/O FAULT
+
+ The member specified in RDS was not in the dataset.  This error can also
+ be caused by undetermined input/output errors in the operating system.
+
+
+      *** PDS NOT SELECTABLE FOR OUTPUT
+
+ The partitioned dataset name given to WRS was not atomic.  There  is  no
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 24
+
+
+ partitioned dataset handler for output.
+
+
+      *** R1-SYNTAX ERROR
+
+ The READ or MKATOM function was unable to make sense of  the  characters
+ given to it.
+
+
+      *** R2-BAD BRACKET COUNT
+
+ An  end-of-file  was  reached  while  reading  an   S-expression.    The
+ expression  printed  is  the  S-expression  read  so  far with the extra
+ closing brackets supplied.  This error is fatal.
+
+
+      *** R3-BAD BRACKET COUNT ON USER FILE
+
+ An end-of-file was reached while reading an S-expression from a  dataset
+ other  than  LISPIN.   The  expression printed is the S-expression being
+ read with the needed brackets  generated.   Reading  reverts  to  LISPIN
+ after this error.
+
+
+      ***R5-NAME OR NUMBER TOO LONG
+
+ This error occurs because a name is too long.  Despite  the  message  it
+ cannot occur for numbers, as bignums are of arbitrary size.  The message
+ is an historical relic.
+
+
+      *** NON-ATOM SLOWLINK
+
+ An attempt was made to link to some  non  atomic  object  from  compiled
+ code.   This  is probably an assembler error, or is due to incorrect use
+ of BPSRESTR or CLEAN and similar functions.
+
+
+      *** RDS BUG:  DCBADR=0
+
+ Internal error;  the address of the data control block for  the  dataset
+ being selected is not there.
+
+
+      *** SYSFILE IS EMPTY OR SHORT
+
+ A file being restored was the wrong length.  This  is  probably  a  user
+ error of giving an incorrect file.
+
+
+      *** SOFTWARE EOF FORCED ON PDS - BUFFER USURPED
+
+ If a RESTORE is done from a partitioned dataset from which text is  also
+ being  read,  and  when  the  RESTORE  took  place another member of the
+ dataset was selected  for  reading,  then  the  buffer  will  have  been
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 25
+
+
+ destroyed  by  the restore, and so continuation from the original member
+ is not possible.  The  system  will  give  this  message  in  the  above
+ circumstance, and input will resort to LISPIN.  (see 6.2)
+
+
+      ***** OVER- OR UNDERFLOW OF TYPE xxx
+
+ An overflow caused an interrupt.  The  most  likely  cause  is  floating
+ point  overflow.  This message can also be generated by user written LAP
+ functions.
+
+
+
+ 5.2  System Messages And Warnings
+
+
+      *** END OF USER FILE - LISPIN RESUMED
+
+ The currently selected dataset for reading has ended, and so the reading
+ resorts to LISPIN.  This message indicates this.
+
+
+      *** END OF DATA
+
+ The LISPIN dataset has ended.  This message  will  be  followed  by  the
+ program terminating.
+
+
+      *** LISPIN DD STATEMENT MISSING - RUN ENDED
+
+ During system initialization the ddname LISPIN was not available, so the
+ program will end abnormally fast.  Provide the missing dataset.
+
+
+      *** INVALID PARM FIELD, ONE OR MORE DEFAULTS USED
+
+ An option in the PARM  field  was  incorrectly  specified,  or  was  not
+ available.  The offending option is ignored, and the system default will
+ be used for the option in question.
+
+
+      *** NOT ENOUGH CORE FOR LISP - RUN ENDED.
+
+ There  was  not  enough  core  for  the  system  to  initialize  itself.
+ SLISP/360 needs at least 120K to run.
+
+
+      FCS % WAS TOO SMALL, SO TOOK MORE..
+
+ The amount of free cells specified in the PARM string  was  insufficient
+ to  run  LISP, so the percentage requested is modified.  The amount used
+ is that necessary for the initial object list.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 26
+
+
+      There are a number of messages that are produced  to  describe  the
+ layout  of  storage  for certain IBM operating systems, where the simple
+ model described in the introductory pages of this manual are not  always
+ true.  These messages are:
+
+
+      *** ALLOCATED SPACE WAS BELOW MAIN PROGRAM.
+      NON-CONTIGUOUS.
+      (AND SPLIT I/O RESERVE)
+      -CONTIGUOUS-
+
+
+
+ 5.3  Supervisor Messages
+
+      The normal LISP EVAL supervisor produces the messages
+
+ ARGUMENT FOR EVAL ...
+
+ and then prints the expression to be evaluated.   After  the  value  has
+ been obtained the message
+
+ TIME xxxMS, VALUE IS ...
+
+ is writen to the output followed on the next line by the answer.
+
+      If errors occur during the reading of the expression the message
+
+      *** READ ERRORS, CONTINUING WITH NEXT OPERATION
+
+ is produced, and the supervisor loop is restarted.
+
+
+
+ 5.4  Reading Interrupt Messages
+
+      After the message UNEXPECTED INTERRUPT the LISP system prints a PSW
+ trap.   This section is intended to give some guidance as to how to read
+ this trap.  Note that all numbers in this section are in hexadecimal.
+
+      The first line starts
+
+ TRAP:PSW
+
+ and then prints the date of the system being used, and  the  address  of
+ the  dumped  information.   This  information  is repeated on each line.
+ Following this there are the two words of the PSW.  This tells the exact
+ error,  and where it was discovered.  This is not always as useful as it
+ would seem.  For example on models 91 and 195 where imprecise  interrupt
+ can  occur,  this  will  normally  be  the  address inside the LISP trap
+ handler.  The following six words are the values of
+
+ LISPLOC - origin of the overall LISP system
+ PUSHA   - base of the PDS
+ BOTTOM  - last cell in the FCS
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 27
+
+
+ BPSBASE - the base of the BPS.  This will usually be BOTTOM+8
+ BPORG   - pointer to the next free BPS cell
+ BPEND   - pointer to top of BPS which is region size - 16
+
+      The next two lines are the values of the registers.
+
+ R0    - working register
+ R1    -  " "
+ R2    - usually the return address from the last subroutine via BAL
+ R3    - either the base register of a LISP section or the  base  of  the
+ last compiled function obeyed.
+ R4    - normally has the value 4 except during CHKPOINT/RESTORE
+ NILR  - the value of NIL
+ FREE  - the free chain
+ PDS   - the LISP stack pointer
+ R8-A  - working register, and first argument to a function
+ R9-Q  -   "        "       " second   "       " "    "
+ R10-M - working register
+ R11   - LISP base register, for the supervisor, EVAL and APPLY
+ R12   - LISP base register, and used for fast links from compiler
+ R13   - LISP base register and the save area
+ R14   - working register
+ R15   - working register or PDL for compiler
+
+      The last line begins -LISPLOC, and gives the values of R0, R1,  R2,
+ A,  Q, M, R14 and R15 minus the value of LISPLOC.  This can be used with
+ an assembly listing to give more information.  If  the  value  is  below
+ LISPLOC then a < is printed.
+
+      An example of decoding a PSW trap is given in an appendix.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 28
+
+
+ 6.0  INPUT/OUTPUT FUNCTIONS
+
+      The input/output functions of SLISP/360 are modeled on the Standard
+ LISP  functions, but have been modified to interface with the facilities
+ of OS/360.
+ The basic method of describing a file is by the DDname.  However as  IBM
+ files  have more attributes than is envisaged in [1] the form of some of
+ the functions is rather more complex.  The functions CLOSE, EJECT, POSN,
+ PRINT, PRIN1, PRIN2, READ and TERPRI are as in the report.
+
+
+
+ 6.1  Basic Data Handling Functions
+
+      ASA(B:boolean):boolean
++     ______________________
+ Type:  EVAL, SPREAD
+ A control character is normally prefixed to all output records  produced
+ by  the  LISP  system.   Execution  of (ASA NIL) stops this prefixing by
+ control characters.  This can be used when output is being produced  for
+ subsequent  reinput.   Insertion  of  carriage control characters can be
+ resumed by the call (ASA  T).   If  ASA  is  used  in  conjunction  with
+ LINELENGTH, then the ASA call should precede.
+
+      BINI():integer
++     ______________
+ Type:  EVAL, SPREAD
+ BINI reads one character from the current input and returns  the  number
+ in  the range 0-255 that is the EBCDIC representation on that character.
+ While this function is designed for binary input it can be mixed  safely
+ with READCH and READ.
+
+      BINO(N:integer):integer
++     _______________________
+ Type:  EVAL, SPREAD
+ The least significant byte of the integer N is written onto  the  output
+ without translation.  N must be a small integer, preferably in the range
+ 0-255.
+
+      INLL(N:integer):NIL
++     ___________________
+ Type:  EVAL, SPREAD
+ INLL specifies how many characters are to be considered in reading  from
+ the  input  dataset.  The default value is 72, corresponding to the data
+ field of a normal IBM card.
+
+      OPEN(DD:ddname, ATR:list, IO:id):id
++     _______________ _________ _________
+ Type:  EVAL, SPREAD
+ The first argument to OPEN is the ddname of the dataset  to  be  opened,
+ and  the  last  argument  is the identifier INPUT or OUTPUT.  The second
+ argument sets up the characteristics of  the  file,  in  particular  the
+ logical  record  length and the blocksize.  The list takes the form of a
+ list of attributes.  Possible attributes are (LRECL .   n),  (BLKSIZE  .
+ m)  and  (A).   These specify the logical record length of the file, the
+ blocksize,   and   the   existence   of   control   characters.    These
+ characteristics  can  be  set  in the related DD statement instead.  All
+ files are in format FB, with the error  option  (EROPT)  set  to  accept
+ (ACC)  on  input and skip (SKP) on output.  These cannot be changed.  If
+ the second argument to OPEN is NIL and the file characteristics are  not
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 29
+
+
+ given in the DD card, then SYSFILE is assumed.
+
+      Instead of an list the second argument  can  be  on  of  the  atoms
+ SYSIN, SYSOUT, SYSPUNCH, or SYSFILE.
+          SYSIN implies a record length of 80 bytes, a  blocksize  of  80
+          and the file will be used for input.
+          SYSOUT implies a record length of 133 bytes, a blocksize of 665
+          bytes, carriage control characters and that the dataset will be
+          used for output.
+          SYSPUNCH is a record length of 80 and a blocksize of  80,  used
+          for output.
+          SYSFILE is 80 byte records with a blocksize of 1600.  This type
+          of dataset is used by the checkpoint/restore system.
+
+ The effect of OPEN  is  to  give  the  ddname  identifier  the  property
+ OPENFILE  with value a dotted pair whose car is a pointer to the DCB, or
+ in the case of partitioned datasets negative pointer to  the  DCB.   The
+ cdr  is  NIL  for  normal  files,  and  the  last  selected  member  for
+ partitioned datasets.
+
+      RDS(DDNAME:id):id
++     _________________
+ Type:  EVAL, SPREAD
+ RDS selects for reading a previously opened dataset.  If the argument is
+ NIL  or  LISPIN  then  the  principal  input devise is selected, and the
+ system does an automatic (INLL 72).  For all other input  documents  the
+ user must issue his own INLL.
+
+      WRS(DDNAME:id):id
++     _________________
+ Type:  EVAL, SPREAD
+ WRS selects for output  a  previously  opened  dataset.   The  ids  NIL,
+ LISPOUT,  and  LISPUNCH  has  special  significance.  NIL and LISPOUT do
+ automatic (ASA T) and (LINELENGTH 100).  LISPUNCH has the effect  of  an
+ automatic  (ASA  NIL)  and  (LINELENGTH 72).  For all other datasets the
+ system issues a LINELENGTH equal to the logical linelength.
+
+
+
+ 6.2  Partitioned Datasets
+
+ A partitioned dataset can be used for input  by  the  extension  of  the
+ ddname  into  a  dotted  pair of (ddname . member).  A certain amount of
+ check is made by the functions WRS, CHKPOINT, BPSCHKPT to ensure that  a
+ partitioned  dataset is not used in a general way for output.  Similarly
+ the input functions will cause an error if a non existent member is read
+ or if a ddname is used both as a simple file and a partitioned dataset.
+
+      Every partitioned dataset is only given one buffer, and so only one
+ member  can  be open at any time.  As a consequence a pds is only opened
+ once, and any second call to open it (even with a different  member)  is
+ ignored.  Similarly closing a (pds .  member) pair has no effect, except
+ if that member is the one currently using the buffer.  Then the  pds  is
+ marked  as  having no open member, and a check is made to see if an (RDS
+ NIL) or (WRS NIL) should be done.  In order to close  a  pds,  releasing
+ the  buffer  space  and  the  DCB,  the call of CLOSE on just the ddname
+ should be made.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 30
+
+
+      The last selected member of a partitioned dataset can  be  obtained
+ by  (CDR  (GET  file  (QUOTE OPENFILE))).  Note that the member name NIL
+ cannot be used.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 31
+
+
+ 7.0  CHECKPOINT FACILITIES
+
+ The Free cell storage (FCS) and binary program space (BPS) can be  saved
+ at any time during a run by use of the CHKPOINT function.  This writes a
+ file of the FCS and BPS which can be reloaded in a subsequent run by the
+ function  RESTORE.   Checkpoints  and  restores  use  datasets  that are
+ already opened, and must have been opened with the option SYSFILE.
+
+      CHKPOINT(DDNAME:id):
++     ____________________
+ Type:  EVAL, SPREAD
+ Execution of CHKPOINT will cause free cell storage  and  binary  program
+ space  to be written onto the specified dataset, with the ddname DDNAME.
+ When this is done only the datasets LISPIN, LISPOUT,  LISPUNCH  and  the
+ checkpoint dataset must be open.
+
+      RESTORE(DDNAME:id):
++     ___________________
+ Type:  EVAL, SPREAD
+ Execution of RESTORE will cause free cell  storage  and  binary  program
+ space  to  be overwritten by the contents of the dataset associated with
+ the ddname.  RESTORE will check that the dataset is compatible with  the
+ version  of  LISP  being  run.   Only  the datasets with ddnames LISPIN,
+ LISPOUT, LISPUNCH and the restored  ddname  should  be  open  when  this
+ function  is  executed.  RESTORE resets the PDS length, FCS contents and
+ the BPS.  It does not change the PDS  contents  nor  the  DCBs  of  open
+ files.   After a RESTORE resumption is only possible from the supervisor
+ loop at top level.
+
+      BPSCHKPT(DDNAME:id):
++     ____________________
+ Type:  EVAL, SPREAD
+ BPSCHKPT is the sane as CHKPOINT except that only the BPS  is  saved  on
+ the dataset.  It is recoved with BPSRESTR.
+
+      BPSRESTR(DDNAME:id):
++     ____________________
+ Type:  EVAL, SPREAD BPSRESTR reads back a saved BPS.  If the file is one
+ created  by  CHKPOINT  just the BPS section will be restored.  It is the
+ users responsibility to ensure that the BPS portion is  compatible  with
+ the FCS.
+
+ Note:  BPSCHKPT and BPSRESTR allow the user to have a number  of  binary
+ program  areas,  which he pages for himself.  However it should be noted
+ that the free cell area may have pointers into  BPS  which  do  not  get
+ changed  by  the  checkpoint or restore, and so the user must take great
+ care in using this facility.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 32
+
+
+ 8.0  DIFFERENCES BETWEEN LISP/360 AND SLISP/360
+
+ The following is a list of the major differences  between  LISP/360  and
+ this modified implementation (SLISP/360).
+
+      1.  SLISP/360 is an EVAL system, while  LISP/360  is  an  EVALQUOTE
+          system.
+
+      2.  The normal EVAL and APPLY use a system alist, while  %EVAL  and
+          %APPLY use a user defined alist.
+
+      3.  SLISP uses FLUID variables rather than COMMON and SPECIAL.
+
+      4.  EVAL and APPLY look at FLUID bindings in addition.
+
+      5.  SLISP does not have LABEL.
+
+      6.  New functions LIST2 and LIST3 included.
+
+      7.  READCH now takes no argument, and looks at the  fluid  variable
+          *ECHO to decide whether to echo.
+
+      8.  MKATOM does not intern its result.
+
+      9.  Strings are available.
+
+     10.  The form of input $$$...$ has been removed.
+
+     11.  The function INTERN is available to the user.
+
+     12.  ZEROP has been renamed as !%ZEROP, and the tolerance reduced to
+          10**-20.
+
+     13.  ERRORSET takes three arguments.
+
+     14.  SETQ will declare things FLUID with a message.
+
+     15.  The functions ATTRIB, BREAKP, LAST, RECIP, and LITP  have  been
+          removed.
+
+     16.  The predefined APVALs for characters have been removed.
+
+     17.  The predicates CODEP, IDP and STRINGP have been introduced.
+
+     18.  OTLL has been changed and renamed as LINELENGTH.
+
+     19.  AND and OR return the last non NIL object where appropriate.
+
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 33
+
+
+ 9.0  THE INTERPRETER
+
+      Sometimes it is useful to know the details of the interpreter, that
+ is  the EVAL/APPLY functions.  In SLISP/360 it is possible by use of PUT
+ to have an identifier with more than one of the properties EXPR,  FEXPR,
+ SUBR,  FSUBR and MACRO.  Thus it is necessary to know the order in which
+ these properties are investigated.
+ In the following description a form of LISP  is  used.   The  lower-case
+ parts  indicate  values  that  are  not  recalculated,  but  kept from a
+ previous GET.  The two  strings  are  descriptions  of  the  linkage  to
+ compiled  code,  where  BAL and BALR are the IBM/360 instructions, and A
+ and Q are register names.
+
+ (DE EVAL (FORM)
+    (COND
+       ((NULL FORM) NIL)
+       ((NUMBERP FORM) FORM)
+       ((ATOM FORM)
+          (COND
+             ((GET FORM 'APVAL) (CAR apval))
+             (T (CDR
+                   (SASSOC
+                      FORM
+                      ALIST
+                      (FUNCTION
+                         (LAMBDA NIL
+                            (COND
+                               ((GET FORM 'FLUID) fluid)
+                               (T (ERROR* A2)))) ))) )))
+       ((EQ (CAR FORM) 'QUOTE) (CADR FORM))
+       ((EQ (CAR FORM) 'COND) (EVCON (CDR FORM) ALIST))
+       ((ATOM (CAR FORM))
+          (COND
+             ((GET (CAR FORM) 'EXPR)
+                (APPLY expr (EVLIS (CDR FORM))))
+             ((GET (CAR FORM) 'FEXPR)
+                (APPLY fexpr (LIST (CDR FORM) ALIST)))
+             ((GET (CAR FORM) 'SUBR)
+                "spread[evlis[cdr[form]]]; BAL subr")
+             ((GET (CAR FORM) 'FSUBR)
+                "A:=(CDR FORM); Q:=ALIST; BAL fsubr")
+             ((GET (CAR FORM) 'MACRO) (EVAL macro (LIST FORM)))
+             (T (EVAL
+                   (CONS
+                      (CDR
+                         (SASSOC
+                            (CAR FORM)
+                            ALIST
+                            (FUNCTION
+                               (LAMBDA NIL
+                                  (COND
+                                     ((GET (CAR FORM) 'FLUID) fluid)
+                                     (T (ERROR* A9)))) )))
+                      (CDR FORM)))) ))
+       (T (APPLY (CAR FORM) (EVLIS (CDR FORM) ALIST)))) )
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 34
+
+
+ (DE APPLY (FN ARGS)
+    (COND
+       ((NULL FORM) NIL)
+       ((ATOM FN)
+          (COND
+             ((GET FN 'EXPR) (APPLY expr ARGS))
+             ((GET FN 'SUBR) "spread[ARGS]; BAL subr")
+             (T (APPLY
+                   (CDR
+                      (SASSOC
+                         FN
+                         ALIST
+                         (FUNCTION
+                            (LAMBDA NIL
+                               (COND
+                                  ((GET FN 'FLUID) fluid)
+                                  (T (ERROR* A2)))) )))
+                   ARGS))))
+       ((EQ (CAR FN) 'FNARG)
+          (PROG (ALST VAL)
+             (SETQ ALST ALIST)
+             (SETQ ALIST (CADDR FN))
+             (SETQ VAL (APPLY (CADR FN) ARGS))
+             (SETQ ALIST ALST)
+             (RETURN VAL)))
+       ((EQ (CAR FN) 'LAMBDA)
+          (PROG (ALST VAL)
+             (SETQ ALST ALIST)
+             (SETQ ALIST (NCONC (PAIR (CADR FN) ARGS) ALIST))
+             (SETQ VAL (EVAL (CADDR FN)))
+             (SETQ ALIST ALST)
+             (RETURN VAL)))
+       (T (APPLY (EVAL FN) ARGS))))
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 35
+
+
+ 10.0  REFERENCES
+
+ [1] J. B. Marti, A. C. Hearn, M.  L.  Griss,  C.  Griss,  Standard  LISP
++                                                          ________  ____
+      Report, Utah Computational Physics, UCP-60, January 1978.
++     ______
+
+
+ [2]  LISP/360  Reference  Manual,  Stanford   Center   for   Information
++     ________  _________  ______
+      Processing, Stanford University, no date or author.
+
+
+ [3] Kevin R. Kay, Appendix --  Utah  Modifications,  Utah  Computational
++                  ________ __  ____  _____________
+      Physics Group, Operating Note 20.1, March 1977
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 36
+
+
+ Appendix - Deciphering PSW Traps
+
+
+ The following is a recent example of what can be determined  or  guessed
+ from the raw register-dump done by SLISP/360 in a PSW Trap.  It helps to
+ have an assembly listing of Lisp handy,  of  course,  for  approximating
+ program  locations  where feasible.  The example comes from K R Kay, and
+ although it refers to an older version of LISP the  principals  are  the
+ same.   Some  knowledge  of the algebra system REDUCE is assumed in this
+ explanation.
+
+
+ This little case study is a trap from  a  European  user,  without  much
+ supporting  parameters  about  the  generated Reduce program, but we are
+ told it blew up just after a (RESTORE (QUOTE  REDUCE)))  and  a  (BEGIN)
+ without further echoing of input.
+
+
+ We get the following dump, where each line begins  10175  0321F4;   this
+ just  confirms  the Lisp version 1/01/75 and the memory area holding the
+ values being dumped.  In Lisp, the array at SAVEBLK+12 (base  R13,  +12)
+ as can be seen in the TRAPS section.
+
+ TRAP:PSW  FFC50001 5E074038 0002D388 00033920 00071098 0006B958 0008DFC4
+ 0008DFF0
+ REGS 0-7  000360C0 0103E10C AE074014 AE073FB0 00000004 00035EA0 00070FC0
+ 000339C0
+ REGS 8-15 000408C0 0004D170 000474A0 0002D480 0002E34C 00032AE8 000360C0
+ 00033990
+ -LISPLOC  008D38 010D84 046C8C 013538 01FDE8 01A118 008D38 006608
+
+ After these four  highly  informative  lines,  Lisp  will  usually  say:
+ "Unexpected interrupt" which is its catchall for errors which it doesn't
+ understand  or  try  to  recover   from.    It   does   continue   after
+ over/underflows and after GC-signalling "specification" errors.
+
+ After that, it may next print registers A and Q and perhaps a  backtrace
+ of the stack contents, depending on the TRACE/UNTRACE flags.  Sometimes,
+ the stack is more useful than the registers alone, but in our example we
+ only  have  the  registers  to  go on, since it blew at the top-level of
+ Reduce.
+
+ Therefore, we'll look at the dump line by line.  The first two words  of
+ the TRAP:PSW line are the PSW and flag conditions at the time of blowup,
+ and the address 074038 where we presume it  to  bomb.   The  latter  six
+ words are important Lisp memory area pointers:
+
+ LISPLOC - origin or base of the overall Lisp program;
+ PUSHA   - base of the PDS stack;
+ BOTTOM  - last cell in FCS;
+ BPSBASE - usually left = BOTTOM+8, as the base of BPS;
+ BPORG   - working pointer to next free word in BPS;
+ BPEND   - pointer to top of BPS, = Lisp basic core - 10X.
+
+ The middle two lines are the individual registers, as you'd expect.  The
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 37
+
+
+ following are the usual associations:
+
+ R0,R1   - working registers;
+ R2      - return address from last BAL or BALR instruction;
+ R3      - either Lisp base register, or BPS compiled-routine base;
+ R4      - =4, unless in one of the CHKPOINT/RESTORE/overlay functions;
+ R5      - NILR, i.e. the address of the atomhead of NIL; = end of PDS;
+ R6      - FREE, i.e. next free cell in FCS;
+ R7      - PDS,  i.e. Lisp's stack pointer;
+ R8,9,10 - A,Q,M, working cells and function arguments, etc.;
+ R11,12,13  Lisp's very own primary base registers, never changed;
+ R14     - working register, sometimes saves R2;
+ R15     - PDL, local stack pointer for compiled-code; also temporary.
+
+ The last line "-LISPLOC" shows the contents of R0, R1, R2, A, Q, M, R14,
+ R15,  each  minus  the  value of LISPLOC, hence showing the Lisp-program
+ relative addresses for easy lookup if you have a listing.  In this case,
+ they  are all larger than 6600X or so, so aren't very helpful since they
+ point onto the stack or into FCS.  Note that PDL (R15) does  point  into
+ the stack 70X beyond PUSHA, but 30X below PDS.
+
+ From these values we can guess a fair amount:
+
+
+      1.  Starting with the PSW address of 074038, we see it is >  BOTTOM
+          and < BPORG, in BPS code;  we tentatively guess that a spurious
+          jump/branch had an address overlapping two instruction there.
+
+
+      2.  R3 is also up there, as the base of some  compiled  routine  at
+          73FB0  (its  ENTERCC  call);   R2  is  also  just  beyond this,
+          presumably some subroutine call within that routine.
+
+
+      3.  We see that BPSBASE does not = BOTTOM+8 ! Since Lisp always (?)
+          resets it so, we suspect Reduce manipulated BOTTOM.  Looking at
+          the BEGIN code, we determine (a)  the  BPSMOVE  has  been  done
+          since  BPORG=BPEND-12  (word-rounded),  and  (b) the EXCISE was
+          done  since  only  this  (presently)  sets  BOTTOM  by  itself.
+          Therefore,  as  a  side matter, we note that the compiler after
+          the BPSMOVE had its base at 6B958;   and  that  Reduce  now  is
+          based at 710A0 (the current BOTTOM, +8).
+
+
+      4.  Anyway, we knew it somehow got this far because "Reduce 2 date"
+          did print before the PSW.
+
+
+      5.  So somewhere into or beyond BEGIN1 seemingly.  Casting  around,
+          FREE points into the area above BPSBASE and below BOTTOM.  This
+          means that a garbage collection has been done since the EXCISE,
+          because  the  freelist  is  linked  backwards  in memory:  from
+          BOTTOM (or the first free cell unused below that) towards NILR.
+          Assuming only one garbage collection has been done, BOTTOM-FREE
+          = D8X, = 208+8 = 216 bytes =  27  cells  --->  27  CONS's  used
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 38
+
+
+          since.
+
+
+      6.  By a similar process, R3-BOTTOM = 2F18, = 12056 bytes,  =  3014
+          words  into  BPS code.  Hence, allowing for the retained length
+          of EXCISE, about 3000 words into Reduce code, which, if we  had
+          available the output from building/compiling that Reduce, would
+          nearly pinpoint which routine we're in.  R2 =  R3+64X,  roughly
+          25-35  instruction  into  (or past) that routine.  PSW= another
+          24X, another 9 words to the B's tag?
+
+
+      7.  Looking at the remaining registers, R0=R14 and = NILR+220X.  We
+          just happen to know, because frequently appears, that NILR+220X
+          is the address of 'SUBR.  If only R14 had had this value,  we'd
+          suspect  the program had just been in EVAL/APPLY;  however, the
+          only portion of the current Lisp with both = 'SUBR  is  in  the
+          slowlink  processor,  so  the  R3  routine is being called by a
+          slowlink (this time anyway).
+
+
+      8.  We know it's this R3, because of R1's  relative  addressing  to
+          it:   R1+NILR  will  be  the  entry point of a slowlink, namely
+          R3-4.  The high byte of R1  ("01")  says  it's  a  one-argument
+          function.
+
+
+      9.  Since R1 still has this pointer, we gather that no SPECBIND was
+          done in the routine (yet), since R1 would have been utilized in
+          1/01/75 Lisp's compiler for that.(*)
+
+
+     10.  Since we are evidently in BPS code, then PDL (R15) implies (70X
+          =  112)  that  27-28  pushes  were  done  before  entering this
+          routine, @ 3+ per call +arguments+localvars.   Also  that  (30X
+          =48)  12 words are on the local stack ---> 1 NIL + 1 argument +
+          10 locals for this routine.
+
+
+     11.  This is  about  all  we  can  glean  without  a  backtrace,  or
+          indication  of  what  the  A  and  Q registers point to in FCS.
+          Since  they're  not  within  1000X  of  NILR,  they  can't   be
+          pinpointed on the OBLIST.
+
+
+     12.  In this example the PSW "interruption code" (right half of word
+          1)  doesn't  help  much;   "0001"  is  an  operation  error, so
+          probably a branch into the middle of an instruction, getting an
+          illegal  opcode and trapping.  Why such a branch? You'd have to
+          guess;  maybe a spurious adjustment in  the  BPSMOVE,  maybe  a
+          spurious RESTORE because of building in an unusually sized Lisp
+          job, but no one's been able to prove these yet.
+
+ (*) In the 1978 version of the compiler SPECBIND is replaced by PROGBIND
+ and LAMBBIND, but the comment is still valid.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 39
+
+
+     13.  Other codes that mean  more  are:   "0004"  protection,  "0005"
+          addressing, "0006" specification.  These all usually imply that
+          a CAR was indeed taken of a fullcell, getting  a  out-of-bounds
+          or an off-boundary address, and such would appear in one of the
+          registers, usually A.  If  none  of  the  registers  contain  a
+          printname's  EBCDIC characters or a likely unboxed number, then
+          one of  them  is  probably  a  spurious  NILR-relative  address
+          (perhaps  wrongly  relocated,  e.g.  a BPS literal pointer to a
+          QUOTE or SPECIAL cell).
+
+ Given the above, we really  haven't  solved  much  about  the  immediate
+ cause.   We  should get a LAP printout for the routine involved at R3 to
+ make guesses from there, by counting words and bytes per instruction  to
+ pinpoint  the  bug.   The last thing we can be halfway sure of is the R2
+ return-address:  this was not a slowlink or fastlink from that  location
+ backwards 64X to the R3 routine, because (unless it's bombing in calling
+ Lisp) the return would be pushed and the actual call  made  from  within
+ Lisp.   Rather,  this  must  be  one  of  the  dozen  "frequently-called
+ functions" being called relative to R12, e.g.  CONS, since compiled that
+ way.
+
+ Good luck.
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 40
+
+
+                                  Index
+
+
+
+ ! !  . . . . . . . . . . . . . . . . 17
+
+ %APPLY . . . . . . . . . . . . . . . 16
+ %EVAL  . . . . . . . . . . . . . . . 16
+ %READCH  . . . . . . . . . . . . . . 16
+ %ZEROP . . . . . . . . . . . . . . . 17
+
+ *ECHO  . . . . . . . . . . . . . . . 15, 32
+
+ A  . . . . . . . . . . . . . . . . . 28
+ ABEND  . . . . . . . . . . . . . . . 17
+ ABS  . . . . . . . . . . . . . . . . 9
+ ACONC  . . . . . . . . . . . . . . . 12
+ ADD1 . . . . . . . . . . . . . . . . 12
+ ALIST  . . . . . . . . . . . . . . . 17
+ AND  . . . . . . . . . . . . . . . . 9, 32
+ APPEND . . . . . . . . . . . . . . . 9
+ APPLY  . . . . . . . . . . . . . . . 16, 20, 22
+ APVAL  . . . . . . . . . . . . . . . 12, 18, 21, 32
+ ASA  . . . . . . . . . . . . . . . . 28
+ ASSOC  . . . . . . . . . . . . . . . 9
+ ATOM . . . . . . . . . . . . . . . . 9
+ Atomheader . . . . . . . . . . . . . 6
+ Atoms  . . . . . . . . . . . . . . . 6
+
+ Big numbers  . . . . . . . . . . . . 7
+ Bignum . . . . . . . . . . . . . . . 10, 12, 23
+ BIGP . . . . . . . . . . . . . . . . 12
+ Binary program space . . . . . . . . 2
+ BINI . . . . . . . . . . . . . . . . 28
+ BINO . . . . . . . . . . . . . . . . 28
+ BLKSIZE  . . . . . . . . . . . . . . 28
+ Blocksize  . . . . . . . . . . . . . 28
+ BPS  . . . . . . . . . . . . . . . . 1-2, 17
+ BPSCHKPT . . . . . . . . . . . . . . 29, 31
+ BPSLEFT  . . . . . . . . . . . . . . 19
+ BPSMOVE  . . . . . . . . . . . . . . 19, 23
+ BPSRESTR . . . . . . . . . . . . . . 18, 24, 31
+ BPSWIPE  . . . . . . . . . . . . . . 19
+ BPSZ . . . . . . . . . . . . . . . . 19
+
+ CAR  . . . . . . . . . . . . . . . . 9
+ CDR  . . . . . . . . . . . . . . . . 9
+ Checkpoint facilities  . . . . . . . 31
+ CHKPOINT . . . . . . . . . . . . . . 29, 31
+ CLEAN  . . . . . . . . . . . . . . . 18, 24
+ CLOSE  . . . . . . . . . . . . . . . 21, 28
+ CODEP  . . . . . . . . . . . . . . . 9, 32
+ Common . . . . . . . . . . . . . . . 32
+ COMPRESS . . . . . . . . . . . . . . 9
+ COND . . . . . . . . . . . . . . . . 9
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 41
+
+
+ CONDENSE . . . . . . . . . . . . . . 18-19
+ Condition codes  . . . . . . . . . . 4, 17
+ CONS . . . . . . . . . . . . . . . . 9, 14, 16
+ CONSTANTP  . . . . . . . . . . . . . 9
+ COUNT  . . . . . . . . . . . . . . . 12, 15-16, 21
+ CSET . . . . . . . . . . . . . . . . 12
+ CSETQ  . . . . . . . . . . . . . . . 13
+
+ DE . . . . . . . . . . . . . . . . . 9
+ DEFINE . . . . . . . . . . . . . . . 13
+ DEFLIST  . . . . . . . . . . . . . . 10
+ DELETE . . . . . . . . . . . . . . . 9
+ DF . . . . . . . . . . . . . . . . . 9
+ DIFFERENCE . . . . . . . . . . . . . 9
+ DIGIT  . . . . . . . . . . . . . . . 9
+ DIVIDE . . . . . . . . . . . . . . . 9
+ DM . . . . . . . . . . . . . . . . . 9
+
+ EBCDIC . . . . . . . . . . . . . . . 11
+ EJECT  . . . . . . . . . . . . . . . 9, 28
+ EQ . . . . . . . . . . . . . . . . . 9
+ EQN  . . . . . . . . . . . . . . . . 9
+ EQUAL  . . . . . . . . . . . . . . . 9
+ ERROR  . . . . . . . . . . . . . . . 20
+ ERRORSET . . . . . . . . . . . . . . 10, 32
+ EVAL . . . . . . . . . . . . . . . . 16, 21
+ EVCON  . . . . . . . . . . . . . . . 13
+ EVLIS  . . . . . . . . . . . . . . . 9
+ EXITERR  . . . . . . . . . . . . . . 4, 13
+ EXPAND . . . . . . . . . . . . . . . 9
+ EXPLODE  . . . . . . . . . . . . . . 9
+ EXPLODEC . . . . . . . . . . . . . . 13
+ EXPR . . . . . . . . . . . . . . . . 10-11
+ EXPT . . . . . . . . . . . . . . . . 9, 22-23
+
+ F  . . . . . . . . . . . . . . . . . 17
+ Fastlink . . . . . . . . . . . . . . 15
+ FCS  . . . . . . . . . . . . . . . . 1-2
+ FEXPR  . . . . . . . . . . . . . . . 10-11
+ FIX  . . . . . . . . . . . . . . . . 10
+ FIXP . . . . . . . . . . . . . . . . 9
+ FLAG . . . . . . . . . . . . . . . . 9
+ FLAGP  . . . . . . . . . . . . . . . 9
+ FLOAT  . . . . . . . . . . . . . . . 9
+ Floating point numbers . . . . . . . 7
+ FLOATP . . . . . . . . . . . . . . . 9
+ FLUID  . . . . . . . . . . . . . . . 9
+ Fluid  . . . . . . . . . . . . . . . 10
+ FLUIDP . . . . . . . . . . . . . . . 9
+ FNARG  . . . . . . . . . . . . . . . 10
+ Free cell storage  . . . . . . . . . 2
+ Free list  . . . . . . . . . . . . . 3
+ FSUBR  . . . . . . . . . . . . . . . 10-11
+ Full word  . . . . . . . . . . . . . 3
+ FUNCTION . . . . . . . . . . . . . . 10
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 42
+
+
+ GC*  . . . . . . . . . . . . . . . . 18
+ GENSYM . . . . . . . . . . . . . . . 9
+ GENSYM1  . . . . . . . . . . . . . . 13
+ GET  . . . . . . . . . . . . . . . . 10
+ GETD . . . . . . . . . . . . . . . . 9
+ GLOBAL . . . . . . . . . . . . . . . 9
+ GLOBALP  . . . . . . . . . . . . . . 9
+ GO . . . . . . . . . . . . . . . . . 10, 20
+ GREATERP . . . . . . . . . . . . . . 9
+
+ Identifiers  . . . . . . . . . . . . 6
+ IDP  . . . . . . . . . . . . . . . . 9, 32
+ INLL . . . . . . . . . . . . . . . . 28-29
+ Input/output buffers . . . . . . . . 2
+ INTERN . . . . . . . . . . . . . . . 10, 32
+ Interruption code  . . . . . . . . . 38
+
+ JCL  . . . . . . . . . . . . . . . . 4
+ Job control cards  . . . . . . . . . 4
+
+ LABEL  . . . . . . . . . . . . . . . 32
+ LEFTSHIFT  . . . . . . . . . . . . . 13
+ LENGTH . . . . . . . . . . . . . . . 10
+ LESSP  . . . . . . . . . . . . . . . 9
+ LINELENGTH . . . . . . . . . . . . . 11, 28, 32
+ LISPIN . . . . . . . . . . . . . . . 25
+ LISPOUT  . . . . . . . . . . . . . . 11, 29
+ LISPUNCH . . . . . . . . . . . . . . 29
+ LIST . . . . . . . . . . . . . . . . 9
+ LIST2  . . . . . . . . . . . . . . . 13
+ LIST3  . . . . . . . . . . . . . . . 13
+ LITER  . . . . . . . . . . . . . . . 9
+ LOGAND2  . . . . . . . . . . . . . . 14
+ Logical numbers  . . . . . . . . . . 7
+ Logical record length  . . . . . . . 28
+ LOGOR2 . . . . . . . . . . . . . . . 14
+ LOGP . . . . . . . . . . . . . . . . 14
+ LOGXOR2  . . . . . . . . . . . . . . 14
+ LRECL  . . . . . . . . . . . . . . . 28
+
+ MACRO  . . . . . . . . . . . . . . . 10-11
+ MAPCAN . . . . . . . . . . . . . . . 9
+ MAPCAR . . . . . . . . . . . . . . . 9
+ MAPLIST  . . . . . . . . . . . . . . 9
+ MAX  . . . . . . . . . . . . . . . . 9
+ MAX2 . . . . . . . . . . . . . . . . 9
+ MEMBER . . . . . . . . . . . . . . . 9
+ MEMQ . . . . . . . . . . . . . . . . 9
+ MIN  . . . . . . . . . . . . . . . . 9
+ MIN2 . . . . . . . . . . . . . . . . 9
+ MINUS  . . . . . . . . . . . . . . . 9
+ MINUSP . . . . . . . . . . . . . . . 14
+ MKATOM . . . . . . . . . . . . . . . 14-15, 24, 32
+ MKSTRING . . . . . . . . . . . . . . 14-15
+
+
+1NCONC  . . . . . . . . . . . . . . . 9, 12
+ NCONS  . . . . . . . . . . . . . . . 14
+ NOT  . . . . . . . . . . . . . . . . 9
+ NULL . . . . . . . . . . . . . . . . 9
+ NUMBERP  . . . . . . . . . . . . . . 9
+ Numbers  . . . . . . . . . . . . . . 7
+
+ OBLIST . . . . . . . . . . . . . . . 17
+ Oblist, the  . . . . . . . . . . . . 8
+ OPEN . . . . . . . . . . . . . . . . 21, 23, 28
+ OPENFILE . . . . . . . . . . . . . . 29
+ OR . . . . . . . . . . . . . . . . . 9, 32
+ ORDERP . . . . . . . . . . . . . . . 14, 18
+
+ PAIR . . . . . . . . . . . . . . . . 9
+ PARM . . . . . . . . . . . . . . . . 4, 25
+ Partitioned dataset  . . . . . . . . 23, 25, 29
+ PDS  . . . . . . . . . . . . . . . . 1-2, 5
+ PHEX . . . . . . . . . . . . . . . . 14
+ PLUS . . . . . . . . . . . . . . . . 9
+ PLUS2  . . . . . . . . . . . . . . . 9
+ POSN . . . . . . . . . . . . . . . . 9, 28
+ PRBUFFER . . . . . . . . . . . . . . 15
+ PREVALQT . . . . . . . . . . . . . . 15
+ PRIN1  . . . . . . . . . . . . . . . 9, 28
+ PRIN2  . . . . . . . . . . . . . . . 9, 28
+ PRINC  . . . . . . . . . . . . . . . 9
+ PRINT  . . . . . . . . . . . . . . . 9, 28
+ PROG . . . . . . . . . . . . . . . . 10
+ PROG2  . . . . . . . . . . . . . . . 15
+ PROGN  . . . . . . . . . . . . . . . 9
+ Property list  . . . . . . . . . . . 8
+ Psw trap . . . . . . . . . . . . . . 26
+ Push down stack  . . . . . . . . . . 2
+ PUT  . . . . . . . . . . . . . . . . 11, 33
+ PUTD . . . . . . . . . . . . . . . . 9
+
+ QUOTE  . . . . . . . . . . . . . . . 9
+ QUOTIENT . . . . . . . . . . . . . . 9
+
+ RDS  . . . . . . . . . . . . . . . . 21, 23, 29
+ READ . . . . . . . . . . . . . . . . 9, 11, 24, 28
+ READCH . . . . . . . . . . . . . . . 9, 11, 15-16
+ RECLAIM  . . . . . . . . . . . . . . 18
+ REMAINDER  . . . . . . . . . . . . . 9
+ REMD . . . . . . . . . . . . . . . . 9
+ REMFLAG  . . . . . . . . . . . . . . 9
+ REMOB  . . . . . . . . . . . . . . . 9
+ REMPROP  . . . . . . . . . . . . . . 9
+ RESTORE  . . . . . . . . . . . . . . 1, 9, 21, 24, 31
+ RETURN . . . . . . . . . . . . . . . 11
+ REVERSE  . . . . . . . . . . . . . . 9
+ RLIT . . . . . . . . . . . . . . . . 14-15
+ RNUMB  . . . . . . . . . . . . . . . 14-15
+ RPLACA . . . . . . . . . . . . . . . 9
+ RPLACD . . . . . . . . . . . . . . . 9
+
+ SASSOC . . . . . . . . . . . . . . . 9
+
+1STANDARD LISP ON IBM SYSTEM 360 AND 370                          Page 44
+
+
+ SET  . . . . . . . . . . . . . . . . 9
+ SETQ . . . . . . . . . . . . . . . . 9, 32
+ SETSIZE  . . . . . . . . . . . . . . 3, 18
+ Slowlink . . . . . . . . . . . . . . 15
+ Small numbers  . . . . . . . . . . . 7
+ SPACES . . . . . . . . . . . . . . . 15
+ SPEAK  . . . . . . . . . . . . . . . 12, 15-16
+ Special  . . . . . . . . . . . . . . 32
+ STAYSLOW . . . . . . . . . . . . . . 15
+ STRINGP  . . . . . . . . . . . . . . 9, 32
+ Strings  . . . . . . . . . . . . . . 8
+ SUB1 . . . . . . . . . . . . . . . . 15
+ SUBLIS . . . . . . . . . . . . . . . 9
+ SUBR . . . . . . . . . . . . . . . . 10-11
+ SUBST  . . . . . . . . . . . . . . . 9
+ SYSFILE  . . . . . . . . . . . . . . 23, 29, 31
+ SYSIN  . . . . . . . . . . . . . . . 23, 29
+ SYSOUT . . . . . . . . . . . . . . . 29
+ SYSPUNCH . . . . . . . . . . . . . . 29
+
+ TERPRI . . . . . . . . . . . . . . . 9, 28
+ TIME . . . . . . . . . . . . . . . . 16
+ TIMES  . . . . . . . . . . . . . . . 9
+ TIMES2 . . . . . . . . . . . . . . . 9
+ Tolerance  . . . . . . . . . . . . . 32
+ TRACE  . . . . . . . . . . . . . . . 16
+ TTAB . . . . . . . . . . . . . . . . 16
+
+ UNCOUNT  . . . . . . . . . . . . . . 12, 16
+ UNFLUID  . . . . . . . . . . . . . . 9
+ UNTRACE  . . . . . . . . . . . . . . 16
+
+ Vectors. . . . . . . . . . . . . . . 9
+ VERBOS . . . . . . . . . . . . . . . 16
+
+ WRS  . . . . . . . . . . . . . . . . 21, 23, 29
+
+ XCONS  . . . . . . . . . . . . . . . 16
+
+
+1

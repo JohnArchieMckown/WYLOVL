@@ -1,0 +1,172 @@
+;
+;;  PHONE -- Special version of WHOIS which only returns the
+;;    telephone number.  Note that this exec is somewhat dependent
+;;    on the form of responses returned by Argus.
+;;
+;;    The REQUEST subroutine really does all the work.
+;;
+;;
+;;  Created, 3/29/87, Niz
+;;
+;;  Modifications:
+;;     8/08/87  Niz     Add SYSC check.
+;;     4/10/88  Niz     Second version, uses a direct TCP
+;;                        connection.
+;;     1/02/89  Niz     Add "mail-code" to display.
+;
+
+
+
+xproc () begin
+   x.origact = actno
+   x.attn = 0                         ; attn counter (see attnexit)
+
+   x.pgm = 'PHONE'                    ; program name
+   x.maint = '(netexec-maint)'               ; maintenance people
+
+   x.pno = 0
+
+   on error cmd 'xcall wyl.gs.wyl.net#\
+      _error(x.pgm, x.maint, errid, errmsg, errinfo)'
+   on attn  cmd 'xcall wyl.gs.wyl.net#\
+      _attn(x.pgm, x.maint, x.attn)'
+
+   nicname = 'directory.stanford.edu'     ; whois server host name
+   port = 43                          ; whois tcp port number
+
+;
+;  Right now only the Forsythe SYSA machine has a SUNet interface.
+;
+
+   if (machine ne 'SYSA') begin
+      write x.pgm || ' can not be executed on this machine.'
+      write 'The ' || machine \
+         || ' machine does not have a direct SUNet connection.'
+      xreturn
+   end
+
+;
+;  Scan WHOIS parameters (big deal).
+;
+
+   whoname = strip(parm_string)
+
+   if (whoname eq '') begin
+      write 'Missing "name" after &(x.pgm).  Type \
+         "HELP &(x.pgm)" for more information.'
+      pcall cleanup('error')
+   end
+
+;
+;  Issue the network request (responses will come back in the
+;    current Active file).
+;
+
+   open whois title 'whois &(tran(whoname,'"',"'"))' temp
+
+   rc = ''
+   xcall wyl.gs.wyl.net#_request (x.pgm, \
+      nicname, port, whoname, rc)
+
+   pcall list_phone
+
+   close
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+;  list_phone -- Routine to pick out the phone number from the
+;    WHOIS responses in the current active file and display
+;    it in a reasonably readable format to the user.
+;
+
+proc list_phone() begin
+   if (lines ne 0) begin
+      change '    '1 to '' nolist
+      change '    '1 to '' nolist
+      change '   '1  to '' nolist
+      change '   '1  to '' nolist
+      change '  '1   to '' nolist
+      change '  '1   to '' nolist
+      change ' '1    to '' nolist
+      change ' '1    to '' nolist
+
+      change '(415) 72' to '(415)72' nolist
+      change x'0d' to '' nolist
+
+      p c'phone: '1 or c'home-phone: '1 (1) n
+      if (* lt 0) try list unn
+      else begin
+         p_name = ''
+         office_phone = 'none'
+         home_phone = ''
+         mail_code = ''
+
+;
+;  Pick out the name and phone number and just display that.
+;
+
+         pcall get_data('name', p_name)
+         if (p_name eq '') try list unn
+         else begin
+            pcall get_data('phone', office_phone)
+            if (left(office_phone, 7) eq '(415)72') begin
+               office_phone = 'x' || substr(office_phone, 8)
+            end
+            pcall get_data('home-phone', home_phone)
+            pcall get_data('mail-code', mail_code)
+
+            info = 'Office: ' || office_phone
+
+            if (home_phone ne '') \
+               info = info || '  Home: ' || home_phone
+
+            if (mail_code ne '') \
+               info = info || '  ID mail: ' || mail_code
+
+
+            if (size(p_name) lt 26) p_name = left(p_name, 26)
+            comment &(p_name) &(info)
+         end
+      end
+   end
+end
+
+
+
+;<.page>
+;
+;  get_data -- Routine to return the data information given the
+;     key.  This takes advantage of the fact that all the lines
+;     in the Active file will have the form "keyword = value".
+;
+
+proc get_data(key, data) begin
+
+   data = ''
+   point '&(key): '1 (1) nolist
+   if (* gt 0) begin
+      data = strip(substr(line(*), size(key)+3))
+   end
+
+   return (data)
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

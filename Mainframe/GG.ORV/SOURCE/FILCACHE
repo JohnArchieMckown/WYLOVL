@@ -1,0 +1,884 @@
+FILCACHE TITLE 'ORVYL''S Buffer Management Caching Routines'
+         COPY  HEADER
+*
+FILCACHE MODULE TRCNUM=51
+*
+*         COPY  ORVDEFN
+*
+         PUSH  OFF                 Don't print common DSECTS
+*-
+*-       Global data areas.
+*-
+         COPY  PZERO               Page zero
+*
+         COPY  VMPARM              Virtual memory
+*
+         COPY  LOCKPARM            Locks
+*
+         POP   PRINT               End of common DSECTS
+*
+         COPY  CACHPARM            Caching
+*
+*
+         REGS  ,,,,,,,,,,SCPR,SCBR
+*
+CITR     REG   RX                  CIT ptr
+CABR     REG   RY                  CAB ptr
+         TITLE 'Local Cache Control Blocks'
+         COPY  CACHCB
+         TITLE 'Local Cache Macros'
+         MACRO
+&L       LKVER &NAME
+.*  LKVER call could be used to verify that we have the
+.*    lock specified.  Right now it doesn't generate any code.
+&L       LABEL
+         MEND
+*box
+*
+*        CAQ -- Macro to insert CAB into the start of the
+*          specified doubly linked queue.
+*
+         MACRO
+&L       CAQ   &R1,&R2,&QNAME
+.*  Note:  Assumes that the queue update lock is held.
+&L       LA    &R1,CAB             Our CAB
+         LA    &R2,CIT&QNAME       Master CAB
+         LKVER CITLOCK             Verify that we still have lock
+.*
+         ST    &R2,CABQB-CAB(,&R1)  Set our back ptr
+         L     &R2,CABQF-CAB(,&R2)  Next entry
+         ST    &R2,CABQF-CAB(,&R1)  Set our forw ptr
+         ST    &R1,CABQB-CAB(,&R2)  Link us in back Q
+         LA    &R2,CIT&QNAME        Master CAB
+         ST    &R1,CABQF-CAB(,&R2)  Link us in forw Q
+.*
+         STCK  0(SPR)
+         MVC   CABCLCK,0(SPR)      Save TOD when queued
+         MEND
+*box
+*
+*        CADQ -- Macro to remove CAB from the current doubly
+*          linked queue.
+*
+         MACRO
+&L       CADQ  &R1,&R2
+.*  Note:  Assumes that the queue update lock is held.
+&L       LA    &R1,CAB             Our CAB
+         LKVER CITLOCK             Verify that we still have lock
+.*
+         L     &R2,CABQB-CAB(,&R1)  Previous entry
+         MVC   CABQF-CAB(4,&R2),CABQF-CAB(&R1)  Dequeue forw
+.*
+         L     &R2,CABQF-CAB(,&R1)  Next entry
+         MVC   CABQB-CAB(4,&R2),CABQB-CAB(&R1)  Dequeue back
+.*
+         L     &R2,=F'-1'          Neatness...
+         ST    &R2,CABQB-CAB(,&R1)
+         ST    &R2,CABQF-CAB(,&R1)
+         MEND
+         EJECT
+*box
+*
+*        CAHASH -- Macro to form number between 0 and CITNHASH-1
+*          based on a 64-bit key.
+*
+         MACRO
+&L       CAHASH &R0,&R1
+         AIF   ('&R0,&R1' EQ 'RA,RB').OK
+         MNOTE 8,'Only "CAHASH RA,RB" is allowed.'
+.OK      ANOP
+&L       SLL   RA,16
+         ALR   RB,RA               Form 32 bit hash
+         N     RB,=A(X'7FFFFFFF')  Force positive number
+         CLEAR RA
+         D     RA,CITNHASH         RA = num between 0 and CITNHASH-1
+         MEND
+         TITLE 'Cache Open (Initialization) Routine'
+*box
+*
+*  CAOPEN -- Routine to establish a cache area.
+*
+*    On entry:
+*      @CAODLEN - data entry length
+*      @CAONBUF - number of buffers to allocate
+*
+*    On exit, RVR:
+*      0 - cache not available
+*      nz- CIT ptr
+*
+CAOPEN   PROC  @CAOPEN,SCOPE=GLOBAL
+*-
+*-       Allocate CIT.
+*-
+         L     RK,=A(L'CIT)        Basic CIT length
+         AL    RK,=A(CITDEFH#*4)   Add in length of hashed Q heads
+         VMGET (RK),LOC=GLOBHI,FIX=YES,SP=05  Allocate CIT
+         IF    (RVR,Z),CAOPEXIT    No memory, forget it
+         LR    CITR,RVR
+         WITH  CIT
+         ZOT   CIT,(RK)            Zero entire CIT
+         IF    @CAOFNOT,BEGIN
+         SYSCTL CITR,RK,TYPE=DUMPNOT Don't include in a dump
+         END   ,
+         MVC   CITID,=CL4'CIT'     Set self-identification
+*
+         MVC   CITDLEN,@CAODLEN    Save entry length
+         MVC   CITNHASH,=A(CITDEFH#)  Save number of hashed Q heads
+*-
+*-       Initialize "master" free CAB.  This is a dummy CAB entry,
+*-         so there will always be at least one entry on the queue
+*-         (which makes queue manipulations easier).
+*-
+         LA    RA,CITFREEQ         Master free CAB
+         WITH  (CAB,RA),BEGIN
+         CLEAR CAB
+         MVC   CABID,=CL4'CAB'     Set self-identification
+         ST    RA,CABQF            Set forward queue ptr
+         ST    RA,CABQB            Set backward queue ptr
+         END
+*-
+*-       Initialize "master" LRU CAB.  This is a dummy CAB entry.
+*-
+         LA    RA,CITLRUQ          Master LRU CAB
+         WITH  (CAB,RA),BEGIN
+         CLEAR CAB
+         MVC   CABID,=CL4'CAB'     Set self-identification
+         ST    RA,CABQF            Set forward queue ptr
+         ST    RA,CABQB            Set backward queue ptr
+         END
+*-
+*-       Allocate buffer manipulation lock.
+*-
+         LKCRE FILE_CACHE          Allocate lock
+         ST    RVR,CITLOCK         Save lock id
+*
+DUMPNOT  IF    @CAOFNOT,BEGIN      Exclude cache buffers in a dump
+*-
+*-       Allocate cache buffers a different way so we can
+*-       avoid dumping them.
+*-
+         L     RK,@CAONBUF         Count of buffers
+         MH    RK,=Y(L'CAB)        Calc length
+         VMGET (RK),LOC=GLOBHI,FIX=YES,SP=05  Allocate CAB
+         IF    (RVR,Z),'EXIT DUMPNOT' forget it
+         LR    CABR,RVR            Get pointer
+         WITH  CAB
+         CLEAR RA
+         L     RB,@CAONBUF         Count of buffers
+         M     RA,CITDLEN          Calc length
+         VMGET (RB),LOC=GLOBHI,FIX=YES,SP=06,PAGE=YES Get buffs
+         IF    (RVR,Z),BEGIN
+         VMFREE A=LA:CAB,(RK),LOC=GLOBHI,FIX=YES,SP=05 Release CAB
+         EXIT  DUMPNOT
+         END   ,
+         LR    RJ,RVR
+         SYSCTL CABR,RK,TYPE=DUMPNOT Don't include in a dump
+         SYSCTL RJ,RB,TYPE=DUMPNOT Don't include in a dump
+         MVC   CITDCUR,@CAONBUF
+         MVC   CITDMAX,@CAONBUF
+         ZOT   CAB,(RK)
+         ZOT   @RJ,(RB)
+         L     RVR,CITDCUR         Loop count
+         LOOP  BEGIN               Initialize buffers
+         MVC   CABID,=CL4'CAB'     Set self-identification
+         MVC   CABLINK,=F'-1'      Neatness
+         ST    RJ,CABBUFP          Save buffer ptr
+*  mvc @rj(16),=c' *** Buffer *** '
+         CAQ   RA,RB,FREEQ         Add buffer to free queue
+         LA    CABR,CAB+L'CAB      Next buffer
+         A     RJ,CITDLEN          Next buffer
+         UNTIL (BCT,RVR),END
+         LA    RVR,CIT             Return CIT ptr to caller
+         EXIT  CAOPEN
+         END   ,                   Exclude cache buffers in a dump
+
+*-
+*-       Do control function to allocate the cache buffers.
+*-
+         PSET  @CACTRL
+         PMOV  @CACCIT,LA:CIT      CIT ptr
+         PMOV  @CACCNO,LA:1        Control 1: change no. of bufs
+         PMOV  @CACPARM,@CAONBUF   Desired number of buffers
+         ACALL CACTRL              Allocate buffers
+*
+         LA    RVR,CIT             Return CIT ptr to caller
+CAOPEXIT PEND
+         TITLE 'Cache Control Routine'
+*box
+*
+*  CACTRL -- Routine to change a cache parameter.  Right now the
+*    only thing that is supported is to change the number of
+*    cache data entries.
+*
+*    On entry:
+*      @CACCIT = CIT ptr
+*
+*      @CACCNO =  ctrl opcode:
+*              1 - change number of buffers;
+*                    @CACPARM = number of buffers
+*              2 - enable caching
+*              3 - disable caching
+*              4 - purge current cache buffers
+*              5 - cache data verification;
+*                    @CACPARM = 1=on, 0=off
+*
+*    On exit, RVR:
+*      0 - OK
+*      nz- error of some sort
+*
+CACTRL   PROC  @CACTRL,SCOPE=GLOBAL
+         L     CITR,@CACCIT        CIT ptr
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CACTRL_BADCIT  Bad CIT ptr
+*-
+*-       Control 1:  Change the number of buffers.
+*-
+         IF    (@CACCNO,EQ,=F'1'),BEGIN  Change number of buffers...
+         MVC   CITDMAX,@CACPARM    New maximum number of buffers
+*
+         WITH  CAB
+*
+CAC1LP   WHILE (CITDCUR,NE,CITDMAX),BEGIN  We need to adjust...
+         LKOB  CITLOCK             Get exclusive lock
+*-
+*-       Allocate a new buffer and add it to the free queue.
+*-
+         IF    (CITDCUR,LT,CITDMAX),BEGIN  Add a buffer...
+         VMGET L'CAB,LOC=GLOBHI,FIX=YES,SP=05  Allocate CAB
+         IF    (RVR,Z),'LKREL CITLOCK; LA RVR,16; B CACTEXIT'
+         LR    CABR,RVR
+         CLEAR CAB
+         MVC   CABID,=CL4'CAB'     Set self-identification
+         MVC   CABLINK,=F'-1'      Neatness
+*
+         VMGET L:CITDLEN,LOC=GLOBHI,FIX=YES,SP=06  Allocate buffer
+         IF    (RVR,Z),BEGIN       No memory...
+         VMFREE A=LA:CAB,L'CAB,LOC=GLOBHI,FIX=YES,SP=05  Release CAB
+         LKREL CITLOCK             Release exclusive lock
+         LA    RVR,16              No memory return code
+         B     CACTEXIT
+         END
+*
+         ST    RVR,CABBUFP         Save buffer ptr
+         ZOT   (RVR),L:CITDLEN     Zero data block
+*  l r14,cabbufp
+*  mvc @r14(16),=c' *** Buffer *** '
+*
+         INCRR RA,RB,CITDCUR       Kick number of entries
+*
+         CAQ   RA,RB,FREEQ         Add buffer to free queue
+         END
+*-
+*-       Release a buffer.
+*-
+         IF    (CITDCUR,GT,CITDMAX),BEGIN  Release a buffer...
+*-
+*-       Release a free buffer.
+*-
+         LA    CABR,CITFREEQ       Master free CAB entry
+         IF    (CABR,NE,CABQF),BEGIN  We have a free entry...
+         L     CABR,CABQF          Get first real free entry
+*
+         CADQ  RA,RB               Take it off the free queue
+         B     CAC1REL             Release this CAB
+         END
+*-
+*-       Release the oldest buffer on the LRU queue.
+*-
+         LA    CABR,CITLRUQ        Master LRU CAB entry
+         FAIL  (CABR,EQ,CABQF),CA1ERR_QF  Cache buffer error
+         L     CABR,CABQB          Get oldest buffer
+         FAIL  (CABBUFP,Z),CA1ERR_BUFP  Cache buffer error
+*
+         CADQ  RA,RB               Remove this entry from LRU Q
+*
+         ACALL CAUNLINK            Remove entry from hashed queue
+*
+CAC1REL  FAIL  (CAB,NE,'CAB'),CA1ERR_CABID  Release buffer error
+         MVC   CABID,=C'XCAB'      Zap self identification
+         MVC   CABLINK,=F'-1'      | Neatness
+         MVC   CABQF,=F'-1'        |
+         MVC   CABQB,=F'-1'        |
+*
+         VMFREE A=L:CABBUFP,L:CITDLEN,LOC=GLOBHI,FIX=YES,SP=06
+         MVC   CABBUFP,=F'-1'      Buffer has been released
+*
+         VMFREE A=LA:CAB,L'CAB,LOC=GLOBHI,FIX=YES,SP=05  Release CAB
+*
+         DECRR RA,RB,CITDCUR       One less buffer now
+         END
+*
+         LKREL CITLOCK             Release exclusive control
+         END
+*
+         CLEAR RVR                 Set good return code
+         END
+*-
+*-       Control 2: Enable Caching.
+*-
+         ELSEIF (@CACCNO,EQ,=F'2'),BEGIN  Enable caching...
+         IF    CITFDISABLED,BEGIN  Currently disabled...
+         LA    CABR,CITLRUQ
+         WITH  CAB
+         FAIL  (CABR,NE,CABQB),CA2ERRB  Cache enable error
+         FAIL  (CABR,NE,CABQF),CA2ERRF  Cache enable error
+*
+         LKOB  CITLOCK             Get exclusive control
+         CLEAR CITFDISABLED        Enable cache
+         LKREL CITLOCK             Release exclusive control
+         END
+*
+         CLEAR RVR                 A-ok
+         END
+*-
+*-       Control 3: Disable Caching.
+*-
+         ELSEIF (@CACCNO,EQ,=F'3'),BEGIN  Disable caching...
+         IF    ^CITFDISABLED,BEGIN Currently enabled...
+         LKOB  CITLOCK             Get exclusive control
+         SET   CITFDISABLED        Disable cache
+         ACALL CAPURGE             Purge current cache
+         LKREL CITLOCK             Release control
+         END
+*
+         CLEAR RVR                 A-ok
+         END
+*-
+*-       Control 4: Purge current cache.
+*-
+         ELSEIF (@CACCNO,EQ,=F'4'),BEGIN  Purge current cache...
+         LKOB  CITLOCK             Get exclusive control
+         ACALL CAPURGE             Purge current cache entries
+         LKREL CITLOCK             Release exclusive control
+*
+         CLEAR RVR                 A-ok
+         END
+*-
+*-       Control 5: Turn cache data verification on/off.
+*-
+         ELSEIF (@CACCNO,EQ,=F'5'),BEGIN  Set data verify mode...
+         LKOB  CITLOCK             Get exclusive control
+         IF    (@CACPARM,Z),'CLEAR CITFVERIFY'
+*
+         ELSE  BEGIN
+         IF    CITFVERIFY,EXIT     Already in verify mode, scram
+         ACALL CAPURGE             Purge current cache
+         SET   CITFVERIFY          Now start verifying data
+         END
+*
+         LKREL CITLOCK             Release control
+*
+         CLEAR RVR                 A-ok
+         END
+*-
+*-       Unknown control.
+*-
+         ELSE  BEGIN               Error...
+         LA    RVR,20              Error return code
+         END
+*
+CACTEXIT PEND
+         EJECT
+*box
+*
+*  CAUNLINK -- Local routine to unlink the current CAB from the
+*    hashed queue.  Must be called with queue manipulation lock
+*    held.
+*
+*    On entry:
+*      CABR - our CAB ptr
+*      CITR - our CIT ptr
+*
+CAUNLINK PROC
+         WITH  CIT,CAB             Entry assumptions
+*
+         FAIL  (CIT,NE,'CIT'),CAUNLINK_BADCIT  Bad CIT ptr
+         FAIL  (CAB,NE,'CAB'),CAUNLINK_BADCAB  Bad CAB ptr
+*
+         LM    RA,RB,CABKEY        Get key
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         LA    RJ,CITHASHQ-(CABLINK-CAB)(RA)  Dummy prev entry ptr
+         L     RK,CITHASHQ(RA)     Get first entry in our queue
+         WHILE (RK,NZ),BEGIN       Go through CAB queue...
+         WITH  (CAB,RK)
+         IF    (RK,EQ,CABR),BEGIN  It's our CAB...
+         MVC   CABLINK-CAB(4,RJ),CABLINK  Dequeue
+         MVC   CABLINK,=F'-1'      Neatness
+         B     CAUNEXIT            All done, scram
+         END
+*
+         LR    RJ,RK               Save prev CAB ptr
+         L     RK,CABLINK          Get next CAB
+         END
+*
+         ABORT CAUNLINK_BADQ       Bad cache hashed queue
+*
+CAUNEXIT PEND
+         EJECT
+*box
+*
+*  CAPURGE -- Local routine to purge all entries from the cache.
+*    Must be called with queue manipulation lock held.
+*
+*    On entry:
+*      CITR - our CIT ptr
+*
+CAPURGE  PROC
+         WITH  CIT                 Entry assumption
+*
+         FAIL  (CIT,NE,'CIT'),CAPURGE_BADCIT  Bad CIT ptr
+         LKVER CITLOCK             Verify that lock is held
+*
+         LOOP  BEGIN
+         LA    CABR,CITLRUQ        Master LRU CAB
+         WITH  CAB
+         L     CABR,CABQF          Get next CAB ptr
+         IF    (CABBUFP,Z),EXIT    All done, scram
+*
+         CADQ  RA,RB               De-queue CAB from LRU Q
+         ACALL CAUNLINK            Unlink CAB from hashed Q
+         CAQ   RA,RB,FREEQ         Re-queue CAB to free Q
+         END
+*
+         PEND
+         EJECT
+*box
+*
+*  CACHKSUM -- Local routine to calculate a one word checksum from
+*    both the header and the data.  Data verification mode can be
+*    used (at the expense of performance) if there is ever a
+*    suspicion that there is a core clobber.
+*
+*    On entry:
+*      CABR - our CAB ptr
+*      CITR - our CIT ptr
+*
+*    On exit:
+*      RVR - checksum word for header and data
+*
+CACHKSUM PROC
+         WITH  CIT,CAB             Entry assumptions
+*
+         FAIL  (CIT,NE,'CIT'),CACHKSUM_BADCIT  Bad CIT ptr
+         FAIL  (CAB,NE,'CAB'),CACHKSUM_BADCAB  Bad CAB ptr
+         LKVER CITLOCK             Verify that lock is held
+*
+         CLEAR RVR                 Initialize checksum word
+*-
+*-       Calculate header checksum first.
+*-
+         LA    RA,CABHDR           Get header data ptr
+         LA    RB,L'CABHDR         Header length
+*
+         LR    RS,RB
+         N     RS,=F'3'
+         FAIL  NZ,CACHKSUM_HDRERR  Header length not mult of 4
+*
+         WHILE (RB,POS),BEGIN      Checksum header...
+         LR    RB,RVR
+         SLL   RVR,1               Rotate left one bit
+         IF    (RB,NEG),'O RVR,=F"1"'  Move rotated bit to LSB
+         X     RVR,@RA             X-or in next word
+*
+         LA    RA,@RA+4            Next word
+         SH    RB,=H'4'            One word less now
+         END
+*-
+*-       Now checksum the data in the buffer.
+*-
+         LT    RA,CABBUFP          Get data buffer ptr
+         FAIL  Z,CACHKSUM_NOBUF    No data
+         L     RB,CITDLEN          Maximum length of data
+*
+         LR    RS,RB
+         N     RS,=F'3'
+         FAIL  NZ,CACHKSUM_BUFERR  Buffer length not mult of 4
+*
+         WHILE (RB,POS),BEGIN      Checksum data buffer...
+         LR    RB,RVR
+         SLL   RVR,1               Rotate left one bit
+         IF    (RB,NEG),'O RVR,=F"1"'  Move rotated bit to LSB
+         X     RVR,@RA             X-or in next word
+*
+         LA    RA,@RA+4            Next word
+         SH    RB,=H'4'            One word less now
+         END
+*
+         PEND
+*
+         LTORG
+         TITLE 'Cache Read Routine'
+*box
+*
+*  CAREAD -- Routine to read a buffer from the cache if possible.
+*    Note that this routine moves the data into the user buffer,
+*    it never returns a pointer to the cache buffer.
+*
+*    On entry:
+*      @CAIO - key and data/header ptrs
+*
+*    On exit, RVR:
+*      0 - OK (data moved)
+*      nz- not found
+*
+CAREAD   PROC  @CAIO,SCOPE=GLOBAL
+         L     CITR,@CAIOCIT
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CAREAD_BADCIT  Bad CIT ptr
+*-
+*-       Don't do anything if caching is disabled.
+*-
+         IF    CITFDISABLED,BEGIN  Disabled...
+         LA    RVR,24              No cache
+         B     CARDEXIT            Scram
+         END
+*
+         INCRR RA,RB,CIT#RD        Count the read buffer call
+*-
+*-       Get buffer queue manipulation lock so nothing will change
+*-         on us.
+*-
+         LKOB  CITLOCK             Get exclusive lock
+*-
+*-       Hash key to get appropriate queue head.
+*-
+         LM    RA,RB,@CAIOKEY      Get 64-bit key
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         L     CABR,CITHASHQ(RA)   Get first entry in our queue
+*-
+*-       Now go through this CAB queue to find our entry (if it
+*-         exists).
+*-
+         WHILE (CABR,NZ),BEGIN     Go through CAB queue...
+         WITH  CAB
+         IF    (CABKEY,EQ,@CAIOKEY),BEGIN  Matched...
+*-
+*-       Recalculate data checksum to make sure data has not been
+*-         clobbered (the normal production configuration does not
+*-         use this, but it could).
+*-
+         IF    CITFVERIFY,BEGIN    Verify that buffer is OK...
+         ACALL CACHKSUM            Calculate checksum
+         FAIL  (RVR,NE,CABVRFYD),CAREAD_BADDATA  Checksum error
+         END
+*-
+*-       Copy the header to the user's buffer.
+*-
+         L     RA,@CAIOHP          Header ptr
+         L     RB,@CAIOHL          Header length
+         FAIL  (RB,LGT,L'CABHDR),CAREAD_HDRLEN  Too big
+         LA    RJ,CABHDR           Our saved header area
+         LR    RK,RB
+         MVCL  RA,RJ               Copy header to user area
+*-
+*-       Copy the data to the user's buffer.
+*-
+         L     RA,@CAIODP          Data ptr
+         LT    RB,@CAIODL          Data length
+         IF    NZ,BEGIN            We have something...
+         FAIL  (RB,LGT,CITDLEN),CAREAD_LENERR  Too big
+         LT    RJ,CABBUFP          Data buffer ptr
+         FAIL  (RJ,Z),CAREAD_ZEROBUF  Cache buffer error
+         LR    RK,RB
+         MVCL  RA,RJ               Copy data to user area
+         END
+*-
+*-       De-queue and then re-queue so that this buffer will be
+*-         at the head of the LRU queue.
+*-
+         CADQ  RA,RB               Dequeue
+         CAQ   RA,RB,LRUQ          Put at the head of the LRU Q
+*
+         INCRR RA,RB,CABNRDS       Number of times this buffer read
+*
+         INCRR RA,RB,CIT#RDF       Count the read buffer found
+         CLEAR RVR                 A-ok
+         B     CARDULK
+         END
+*
+         L     CABR,CABLINK        Get next CAB entry (or zero)
+         END
+*-
+*-       Buffer is not in our cache.
+*-
+         LA    RVR,4               Not found
+*
+CARDULK  LR    RA,RVR              Save our return code
+         LKREL CITLOCK             Release exclusive lock
+         LR    RVR,RA              Restore return code
+*
+CARDEXIT PEND
+         TITLE 'Cache Write Routine'
+*box
+*
+*  CAWRITE -- Routine to copy the buffer passed to us into the
+*    cache.
+*
+*    On entry:
+*      @CAIO - key and data/header ptrs
+*
+*    On exit, RVR:
+*      0 - OK
+*      4 - no buffers
+*     24 - caching is disabled
+*
+CAWRITE  PROC  @CAIO,SCOPE=GLOBAL
+         L     CITR,@CAIOCIT
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CAWRITE_BADCIT  Bad CIT ptr
+*-
+*-       Don't do anything if caching is disabled.
+*-
+         IF    CITFDISABLED,BEGIN  Disabled...
+         LA    RVR,24              No cache
+         B     CAWREXIT            Scram
+         END
+*
+         INCRR RA,RB,CIT#WR        Count the write buffer call
+*-
+*-       Get buffer manipulation lock.
+*-
+         LKOB  CITLOCK             Get exclusive lock
+*-
+*-       Hash key to get appropriate queue head.
+*-
+         LM    RA,RB,@CAIOKEY      Get key
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         L     CABR,CITHASHQ(RA)   Get first entry in our queue
+*
+         WITH  CAB
+*-
+*-       Now go through this CAB queue to find our entry (if it
+*-         exists).
+*-
+         WHILE (CABR,NZ),BEGIN     Go through CAB queue...
+         IF    (CABKEY,EQ,@CAIOKEY),BEGIN  Matched...
+*
+         CADQ  RA,RB               Deq (will Q at head of LRU Q)
+         B     CAWROLD
+         END
+*
+         L     CABR,CABLINK        Get next CAB entry (or zero)
+         END
+*-
+*-       Take the first available buffer on the free queue if
+*-         possible.
+*-
+         LA    CABR,CITFREEQ       Get master free CAB
+         IF    (CABR,NE,CABQF),BEGIN  We have a free entry...
+         L     CABR,CABQF          Get first entry on free Q
+         CADQ  RA,RB               Take it off the free queue
+         FAIL  (CABLINK,NE,-1),CAWRITE_FREECAB  Free CAB entry error
+         END
+*-
+*-       Otherwise, snatch the oldest buffer from the LRU queue.
+*-
+         ELSE  BEGIN               Take oldest buffer on LRU Q...
+         LA    CABR,CITLRUQ        Master LRU CAB
+         IF    (CABR,EQ,CABQB),BEGIN  No buffers at all...
+         LA    RVR,4               No buffers
+         B     CAWRULK             Scram
+         END
+*
+         L     CABR,CABQB          Get oldest entry on LRU Q
+         CADQ  RA,RB               Take it off the LRU Q
+*-
+*-       Remove entry from it's hashed queue.
+*-
+         LM    RA,RB,CABKEY        Get key
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         LA    RJ,CITHASHQ-(CABLINK-CAB)(RA)  Dummy prev entry ptr
+         L     RK,CITHASHQ(RA)     Get first entry in our queue
+         WHILE (RK,NZ),BEGIN       Go through CAB queue...
+         WITH  (CAB,RK)
+         IF    (RK,EQ,CABR),BEGIN  It's our CAB...
+         MVC   CABLINK-CAB(4,RJ),CABLINK  Dequeue
+         B     CAWRNEW             Now go save our data
+         END
+*
+         LR    RJ,RK               Save prev CAB ptr
+         L     RK,CABLINK          Get next CAB
+         END
+*
+         ABORT CAWRITE_QERR        Caching queue error
+         END
+*-
+*-       Save our buffer in this CAB and then add CAB to the
+*-         appropriate queues.
+*-
+CAWRNEW  CLEAR CABNCOUNTS          Reset buffer usage counters
+*
+         LM    RA,RB,@CAIOKEY      Our 64-bit key
+         STM   RA,RB,CABKEY        Save it in our CAB
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         L     RJ,CITHASHQ(RA)     First entry in our queue
+         ST    RJ,CABLINK          Make old first our next
+         ST    CABR,CITHASHQ(RA)   Our entry is now first
+*-
+*-       Copy the header from the user's buffer and zero pad.
+*-
+CAWROLD  L     RA,@CAIOHP          User's header ptr
+         L     RB,@CAIOHL          User's header length
+         FAIL  (RB,LGT,L'CABHDR),CAREAD_HDRLEN  Too big
+         LA    RJ,CABHDR           Our header area
+         LA    RK,L'CABHDR
+         MVCL  RJ,RA               Copy header from user area
+*-
+*-       Copy the data from the user's buffer and zero pad.
+*-
+         L     RA,@CAIODP          User's data ptr
+         L     RB,@CAIODL          User's data length
+         FAIL  (RB,LGT,CITDLEN),CAREAD_LENERR  Too big
+         LT    RJ,CABBUFP          Our data buffer ptr
+         FAIL  (RJ,Z),CAWRITE_CABERR  Bad CAB entry
+         L     RK,CITDLEN          Our data length
+         MVCL  RJ,RA               Copy data from user area
+*
+         INCRR RA,RB,CABNWRS       Count writes to cache
+*-
+*-       Generate checksum if we are in data verification mode.
+*-
+         IF    CITFVERIFY,BEGIN    Verify data...
+         ACALL CACHKSUM            Go calculate checksum
+         ST    RVR,CABVRFYD        Save it for later
+         END
+*
+         CAQ   RA,RB,LRUQ          Add our entry to the LRU queue
+*
+         CLEAR RVR                 A-ok
+*
+CAWRULK  LR    RA,RVR
+         LKREL CITLOCK             Release exclusive lock
+         LR    RVR,RA
+CAWREXIT PEND
+         TITLE 'Cache Delete Routine'
+*box
+*
+*  CADELETE -- Routine to delete the buffer specified from the
+*    cache.
+*
+*    On entry:
+*      @CAIO - key information
+*
+*    On exit, RVR:
+*      0 - OK
+*      4 - not found
+*     24 - caching is disabled
+*
+CADELETE PROC  @CAIO,SCOPE=GLOBAL
+         L     CITR,@CAIOCIT
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CADELETE_BADCIT  Bad CIT ptr
+*-
+*-       Don't do anything if caching is disabled.
+*-
+         IF    CITFDISABLED,BEGIN  Disabled...
+         LA    RVR,24              No cache
+         B     CADLEXIT            Scram
+         END
+*
+         INCRR RA,RB,CIT#WR        Count delete as "write" call
+*-
+*-       Get buffer manipulation lock.
+*-
+         LKOB  CITLOCK             Get exclusive lock
+*-
+*-       Hash key to get appropriate queue head.
+*-
+         LM    RA,RB,@CAIOKEY      Get key
+         CAHASH RA,RB              RA = num between 0 and CITNHASH-1
+         SLL   RA,2                Times 4 for word offset
+         L     CABR,CITHASHQ(RA)   Get first entry in our queue
+*
+         WITH  CAB
+*-
+*-       Now go through this CAB queue to find our entry (if it
+*-         exists).
+*-
+         WHILE (CABR,NZ),BEGIN     Go through CAB queue...
+         IF    (CABKEY,EQ,@CAIOKEY),BEGIN  Matched...
+         CADQ  RA,RB               Dequeue it from LRU queue
+         CAQ   RA,RB,FREEQ         Re-queue it to FREE queue
+         ACALL CAUNLINK            Take it off the hashed queue
+         CLEAR RVR                 A-ok
+         B     CADLULK             All done
+         END
+*
+         L     CABR,CABLINK        Get next CAB entry (or zero)
+         END
+         LA    RVR,4               Not found
+*
+CADLULK  LR    RA,RVR
+         LKREL CITLOCK             Release exclusive lock
+         LR    RVR,RA
+CADLEXIT PEND
+         TITLE 'Cache Close Routine'
+*box
+*
+*  CACLOSE -- Routine to free up the cache area.
+*
+*    On entry:
+*      @CACLOSE - CIT ptr
+*
+*    On exit, RVR:
+*      0 - OK
+*
+CACLOSE  PROC  @CACLOSE,SCOPE=GLOBAL
+         L     CITR,@CACLCIT
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CACLOSE_BADCIT  Bad CIT ptr
+*-
+*-       Do control function to release all buffers.
+*-
+         PSET  @CACTRL
+         PMOV  @CACCNO,LA:1        Change the number of buffers
+         PMOV  @CACPARM,LA:0       Release all buffers
+         PMOV  @CACCIT,LA:CIT
+         ACALL CACTRL              Make it so
+*-
+*-       Delete lock.
+*-         There is no LKDEL routine; so we'll leave the lock for
+*-         now.
+*-
+***      LKDEL CITLOCK             Delete lock
+*
+         MVC   CITID,=C'XCIT'      Change self-identification
+         MVC   CITFREEQ(4),=C'XCAB'  Ditto
+         MVC   CITLRUQ(4),=C'XCAB'   Ditto
+*-
+*-       Release CIT.
+*-
+         L     RA,CITNHASH         Get number of hash queue ptrs
+         SLL   RA,2                Times 4 for the number of words
+         A     RA,=A(L'CIT)        Plus length of common part
+         VMFREE A=LA:CIT,(RA),LOC=GLOBHI,FIX=YES,SP=05  Release CIT
+*
+         CLEAR RVR                 Always return OK
+         PEND
+         TITLE 'Cache Verification Routine'
+*box
+*
+*  CAVERIFY -- Routine to do a consistency check on the cache
+*    control blocks.
+*
+*    On entry:
+*      @CAVERIFY - CIT ptr
+*
+*    On exit, RVR:
+*      0 - OK
+*      nz- error (check codes below)
+*
+CAVERIFY PROC  @CAVERIFY,SCOPE=GLOBAL
+         L     CITR,@CAVRCIT
+         WITH  CIT
+         FAIL  (CIT,NE,'CIT'),CAVERIFY_BADCIT  Bad CIT ptr
+*
+         CLEAR RVR                 A-ok
+         PEND
+*
+         END   .

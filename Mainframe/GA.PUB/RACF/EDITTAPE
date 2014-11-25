@@ -1,0 +1,149 @@
+;EXEC ID:  WYL.GA.PUB.RACF#EDITTAPE
+;
+;AUTHOR:   BILL BAURIEDEL
+;
+;DATE:     03/27/95
+;
+;VERSION:  1.01
+;
+;REMARKS:  This EXEC is invoked by SHOWPROT at the point after the
+;          TAPE keyword has been specified.  The work of this EXEC
+;          is to validate the format of the tape number and to set
+;          the user and group.  Valid forms for dsnspec will look
+;          like xxnnnn [ACCOUNT gg.uuu] and this will get translated
+;          into profname=xxnnnn, usr=uuu, grp=gg.
+;
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          03/27/95  WJB    Initial Installation.
+;          08/13/98  WJB    Convert tape number edit to DUMP TAPE TYPE
+;          03/24/99  MCL    temp. fix for XC tapes
+;
+
+XPROC (dsnspec,profname,usr,grp) BEGIN
+
+;********** If debug on, then display trace info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'EDITTAPE dsnspec   : '||dsnspec
+   END
+
+;********** Set default user and group
+
+   usr    = USER
+   grp    = GROUP
+   token  = 'dummy'       ; local scan variable
+   accopt = FALSE         ; TRUE if ACCOUNT option specified
+
+;********** Remove leading and trailing blanks
+
+   dsnspec=STRIP(dsnspec)
+
+;********** Preserve dsnspec by assigning to new variable
+
+   parmstr = dsnspec ; parmstr is not preserved
+
+;********** Assign accid.  If present, will normally be in form gg.uuu
+;           But may also be in any userid format (e.g. John.Smith)
+
+   accid = ''
+
+;********** Check to see if ACCOUNT option specified
+
+   IF (SIZE(dsnspec) EQ 6) BEGIN
+      profname = dsnspec
+      GOTO edit_tapeno
+   END
+
+
+scan_loop:
+
+   WHILE (token NE '' AND token NE ';') BEGIN
+
+      SYSCALL SCAN(token, parmstr)
+
+      IF (NOT accopt) BEGIN
+         IF ((ABBREV('ACCOUNT',token,3)) OR (token EQ 'ACCT')) BEGIN
+            accopt = TRUE
+            GOTO scan_loop
+         END
+      END
+
+      IF (accopt) BEGIN
+         accid = accid || token || ' '
+         GOTO scan_loop
+      END
+
+      profname = profname || token || ' '
+      GOTO scan_loop
+
+   END
+
+;********** Edit tape number size
+
+edit_tapeno:
+
+   profname = STRIP(profname)
+
+   IF (SIZE(profname) NE 6) BEGIN
+      errid  = 'RACFTAPE'
+      errmsg = "Tape numbers must be 6 characters in length"
+      XRETURN errid=&(errid), errmsg="&(errmsg)"
+   END
+
+;********** Edit tape number formats
+
+   goodfmt = FALSE
+
+   IF (SUB(profname,1,2) eq 'XC') BEGIN   ; temp. fix for XC (unknown to TLMS) MCL 1999/03/24
+      IF (VERIFY(SUB(PROFNAME,3,4),'0123456789') EQ 0) GOODFMT=TRUE  ;  XCnnnn
+   END  ; XC tape
+   ELSE BEGIN  ;  normal tape type check
+      DUMP TAPE &(profname) TYPE
+      POINT '?'1 IN LAST NOL
+      IF (* LE 0) goodfmt = TRUE
+      DEL LAST
+   END         ;  (normal tape type check
+
+;********** Test if we have a good tape number format
+
+   IF (NOT goodfmt) BEGIN
+      errid  = 'RACFTAPE'
+      errmsg = "Invalid tape ID format"
+      XRETURN errid=&(errid), errmsg="&(errmsg)"
+   END
+
+;********** Test for valid accid
+
+   IF (NOT accopt) BEGIN
+      profname = STRIP(profname)
+      GOTO fini
+   END
+
+   accid = STRIP(accid)
+
+   acciderr=''
+   acciderr = accid
+   accid = GET_ACCOUNT(accid) ; convert to standard gg.uuu format
+
+   IF (accid EQ '') BEGIN
+      errid  = 'RACFTAPE'
+      errmsg = "&(acciderr) not valid form for account ID"
+      XRETURN errid=&(errid), errmsg="&(errmsg)"
+   END
+
+   usr = SUB(accid,4)
+   grp = SUB(accid,1,2)
+
+fini:
+
+   IF (ses.racf_debug) BEGIN
+      WRITE '         profname  : '||profname
+      WRITE '         usr       : '||usr
+      WRITE '         grp       : '||grp
+   END
+
+   XRETURN (profname,usr,grp)
+
+END

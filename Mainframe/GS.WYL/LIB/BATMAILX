@@ -1,0 +1,250 @@
+;
+;  BATMAILX EXEC FILE.
+;
+;     This exec file is run as a BATWYL job to process mail from
+;     another machine.  The mail is passed as "terminal" input
+;     of the form ";keyword:value".  Every line starts with a
+;     semi-colon so that if bad things happen and the command is
+;     interpretted by WYLBUR it will be treated as a comment.
+;
+;
+;  Written 9/84, Niz
+;
+;  Modifications:
+;     12/17/84 Niz  For SYSA/RLG split.
+;     09/16/85 Niz  For RLG's SYSB/SYSE split.
+;     06/16/86 Niz  For RLG's SYSB/SYSE join.
+;     11/13/86 Niz  For long titles (WYLBUR changed too).
+;     08/13/87 Niz  Convert to extended exec; SYSA/SYSC stuff.
+;
+
+xproc () begin
+
+;  Initialization.
+
+   x.pgm = 'batmailx'              ; program name
+   x.maint = '(gg.mpd)'            ; maintenance people
+   x.origact = actno
+
+   on error cmd 'pcall errorexit'
+
+   x.rcstr = '%%%COND=20'          ; assume unknown error
+   write x.rcstr                   ; assume the worst
+
+   dcl str title, notify, sender, sname, recipient
+   recipient = x.maint
+   sender = '"???"'
+   sname = '""'
+
+   dcl str inline, sctoken, sctype
+
+   open mailinp title '&(x.pgm) input file'
+
+;******************************************************************
+;*                                                                *
+;*  Read mail from the input stream.                              *
+;*                                                                *
+;******************************************************************
+;
+   while (true) begin
+      inline = input('. ')
+
+      if (substr(inline, 1, 1) ne ';') begin
+         pcall error('bad data (no starting semi-colon)')
+      end
+
+      text = substr(inline, 2)
+      syscall scan(sctoken, text, sctype, '', ':')  ; get token
+      text = substr(text, 2)  ; remove colon
+
+      cases begin
+         case (sctoken eq 'DATA') begin  ; data line
+            putend &(text)
+         end
+
+         case (sctoken eq 'NOTIFY') begin
+            putend &(text)
+            change '@SYSB' to '@RLG' in last nolist
+            notify = line(last)
+            delete last
+         end
+
+         case (sctoken eq 'TO') begin
+            recipient = text
+         end
+
+         case (sctoken eq 'TITLE') begin
+            title = text
+         end
+
+         case (sctoken eq 'SENDER') begin
+            putend &(text)
+            if (machine eq 'SYSA' or machine eq 'SYSC') \
+               change c'@forsythe.stanford.edu' to '' \
+               in last nolist
+            sender = line(last)
+            delete last
+         end
+
+         case (sctoken eq 'NAME') begin
+            if (index(text, s'00') ne 0) \
+               text = strip(translate(text, ' ', s'00'))
+            sname = text
+         end
+
+         case (sctoken eq 'END') begin
+            goto sendmail
+         end
+
+         case (true) begin
+            pcall error('unrecognized token -- ' || sctoken)
+         end
+      end
+   end
+
+
+;******************************************************************
+;*                                                                *
+;*  Now send the mail.                                            *
+;*                                                                *
+;******************************************************************
+;
+sendmail:
+   if (size(title) gt 100) begin
+      if (lines eq 0) begin
+         putend &(title)
+      end
+      else begin
+         putline first-.002 &(title)
+         putline first-.001
+      end
+
+      title = ''
+   end
+
+   if (title ne '') pcall fix_quote(title)
+   pcall fix_quote(sender)
+   pcall fix_quote(sname)
+
+   cmd = 'mail collect 10001 to ' || recipient || \
+      ' sender ' || sender || ' name ' || sname
+   if (title ne '') cmd = cmd || ' title ' || title
+
+   if (lines eq 0) putend
+
+;*******************************
+;*  Execute the MAIL command.  *
+;*******************************
+   write 'Do: ' || cmd
+   try &(cmd)
+
+   putline 10000 --- Mail command results ---
+   list 10000/last unn
+   delete 'Note: ' in 10000/last nolist
+   delete '' in 10000/last nolist
+   number 10000/last
+
+   if (last eq 10000) begin
+      pcall error('No responses from MAIL command (eek!)')
+   end
+
+   elseif (last eq 10001) begin
+      if (notify ne '') \
+         try $send &(notify) From &(machine) mailer: &(line(10001))
+      x.rcstr = '%%%COND=0'        ; A-ok
+   end
+
+   else begin
+      pcall error('Mail error (too many responses)...')
+   end
+
+   close
+   pcall cleanup('')
+end
+
+
+;
+;  fix_quote -- Routine to return a properly quoted string, given
+;    an unquoted string.
+;
+
+proc fix_quote(qstr) begin
+   if (index(qstr, '"') eq 0) \
+      qstr = '"' || qstr || '"'
+   elseif (index(qstr, "'") eq 0) \
+      qstr = "'" || qstr || "'"
+   else \
+      qstr = '"' || translate(qstr, "'", '"') || '"'
+   return (qstr)
+end
+
+
+;
+;  errorexit -- Error exit.  This routine gets control if a command
+;     fails unexpectedly.  Not much we can do but complain.
+;
+
+proc errorexit() begin
+   write 'An error occurred in the ' || x.pgm || ' program.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+   pcall error('An error occurred in the ' || x.pgm || ' command.')
+end
+
+
+;
+;  error -- Error routine.  Parameter passed is some sort of
+;    descriptive message.  This routine mails as much diagnostic
+;    information as possible to the maintenance people and then
+;    exits.
+;
+
+proc error(ourmsg) begin
+
+;  Mail debugging information to maintenance people.
+
+   if (lines ne 0) \
+      putend ---------------------------------------------
+   putend &(ourmsg)
+   putend
+   putend Debugging information:
+   putend
+   putend errmsg = &(errmsg)
+   putend errinfo = &(errinfo)
+   putend
+   putend ---
+   putend
+   putend >>> show vars type ses
+   dump vars type ses
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   putend
+   putend End of dump.
+
+   write ''
+   try mail to &(x.maint) title '&(x.pgm) error'
+
+;  Call it quits.
+
+   x.rcstr = '%%%COND=999'
+   pcall cleanup('error')
+end
+
+
+;
+;  cleanup -- Routine to do final command cleanup.
+;      There is no return from this routine.
+;
+
+proc cleanup(opt) begin
+   try write x.rcstr
+   pick &(x.origact)
+   xreturn &(opt)
+end

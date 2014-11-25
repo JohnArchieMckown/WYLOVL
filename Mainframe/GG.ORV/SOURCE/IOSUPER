@@ -1,0 +1,718 @@
+IOSUPER  TITLE 'MP-ORVYL I/O Supervisor'
+         COPY  HEADER
+         SPACE
+IOSUPER  MODULE ,
+         SPACE
+DISABLE  EQU   X'04'                   Disable 'AND' mask
+         SPACE
+         DEFCC SCHST,8                 Subchannel operation started
+         DEFCC SCHSP,4                 Subchannel status-pending
+         DEFCC SCHBZ,2                 Subchannel busy
+         DEFCC SCHNO,1                 Subchannel not operational
+*
+         DEFCC SCHER,3                 Subchannel ERROR
+         EJECT
+*
+*  To Do:
+*    Path I/O
+*    JES allocate and I/O
+*
+         TITLE 'IOSUPER - Interface parameters for external modules'
+         COPY  DISPPARM                Dispatcher parameters
+         EJECT
+         COPY  SIGPARM                 Signal/Await parameters
+         EJECT
+         COPY  XITPARM                 Exit parameters
+         EJECT
+         COPY  PAGEPARM                Page services parameters
+         EJECT
+         COPY  VMPARM                  Virtual memory parameters
+         EJECT
+         COPY  LOCKPARM                Lock manager parameters
+         EJECT
+         COPY  LISTPARM                List manager parameters
+         EJECT
+         COPY  LSTMAC                  List manager macros
+         EJECT
+         COPY  IOSPARM                 Common IOS parameters
+         SPACE
+         COPY  IOSIPARM                Init parms
+         EJECT
+         TITLE 'IOSUPER - Global DSECTs'
+         COPY  MAT                     Master Address Table
+         EJECT
+         COPY  PZERO                   Page Zero
+         EJECT
+         COPY  ASB                     Address space block
+         TITLE 'IOSUPER - Local DSECTs'
+IOSRB    RECORD BEGIN        Extended request block
+IRBID    DC    CL4'IORB'
+IRBPFP   DS    A             Forward pointer
+IRBPID   DS    0D            Process ID
+IRBASB   DS    A             | ASB of I/O
+IRBTSK   DS    A             | Task ID of I/O
+IRBECB   DS    D             ECB for this I/O -
+IRBESTAT EQU   IRBECB+4,4    | post code
+*
+* --- ORB ---
+IRBORB   EQU   *,12          - Hardware ORB -
+IRBPARM  DS    A             I/O Parm
+IRBKEY   DS    X             Key of IO program
+         DS    3X            - Reserved -
+IRBPGM   DS    A             I/O Program
+* --- ORB ---
+*
+IRBSSID  DS    A             Device ID - Sub Sys ID
+IRBTIME  DS    D             Time of I/O (TOD units)
+IRBF1    FLAG  ,
+         FLAG  IRBFSYNC      Synchronous I/O
+         FLAG  IRBFAS        | do AS wait if doing wait
+         FLAG  IRBFDISP      I/O Termination from dispatcher stack
+         FLAG  IRBFHALT      Halt done on operation
+*
+IRBPSWM  DS    X             PSW mask for disabled windows
+*
+IRBF2    FLAG  ,
+         FLAG  IRBFIO        I/O in progress
+         DS    X             - Available -
+*
+IRBSRID  DS    A             System routine ID for posting
+IRBEXIT  DS    A             Exit ID/Routine addr for direct call
+IRBXPARM DS    A             Exit routine parameter
+IRBX     DS    0D
+         END   ,
+         EJECT
+*        COPY  ASBIOCB                 I/O extension of ASB
+ASBIOCB  RECORD BEGIN
+AIOWAIT  LELEM PFX=AIOW                Waiting-for-cell link
+AIOWAMT  DS    A                       | amount of resource requested
+AIOASB   DS    A                       ASB pointer
+* AIOLOCK  DS    A                       Lock for I/O ops
+AIOECB   DS    A                       ECB for cell waits
+*
+*  Pending I/Os for address space
+*
+* AIOPEND  LHEAD PFX=AIOP                Pending I/Os
+         END   ,
+         EJECT
+*        COPY  IOSCB                   Anchor I/O Control block
+         SPACE
+IOSCB    RECORD BEGIN                  I/O Supervisor Global CB
+IOCBID   DC    CL4'IOCB'
+*
+*  I/O operation return codes
+*
+IOSROK   EQU   0                       I/O operation OK
+IOSRBUSY EQU   4                       I/O Sub Channel busy
+IOSRERR  EQU   8                       I/O error
+*
+IOCBTYP  EQU   6                       6 device types
+*
+*  I/O cell management
+*
+IOCELLK  DS    A                       Cell pool manipulation lock
+*
+IOCELHD  DS    D                       Head of free cells + ctl wrd
+IOCELNEED DS   A                       | number of cells needed
+         END   ,
+         SPACE
+#LCLLOCK RECORD BEGIN
+#LCLPSWM DS    X                       Byte for PSW mask on disable
+         END   ,
+         EJECT
+         TITLE 'IOSUPER - Local Macros'
+         MACRO
+&L       IOAD  &REG,&BEGIN             Get addr to PAG ctl block
+         USING PZERO,R0
+&L       L     &REG,PZMATP
+         DROP  R0
+         WITH  (MAT,&REG),'L &REG,MATIOCB'
+         AIF   ('&BEGIN' NE 'BEGIN').NOBLK
+         WITH  (IOSCB,&REG),BEGIN
+         MEXIT ,
+.NOBLK   WITH  (IOSCB,&REG)
+         MEND
+         SPACE
+         MACRO
+&L       SLKOB &LOCK,&PSWM
+.*  Macro for obtaining a spin lock.  First the macro will disable
+.*  then go for a spin lock.
+&L       STNSM &PSWM,DISABLE
+         LKOB  &LOCK
+         MEND
+         SPACE
+         MACRO
+&L       SLKRL &LOCK,&PSWM
+.*  Macro for releasing a spin lock.  The macro will release
+.*  the spin lock, and then restore the PSW mask to enable.
+&L       LKREL &LOCK
+         SSM   &PSWM
+         MEND
+         TITLE 'General I/O'
+*********************************************************************
+*                                                                   *
+*  Do I/O                                                           *
+*                                                                   *
+*   Input - @IOSDOIO                                                *
+*                                                                   *
+*  Output - For synchronous operations                              *
+*             RVR = Return code from I/O post                       *
+*           For exit-style I/O                                      *
+*             No output                                             *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSDOIO  PROC  @IOSDOIO,#LCLLOCK,SCOPE=GLOBAL
+         L     RY,@IOSID               IRB address
+         WITH  (IOSRB,RY)              |
+*
+*  Clear posting area
+*
+         CLEAR IRBECB
+         IF    (IRBID,NE,=CL4'IORB'),'ABORT DOIRB'
+         IF    IRBFIO,'ABORT DOIRBFLG'
+         SET   IRBFIO
+*
+*  Queue IRB on ASBIOB list
+*
+*          L     RX,IRBASB               Queue IRB on ASBIOB queue
+*          WITH  (ASB,RX),'L RX,ASBIOB'  |
+*          WITH  (ASBIOCB,RX),BEGIN      |
+*          SLKOB AIOLOCK,#LCLPSWM        |
+*          LADD  AIOPEND,LA:IOSRB,WR=RS  |
+*          SLKRL AIOLOCK,#LCLPSWM        |
+*          END   ,                       OF WITH  (ASBIOCB,RX)
+*
+*  If the routine may need to post across address spaces, get
+*  a System Routine ID.
+*
+         MVC   IRBSSID,@IOSCHID        Channel ID
+         MVC   IRBPID,@IOSPID          Process ID
+         USING PZERO,R0
+         IF    @IOSFSYNC,'MVC IRBPID,PZCURPID'
+         DROP  R0
+         L     RA,@IOSCP               Channel program addr
+         LRA   RA,@RA                  |
+         IF    NZ,DOIOKAP1             | error on real addr
+         ST    RA,IRBPGM               |
+         MVC   IRBEXIT,@IOSXID         Exit ID/Fast path addr
+         MVC   IRBXPARM,@IOSXPAR       | completion parameter
+         MVC   IRBKEY,@IOSKEY          Key of I/O
+         CLEAR IRBF1                   Prime flag byte
+         IF    @IOSFSYNC,'SET IRBFSYNC'
+         IF    @IOSFAS,'SET IRBFAS'
+         IF    @IOSFAST,'SET IRBFDISP'
+         IF    (^IRBFDISP,AND,                                         *
+               (^IRBFSYNC,OR,^IRBFAS)),BEGIN    May do cross-AS post
+         PSET  @SYSRNEW
+         VCALL SYSRNEW
+         ST    RVR,IRBSRID
+         END   ,                       OF May do cross-AS post
+*
+*  Do Start subchannel
+*
+         PMOV  IRBPARM,LA:IOSRB        Set parameter for I/O int
+         LRA   RA,IRBORB               | ** ORB must be real addr **
+         CLEAR RVR                     |
+         REGCH (RS,R1)                 |
+         L     RS,IRBSSID              Subsystem ID = device id
+*--------------                        DISABLED WINDOW
+         STNSM #LCLPSWM,DISABLE
+         STCK  IRBTIME                 Start timing
+         SSCH  @RA                     |
+         USING PZERO,R0
+         LM    RS,RB,PZIOSID           Get possible status
+         DROP  R0
+         SSM   #LCLPSWM
+*--------------                        END OF DISABLED WINDOW
+         IF    SCHER,DOIOKAP2          ERROR on SSCH
+         EJECT ,
+*
+*  Handle immediate posts - post code is in PSA
+*
+         IF    SCHSP,BEGIN             Status pend - Immed ret code
+         IF    (IRBID,NE,=CL4'IORB'),'ABORT IINTIRB'
+         IF    ^IRBFIO,'ABORT IINTIRBIO'
+         CLEAR IRBFIO                  No longer in I/O
+         LM    RJ,RK,IRBTIME           Set time in IRB
+         STCK  IRBTIME                 |
+         LM    RM,RN,IRBTIME           |
+         SLR   RN,RK                   |
+         IF    NEG,'DECR RM'           |
+         SLR   RM,RJ                   |
+         STM   RM,RN,IRBTIME           |
+*
+*    Take IRB off of ASBIOB queue
+*
+*          WITH  (ASBIOCB,RX),BEGIN      Take IRB off of ASBIOB list
+*          SLKOB AIOLOCK,#LCLPSWM        |
+*          LREM  AIOPEND,LA:IOSRB,WR=RS  |
+*          SLKRL AIOLOCK,#LCLPSWM
+*          END   ,                       OF Take IRB off of ASBIOB list
+*
+*    Free System Routine ID - don't need it for immediate post
+*
+         IF    (^IRBFDISP,AND,                                         *
+               (^IRBFSYNC,OR,^IRBFAS)),BEGIN    Free SYSR ID
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,IRBSRID
+         VCALL SYSRDEL
+         END   ,                       OF Free SYSR ID
+*
+         REGCH (RS,R1),(RA,R2),(RB,R3)
+*
+*  Get Subsystem ID, I/O parameter and I/O subchannel ending status.
+*  The subchannel ending status location word is not as per
+*  Principles of Operations, and it is returned as a result of TPI,
+*  and on I/O interrupts, also non POPs.
+*
+         IF    IRBFSYNC,BEGIN          Synchronous
+         LR    RVR,RB                  Get immediate post code in RVR
+         END   ,                       OF Synchronous
+         ELSE  BEGIN                   Exit style I/O, immediate post
+         IF    IRBFDISP,BEGIN          Completion by local call
+         PSET  @IOTERM                 |
+         STM   RA,RB,@IOTPARM          | IRB & post code
+         LCALL IOSDCOMP                |
+         END   ,                       OF Completion by local call
+         ELSE  BEGIN                   Completion by exit
+         PSET  @XITDO
+         WITH  (@IOTERM,@XITPARM)
+         PMOV  @XITRQID,IRBEXIT        Exit ID
+         PMOV  @XITTSK,IRBTSK          Task ID where exit is to run
+         PMOV  @IOTPARM,IRBXPARM       Parm specified @ I/O request
+         PMOV  @IOTEND,(RB)            Immediate post code
+         PMOV  @XITTYPE,LA:XITTIOCN    I/O Completion - Normal
+         VCALL XITDO
+         END   ,                       OF Completion by exit
+         END   ,                       OF Exit style I/O, imm post
+         END   ,                       OF Immediate return code
+         EJECT
+*
+*  Handle non-immediate posts for suspend-style requests
+*
+         ELSEIF IRBFSYNC,BEGIN         Op is Synch/^Immediate Post
+         PSET  @AWAIT
+         PMOV  @AWTECB,LA:IRBECB
+         L     EPAR,=V(AWAIT)
+         IF    IRBFAS,'L EPAR,=V(AWAITAS)'
+         ACALL (EPAR)
+*
+*  Save post code for synchronous I/O
+*
+         ST    RVR,IRBESTAT
+         END   ,                       OF Op is Synch/^Immediate Post
+         PEND  ,
+         SPACE
+         WITH  (IOSDOIO,BR),BEGIN
+DOIOKAP1 LA    RVR,0
+         B     DOIOKAP
+DOIOKAP2 LA    RVR,4
+DOIOKAP  ABORT IOSSSCH                 Error in Start Subchannel
+         END   ,
+         TITLE 'I/O Interrupts'
+*********************************************************************
+*  I/O Interruptions - entered for I/O interrupts                   *
+*    The PSW mask must have I/O interrupts disabled for the         *
+*    duration of this routine                                       *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSINTER PROC  SCOPE=GLOBAL
+         REGCH (RS,R1),(RA,R2),(RB,R3)
+         LOOP  BEGIN
+*
+*  Get Subsystem ID, I/O parameter and I/O subchannel ending status.
+*  The subchannel ending status location word is not as per
+*  Principles of Operations, and it is returned as a result of TPI,
+*  and on I/O interrupts, also non POPs.
+*
+         USING PZERO,R0
+         LM    RS,RB,PZIOSID
+         DROP  R0
+         WITH  (IOSRB,RA)
+         LM    RJ,RK,IRBTIME           Set time in IRB
+         STCK  IRBTIME                 |
+         LM    RM,RN,IRBTIME           |
+         SLR   RN,RK                   |
+         IF    NEG,'DECR RM'           |
+         SLR   RM,RJ                   |
+         STM   RM,RN,IRBTIME           |
+*
+         IF    (IRBID,NE,=CL4'IORB'),'ABORT INTIRB'
+         IF    ^IRBFIO,'ABORT INTIRBIO'
+         CLEAR IRBFIO                  No longer in I/O
+         IF    IRBFDISP,BEGIN          Handle from dispatcher stack
+*
+*  Do I/O completion off of dispatcher stack
+*
+         PSET  @IOTERM                 Call completion routine
+         STM   RA,RB,@IOTPARM          | parms are IRB, post code
+         LCALL IOSDCOMP                |
+         END   ,                       OF Handle from dispatcher stack
+         ELSEIF (IRBFSYNC,AND,IRBFAS),BEGIN     Signal AS wait
+         SIGNL IRBECB,(RB),TYPE=AS
+         END   ,                       OF Signal AS wait
+         ELSE  BEGIN                   Schedule completion
+*
+*  System Routine to schedule completion
+*
+         PSET  @SYSRDO
+         PMOV  @SYSRID,IRBSRID         Routine ID
+         PMOV  @SYSRASB,IRBASB         ASB to run under
+         PMOV  @SYSRLOC,LA:IOSCOMP     Routine address
+         STM   RA,RB,@SYSRPRM          Parameters (IRB, post code)
+         VCALL SYSRDO
+         END   ,                       OF Schedule completion
+*
+*  Get all pending interrupts before returning
+*
+         TPI   0
+         UNTIL ZERO,END
+         PEND  ,
+         TITLE 'I/O Completion (from dispatcher stack)'
+*********************************************************************
+*  I/O Completion from dispatcher stack                             *
+*                                                                   *
+*   Input - @IOTPARM                                                *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSDCOMP PROC  @IOTERM,#LCLLOCK
+         L     RA,@IOTPARM             Get IRB address
+         WITH  (IOSRB,RA)
+*
+*  Here we do any necessary work on user's behalf, like halted I/O,
+*  and page unfixing etc.
+*
+*  -->
+*
+*  Unlink I/O request from ASB chain of I/Os
+*
+*          L     RY,IRBASB
+*          WITH  (ASB,RY),'L RY,ASBIOB'
+*          WITH  (ASBIOCB,RY),BEGIN      Remove request from ASBIOCB
+*          SLKOB AIOLOCK,#LCLPSWM
+*          LREM  AIOPEND,LA:IOSRB,WR=RS
+*          SLKRL AIOLOCK,#LCLPSWM
+*          END   ,                       OF Remove request from ASBIOCB
+*
+*  Call termination routine - pass on post code that was passed in
+*
+         L     RB,@IOTEND              Ending status coming in
+         PUSH  USING
+         PSET  @IOTERM
+         PMOV  @IOTPARM,IRBXPARM       Exit parm & ending status
+         PMOV  @IOTEND,(RB)            |
+         L     EPAR,IRBEXIT
+         BASR  RAR,EPAR
+         POP   USING
+         PEND  ,
+         TITLE 'I/O Completion'
+*********************************************************************
+*  I/O Completion - runs off of dispatcher stack as a system        *
+*                   routine                                         *
+*                                                                   *
+*   Input - @SYSRTN                                                 *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+@IOSCIRB EQU   @SYSPARS,4              IRB address
+@IOSCPC  EQU   @SYSPARS+4,4            Post code
+         SPACE
+IOSCOMP  PROC  @SYSRTN,#LCLLOCK
+         L     RA,@IOSCIRB             Get IRB address
+         WITH  (IOSRB,RA)
+*
+*  Here we do any necessary work on user's behalf, like halted I/O,
+*  and page unfixing etc.
+*
+*  -->
+*
+*  Free System Routine ID
+*
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,IRBSRID
+         VCALL SYSRDEL
+*
+*  Unlink I/O request from ASB chain of I/Os
+*
+*          L     RY,IRBASB
+*          WITH  (ASB,RY),'L RY,ASBIOB'
+*          WITH  (ASBIOCB,RY),BEGIN      Remove request from ASBIOCB
+*          SLKOB AIOLOCK,#LCLPSWM
+*          LREM  AIOPEND,LA:IOSRB,WR=RS
+*          SLKRL AIOLOCK,#LCLPSWM
+*          END   ,                       OF Remove request from
+*
+*  This was a synchronous request, I/O supervisor did the wait, so
+*  wake up the task
+*
+POSTSYNC IF    IRBFSYNC,BEGIN          Synchronous request post
+         SIGNL IRBECB,@IOSCPC          Post in this AS
+         END   ,                       OF Synchronous request post
+*
+*  This was an asynchronous request, so there is a user exit to be
+*  entered.
+*
+         ELSE  BEGIN                   Schedule exit
+         PSET  @XITDO
+         PMOV  @XITRQID,IRBEXIT        Exit ID
+         PMOV  @XITTSK,IRBTSK          Task ID where exit is to run
+         WITH  (@IOTERM,@XITPARM)
+         PMOV  @IOTPARM,IRBXPARM       Parm specified @ request
+         PMOV  @IOTEND,@IOSCPC         Completion code
+         PMOV  @XITTYPE,LA:XITTIOCN    I/O Completion - Normal
+         VCALL XITDO
+         END   ,                       OF Schedule exit
+         PEND  ,
+         TITLE 'Get time for an I/O request'
+*********************************************************************
+*  Get I/O time                                                     *
+*                                                                   *
+*   Input - @IOSTIME                                                *
+*                                                                   *
+*  Output - @IOSTIME                                                *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSTIME  PROC  @IOSTIME,SCOPE=GLOBAL
+         L     RA,@IOSTID
+         WITH  (IOSRB,RA)
+         MVC   @IOSIOTIME,IRBTIME
+         PEND  ,
+         TITLE 'I/O id get'
+*********************************************************************
+*                                                                   *
+*  I/O id get                                                       *
+*                                                                   *
+*   Input - @IOSIDGET                                               *
+*                                                                   *
+*  Output - For calls where wait was specified:                     *
+*             RVR = IOS I/O id                                      *
+*           For calls where wait was not specified:                 *
+*             IF   RVR = 0, no ids available                        *
+*             ELSE RVR = IOS I/O id                                 *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSIDGET PROC  @IOSIDGET,#LCLPSWM,SCOPE=GLOBAL
+         IOAD  RY
+         USING PZERO,R0
+*
+*  Try to get an id
+*
+         LM    RA,RB,IOCELHD
+         LOOP  BEGIN                   Try for id
+         IF    (RA,ZERO),IDWAIT
+         WITH  (IOSRB,RA)
+         L     RJ,IRBPFP               Next in list
+         LA    RK,@RB+1                update control word
+         CDS   RA,RJ,IOCELHD           OF Try for id
+         UNTIL EQUAL,END
+*
+*  Got an id
+*
+         WITH  (IOSRB,RA),BEGIN        Set up IRB
+         CLEAR IRBF1
+         IF    IRBFIO,'ABORT GETIRBFLG'
+         IF    (IRBID,NE,=CL4'iORB'),'ABORT GETIRBID'
+         MVC   IRBID,=CL4'IORB'        Set ID
+         MVC   IRBPID,PZCURPID
+*
+*  If we can wait, and more cells are needed, we will allocate
+*  one of them from virtual storage and put it on the queue
+*
+*  Alloc new IOCB
+         IF    (@IOSFWAIT,AND,('LT RJ,IOCELNEED',POS)),BEGIN
+         LOOP  BEGIN                   We will need one less
+         LR    RK,RJ
+         DECR  RK
+         CS    RJ,RK,IOCELNEED
+         UNTIL EQUAL,END               OF We will need one less
+*
+*  Now get the storage
+*
+         VMGET L'IOSRB,LOC=GLOBHI,FIX=YES,ONEPAGE=YES
+         LR    RJ,RVR
+         WITH  (IOSRB,RJ),BEGIN        Addr to new IOCB
+         CLEAR IOSRB
+         MVC   IRBID,=CL4'iORB'
+*
+*  Put this newly allocated CB on the queue of available CBs
+*
+         LM    RM,RN,IOCELHD
+         LOOP  BEGIN
+         ST    RM,IRBPFP
+         LA    RK,@RN+1
+         CDS   RM,RJ,IOCELHD
+         UNTIL EQUAL,END
+         END   ,                       OF Addr to new IOCB
+         END   ,                       OF Alloc new IOCB
+        $LA    RVR,IOSRB               Set return
+         END   ,                       OF Set up IRB
+*
+         EXIT  IOSIDGET
+*
+*  No ids available - see if we can wait
+*
+IDWAIT   LABEL ,
+         IF    @IOSFWAIT,BEGIN         We can wait
+         VMGET L'IOSRB,LOC=GLOBHI,FIX=YES,ONEPAGE=YES
+         LR    RA,RVR
+         WITH  (IOSRB,RA)
+         CLEAR IOSRB
+         MVC   IRBID,=CL4'IORB'        Set ID
+         MVC   IRBPID,PZCURPID
+         END   ,                       OF We can wait
+         ELSE  BEGIN                   We can't wait
+         L     RA,IOCELNEED            Increment cells needed
+         LOOP  BEGIN
+         LR    RB,RA
+         INCR  RB
+         CS    RA,RB,IOCELNEED
+         UNTIL EQUAL,END
+         CLEAR RVR                     Say we couldn't accomodate...
+         END   ,                       OF We can't wait
+         DROP  R0
+         PEND  ,
+         TITLE 'I/O id free'
+*********************************************************************
+*                                                                   *
+*  I/O id free                                                      *
+*                                                                   *
+*   Input - @IOSIDFRE                                               *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSIDFRE PROC  @IOSIDFRE,#LCLPSWM,SCOPE=GLOBAL
+         IOAD  RY
+*
+*  Free this id
+*
+         L     RJ,@IOSFID
+         WITH  (IOSRB,RJ),BEGIN
+         IF    (IRBID,NE,=CL4'IORB'),'ABORT BADIRBFREE'
+         IF    IRBFIO,'ABORT FREIRBFLG'
+         MVI   IRBID,C'i'              Change ID
+         END   ,
+         LM    RA,RB,IOCELHD
+         LOOP  BEGIN                   Free id
+         WITH  (IOSRB,RJ)
+         ST    RA,IRBPFP               Point fwd to old head
+         LA    RK,@RB+1
+         CDS   RA,RJ,IOCELHD
+         UNTIL EQUAL,END               OF Free id
+         PEND  ,
+         TITLE 'IOSUPER - Address space creation'
+*********************************************************************
+*  Address space creation                                           *
+*                                                                   *
+*   Input - @IOSASC                                                 *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSASC   PROC  @IOSASC,SCOPE=GLOBAL
+         PEND  ,
+*        L     RY,@IOASCAS
+*        WITH  (ASB,RY)
+*
+*  Allocate control block
+*        VMGET L'ASBIOCB,LOC=GLOBHI,FIX=YES
+*        LR    RX,RVR
+*        WITH  (ASBIOCB,RX)
+*        CLEAR ASBIOCB
+*
+*  Get lock for address space I/O
+*          LKCRE ASBIOLK,TYPE=SPIN
+*          ST    RVR,AIOLOCK
+*
+*  Init list of pending I/Os
+*          LA    RA,AIOPEND              Init list of pending I/Os
+*          ST    RA,AIOPFP               |
+*          ST    RA,AIOPBP               |
+*
+*  Link ASB and I/O control block
+*        PMOV  AIOASB,LA:ASB           Point at ASB
+*        PMOV  ASBIOB,LA:ASBIOCB       ASB points here too
+*        PEND  ,
+         TITLE 'Global initialization for I/O supervisor'
+*********************************************************************
+*  Global initialization for I/O supervisor                         *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+IOSINIT  PROC  SCOPE=GLOBAL
+*
+*  Allocate and initialize global I/O control block
+*
+         VMGET L'IOSCB,LOC=GLOBHI,FIX=YES
+         LR    RY,RVR
+         WITH  (IOSCB,RY)
+         CLEAR IOSCB
+         MVC   IOCBID,=CL4'IOCB'
+         L     RX,MATPTR               Save our roots
+         WITH  (MAT,RX),BEGIN
+         ST    RY,MATIOCB
+         END   ,
+*
+*  Create a lock for cell pool
+*
+         LKCRE IOSCELL,TYPE=SPIN       Create a lock for cell pool
+         ST    RVR,IOCELLK             |
+*
+*  Init global control blocks (IRB cells)
+*  Initialize cell pool
+*
+         LH    RK,=Y(4096)             Number of cells/page
+         CLEAR RJ                      |
+         LA    EPAR,L'IOSRB            |
+         DR    RJ,EPAR                 |
+         LR    EPAR,RK                 Number of pages
+         LA    RK,IOSIAMT              |
+         CLEAR RJ                      |
+         DR    RJ,EPAR                 |
+         IF    (RJ,NZ),'INCR RK'       | round up
+         SLL   RK,12                   | pages to bytes
+         LR    RJ,EPAR                 | cells/page
+         VMGET (RK),LOC=GLOBHI,FIX=YES,PAGE=YES
+         LR    RM,RVR                  Clear pages
+         LR    RN,RK                   |
+         CLEAR RB                      |
+         MVCL  RM,RA                   |
+         SRL   RK,12                   Number of pages
+         LR    RM,RVR                  Starting address
+*
+*  Link all IRB cells
+*
+         LOOP  BEGIN                   Link together all pages
+         LR    RB,RJ
+         LOOP  BEGIN                   Link together cells on a page
+         WITH  (IOSRB,RM)
+         MVC   IRBID,=CL4'iORB'        Put in ID
+         MVC   IRBPFP,IOCELHD          Point to old head
+         ST    RM,IOCELHD              |
+         LA    RM,IOSRB+L'IOSRB        Next cell in page
+         UNTIL (BCT,RB),END            OF Link together cells on page
+         LA    RM,@RM+L'IOSRB
+         N     RM,=X'7FFFF000'
+         UNTIL (BCT,RK),END            OF Link together all pages
+         PEND  ,
+IOSIAMT  EQU   200
+         END   .

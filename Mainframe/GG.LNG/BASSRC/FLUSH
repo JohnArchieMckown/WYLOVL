@@ -1,0 +1,143 @@
+FLUS     TITLE   'DISK ROUTINE TO FLUSH FILE BUFFERS'
+*
+FLUSH    CSECT
+*
+*  ROUTINE TO WRITE CHANGED PHYSICAL RECORDS OUT TO THE SYSTEM FILES
+*
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0                  LOCAL WORK ONLY..USED BY SVC
+R1       EQU   1                  LOCAL WORK ONLY..USED BY SVC
+R2       EQU   2             =0 NO ERRORS  =4 ERRORS IN FLUS OPERATION
+R3       EQU   3
+R4       EQU   4                  LOCAL WORK WHEN NOT INTERNAL BRANCH
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8                  LOOP CONTROL COUNTER
+R9       EQU   9                  POINTER TO FCTB ENTRY
+R10      EQU   10                 BASE FOR FILE CONTROL BLOCK  (FCB)
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'FLUS'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14                 LOCAL WORK ONLY..USED BY SVC
+R15      EQU   15                 LOCAL WORK ONLY..USED BY SVC
+*
+*
+**FLUS(H) ENTRY
+START    STM   R14,R12,12(R13)    SAVE REGS
+         LA    R1,72(R0,R13)      POINT TO NEW SAVE AREA
+         ST    R13,4(R0,R1)       STORE CHAIN TO PRIOR SAVE AREA
+         ST    R1,8(R0,R13)       CHAIN NEW TO OLD SAVE AREA
+         LR    R13,R1             SET UP FOR CALLS DOWN
+         BALR  R12,0              SET ADDRESSABILITY
+         USING *,R12              TELL ASSEMBLER
+         USING AREA,R11           TELL ASSEMBLER ABOUT AREA
+*
+**ZERO REG 2 TO KEEP TRACK OF WHETHER AN ERROR CONDITION IS FOUND
+*
+         SR    R2,R2              0=NO ERRORS 4=ERRORS
+*
+**SET UP TO LOOP THRU FILE CONTROL BLOCKS
+*
+         LA    R8,15(R0,R0)       SET TO COUNT DOWN TABLE
+         L     R9,AFCB            PICK UP ADDR OF FCBT
+         LA    R10,64(R0,R9)      GET ADDR OF FIRST FCB
+         USING FCB,R10            TELL ASSEMBLER ABOUT THE FCB
+*
+**START LOOP THRU CONTROL BLOCKS LOOKING FOR PHYSICAL RECORDS
+**TO WRITE OUT AND CHECKING INTERNAL CONSISTENCE
+*
+TOP      L     R1,0(R0,R9)        GET FCBT ENTRY
+         LA    R1,0(R0,R1)        TAKE OUT HIGH BYTE
+         LTR   R1,R1              TEST FOR ENTRY IN USE
+         BZ    ENDLOOP            IF NOT SET TO LOOP
+         TM    FCBFLG,X'01'       HAS PHYSICAL RECORD BEEN CHANGED
+         BNO   ENDLOOP            IF NOT LOOP
+         L     R1,FCBLNR          GET LEN OF PHYSICAL RECORD
+         LTR   R1,R1              TEST FOR ANY DATA
+         BNP   ERRU               CHANGED RECORD WITH NO LENGTH
+         L     R1,FCBOID          GET ORVYL ID (IF 0 NOT ATTACHED)
+         LTR   R1,R1              SEE IF ZERO
+         BZ    ERRV               CHANGED RECORD, FILE NOT ATTACHED
+*
+**WE ARE NOW READY TO WRITE OUT THE PHYSICAL RECORD
+*
+         WRITE FCBOID,L:FCBAOB,L:FCBLNR,L:FCBPHR,MODE=WAIT
+         BNZ   ERRH               SYSTEM ERROR IN STARTING A WRITE
+         WAIT  (0)                WAIT FOR WRITE TO COMPLETE
+         BZ    PURGE              TEST FOR GOOD RETURN
+         BP    SORT9              GO SORT OUT THE POSITIVE ERRORS
+         LA    R15,24(R0,R0)      SET NEG ONE TO 4 OVER LAST POSITIVE
+SORT9    B     *(R15)             SORTING OUT THE RETURNS
+         B     ERRI               FILE NOT IMMEDIATELY AVAILABLE
+         B     ERRJ               WRITE ACCESS TO THIS FILE PROHIBITED
+         B     ERRK          REWRITING OF EXISTING RECORD NOT PERMITTED
+         B     ERRL               FILE STORAGE LIMIT EXCEEDED
+         B     ERRM               FILE SPACE EXHAUSTED
+         B     ERRN               PERMANENT I/O ERROR
+*
+**MARK PHYSICAL RECORD NOT CHANGED
+*
+PURGE    NI    FCBFLG,X'FE'       MARK PHYSICAL RECORD NOT CHANGED
+*
+**ADVANCE TO THE NEXT TABLE ENTRIES DECREMENT CONTROL COUNT
+**AND LOOP BACK IF NOT DONE
+*
+ENDLOOP  LA    R9,4(R0,R9)        MOVE TO NEXT FCBT ENTRY
+         LA    R10,108(R0,R10)    MOVE TO NEXT FCB ENTRY
+         BCT   R8,TOP             KEEP GOING UNTIL ALL ARE FLUSHED
+*
+**DETERMINE TYPE OF RETURN TO THE CALLER
+*
+         B     *+4(R2)            SORT ON ERROR REGISTER
+         B     NEXIT              GO TO NORMAL EXIT (NO ERROR)
+*
+**ERROR RETURN TO CALLER
+*
+         L     R13,4(R0,R13)      CHAIN UP SAVE AREA
+         LM    R14,R12,12(R13)    RESTORE REGISTERS
+         BR    R14                ERROR RETURN
+*
+**NON-ERROR RETURN TO CALLER
+*
+NEXIT    L     R13,4(R0,R13)      CHAIN UP SAVE AREA
+         LM    R14,R12,12(R13)    RESTORE REGS
+         B     4(R0,R14)          GOOD RETURN
+*
+**SET UP ERROR MESSAGE CODES
+*
+E        EQU   1
+ERRH     LA    E,17
+         B     ERR
+ERRI     LA    E,18
+         B     ERR
+ERRJ     LA    E,19
+         B     ERR
+ERRK     LA    E,20
+         B     ERR
+ERRL     LA    E,21
+         B     ERR
+ERRM     LA    E,22
+         B     ERR
+ERRN     LA    E,23
+         B     ERR
+ERRU     LA    E,43
+         B     ERR
+ERRV     LA    E,44
+         B     ERR
+*
+**WE SEND THE MESSAGE OUT TO THE USER NOW
+*
+ERR      LA    R2,4(R0,R0)        MARK WE HAD AN ERROR
+         AH    R1,=H'7000'        BUMP TO THIS LOGICS AREA
+         L     R15,=V(RUNERR)     SET ENTRY TO RUNERR
+         SR    R0,R0              FAKE A LINE NUMBER
+         BALR  R14,R15            SEND THE ERROR MESSAGE OUT
+         B     ENDLOOP            BACK UP FOR THE REST OF THEM
+         LTORG
+         EJECT
+AREA     DSECT
+         COPY  AREA
+         END

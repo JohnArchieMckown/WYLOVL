@@ -1,0 +1,296 @@
+;
+;  SHOW VFS -- Orvyl file system activity monitor.
+;
+;    Written, 5/19/91, Jim Nisbet
+;
+;    Modifications:
+;       5/19/91  Niz  Initial version.
+;
+
+xproc () begin
+   ;
+   ;  General initialization.
+   ;
+   x.origact = actno
+   x.attn = 0                      ; attn counter (see attnexit)
+   x.noattn = false                ; allow ATTNs
+
+   x.pgm = 'SHOW VFS'              ; our program name
+   x.maint = '(gg.jdn)'            ; maintenance people
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit'
+
+   ;
+   ;  Constants.
+   ;
+   cr = s'0d'
+
+   ;
+   ;  Initialize command options.
+   ;
+   x.interval = 10                 ; default interval
+   x.repeat = false                ; don't continuously update
+   x.fsmatch = ''                  ; don't match just one fs
+
+   header_displayed = false
+
+   dcl num x.stamp[1], new_stamp[1]
+   dcl str x.fsnames[20], new_fsnames[20]
+   dcl num x.ios[20], new_ios[20]
+   dcl num x.ca_reads[20], new_ca_reads[20]
+
+   open orvmon title 'Orvyl monitor temporary Active file' temp
+   x.monact = actno
+   pick &(x.origact)
+
+   ;
+   ;  Initial processing of command options.
+   ;
+   options = strip(parm_string)
+   ;
+   ;  Handle processing "collect options".
+   ;
+   if (substr(options,1,9) eq '%%%%DUMP ') begin  ; DUMP BBOARD...
+      options = 'collect end '||substr(options,10)
+   end
+
+   ;
+   ;  Get file system names and initial activity counts.
+   ;
+   pcall getfscounts(x.stamp[], x.fsnames[], x.ios[], x.ca_reads[])
+
+   ;
+   ;  Scan command options.
+   ;
+   pcall command_options(options)
+
+   ;
+   ;  Do main display (operation is repeated for continuous
+   ;     display).
+   ;
+   repeat begin
+      pfx = '  '
+      if (x.repeat) pfx = left(time,5) || ' '
+
+      ;
+      ;  Give "waiting" message, wait, and then erase it.
+      ;
+      try write left(time,5) || ' ' \
+         || x.pgm || ' waiting for ' || x.interval || ' seconds... ' nonl
+      try wait &(x.interval)
+      if (tryattn) x.repeat = false
+      try write cr || copies(' ',40) || cr nonl
+
+      ;
+      ;  Get new file system activity counts.
+      ;
+      pcall getfscounts(new_stamp[], new_fsnames[], new_ios[], new_ca_reads[])
+
+      interval = new_stamp[1] - x.stamp[1]
+      if (not header_displayed) begin
+         Write 'Orvyl file system I/O activity for the last ' \
+            || format(int(interval),-1,1) || ' seconds:'
+         header_displayed = true
+      end
+
+      fsno = 1
+      while (x.fsnames[fsno] ne '') begin
+         ;
+         ;  Display activity for this file system.
+         ;
+         if (x.fsmatch eq '' or x.fsmatch eq x.fsnames[fsno]) begin
+            io_delta = new_ios[fsno] - x.ios[fsno]
+            ca_delta = new_ca_reads[fsno] - x.ca_reads[fsno]
+            io_rate = format(io_delta/interval,4,1)
+            if (io_delta+ca_delta eq 0) reduction = format(0,3,1)
+            else \
+               reduction = format(ca_delta*100/(io_delta+ca_delta),3,1)
+            write pfx || left(x.fsnames[fsno],8)||'  ' \
+               || io_rate || ' I/O''s per sec  ' \
+               || reduction || '% reduced  ' \
+               || '(' || format(io_delta,5,0) || ' I/O''s' \
+               || format(ca_delta,5,0) || ' cache)'
+         end
+
+         ;
+         ;  Update array in case this is a repeating display.
+         ;
+         x.stamp[1] = new_stamp[1]
+         x.ios[fsno] = new_ios[fsno]
+         x.ca_reads[fsno] = new_ca_reads[fsno]
+
+         fsno = fsno+1
+      end
+      if (x.repeat and x.fsmatch eq '') write ''
+   end
+   until (not x.repeat)
+end
+
+
+
+; <.page>
+;
+; command_options -- Scan the SHOW VFS options and set the
+;   appropriate global variables.
+;
+proc command_options(opts) begin
+   token = ''
+   token_type = ''
+
+;
+;  Process collect options.
+;
+
+   try syscall collect_scan(opts)
+   if (tryerr or tryattn) begin
+      write 'Command stopped.'
+      pcall cleanup('')
+   end
+
+option_loop:
+   while (opts ne '') begin
+      syscall scan_parm(token, opts, token_type)
+      token = upper(token)
+
+      cases begin
+         case (abbrev('REPEAT', token, 3)) begin
+            x.repeat = true
+         end
+
+         case (token_type eq 'NUMBER') begin
+            x.interval = token
+         end
+
+         case (true) begin
+            i = 1
+            while (x.fsnames[i] ne '') begin
+               if (x.fsnames[i] eq token) begin
+                  x.fsmatch = token
+                  goto option_loop
+               end
+               i = i+1
+            end
+
+            write token ||': unrecognized SHOW VFS option.'
+            pcall cleanup('')
+         end
+      end
+   end
+end
+
+
+; <.page>
+;
+;  getfscounts -- Routine to update arrays with file system
+;    activity in them.
+;
+
+proc getfscounts(stamp[], names[], ios[], ca_reads[]) begin
+   oldactno = actno
+
+   dcl str token, toktype
+
+   pick &(x.monact)
+   try quietly delete f/l
+
+   ;
+   ;  Get the statistics from Orvyl.
+   ;
+   stamp[1] = timebin              ; update timestamp
+   dumpn vblocks btf
+   change x'05' to '|' nolist      ; (temporary -- until CLP change is installed)
+
+   ;
+   ;  Only keep data lines and reformat them slightly.
+   ;
+   delete ~'|'1 nolist
+   change ';                    ' to '|' nolist
+
+
+   ;
+   ;  Process the data lines row at a time.
+   ;
+   fno = 1
+   lno = first
+   while (lno ge 0) begin
+      wkline = substr(line(lno),2)
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; fsid
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; fsname
+      names[fno] = token
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; blocks_available
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; blocks_total
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; ios
+      ios[fno] = token
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; ca_reads
+      ca_reads[fno] = token
+
+      lno = lno_next(lno)
+      fno = fno+1
+   end
+   names[fno] = ''                     ; force end of list
+
+   pick &(oldactno)
+end
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end
+
+
+;<.page>
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   if (not x.noattn) begin
+      x.attn = x.attn + 1
+      write 'BREAK interrupted ' || x.pgm || ' command.'
+      pcall cleanup('')
+   end
+end
+
+
+
+;<.page>
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    Right now all we do is log the error information.
+;
+
+proc errorexit() begin
+   write '----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+   write ''
+   write '--> show vars type error'
+   try show vars type error
+
+   write ''
+   write '--> show vars type x'
+   try show vars type error
+
+   write ''
+   write '--> show vars type ses'
+   try show vars type error
+
+   write ''
+   write 'End of diagnostics.'
+
+   pcall cleanup('error')
+end

@@ -1,0 +1,448 @@
+;
+;;  SET USERID command.
+;;
+;;     Created, 12/06/91, Jim Nisbet
+;;
+;;     Modifications:
+;;        01/08/92  Niz  Add reserved userids.
+;;        12/19/91  Niz  Second generation changes (this was
+;;                       initially the SET ID command).
+;;        12/06/91  Niz  Initial version.
+;
+
+xproc () begin
+;
+;  Initialization.
+;
+   x.origact = actno
+   x.attn = 0                      ; attn counter (see attnexit)
+   x.noattn = false                ; allow ATTNs
+
+   x.pgm = 'SET USERID'            ; our program name
+   x.maint = '(gg.jdn gg.sch)'     ; maintenance people
+
+   x.reserve_file = 'wyl.gs.wyl.commands#.userids'  ; reserved userids
+
+   x.iacct = xaccount              ; account to change
+   x.ilist = ''                    ; list of new USERIDs to set
+   x.verify = true                 ; set to FALSE if NOVERIFY
+
+   upd_count = 0                   ; working update count
+   data = ''                       ; working data return area
+   tok = ''                        ; working current token
+   rc = ''                         ; working return code string
+
+   if (vartype('ses.id_debug') eq 'UNDEFINED') \
+      ses.id_debug = FALSE
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit'
+
+;
+;  Scan command options.
+;
+
+   pcall command_options(parm_string)
+
+;
+;  Temporary restriction.
+;
+
+   if (wylbur eq 'WYLBUR') begin
+      write 'The SET USERID command is only supported in TESTWYL.'
+      pcall cleanup('')
+   end
+
+;
+;  Do SET USERID option processing.
+;
+
+   if (x.iacct ne xaccount) begin
+      iid = get_userid(x.iacct)
+      if (iid eq x.iacct) \
+         comment Account &(x.iacct) is not yours.
+      else \
+         comment User &(get_userid(x.iacct)) (account &(x.iacct)) \
+         is not yours.
+      prc = 'NO WAY'
+      try prc = rf_pw_prompt('', x.iacct)
+      if (prc ne 'OK') begin
+         comment No action taken.
+         pcall cleanup('')
+      end
+   end
+
+   if (x.ilist eq '') begin
+      pcall missing_options
+   end
+
+   if (x.verify) begin
+      write 'Account ' || x.iacct
+      write ''
+      old_ilist = get_userid_list(x.iacct)
+      if (old_ilist ne '') begin
+         pcall display_id('  Old user-ID: ', old_ilist)
+      end
+      if (upper(x.ilist) eq 'NONE') begin
+         write '  No new user-ID.'
+      end
+      else begin
+         pcall display_id('  New user-ID: ', x.ilist)
+      end
+      write ''
+      yn = yesno('OK to make this change', 'yes no attn')
+      if (yn ne 'YES') begin
+         write 'No action taken.'
+         pcall cleanup('')
+      end
+   end
+
+;
+;  Update the KEYS file with the new ID records.
+;
+
+   x.noattn = true
+   set exec auth                   ; ********
+   pcall id_delete(x.iacct)        ; delete any old IDs
+   if (upper(x.ilist) ne 'NONE') \
+      pcall id_add(x.iacct, x.ilist)  ; add new IDs
+   syscall userid_refresh          ; update our ID, if necessary
+   set exec noauth                 ; ********
+   x.noattn = false
+
+   pcall cleanup('')
+end
+
+
+
+;<.page>
+;
+;  command_options -- Routine to process local command options.
+;
+
+proc command_options(opts) begin
+   dcl string token, dummystr, idlist[25]
+   dcl number idn
+   valid_fchar = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+   valid_fchar = 'abcdefghijklmnopqrstuvwxyz' || valid_fchar
+   valid_chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.'
+   valid_chars = 'abcdefghijklmnopqrstuvwxyz' || valid_chars
+
+;
+;  Process collect options.
+;
+
+   try syscall collect_scan(opts)
+   if (tryerr or tryattn) begin
+      write 'Command stopped.'
+      pcall cleanup('')
+   end
+
+;
+;  Scan USERIDs and build an id list.
+;
+
+   while (opts ne '') begin
+      syscall scan_parm(token, opts)
+      uptok = upper(token)
+
+      cases begin
+         case (uptok eq 'FOR') begin
+            syscall scan_parm(token, opts)
+            if (token eq '') begin
+               write 'Missing account after FOR.'
+               pcall cleanup('error')
+            end
+            x.iacct = get_account(token)
+            if (x.iacct eq '') begin
+               write 'Account ' || uptok || ' does not exist.'
+               pcall cleanup('error')
+            end
+         end
+
+         case (abbrev('NOVERIFY', uptok, 3)) begin
+            x.verify = false
+         end
+
+         case (abbrev('ACCOUNT', uptok, 3) or \
+               abbrev('QUIET', uptok, 3)) begin
+            write token || ': can not be used as a user-ID'
+            pcall cleanup('error')
+         end
+
+         case (true) begin
+            if (size(token) eq 1) begin
+               write token || ' is too short a user-ID, \
+                  please use a longer one.'
+               pcall cleanup('')
+            end
+            if (size(token) eq 3) begin
+               if (group ne 'GG') begin
+                  write token || ': three character user-IDs \
+                     are not currently allowed.'
+                  pcall cleanup('')
+               end
+            end
+            if (size(token) eq 6) begin
+               if (substr(token,3,1) eq '.' \
+                     or substr(token,4,1) eq '$') begin
+                  write 'You can not have an user-ID of the form: ' || token
+                  pcall cleanup('')
+               end
+            end
+
+            if (verify(token, valid_fchar) eq 1 or \
+                  verify(token, valid_chars) ne 0) begin
+               write token || ':  illegal characters in user-ID.'
+               pcall cleanup('error')
+            end
+
+            isreserved = false
+            pcall reserved_idchk(token, isreserved)
+            if (isreserved) begin
+               write token || ': this user-ID is reserved, \
+                  please use something else.'
+               pcall cleanup('error')
+            end
+
+            idn = idn + 1
+            idlist[idn] = token
+         end
+      end
+   end
+
+;
+;  SET USERID with no options.
+;
+   if (idn eq 0) begin
+      pcall missing_options
+   end
+
+;
+;  Do final checks on id(s) and build id list for caller.
+;
+
+   i = 1
+   while (i le idn) begin
+      token = idlist[i]
+      tempacct = get_account(token)
+      if (tempacct ne '' and tempacct ne x.iacct) begin
+         write uptok || ': already assigned to account ' \
+            || tempacct
+         write 'No action taken.'
+         pcall cleanup('error')
+      end
+      x.ilist = x.ilist || ';' || token
+      i = i+1
+   end
+
+   if (left(x.ilist,1) eq ';') x.ilist = substr(x.ilist,2)
+end
+
+
+
+;<.page>
+;
+;  display_id -- Routine to display the userids.
+;
+
+proc display_id(pfxmsg, idlist) begin
+   msg = pfxmsg
+
+   idlist = chstr(idlist, ';', ' ')
+   primary_id = scan_token(idlist)
+   idlist = strip(scan_skip(idlist))
+
+   msg = msg || primary_id
+   if (idlist ne '') begin
+      if (index(idlist,' ') eq 0) alias = 'alias'
+      else alias = 'aliases'
+      msg = msg || ' (' || alias || ': ' || idlist || ')'
+   end
+
+   write msg
+end
+
+
+;<.page>
+;
+;  reserved_idchk -- Routine to check to see if the userid
+;    given is a reserved userid.
+;
+
+proc reserved_idchk(id,rflag) begin
+   open rids temp
+   try quietly use &(x.reserve_file)
+   putend    dummy line so point will never fail if no Active file
+   point c'&(id) '1 nolist
+   rflag = (* ge 0)
+   close
+   return (rflag)
+end
+
+
+;<.page>
+;
+;  missing_options -- Routine to write missing options error msg.
+;
+
+proc missing_options() begin
+   write 'Missing SET USERID options.'
+   write 'Expecting either "SET USERID userid" or "SET USERID NONE".'
+   pcall cleanup('')
+end
+
+
+
+;<.page>
+;
+;  id_delete -- Routine to delete all the current IDs that belong to
+;     this account.
+;
+
+proc id_delete(p_acct) begin
+   dcl str idlist, token, rc
+   dcl num dummynum
+   if (ses.id_debug) \
+      comment ==> id_delete(&(p_acct))
+
+   idacct = get_account(p_acct)
+   if (idacct eq '') begin
+      write p_acct || ' does not exist.'
+      write 'No action taken.'
+      pcall cleanup('error')
+   end
+
+   syscall key_get(idacct||'_IDLIST', idlist, '', dummynum, rc)
+   if (rc ne 'OK' and rc ne 'RECORD NOT FOUND') \
+      pcall err_rc('KEY_GET', rc)
+   if (ses.id_debug) \
+      comm ==> key_get of &(idacct)_IDLIST returns: &(idlist)
+   if (idlist ne '') begin
+      idlist = tran(idlist, ' ', ';')
+      repeat begin
+         syscall scan_parm(token, idlist)
+         token = upper(token)
+         if (token ne '') begin
+            if (ses.id_debug) \
+               comment ==> key_delete('ID_&(token)')
+            syscall key_delete('ID_' || token, '', rc)
+            if (rc ne 'OK') pcall err_rc('KEY_DELETE', rc)
+         end
+      end
+      until (token eq '')
+
+      if (ses.id_debug) \
+         comment ==> key_delete('&(idacct)_IDLIST')
+      syscall key_delete(idacct||'_IDLIST', '', rc)
+      if (rc ne 'OK') pcall err_rc('KEY_DELETE', rc)
+   end
+end
+
+
+
+;<.page>
+;
+;  id_add -- Routine to add new IDs.
+;
+
+proc id_add(idacct, idlist) begin
+   dcl str token, rc
+
+   if (ses.id_debug) \
+      comment ==> id_add(&(idacct), &(idlist))
+   if (idlist ne '') begin
+      ids = tran(idlist, ' ', ';')
+      repeat begin
+         syscall scan_parm(token, ids)
+         if (token ne '') begin
+            if (ses.id_debug) \
+               comment ==> key_put('ID_&(upper(token))', &(idacct), '', 0, rc)
+            syscall key_put('ID_' || upper(token), idacct, '', 0, rc)
+            if (rc ne 'OK') pcall err_rc('KEY_PUT', rc)
+         end
+      end
+      until (token eq '')
+
+      if (ses.id_debug) \
+         comment ==> key_put('&(idacct)_IDLIST', &(idlist), '', 0, rc)
+      syscall key_put(idacct||'_IDLIST', idlist, '', 0, rc)
+      if (rc ne 'OK') pcall err_rc('KEY_PUT', rc)
+   end
+end
+
+
+
+;<.page>
+;
+;  err_rc -- Routine to check return code.
+;
+
+proc err_rc(function, rc) begin
+   if (rc ne 'OK') begin
+      comment &(function) operation didn't work (RC=&(rc))
+   end
+end
+
+
+
+;<.page>
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   if (not x.noattn) begin
+      x.attn = x.attn + 1
+      write 'BREAK interrupted ' || x.pgm || ' command.'
+      pcall cleanup('')
+   end
+end
+
+
+
+;<.page>
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    Right now all we do is log the error information.
+;
+
+proc errorexit() begin
+   write '----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+   write ''
+   write '--> show vars type error'
+   try show vars type error
+
+   write ''
+   write '--> show vars type x'
+   try show vars type error
+
+   write ''
+   write '--> show vars type ses'
+   try show vars type error
+
+   write ''
+   write 'End of diagnostics.'
+
+   pcall cleanup('error')
+end
+
+
+
+;<.page>
+;
+;  cleanup -- Routine to do final cleanup and exit.
+;
+
+proc cleanup(opt) begin
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

@@ -1,0 +1,1043 @@
+XPROC () BEGIN
+; TeX -- create and print (optional) a TeX DVI file.
+; New XPROC version for all batch TeX 08/16/88
+
+  DECLARE STRING REVDATE   ; last revision date
+  REVDATE = '08/16/88'
+
+; Recent revision log --
+; 08/16/88 Removed SYS.MEMBER WYLBUR BUG (See SCRIPT exec).
+;          Added TEMPINPUT=PREFIX if DSNPARM=*
+;          Fixed action where reply to DVI dsname is *
+
+DECLARE STRING DDSTMT[256] SX1 DSINFO DVIOPT TEXNAME PARMSTMT1 PARMSTMT2
+DECLARE STRING EDITFORM VAL RUNREPLY COPYREPLY SAVINPUT TEMPNAME
+DECLARE STRING DSNPARM TEXINPUT TEXINLAST SRCFILE OPTION
+DECLARE STRING FORMREPLY LISTDIR FORMCODE INDSN MEMBER TEMPINPUT
+DECLARE STRING HELPDSN DVIOUT PRIREPLY INPUTLIN NUMREPLY
+HELPDSN = 'WYL.GA.PUB.LIBDATA#TEXHELP'
+
+DECLARE NUM USERFILE WORKFILE NUMINPUT LONGOPT ITEM NEXT_ITEM ITEM_END I DD
+DECLARE NUM COPIES TEXEXT SIZEOPT RECLEN BLANKPOS COUNTER EXTRACTLIB N0 N4 N5
+
+DECLARE BOOLEAN INPUTFLG MULTINFLG INPTEXTFLG CONCATFLAG B0 CONTINUE
+DECLARE BOOLEAN MEMBERFLG SRCFLG
+
+;  BLANKPOS - NUM TELLING LOCATION IN STRING OF BLANK
+;  CONCATFLAG - FLAG THAT TEXSRC IS CONCATENATED FILE - NO DD STMTS NEEDED
+;  CONTINUE - FLAG FOR CONTINUE ON RUN OPTIONS
+;  COPIES - COPIES OPTION
+;  COPYREPLY - USER'S ANSWER TO QUESTION ON HOW MANY COPIES TO PRINT
+;  COUNTER - A COUNTER IN A LOOP (WHILE COUNTER .... BEGIN)
+;  DD - LOOPING THRU DD STMTS - DD STARTS WITH 1 & INCREMENTED BY 1
+;  DSINFO - DSNINFO RETURN FROM DSN CHECKER
+;  DDSTMT - ARRAY TO HOLD DDSTMTS FOR JCL
+;  DSNPARM - HOLDS INPUT NAME USER ENTERS
+;  DVIOPT - DVIXER OPTIONS
+;  DVIOUT - NAME OF DVI OUTPUT FILE THAT USER ENTERS
+;  EDITFORM - DSNAME OF NEW SEQUENTIAL DATASET WHEN LIB. DSNAME FORMAT BAD
+;  EXTRACTLIB - NUM POSITION OF '#' AFTER LIBRARY NAME (TEXBOOK#CHAP)
+;  FORMCODE - FORMS CODE
+;  FORMREPLY - USER'S ANSWER TO QUERY ABOUT WHICH X9700 FORM TO USE
+;  INDSN - DATASET NAME TO BE VERIFIED THRU CHECKDSN
+;  INPUTFLG - INDICATES TEX SOURCE IS LIST OF \INPUT STMTS
+;  INPUTLIN - INPUT LINE OF FILE COPIED INTO ACTIVE FILE
+;  ITEM = FIRST LINE OF TEX \INPUT STMT  (-1 IF NONE)
+;  ITEM_END = LAST LINE OF TEX INPUT (MAY NOT ACTUALLY EXIST)
+;  LISTDIR - ANSWER TO QUESTION DO YOU WANT DIRECTORY LISTING
+;  LONGOPT - NEED MORE THAN 1 LINE FOR DVIXER PARM STATEMENT
+;  MEMBER - MEMBER NAME (IF ANY)
+;  MEMBERFLG - TRUE IF \INPUT FILE IS MEMBER OF LIBRARY
+;  MEMNAME - IF MEMBER NAME GIVEN IN () - CONTAINS MEMBER NAME
+;  MEMSIZE - SIZE OF MEMNAME
+;  INPTEXTFLG - INDICATES MORE THAN 1 INPUT FILE IN CONCATENATED TEX SOURCE
+;  NEXT_ITEM = FIRST LINE OF NEXT TEX \INPUT STMT (-1 IF NONE)
+;  N0,N4,N5 - MISC. TEMPORARY
+;  NUMINPUT - NUMBER OF \INPUTS, GIVES # OF DD STMTS NEEDED
+;  NUMREPLY - NUMBER OF \INPUT STATEMENTS IN INPUT SOURCE FILE
+;  OPTION - ONE OF DVIXER OPTIONS
+;  PARMSTMT1 - 1ST LINE OF PARM.DVIXER IF OPTIONS LINE TOO LONG
+;  PARMSTMT2 - 2nd LINE OF PARM.DVIXER IF OPTIONS LINE TOO LONG
+;  PRIREPLY - HOLDS USER'S ANSWER WHETHER TO PRINT OR NOT
+;  RECLEN - NUM VAR FOR LONGEST LINE LENGTH TO DETERMINE LRECL
+;  RUNREPLY - USER'S ANSWER TO QUERY ABOUT RUN OPTIONS
+;  SAVINPUT - BACKUP OF \INPUT STMT. READ FROM USER'S SOURCE
+;  SIZEOPT - NUM VAR -- SIZE OF DVI OPTION STRING USER PROVIDES
+;  SRCFILE - INPUT FILE USER PROVIDES AS TEX SOURCE
+;  SRCFLG - KEEP NAME OF TEX SOURCE FOR JCL
+;  SX1 - WORK VARIABLE FOR DSN CHECKER
+;  TEMPINPUT - NAME HOLDER FOR INPUT SOURCE FILE FOR ERROR RECOVERY
+;  TEMPNAME - NAME HOLDER FOR \INPUT STMT FOR ERROR RECOVERY
+;  TEXEXT - NUM VAR. -- IF 0, NO .TEX EXTENSION, ELSE THERE IS
+;  TEXINLAST - LAST LINE OF INPUT SOURCE FILE
+;  TEXINPUT - NAME USER GIVES FOR INPUT FILE - STEPNAME ON DD STMT
+;  TEXNAME - NAME OF TEX INPUT FILE
+;  USERFILE - Number of user's active file
+;  WORKFILE - ACTIVE file number of work file
+;  VAL - VALUE IN FWORD PROC
+;
+;  CONSTANTS ---------------------------------------------------
+;
+;  List of allowable 9700 forms:
+DECLARE STRING FORM9700
+FORM9700  =  ' BOND 3HOL BLUE ARCB RAGB BOOK '
+
+; ------------------------- here's the code -----------------------
+
+WORKFILE = 0
+USERFILE = ACTNO ; Save user's active file number
+COMM TeX version of &(REVDATE) -- Create and print (optional) a TeX DVI file
+COMM For help, reply '?' to any question.
+COMM
+
+;************************************************************************
+; check if user typed TeX a:filename.  If so, give error msg, goto GETDSN
+;************************************************************************
+PARM_STRING = UPPER(STRIP(PARM_STRING))
+IF (SUBSTR(PARM_STRING,2,1) EQ ':') BEGIN ;  Use A:filename etc.
+    COMM Your Dataset must be a WYLBUR data set saved on the Forsythe
+    COMM mainframe.  Upload your TeX files using Samon prior to using
+    COMM this exec. For more help, use the 'QUICK GUIDE TO SAMSON'.
+    WRI ''
+    GOTO GETDSN
+END
+;********************************************************************
+; look for Library member noted by () so you can strip off member
+; name and leave PARM_STRING with just Library name.
+; If user does NOT give Tex source input, goto INIT, else goto GOTPARM
+;********************************************************************
+DSNPARM = UPPER(SCAN_TOKEN(PARM_STRING)) ; DSNPARM contains lib. name
+;                                 ; only if member in () but contains
+;                                 ; lib & member if member is #
+PARM_STRING=SCAN_SKIP(PARM_STRING) ; Strips off (memname) into PARM_STRING
+IF(DSNPARM EQ '') GOTO INIT
+; DSN in PARM. -- see if user gave dsn(member)
+MEMNAME=SCAN_TOKEN(PARM_STRING)  ; next token ex: '(memname)'
+MEMSIZE=SIZE(MEMNAME)
+IF (MEMSIZE GT 2) BEGIN;
+    IF (SUB(MEMNAME,1,1) EQ '(' AND SUB(MEMNAME,MEMSIZE,1) EQ ')') BEGIN
+        DSNPARM=DSNPARM||MEMNAME  ; put member back (scan_token stripped it)
+        PARM_STRING=SCAN_SKIP(PARM_STRING)  ; and take it out of parm
+    END
+END
+GOTO GOTPARM
+
+;%%%%%%%%%%%%%%%%%%%
+;     START
+;%%%%%%%%%%%%%%%%%%%
+;*******************
+; here to restart
+;*******************
+START:
+DSNPARM  =  ''
+GOTO INIT
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTPARM
+;%%%%%%%%%%%%%%%%%%%
+;********************************************************************
+; Look for '*' as Tex source input.  If found, put fully qualified
+; name in DSNPARM
+;********************************************************************
+GOTPARM:
+IF (DSNPARM EQ '*') BEGIN
+    IF (PREFIX EQ '') BEGIN ; * is undefined
+        WRI '* is undefined.'
+        DSNPARM=''
+        GOTO INIT
+    END
+    DSNPARM=PREFIX
+    TEMPINPUT=PREFIX
+END
+COMM TeX Input is &(DSNPARM)
+TEMPINPUT = DSNPARM
+
+;%%%%%%%%%%%%%%%%%%%
+;     INIT
+;%%%%%%%%%%%%%%%%%%%
+INIT:
+CONTINUE = FALSE
+FORMCODE ='BOND' ; default x9700 form
+INPUTFLG = FALSE
+CONCATFLAG=FALSE
+NUMINPUT=0
+MEMBER=''
+IF (DSNPARM NE '') GOTO GOTDSN ; Got filename, don't ask for help
+;
+TRY REA STR DSNPARM UPP PRO 'Do you want instructions (YES/NO)? '
+WRI ''
+IF (TRYATTN) GOTO QUIT
+IF (INDEX('.YES.Y.OK.HELP.?.','.&(DSNPARM).') EQ 0) GOTO GETDSN
+TRY LIST 6/26 FRO &(HELPDSN) UNN ; intro
+WRI ' '
+
+;%%%%%%%%%%%%%%%%%%%
+;     GETDSN
+;%%%%%%%%%%%%%%%%%%%
+GETDSN:
+TRY REA STR DSNPARM UPP PRO 'Dsname of TeX Source File: '
+IF (TRYATTN) GOTO QUIT
+TEMPINPUT=DSNPARM
+SRCFLG = TRUE
+IF(DSNPARM EQ'') GOTO GETDSN
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTDSN
+;%%%%%%%%%%%%%%%%%%%
+GOTDSN:
+;************************************************************************
+; check if user typed TeX a:filename.  If so, give error msg, goto GETDSN
+;************************************************************************
+DSNPARM = UPPER(STRIP(DSNPARM)) ; strip leading and/or trailing characters
+                                ; and change lowercase to UPPER
+IF (SUBSTR(DSNPARM,2,1) EQ ':') BEGIN ;  Use A:filename etc.
+    WRI ''
+    COMM Your Dataset must be a WYLBUR data set saved on the Forsythe
+    COMM mainframe.  Upload your TeX files using Samon prior to using
+    COMM this exec. For more help, use the 'QUICK GUIDE TO SAMSON'.
+    WRI ''
+    GOTO GETDSN
+END
+IF(INDEX('.HELP.?.','.&(DSNPARM).') EQ 0) GOTO GOODDSN1
+TRY LIST 51/81 FRO &(HELPDSN) UNN
+GOTO GETDSN
+
+;%%%%%%%%%%%%%%%%%%%
+;     BADDSN
+;%%%%%%%%%%%%%%%%%%%
+BADDSN:
+WRI DSNPARM||' is not a legal input.'
+GOTO GETDSN
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOODDSN1
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+; check for '*' or '#' or '('
+;*****************************************************************
+GOODDSN1:
+IF (DSNPARM EQ '*') BEGIN
+    IF (PREFIX EQ '') BEGIN ; * is undefined
+        WRI '* is undefined.'
+        DSNPARM=''
+        GOTO GETDSN
+    END
+    DSNPARM=PREFIX
+    TEMPINPUT=PREFIX
+END
+IF(INDEX(DSNPARM,'#') GT 0) GOTO ISLIB1
+IF(INDEX(DSNPARM,'(') GT 0) GOTO ISLIB2
+GOTO GOTDSN1
+
+;%%%%%%%%%%%%%%%%%%%
+;     ISLIB1
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+;   here if library member with '#'
+;*****************************************************************
+ISLIB1:
+IF(SUB(DSNPARM,1,1) EQ'#') BEGIN
+    INDSN=LIBRARY||DSNPARM
+    MEMBER=SUB(DSNPARM,2)
+    GOTO CHECKDSN1
+END
+N0=INDEX(DSNPARM,'#')
+MEMBER=SUB(DSNPARM,N0+1)
+GOTO GOTDSN1
+
+;%%%%%%%%%%%%%%%%%%%
+;     ISLIB2
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+;   here if library member with ()
+;*****************************************************************
+ISLIB2:
+IF(SUB(DSNPARM,1,1) EQ'(') BEGIN
+    INDSN=LIBRARY||DSNPARM
+    MEMBER=SUB(DSNPARM,2)   ;strip leading (
+    IF (SUB(MEMBER,SIZ(MEMBER)) EQ ')') MEMBER=SUB(MEMBER,1,SIZ(MEMBER)-1) ;strip trailing )
+    GOTO CHECKDSN1
+END
+N0=INDEX(DSNPARM,'(')
+MEMBER=SUB(DSNPARM,N0+1) ; strip leading (
+IF (SUB(MEMBER,SIZ(MEMBER)) NE')') GOTO BADDSN
+MEMBER=SUB(MEMBER,1,SIZ(MEMBER)-1)  ;strip trailing )
+INDSN=SUB(DSNPARM,1,N0-1)
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTDSN1
+;%%%%%%%%%%%%%%%%%%%
+GOTDSN1:
+INDSN = DSNPARM ; NO MEMBER
+;%%%%%%%%%%%%%%%%%%%
+;     CHECKDSN1
+;%%%%%%%%%%%%%%%%%%%
+;**************************************************
+; gives fully qualified name but does NOT verify it
+;**************************************************
+CHECKDSN1:
+TRY INDSN = DSNFORMAT(INDSN) ; DSNFORMAT provides fully qualified name
+IF (TRYERROR) GOTO QUIT
+PCALL DSNCHECK(INDSN,DSINFO)
+IF (DSINFO EQ '') BEGIN
+    DSNPARM = ''
+    SAVINPUT = ''
+    IF (INPUTFLG) GOTO FULL_INPUT_NAME
+    IF (INPTEXTFLG) INPTEXTFLG=FALSE
+    GOTO INIT; and try again
+END
+
+;%%%%%%%%%%%%%%%%%%%
+;    CHECK_FORMAT
+;%%%%%%%%%%%%%%%%%%%
+;******************************************************************
+;  TeX files and DVI files cannot be in EDIT format, must convert
+;******************************************************************
+CHECK_FORMAT:
+IF(SUBSTR(DSINFO,73,1) EQ 'U') BEGIN ;file is EDIT format - convert
+    IF(SUBSTR(DSINFO,69,2) EQ 'PO') BEGIN ; input source in library with wrong format
+        IF (MEMBER EQ '') GOTO GETMEM
+        WRI ''
+        COMM Your TeX input source is in the wrong file format for TeX.  Since this
+        COMM file is a library member, you cannot change its format without rendering
+        COMM the other members unreadable.  Instead, this EXEC will now prompt you for
+        COMM a new sequential data set name (ex: &(MEMBER).NEW) that your input will be
+        COMM copied into for use by this program.
+        WRI ''
+        TRY REA STR EDITFORM UPP PRO 'New dataset name for sequential copy of TeX input: '
+        IF (TRYATTN) GOTO QUIT
+        IF (INDEX('.HELP.?.','.&(EDITFORM).') NE 0) GOTO CHECK_FORMAT
+        N4=(INDEX('&(EDITFORM)','#'))
+        N5=(INDEX('&(EDITFORM)','('))
+        IF (N4 NE 0 OR N5 NE 0) BEGIN
+            WRI ''
+            WRI 'ERROR - You have specified a library name and member.'
+            WRI 'Looking for a sequential data set name.'
+            GOTO GETDSN
+        END
+        OPEN WORK2 TITLE 'work file for seq. format'
+        COP FRO &(INDSN) QUIET;  copy from input file assigned to DSNPARM
+        DUMP SIZE OVER 230 ; get longest line length
+        READ STR INPUTLIN UPP USING=LAST
+; NOTE on the following lines.  Last line of your file now is message
+; "No lines over 230, longest was 119". The 119 (or appropriate number)
+; begins in col. 32
+        IF(SUBSTR(INPUTLIN,34,1)EQ '') RECLEN=(SUBSTR(INPUTLIN,32,2))
+        ELSE RECLEN=(SUBSTR(INPUTLIN,32,3))
+        DELETE LAST
+        TRY SAVE &(EDITFORM) LRECL=&(RECLEN)
+        IF ((TRYERROR) OR (TRYATTN)) GOTO QUIT
+        EDITFORM = DSNFORMAT(EDITFORM) ; DSNFORMAT provides fully qualified name
+        IF (SRCFLG) SRCFILE=EDITFORM
+        SRCFLG=FALSE
+        DSNPARM=EDITFORM
+        INDSN=EDITFORM
+        GOTO NOTMEM
+    END
+    WRI ''
+    WRI '&(INDSN) has an improper (EDIT) file format.'
+    TRY REA STR EDITFORM UPP PRO 'Do you want to change it here (CR=YES)? '
+    IF (TRYATTN) GOTO QUIT
+    EDITFORM = STRIP(EDITFORM)
+
+; Look at EDITFORM (user's answer) for HELP
+    IF (INDEX('.NO.N.','.&(EDITFORM).') NE 0) GOTO QUIT
+
+    IF (INDEX('.HELP.?.','.&(EDITFORM).') NE 0) BEGIN
+        WRI ''
+        TRY LIST 96/100 FRO &(HELPDSN) UNN ; INTRO
+        GOTO CHECK_FORMAT
+    END
+
+    IF ((INDEX('.YES.Y.OK.','.&(EDITFORM).') NE 0) OR (EDITFORM EQ '')) GOTO CHANGE_FORMAT
+
+
+;%%%%%%%%%%%%%%%%%%%%%%
+;     CHANGE_FORMAT
+;%%%%%%%%%%%%%%%%%%%%%%
+CHANGE_FORMAT:
+    WRI ''
+    COMM REPLY <.B+>YES<.B-> TO THE WARNING MESSAGE BELOW!!
+    WRI ''
+    OPEN WORK2 TITLE 'work file for changing format'
+    COP FRO &(DSNPARM) QUIET;  copy from input file assigned to DSNPARM
+    DUMP SIZE OVER 230 ; get longest line length
+    READ STR INPUTLIN UPP USING=LAST
+    IF(SUBSTR(INPUTLIN,34,1)EQ '') RECLEN=(SUBSTR(INPUTLIN,32,2))
+    ELSE RECLEN=(SUBSTR(INPUTLIN,32,3))
+    DELETE LAST
+    TRY SAVE &(DSNPARM) LRECL=&(RECLEN) REPLACE
+    IF ((TRYATTN) OR (TRYERROR)) GOTO QUIT
+    IF (SRCFLG) SRCFILE=DSNPARM
+    SRCFLG=FALSE
+END
+IF(SUBSTR(DSINFO,69,2) EQ 'PO') GOTO LIBRARY; if library
+IF(MEMBER EQ'') GOTO NOTMEM
+MEMBER =''
+GOTO NOTMEM
+
+;%%%%%%%%%%%%%%%%%%%
+;     LIBRARY
+;%%%%%%%%%%%%%%%%%%%
+LIBRARY:
+IF(MEMBER NE'')GOTO NOTMEM
+
+;%%%%%%%%%%%%%%%%%%%
+;     GETMEM
+;%%%%%%%%%%%%%%%%%%%
+;************************************************
+; User gave a library name.  Get the member name.
+;************************************************
+GETMEM:
+WRI ''
+TRY WRI INDSN||' is a library; you must specify a member name.'
+WRI ''
+LISTDIR = YESNO('Do you want a listing of the directory of the library?')
+WRI ''
+IF (LISTDIR EQ 'YES' OR LISTDIR EQ '')TRY SHO DIR ALL IN &(INDSN)
+GETMEM_AGAIN:
+TRY REA STR DSNPARM UPP PRO'Member name (CR=restart)? '
+IF (TRYATTN) GOTO QUIT
+IF (SUBSTR(DSNPARM,1,3) EQ 'WYL') DSNPARM=(SUBSTR(DSNPARM,12)) ; strip out DD name
+IF ((INDEX(DSNPARM,'#') NE 0) OR (INDEX(DSNPARM,'(') NE 0)) BEGIN
+    ; library and member name given, strip out member name
+    N0=SIZE(DSNPARM)
+    EXTRACTLIB = (INDEX(DSNPARM,'#'))
+    IF (EXTRACTLIB NE 0) DSNPARM=SUBSTR(DSNPARM,EXTRACTLIB+1)
+    ELSE BEGIN    ; () found
+         EXTRACTLIB = (INDEX(DSNPARM,'('))
+         N0=N0-EXTRACTLIB
+         DSNPARM=SUBSTR(DSNPARM,EXTRACTLIB+1,N0-1)
+    END
+END
+MEMBER=STRIP(DSNPARM)
+TEXINPUT=MEMBER
+IF(SIZ(MEMBER)GT 8) BEGIN ; Illegal membername
+    WRI MEMBER||' - Illegal member name.  It must be 8 characters or less'
+    GOTO GETMEM
+END
+IF (MEMBER EQ '') BEGIN
+    DSNPARM=''
+    GOTO GETDSN
+END
+IF(INDEX('.HELP.?.','.&(DSNPARM).') NE 0) BEGIN
+    COMM
+    COMM The dsname you have specified (&(TEMPINPUT)) is a library.
+    COMM Please specifiy which member of the library you wish to use.
+    COMM The name must be 8 characters or fewer.
+    COMM
+    GOTO GETMEM_AGAIN
+END
+INDSN=INDSN||'('||MEMBER||')'
+GOTO CHECKDSN1
+
+;%%%%%%%%%%%%%%%%%%%
+;     NOTMEM
+;%%%%%%%%%%%%%%%%%%%
+;*************************************
+; check for bad member or dataset name
+;*************************************
+NOTMEM:
+IF(MEMBER EQ'')GOTO MEMDONE
+IF(SIZ(MEMBER)GT 8) BEGIN ; Illegal membername
+    WRI MEMBER||' - Illegal member name.'
+    GOTO GETMEM
+END
+GOTO MEMDONE
+
+;%%%%%%%%%%%%%%%%%%%
+;     DDSTMT
+;%%%%%%%%%%%%%%%%%%%
+DDSTMT:
+;  save DD step name & qualified dsn of input file to build JCL DD
+;  stmt. later, decrement number of files left, add 1 to DDSTMT
+;  array
+DDSTMT[NUMINPUT] = '//'||TEXINPUT||'    DD DSN='||INDSN||',DISP=SHR'
+; ex: TEXINPUT=chap01 & INDSN=wyl.ga.kgp.input2
+MEMBERFLG=FALSE
+IF (MULTINFLG) BEGIN
+    IF (WORKFILE NE 0) PICK &(WORKFILE)
+    DD=DD-1
+    DEL FIRST
+    GOTO SOME_LOOP
+END
+IF (INPUTFLG) GOTO DD_LOOP
+IF (INPTEXTFLG) GOTO GET_MORE_INPUT
+
+;%%%%%%%%%%%%%%%%%%%
+;     MEMDONE
+;%%%%%%%%%%%%%%%%%%%
+MEMDONE:
+IF ((INPUTFLG) OR (INPTEXTFLG) OR (MULTINFLG)) GOTO DDSTMT
+IF (CONCATFLAG) GOTO DVI
+;    looping action here - repeat until numinput = 0
+;    after you get \input stripped off, count the number of
+;    files and save in numinput.  Make a counter, say DD=1.
+;    Then prompt user for full name, go thru dsnformat and verify,
+;    then put out a dd stmt in an array - DDSTMT[NUMINPUT].
+;    Then decrement with numinput=numinput-1.  DD = DD+1.
+;
+;    look for \input from Tex Source file.  If none, Source is concatenated file.
+;
+IF (ACTNO NE WORKFILE) BEGIN ; not in workfile, e.g. first pass thru
+    OPEN WORK1 TITLE 'work file for TeX'
+    WORKFILE = ACTNO ; save this number
+END
+ELSE BEGIN
+    IF (LAST GT 0) DEL .001/LAST ; we've been thru before, already got a workfile
+END
+IF (SRCFILE EQ '') SRCFILE=INDSN
+COPY FRO &(SRCFILE) QUIET ; looking for \input stmts
+READ STR TEXINLAST UPP USING=LAST
+
+IF (SUBSTR(TEXINLAST,1,6) NE '\INPUT') BEGIN
+    ;%%%%%%%%%%%%%%%%%%%%%%%%
+    ;     GET_INPUT_STMTS
+    ;%%%%%%%%%%%%%%%%%%%%%%%%
+    ;**************************************************************
+    ; the Tex Source file contains one or more input files vs. list
+    ; of \input statements.
+    ;**************************************************************
+    GET_INPUT_STMTS:
+    INPUTFLG=TRUE ; Looking for \input stmts in source
+    NUMINPUT = 0
+    POINT C'\INPUT'1 (1) NOLIST
+    ITEM = CURRENT
+    IF (ITEM NE -1) BEGIN
+        STRIP_INPUT:
+        NUMINPUT=NUMINPUT+1
+        TEXNAME=''
+        READ STR TEXINPUT UPP USING=CURRENT
+        TEXNAME=SCAN_SKIP(TEXINPUT)
+        TEMPNAME=TEXNAME
+        TEXINPUT=TEXNAME
+        TEXEXT=(INDEX(TEXNAME,'.')) ;looking for extensions
+        IF (TEXEXT NE 0) TEXINPUT=(SUB(TEXNAME,1,TEXEXT-1))
+        TEXEXT=(INDEX(TEXNAME,'.TEX')) ;looking for filename.TEX
+        IF (TEXEXT EQ 0) BEGIN
+            I=SIZE(TEXNAME)
+            IF (I-TEXEXT NE 3) BEGIN
+                IF ((INDEX(TEMPINPUT,'#') NE 0) OR (INDEX(TEMPINPUT,'(') NE 0)) BEGIN
+                    ; library and member name given, setup DDSTMT
+                    N0=SIZE(TEMPINPUT)
+                    IF (INDEX(TEMPINPUT,'#') NE 0) EXTRACTLIB = (INDEX(TEMPINPUT,'#'))
+                    ELSE EXTRACTLIB=(INDEX(TEMPINPUT,'('))
+                    IF (EXTRACTLIB NE 0) TEMPINPUT=SUBSTR(TEMPINPUT,1,EXTRACTLIB-1)
+                    MEMBER=TEXNAME
+                 END
+                 INDSN=TEMPINPUT
+
+             ;%%%%%%%%%%%%%%%%%%%%%%%%
+             ;     FULL_INPUT_NAME
+             ;%%%%%%%%%%%%%%%%%%%%%%%%
+                FULL_INPUT_NAME:
+                WRI ''
+                IF (MEMBER NE '') BEGIN
+                    WRI 'Is the complete dsname on your input statement - \INPUT &(TEMPNAME)'
+                    WRI '<.B+>(1)<.B-> &(TEMPINPUT)#&(TEMPNAME)'
+                    WRI '<.B+>(2)<.B-> &(TEMPINPUT)#&(TEMPNAME).TEX, OR'
+                    TRY REA STR SAVINPUT UPP PRO '<.B+>(3)<.B-> Other (1/2/3): '
+                    MEMBERFLG=TRUE
+                END
+                ELSE BEGIN
+                    WRI 'Is the complete dsname on your input statement - \INPUT &(TEMPNAME) '
+                    WRI '<.B+>(1)<.B-> &(TEMPNAME)'
+                    WRI '<.B+>(2)<.B-> &(TEMPNAME).TEX, OR'
+                    TRY REA STR SAVINPUT UPP PRO '<.B+>(3)<.B-> Other (1/2/3):  '
+                END
+                IF (TRYATTN) GOTO QUIT
+
+                ; look at SAVINPUT (user's answer) for ? or HELP
+                IF ((INDEX('.?.HELP.','.&(SAVINPUT).') NE 0) OR (SAVINPUT EQ '')) BEGIN
+                    WRI ''
+                    COMM Looking for the complete name after the WYLBUR prefix of WYL.GG.UUU
+                    COMM For example, is the complete filename &(TEMPNAME) or &(TEMPNAME).TEX?
+                    COMM If it is neither, enter 3 at this prompt.
+                    WRI ''
+                    GOTO FULL_INPUT_NAME
+                END
+
+                ; look at SAVINPUT (user's answer) for 2
+                IF (INDEX('.2.','.&(SAVINPUT).') NE 0) TEXNAME=TEXNAME||'.TEX'
+
+                ; look at SAVINPUT (user's answer) for YES, Y, OK, 1 OR 2
+                IF (INDEX('.1.2.YES.Y.OK.','.&(SAVINPUT).') NE 0) BEGIN
+                    IF (MEMBERFLG) BEGIN
+                        DSNPARM=TEMPINPUT||'('||TEXNAME||')'
+                        PCALL DSNCHECK(DSNPARM,DSINFO)
+                        IF (DSINFO EQ '') BEGIN
+                            TEXNAME=TEXINPUT
+                            GOTO FULL_INPUT_NAME
+                        END
+                        ELSE BEGIN
+                            MEMBER=TEXNAME
+                            GOTO GOTDSN1
+                        END
+                    END
+                    DSNPARM=TEXNAME
+                    GOTO GOTDSN1
+                END
+
+                ELSE BEGIN ;user entered something else
+                    DSNPARM=''
+                    WRI ''
+                    TRY REA STR SAVINPUT UPP PRO'Complete Dsname for filename called by ''\INPUT &(TEMPNAME)'': '
+                    IF (TRYATTN) GOTO QUIT
+                    ; look at SAVINPUT (user's answer) for ? or HELP
+                    IF ((INDEX('.?.HELP.','.&(SAVINPUT).') NE 0) OR (SAVINPUT EQ '')) BEGIN
+                        WRI ''
+                        COMM Looking for the complete name after the WYLBUR prefix of WYL.GG.UUU
+                        COMM For example, is the complete filename &(TEMPNAME) or &(TEMPNAME).TEX?
+                        COMM If it is neither, enter 3 at this prompt.
+                        WRI ''
+                        GOTO FULL_INPUT_NAME
+                    END
+                    IF (SUBSTR(SAVINPUT,1,3) EQ 'WYL') SAVINPUT=(SUBSTR(SAVINPUT,12))
+                    ; strip out DD name
+
+                    IF ((INDEX(SAVINPUT,'#') NE 0) OR (INDEX(SAVINPUT,'(') NE 0)) BEGIN
+                        ; library and member name given, setup DDSTMT
+                        N0=SIZE(SAVINPUT)
+                        EXTRACTLIB = (INDEX(SAVINPUT,'#'))
+                        IF (EXTRACTLIB NE 0) BEGIN
+                            IF (EXTRACTLIB NE 1) DSNPARM=SUB(SAVINPUT,1,EXTRACTLIB-1)
+                            SAVINPUT=SUBSTR(SAVINPUT,EXTRACTLIB+1)
+                        END
+                        ELSE BEGIN    ; () found
+                            EXTRACTLIB = (INDEX(SAVINPUT,'('))
+                            IF (EXTRACTLIB NE 1) DSNPARM=SUB(SAVINPUT,1,EXTRACTLIB-1)
+                            N0=N0-EXTRACTLIB
+                            SAVINPUT=SUBSTR(SAVINPUT,EXTRACTLIB+1,N0-1)
+                        END
+                    MEMBER=SAVINPUT
+                    END
+
+                TEXEXT=INDEX(SAVINPUT,'.')
+                IF (TEXEXT NE 0) TEXINPUT=SUB(SAVINPUT,1,TEXEXT-1)
+                IF ((TEXEXT EQ 0) AND (TEXINPUT EQ '')) TEXINPUT=SAVINPUT
+                IF (DSNPARM EQ '') DSNPARM=STRIP(SAVINPUT)
+                GOTO GOTDSN1
+                END
+            END
+        END
+
+    TEXNAME=STRIP(TEXNAME)
+    DSNPARM = TEXNAME
+    GOTO GOTDSN1
+    DD_LOOP:
+    WHILE (ITEM NE -1) BEGIN
+        INPUTFLG=FALSE
+        POINT C'\INPUT' (1) IN &(ITEM+.001)/LAST NOLIST
+        NEXT_ITEM = CURRENT
+        IF (NEXT_ITEM EQ -1) ITEM_END = LAST
+        ELSE BEGIN
+            ITEM_END = NEXT_ITEM-.001
+            INPTEXTFLG=TRUE
+            GOTO STRIP_INPUT
+        END
+        GET_MORE_INPUT:
+        POINT &(PARM_STRING) &(ITEM) &(ITEM_END) NOLIST
+        IF (CURRENT EQ -1) DELETE &(ITEM) &(ITEM_END)
+        ITEM = NEXT_ITEM
+    END
+    END
+
+    IF ((NUMINPUT EQ 0) OR (NUMINPUT EQ '')) BEGIN ; only 1 source file - no DD stmts needed
+        CONCATFLAG=TRUE
+        INPUTFLG=FALSE
+        GOTO CHECKDSN1
+    END
+GOTO DVI
+END
+;%%%%%%%%%%%%%%%%%%%%%%%%
+; SOME_LOOP
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;*********************************************************************
+; The TeX Source is a series of \input stmts.  Prompt user for full
+; name of each file (i.e., does it have the suffix .TEX?)
+;******************************************************************
+;
+DD=LAST ; counter for number of \input files
+MULTINFLG=TRUE ; TeX Source file made up of \input stmts.
+NUMINPUT=0
+SOME_LOOP:
+WHILE (DD NE 0) BEGIN
+    IF (WORKFILE NE 0) PICK &(WORKFILE)
+    POINT C'\INPUT'1 (1) NOLIST
+    GOTO STRIP_INPUT
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         DVI
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;*******************************
+; prompt for DVI output filename
+;*******************************
+DVI:
+WRI ''
+TRY REA STR DVIOUT UPP PRO 'Dsname of DVI Output File: '
+IF (TRYATTN) GOTO QUIT
+IF ((DVIOUT EQ '') OR (INDEX('.HELP.?.','.&(DVIOUT).') NE 0)) BEGIN
+    TRY LIST 132/138 FRO &(HELPDSN) UNN
+    GOTO DVI
+END
+TRY DVIOUT = DSNFORMAT(DVIOUT) ; DSNFORMAT provides fully qualified name
+IF (TRYERROR) BEGIN
+    WRI 'You must provide a valid dataset name for the DVI file to be created.'
+    GOTO DVI
+END
+SX1=DSNVER(DVIOUT)
+IF (SX1 NE 'NOT THERE' AND SX1 NE 'BAD MEMBER') BEGIN
+    WRI ''
+    WRI DVIOUT||' already exists.  '
+    IF(YESNO('Do you want to replace it? ') EQ 'YES') BEGIN
+        TRY SCR &(DVIOUT)
+        IF (TRYATTN) OR (TRYERROR) GOTO DVI
+    END
+    ELSE GOTO DVI
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         ASK_PRINT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+ASK_PRINT:
+WRI ''
+TRY REA STR PRIREPLY UPP PRO 'Do you want to print the DVI file (RETURN=YES)? '
+IF (TRYATTN) GOTO DVI
+IF (INDEX('.HELP.?.','.&(PRIREPLY).') NE 0) BEGIN
+    TRY LIST 141/144 FRO &(HELPDSN) UNN
+    GOTO ASK_PRINT
+END
+IF (INDEX('.YES.Y.OK.','&(PRIREPLY).') EQ 0) GOTO TEXJCL
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GET_COPIES
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GET_COPIES:
+; PROMPT FOR COPIES OPTION
+;
+WRI ' '
+TRY READ STRING COPYREPLY UPP PRO 'How many copies do you want (CR=default 1)? '
+IF (TRYATTN) GOTO DVI
+IF ((COPYREPLY EQ ' ') OR (INDEX('.YES.Y.OK.','.&(COPYREPLY).') NE 0)) BEGIN
+   COPIES=1
+   GOTO GET_FORM
+END
+COPYREPLY = STRIP(COPYREPLY)
+IF (COPYREPLY NE '') BEGIN ; user specified something
+    IF(INDEX('.HELP.?.','.&(COPYREPLY).') NE 0) BEGIN ; HELP
+        COMM
+        COMM For multiple copies of your TeX output, enter the number
+        COMM of copies you want.
+        COMM
+        GOTO GET_COPIES
+    END
+    TRY COPIES = NCONVERT(COPYREPLY)
+    IF (TRYERROR) GOTO GET_COPIES
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GET_FORM
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GET_FORM:
+; PROMPT FOR FORM OPTION
+;
+WRI ' '
+PROMPT_FORM:
+TRY READ STR FORMREPLY UPP PRO 'Printer Form (CR=BOND)? '
+IF (TRYATTN) GOTO GET_COPIES
+FORMREPLY = STRIP(FORMREPLY)
+IF ((FORMREPLY EQ '') OR (INDEX('.YES.Y.OK.','.&(FORMREPLY).') NE 0)) GOTO GOT_FORM ; take default
+; got a form code
+IF (FORMREPLY NE '') BEGIN ; user specified something
+    IF (INDEX('.HELP.?.','.&(FORMREPLY).') NE 0) BEGIN ; HELP
+        WRI ''
+        TRY LIST 147/161 FRO &(HELPDSN) UNN
+        GOTO PROMPT_FORM
+    END
+    IF ((SIZE(FORMREPLY) EQ 4) AND (INDEX('.BOND.3HOL.BLUE.ARCB.RAGB.BOOK.','.&(FORMREPLY).') NE 0)) FORMCODE=FORMREPLY
+    ELSE BEGIN ; bad form code
+        WRI ''
+        WRI '<.b+>'||FORMREPLY||'<.b-> is an invalid form code. Please type one of the allowable'
+        WRI 'forms codes:  '||FORM9700
+        WRI 'Type <.b+>?<.b-> if you need more information.'
+        WRI ' '
+        GOTO PROMPT_FORM
+    END
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GOT_FORM
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GOT_FORM:
+; end of "get forms" code
+OPEN WORK3 TITLE 'JCL FILE FOR TEX/TEXDVI'
+SRCFILE=DSNFORMAT(SRCFILE)
+WRI ''
+PUTEND //TEXDVI JOB
+PUTEND // EXEC TEXDVI,TEXSRC='&(SRCFILE)',
+DVIOUT=DSNFORMAT(DVIOUT)
+PUTEND //     DVI='&(DVIOUT)',
+PUTEND //     COPIES='&(COPIES)',FORMS='&(FORMCODE)',
+PUTEND //     PARM.FORMAT='\batchmode\input texsrc \end',
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    PROMPT_DVI_OPTS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+PROMPT_DVI_OPTS:
+TRY REA STR DVIOPT UPP PRO 'DVI print options: (CR=NONE) '
+IF (TRYATTN) GOTO GET_FORM
+
+; user needs help
+IF (INDEX('.HELP.?.','.&(DVIOPT).') NE 0) BEGIN
+    WRI ' '
+    TRY LIST 164/190 FRO &(HELPDSN) UNN ; LIST OF OPTIONS
+    GOTO PROMPT_DVI_OPTS
+END
+
+; user doesn't want any dvixer options
+IF ((DVIOPT EQ '') OR (INDEX('.YES.Y.OK.NO.N.','.&(DVIOPT).') NE 0)) BEGIN
+    PUTEND //     PARM.DVIXER='dialog%nodialog'
+    GOTO DD_STMTS_OUT
+END
+
+; user gave options
+IF (DVIOPT NE '') BEGIN
+    SIZEOPT=SIZE(DVIOPT)
+    IF (SIZEOPT GT 30) BEGIN
+        LONGOPT=1
+        PARMSTMT1='//  PARM.DVIXER=('||'''dvixer%nodialog'''||','||''''
+        PARMSTMT2='// '
+        WHILE (SIZEOPT GT 0) BEGIN
+            BLANKPOS=INDEX('&(DVIOPT)',' ')
+            IF ((BLANKPOS EQ 0) AND (SIZEOPT GT 0)) BEGIN ;last option given
+                PARMSTMT2=PARMSTMT2||'''&(DVIOPT)'''||')'
+                GOTO END_OPTIONS
+            END
+            OPTION=SUBSTR(DVIOPT,1,BLANKPOS-1)
+            DVIOPT=SUB(DVIOPT,BLANKPOS+1,SIZEOPT-BLANKPOS)
+            SIZEOPT=SIZE(DVIOPT)
+            IF (LONGOPT EQ 1) BEGIN
+                PARMSTMT1=PARMSTMT1||OPTION||''''||','
+                LONGOPT=0
+            END
+            ELSE PARMSTMT2=PARMSTMT2||''''||OPTION||''''||','
+        END
+    END
+    ELSE BEGIN
+        PUTEND // PARM.DVIXER='dvixer%nodialog &(DVIOPT)'
+        GOTO DD_STMTS_OUT
+    END
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    END_OPTIONS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+END_OPTIONS:
+PUTEND &(PARMSTMT1)
+PUTEND &(PARMSTMT2)
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    DD_STMTS_OUT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+DD_STMTS_OUT:
+COUNTER=1
+WHILE (COUNTER LE NUMINPUT) BEGIN
+    PUTEND &(DDSTMT[COUNTER])
+    COUNTER=COUNTER+1
+END
+GOTO READY_TO_RUN
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    TEXJCL
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;*******************************
+; Don't print DVI - just run TeX
+;*******************************
+TEXJCL:
+OPEN WORK3 TITLE 'JCL FILE FOR TEX/TEXDVI'
+PUTEND //TEX JOB
+PUTEND // EXEC TEX,TEXSRC='&(SRCFILE)',
+PUTEND //     PARM='\batchmode\input texsrc \end',
+DVIOUT=DSNFORMAT(DVIOUT)
+PUTEND //     DVI='&(DVIOUT)'
+COUNTER=1
+WHILE (COUNTER LE NUMINPUT) BEGIN
+    PUTEND &(DDSTMT[COUNTER])
+    COUNTER=COUNTER+1
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    READY_TO_RUN
+;%%%%%%%%%%%%%%%%%%%%%%%%
+READY_TO_RUN:
+; GET READY TO RUN THE JOB
+;
+CONTINUE = FALSE
+WRI ' '
+TRY REA STR RUNREPLY UPP PRO 'Enter RUN Options, QUIT, PAUSE, LIST, or RESTART (CR=run): '
+IF (TRYATTN) GOTO QUIT
+IF (RUNREPLY EQ '') GOTO END_RUN_OPTS
+IF(INDEX('.HELP.?.','.&(RUNREPLY).') EQ 0) GOTO PARSE_RUN
+COMM
+TRY LIST 193/208 FRO &(HELPDSN) UNN
+GOTO READY_TO_RUN
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    PARSE_RUN
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;**************************************
+; Normal response (RUN, CONTINUE, etc.)
+;**************************************
+PARSE_RUN:
+RUNREPLY = RUNREPLY||' '
+PCALL FWORD(RUNREPLY,RUNREPLY,'CONTINUE',CONTINUE,VAL) ; look for CONTINUE
+IF (~CONTINUE) PCALL FWORD(RUNREPLY,RUNREPLY,'CONT',CONTINUE,VAL) ; look for CONT
+IF (CONTINUE) GOTO END_RUN_OPTS
+IF(SUB(RUNREPLY,1,3) EQ'LIS') GOTO LIST_JCL
+IF(RUNREPLY EQ 'L') GOTO LIST_JCL
+IF(SUB(RUNREPLY,1,3) EQ'PAU') GOTO PAUSE
+IF(SUB(RUNREPLY,1,3) EQ'QUI') GOTO QUIT
+IF(SUB(RUNREPLY,1,3) EQ'EXI') GOTO QUIT
+IF(SUB(RUNREPLY,1,3) EQ'RES') BEGIN ; clean up
+    RUNREPLY = ''
+    DSNPARM=''
+    SRCFILE = ''
+    TEXNAME= ''
+    TEXINPUT= ''
+    MEMBER=''
+    DD=0
+    INPTEXTFLG=FALSE
+    INPUTFLG=FALSE
+    GOTO INIT
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    END_RUN_OPTS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+END_RUN_OPTS:
+; fixup "hold=yes"
+PCALL FWORD(RUNREPLY,RUNREPLY,'HOLD=',B0,VAL) ; look for HOLD=
+IF (B0) BEGIN ; Found HOLD= something
+    VAL=UPPER(VAL)
+    IF (VAL EQ 'Y' OR VAL EQ 'YES') BEGIN ; found HOLD=YES
+        RUNREPLY=RUNREPLY ; remove from run options string
+        RUNREPLY=STRIP(RUNREPLY)||' HOLD ' ; put it back the right way
+    END
+END
+WRI ' '
+TRY RUN NOTIFY &(RUNREPLY)
+IF (~TRYERR) GOTO QUIT ; ran OK
+WRI RUNREPLY||': Invalid RUN options.'
+GOTO READY_TO_RUN ; prompt for new RUN options
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    LIST_JCL
+;%%%%%%%%%%%%%%%%%%%%%%%%
+LIST_JCL:
+LIST
+GOTO READY_TO_RUN
+PAUSE:
+COMM The TEX JCL is in the active file.
+COMM Type XGO to resume.
+XPAUSE
+GOTO READY_TO_RUN
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;        QUIT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+QUIT:
+IF (ACTNO NE USERFILE) PICK &(USERFILE)
+IF (CONTINUE) BEGIN
+    DSNPARM=''
+    CLEAR VALUES
+    GOTO INIT
+END
+COMM Exiting TEX
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;        OUT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+OUT:
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;   PROC DSNCHECK
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;*****************************
+; Data set checker subroutine
+;*****************************
+PROC DSNCHECK (CHECKDSN,DSINFO) BEGIN
+DECLARE STRING SX1
+SX1 = DSNVER(CHECKDSN) ;DSNVER verifies existence & status of file
+DSINFO = ''
+IF (SX1 EQ 'OK') DSINFO = DSNINFO(CHECKDSN)   ; OK
+   ELSE WRI 'Error:  Data set '||CHECKDSN||' is '||SX1  ; error
+RETURN(CHECKDSN,DSINFO)
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;   PROC FWORD
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+;find and extract a word
+;  IN is input string
+;  OUT is output string (with word removed)
+;  WORD is word to look for
+;  FLAG is TRUE if the word was found, else FALSE
+;  VALUE is the argument value found if WORD ended in = sign
+;*****************************************************************
+PROC FWORD(IN,OUT,WORD,FLAG,VALUE) BEGIN
+DECLARE STRING XIN
+DECLARE BOOLEAN EQF
+EQF=FALSE
+FLAG = FALSE
+VALUE=''
+XIN=' '||TRANSLATE(IN, ' ', ',')||' '  ; commas to blanks; pad
+WORD = ' '||STRIP(WORD) ; pad word so find only if delimited
+IF (SUBSTR(WORD,SIZE(WORD),1) NE '=') WORD=WORD||' ' ; pad on rt.
+   ELSE EQF=TRUE ; we have WORD= so look for argument
+OUT = IN
+WL = SIZE(WORD)
+IX = INDEX(XIN,WORD) ; find word
+IF (IX GT 0) BEGIN ; Found the word
+    FLAG = TRUE
+;  Remove word from string...
+    IF (IX EQ 1) F1=''             ;  word was first
+    ELSE F1=SUBSTR(IN,1,IX-1)   ;  part ahead of word
+    IF (SIZE(IN) LE IX+WL-2) F2='' ;  word was last
+    ELSE F2=SUBSTR(IN,IX+WL-1)  ;  part after word
+    IF (EQF) BEGIN ; this is word=value, get value
+        IX = FIND(F2,' ,') ; next delimiter
+        IF (IX EQ 0) BEGIN ; no more delims in line, take it all
+            VALUE=F2
+            F2=''
+        END
+        ELSEIF (IX EQ 1) BEGIN ; immediate delim, null arg
+            VALUE=''
+            IF (SIZE(F2) GT 1) F2=SUBSTR(F2,2)
+            ELSE F2=''
+        END
+        ELSE BEGIN ; some arg
+            VALUE=SUBSTR(F2,1,IX-1)
+            IF (SIZE(F2) GT IX) F2=SUBSTR(F2,IX+1)
+            ELSE F2=''
+        END
+    END
+    IF (F1 NE '' AND F2 NE '') BEGIN ; check for extra comma now
+        IF (SUBSTR(F1,SIZE(F1),1) EQ ',' AND SUBSTR(F2,1,1) EQ ',') F2=SUBSTR(F2,2)  ;  don't keep two commas
+    END
+;  Make sure some delimiter is left between parts
+    IF (F1 NE '' AND F2 NE '') BEGIN ; got two parts
+        VAL=SUBSTR(F1,SIZE(F1),1) ; last of the first
+        RUNREPLY=SUBSTR(F2,1,1)        ; first of the last
+        VAL=VAL||RUNREPLY                ; trailing+leading delimiters
+        IF (FIND(VAL,', ') EQ 0) F1=F1||' ' ; put in a blank
+    END
+    OUT=F1||F2
+    OUT=STRIP(OUT,'B',',')
+    OUT=STRIP(OUT)
+    OUT=STRIP(OUT,'B',',')
+END
+    RETURN(OUT,FLAG,VALUE)
+END

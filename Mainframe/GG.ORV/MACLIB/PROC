@@ -1,0 +1,116 @@
+         MACRO                                                                  
+&L       PROC &PDS,&LWA,&SCOPE=LOCAL,&NBR=1,&BCH=YES                            
+.*                                                                              
+.* Start on ORVYL procedure                                                     
+.*                                                                              
+.*     &PDS   -- Name of the parm DSECT                                         
+.*     &LWA   -- Name of the local work area DSECT                              
+.*     &SCOPE -- LOCAL or GLOBAL                                                
+.*     &NBR   -- Number of base registers (1 OR 2)                              
+.*                                                                              
+         GBLC  &$PROC                                                           
+         GBLA  &$TRMOD                 Trace module number                      
+         LCLC  &LBLNTRY                                                         
+&$PROC   SETC  '&L'                                                             
+         BEGIN BLAB=&L,BLOCK=NO,TYPE=P                                          
+         LCLB  &P,&W                                                            
+         LCLA  &PL,&WL,&X                                                       
+         AIF   ('&PDS' EQ '').NOPDS                                             
+&P       SETB  1                       Have a parm DSECT                        
+&PL      SETA  ((L'&PDS+7)/8)*8        length of the parm area                  
+.NOPDS   AIF   ('&LWA' EQ '').NOLWA                                             
+&W       SETB  1                       Have a local work area                   
+&WL      SETA  ((L'&LWA+7)/8)*8        length                                   
+.*                                                                              
+.* Take care of the ENTRY if needed.                                            
+.*                                                                              
+.NOLWA   AIF   ('&SCOPE' EQ 'LOCAL').LOCAL                                      
+         AIF   ('&SCOPE' EQ 'GLOBAL').GLOBAL                                    
+         MNOTE 4,'Invalid SCOPE parameter. LOCAL assumed'                       
+         AGO   .LOCAL                                                           
+.GLOBAL  ANOP                                                                   
+         ENTRY &L                                                               
+         AGO   .NOLCL                                                           
+.LOCAL   ANOP                          --> Move after ENTRY stmt                
+         AIF   (&$TRMOD EQ 0).NOLCL                                             
+.*                                                                              
+.*  Generate a special ENTRY point for local modules                            
+.*    &$TRMOD is the module number which helps us to generate                   
+.*    unique symbols across the load module.                                    
+.*                                                                              
+&LBLNTRY SETC  '&L'(1,8)                                                        
+&MODNUM  SETC  '&$TRMOD'                                                        
+&LEN     SETA  (K'&LBLNTRY+K'&MODNUM)-8                                         
+         AIF   (&LEN LE 0).OKLEN                                                
+&LBLNTRY SETC  '&LBLNTRY'(&LEN+1,K'&LBLNTRY-&LEN)                               
+&FIRST   SETC  '&LBLNTRY'(1,1)                                                  
+.*                                                                              
+.*  Don't let the symbol start w/ a number                                      
+.*                                                                              
+         AIF   ('&FIRST' NE '1').NONUM                                          
+&LBLNTRY SETC  '$'.'&LBLNTRY'(2,K'&LBLNTRY-1)                                   
+.NONUM   ANOP  ,                                                                
+.OKLEN   ANOP  ,                                                                
+&LBLNTRY SETC  '&LBLNTRY&MODNUM'                                                
+         ENTRY &LBLNTRY                                                         
+&LBLNTRY DS    0H                                                               
+.NOLCL   ANOP  ,                                                                
+.*                                                                              
+.* Set up a prefix to the routine containing its name and                       
+.* the size of the work area and parm area.                                     
+.*                                                                              
+         DS    0H                      align on a halfword                      
+         DC    CL8'&L'                 Routine Name                             
+         DC    AL2(&PL)                Length of the parm area                  
+         DC    AL2(&WL)                Length of the local work area            
+.*                                                                              
+.* Set up the entry                                                             
+.*                                                                              
+&L       STM   R0,R15,4(SPR)           Save the entry registers                 
+.*                                                                              
+.* Set up addressability                                                        
+.*                                                                              
+         LR    BR,EPAR                 Get the entry point address              
+         AIF   (&NBR EQ 1).ONEBASE                                              
+         LA    BRR,4095(,EPAR)                                                  
+         LA    BRR,1(,BRR)             Set up the second base reg               
+         WITH  (&L,BR,BRR)                                                      
+         AGO   .BASEDN                                                          
+.ONEBASE WITH  (&L,BR)                 Set up routine addressability            
+.BASEDN  ANOP                                                                   
+.*                                                                              
+.* Link up the save areas.                                                      
+.*                                                                              
+         AIF   ('&BCH' EQ 'NO').NBCH                                            
+         ST    SPR,0(,WAR)             Link this to the previous                
+.NBCH    ANOP                                                                   
+         LR    WAR,SPR                 Update the work area pointer             
+         OI    0(WAR),X'80'            Mark this as last in chain               
+.*                                                                              
+.* Set up parm area addressability                                              
+.*                                                                              
+         AIF   (NOT &P).NP             no parm area                             
+         WITH  (&PDS-72,WAR)           addressability                           
+.NP      ANOP                                                                   
+.*                                                                              
+.* Set up work area addressability                                              
+.*                                                                              
+         AIF   (NOT &W).NL             no work area                             
+         AIF   (&P).NP2                have a parm area too                     
+         WITH  (&LWA-72,WAR)           if not address it                        
+         AGO   .NL                                                              
+.*                                                                              
+.* have both areas                                                              
+.*                                                                              
+.NP2     ANOP                                                                   
+.* &X       SETA  72+&PL                                                        
+         USING &LWA,&PDS+&PL                                                    
+.*       LA    WAR2,&X.(,WAR)          point at the work area                   
+.*       WITH  (&LWA,WAR2)             addressabilitiy                          
+.NL      ANOP                                                                   
+.*                                                                              
+.* Set up the new stack pointer                                                 
+.*                                                                              
+&X       SETA  72+&PL+&WL                                                       
+         LA    SPR,&X.(,WAR)                                                    
+         MEND                                                                   

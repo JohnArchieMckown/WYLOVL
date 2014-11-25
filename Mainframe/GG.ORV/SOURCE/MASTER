@@ -1,0 +1,791 @@
+MPMAST   TITLE 'ORVYL''S Master Task'
+         COPY  HEADER
+MPMAST   MODULE
+         PRINT OFF                     PSA, CVT, TCB, SCV
+         EJECT
+         IHAPSA
+         EJECT
+CVT      DSECT
+         CVT   DSECT=YES
+         EJECT
+SCIPCVT  DSECT
+         SCIPCVT PFX=SCV
+         EJECT
+         IKJTCB
+         PRINT ON
+*PUSH,GEN
+         EJECT
+MVSCOMM  DSECT
+         IEZCOM
+         EJECT
+MVSCIB   DSECT
+         IEZCIB
+*POP
+*
+MPMAST   CSECT
+         EJECT
+         MACRO
+&L       FTGEN &FUNC
+         WXTRN &FUNC.INIT
+&L       DC    A(&FUNC.INIT)
+         WXTRN &FUNC.TERM
+         DC    A(&FUNC.TERM)
+         WXTRN &FUNC.STAT
+         DC    A(&FUNC.STAT)
+         WXTRN &FUNC.DUMP
+         DC    A(&FUNC.DUMP)
+&FUNC.PARM DC    A(0)
+         MEND
+         EJECT ,
+         COPY  CBAT
+         EJECT ,
+         COPY  RTCB
+         EJECT
+         COPY  FUNCPARM
+         EJECT
+         COPY  PARMPARM
+         EJECT
+         COPY  POOLPARM
+         SPACE 3
+         COPY  CPTPARM
+         EJECT
+         COPY  DSALPARM
+         EJECT
+         COPY  JSALPARM
+         EJECT
+         COPY  SEGPARM
+         EJECT
+         COPY  SEGCBD
+         EJECT
+         COPY  ESTAPARM
+         SPACE 3
+         COPY  TASKPARM
+         EJECT
+         COPY  MEMPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*        Function Table Entry                                     *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+FUNCTAB  RECORD BEGIN
+FTINIT   DS    A                       Initialization Entry
+FTTERM   DS    A                       Termination Entry
+FTSTAT   DS    A                       Statistics Entry
+FTDUMP   DS    A                       Dump Entry
+FTPARM   DS    A                       User Parameter
+         END   ,
+         EJECT
+         COPY  TMCB
+         EJECT
+*******************************************************************
+*                                                                 *
+*        Data and Function tables                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+         DATA  BEGIN
+TMCBADDR DS    A             Address of the TMCB
+RTCBADDR DS    A             Address of the RTCB
+STACKPTR DS    A             Location of the MASTER Stack
+MVSSAVE  DS    A             Location of the entry save area
+*
+* Function Tables
+*
+FTSTART  FTGEN IOS
+         FTGEN GST
+FTEND    LABEL ,
+*
+*  System dump parameters
+*
+SDPARM   SNAP  SDATA=(CB,DM,ERR,IO,SUM,TRT),PDATA=(ALL),MF=L
+*
+DMPMSG   WTO   '***          *** Abend dump in progress',              *
+               DESC=2,ROUTCDE=1,MF=L
+*
+MDFYMSG  WTO   'Modify command:                         ',             *
+               ROUTCDE=11,MF=L
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*  MPIWORK - Master initialization routine parameter work area    *
+*                                                                 *
+*******************************************************************
+         SPACE
+MPIWORK  RECORD BEGIN
+MPIWPARM DS    XL(L'PARMIN)            Parmin area
+MPIWKEY1 DS    CL8                     Key 1
+MPIWKEY2 DS    CL8                     Key 2
+MPIWKEY3 DS    CL8                     Key 3
+MPIWVAL  DS    A                       Integer value
+MPIWSTR  DS    CL80                    String parameter area
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    MPINIT - Entry point to the ORVYL master task from MVS       *
+*             Set up the ORVYL environment and get things going   *
+*                                                                 *
+*     Input - MVS register conventions.                           *
+*                                                                 *
+*    Output - Return to MVS                                       *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+         ENTRY MPINIT
+MPINIT   STM   R14,R12,12(R13)
+         LR    BR,R15                  Get the entry address
+         USING MPINIT,BR               Set up addressability
+         ST    R13,MVSSAVE             Save the MVS Save area address
+         GETMAIN RU,LV=4096,LOC=ANY
+         LR    WAR,R1                  Get the stack pointer
+         LA    SPR,@WAR+8              Dummy first entry
+         ST    SPR,STACKPTR            Save our stack pointer
+         LA    R0,MODTABC
+         LA    R1,MODTAB
+         LOOP  BEGIN
+         L     R15,@R1
+         QSNAP @R15,31
+         LA    R1,@R1+L'MODTAB
+         UNTIL (BCT,R0),END
+         LCALL DOINIT                  Go forth and initialize
+         LCALL MAIN                    Do low level processing
+         L     R13,MVSSAVE             Get save area address
+         LM    R14,R12,12(R13)         Restore calling registers
+         CLEAR R15
+         BASR  0,R14
+         DROP  ,
+MODTAB   DC    V(GSTINTF)
+         DC    V(IOSERV)
+         DC    V(MEMSERV)
+         DC    V(MSGSERV)
+         DC    V(MPMAST)
+         DC    V(TEXTCONV)
+         DC    V(PARMS)
+         DC    V(IPLTEXT)
+         DC    V(TASKSERV)
+MODTABC  EQU   (*-MODTAB)/L'MODTAB
+         EJECT
+*******************************************************************
+*                                                                 *
+*    DOINIT -  ORVYL master task initialization                   *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+DOINIT   PROC  SCOPE=LOCAL
+*
+* First get us into supervisor state
+*
+         MODESET MODE=SUP
+         CLEAR R1                      ECB indicator for sysevent
+         SYSEVENT TRANSWAP
+*
+* Initialize the services
+*
+         PSET  @TASKINI
+         MVC   @TASKIST,STACKPTR       Tell him about our stack
+         VCALL TASKINIT                Initialize task services
+         LR    RTCBR,RVR               setup our RTCB pointer
+         ST    RTCBR,RTCBADDR          Save the address
+         WITH  (RTCB,RTCBR)
+         VCALL PARMINIT                Setup parms
+*
+* Initialize the information we will need to terminate
+*
+         POOLGET L'TMCB,TYPE=(LOCAL,BELOW16M)    Get a TMCB
+         LR    RX,RVR                  Copy the address
+         WITH  (TMCB,RX)
+         CLEAR TMCB                    Clear it
+         MVC   TMCB(4),=C'TMCB'        Move in the ID
+*
+         POOLGET 2048,TYPE=(LOCAL)     Get a stack for termination
+         ST    RVR,TMCBSTK             Save its address
+         POOLGET L'SEGCBD,TYPE=(LOCAL) Get a SEG control block
+         ST    RVR,TMCBSCB             Save its address
+         SEGINIT ,,TMCBSCB,RTN=DUMPWRT Initialize it
+*
+* Save the location of the TMCB
+*
+         ST    RX,TMCBADDR             Save the address
+         L     RS,RTCBCBAT             Get the CBAT address
+         WITH  (CBAT,RS),'ST RX,CBATTMCB'    Save the TMCB address
+         DROP  RTCBR
+*
+*  Obtain the parameter work area
+*
+         MEMGET L'MPIWORK
+         LR    RK,RVR
+         USING (MPIWORK,RK)
+         WITH  (PARMIN,MPIWPARM)
+*
+*  Get the system name
+*
+         MVC   TMCBNAME,=CL8'TORVYL'   Default name
+         MVC   MPIWKEY1,=CL8'SYSNAME'  Primary Keyword
+         PSET  @PARMDO
+         PMOV  @PARILOC,LA:PARMIN      PARMIN location
+         PMOV  @PARILEN,LA:L'PARMIN+8  Length of input
+         PMOV  @PAROLOC,LA:MPIWSTR     Location of return area
+         PMOV  @PAROLEN,LA:L'TMCBNAME  Length of return area
+         SET   PARMFSTR
+         VCALL PARMDO
+         IF    (RVR,Z),BEGIN
+         MVC   TMCBNAME,=CL8' '        Blank the name field
+         L     RS,@PAROLEN             String length
+         DEX   RS,'MVC  TMCBNAME(0),MPIWSTR'   Move it in
+         END   ,
+*
+* Set the SYSMDUMP defaults
+*
+         CLEAR TMCBDSN             No dump!
+         CLEAR TMCBGDG                 Generation number
+         CLEAR TMCBTRK                 Tracks
+*
+*  Obtain the SYSMDUMP parameters
+*
+         MVC   MPIWKEY1,=CL8'SYSDUMP'  Primary Keyword
+*
+*  Get dsname
+*
+         MVC   MPIWKEY2,=CL8'DSNAME'   Secondary Keyword
+         PSET  @PARMDO
+         PMOV  @PARILOC,LA:PARMIN      PARMIN location
+         PMOV  @PARILEN,LA:L'PARMIN+16 Length of input
+         PMOV  @PAROLOC,LA:MPIWSTR     Location of return area
+         PMOV  @PAROLEN,LA:L'TMCBDSN   Length of return area
+         SET   PARMFSTR
+         VCALL PARMDO
+         IF    (RVR,Z),BEGIN
+         MVC   TMCBDSN,=CL44' '         Blank the name field
+         L     RS,@PAROLEN             String length
+         DEX   RS,'MVC  TMCBDSN(0),MPIWSTR'   Move it in
+         CLEAR TMCBGDG                 Assume non-gdg
+         END   ,
+*
+*  Get gdg
+*
+         MVC   MPIWKEY2,=CL8'GDG'      Keyword
+         PSET  @PARMDO
+         PMOV  @PARILOC,LA:PARMIN      PARMIN location
+         PMOV  @PARILEN,LA:L'PARMIN+16 Length of input
+         PMOV  @PAROLOC,LA:MPIWSTR     Location of return area
+         PMOV  @PAROLEN,LA:L'TMCBGDG   Length of return area
+         SET   PARMFSTR
+         VCALL PARMDO
+         IF    (RVR,Z),BEGIN
+         MVC   TMCBGDG,=CL8' '          Blank the name field
+         L     RS,@PAROLEN             String length
+         DEX   RS,'MVC  TMCBGDG(0),MPIWSTR'   Move it in
+         END   ,
+*
+*  Get volume
+*
+         MVC   MPIWKEY2,=CL8'VOLUME'    Keyword
+         PSET  @PARMDO
+         PMOV  @PARILOC,LA:PARMIN      PARMIN location
+         PMOV  @PARILEN,LA:L'PARMIN+16 Length of input
+         PMOV  @PAROLOC,LA:MPIWSTR     Location of return area
+         PMOV  @PAROLEN,LA:L'TMCBVOL   Length of return area
+         SET   PARMFSTR
+         VCALL PARMDO
+         IF    (RVR,Z),BEGIN
+         MVC   TMCBVOL,=CL6' '         Blank the name field
+         L     RS,@PAROLEN             String length
+         DEX   RS,'MVC  TMCBVOL(0),MPIWSTR'   Move it in
+         END   ,
+*
+*  Get tracks
+*
+         MVC   MPIWKEY2,=CL8'TRACKS'    Keyword
+         PSET  @PARMDO
+         PMOV  @PARILOC,LA:PARMIN      PARMIN location
+         PMOV  @PARILEN,LA:L'PARMIN+16 Length of input
+         PMOV  @PAROLOC,LA:MPIWVAL     Location of return area
+         PMOV  @PAROLEN,LA:L'MPIWVAL   Length of return area
+         SET   PARMFINT
+         VCALL PARMDO
+         IF    (RVR,Z),BEGIN
+         MVC   TMCBTRK,MPIWVAL         Move it in
+         END   ,
+*
+*  Free the work area
+*
+         DROP  RK
+         MEMFREE L'MPIWORK,A=(RK)
+*
+*  Then allocate SYSMDUMP
+*
+         IF    (TMCBDSN,NZ),BEGIN  Alloc if explicitly specified...
+         PSET  @ALLOSYM
+         ST    RX,@ASMTMCB             TMCB address
+         ACALL ALLOSYSM
+         END
+*
+         EXTRACT TMCBCOMA,'S',FIELDS=(COMM),MF=(E,TMCBEPL)
+         L     RA,TMCBCOMA             Pointer to communication block
+         WITH  (MVSCOMM,RA)
+         L     RS,COMECBPT             Ptr to Stop/Modify ECB
+         ST    RS,TMCBSMEA             Save it in the list
+*
+*  Process Start CIB if present
+*
+         L     RB,COMCIBPT             Ptr to CIB
+         WITH  (MVSCIB,RB)
+         IF    (CIBVERB.CIBSTART,EQ),BEGIN
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(RB)  Release it
+         IF    (R15,NZ),'QSNAP  "CIB FREE ERROR"'
+         END   ,
+         DROP  RB
+*
+*  Allow "Modify" commands
+*
+         QEDIT ORIGIN=COMCIBPT,CIBCTR=2
+         DROP  RA
+*
+         LA    RS,TMCBECB              Address of local ECB
+         ST    RS,TMCBECBA             Save that in the ECB list
+         OI    TMCBECBA,X'80'          Mark the end of the list
+*
+*  Initialize Functions
+*
+INITFUNC LA    RB,FTSTART              Address of the function tables
+         WHILE (RB,LT,=A(FTEND)),BEGIN
+         CLEAR RVR                     Clear the parm register
+         WITH  (FUNCTAB,RB),BEGIN
+         ACALL FTINIT,*                Call the init routine
+         ST    RVR,FTPARM              Save the parm value returned
+         END   ,
+         LA    RB,@RB+L'FUNCTAB        Get to the next function
+         END   ,
+         PEND  ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    MAIN   -  ORVYL master task main loop                        *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+MAIN     PROC  SCOPE=LOCAL
+         L     RX,TMCBADDR             Get the TMCB address
+         WITH  (TMCB,RX)
+         L     RTCBR,RTCBADDR          Get the RTCB address
+         WITH  (RTCB,RTCBR)
+*
+* Just wait for something to do ...
+*
+WAIT     LOOP  BEGIN
+         WAIT  1,ECBLIST=TMCBSMEA      Wait for something
+*
+*  Handle operator commands
+*
+         L     RS,TMCBSMEA             MVS communications ECB
+         IF    @RS.X'40',BEGIN         Has been posted
+         L     RA,TMCBCOMA             Pointer to communication block
+         WITH  (MVSCOMM,RA)
+         L     RB,COMCIBPT             CIB pointer
+         WITH  (MVSCIB,RB)
+*
+*  A STOP command was received, just go away
+*
+         IF    (CIBVERB.CIBSTOP,EQ),BEGIN
+         WTO   'Operator Issued STOP command',ROUTCDE=11
+         EXIT  WAIT
+         END
+         EJECT
+*
+*  It was a MODIFY command, log it then try to figure it out
+*
+         IF    (CIBVERB.CIBMODFY,EQ),BEGIN
+         LH    R15,CIBDATLN            Command length
+         CEIL  R15,24
+         LA    RS,MDFYMSG              Log Operator request
+         MVC   @RS+20(24),=CL24' '     Clear Buffer
+         DEX   R15,'OC @RS+20(0),CIBDATA'   Uppercase and move text
+         WTO   MF=(E,(RS))             And write it out
+*
+         LA    RS,MDFYMSG+20           Locate Operator request
+         IF    (@RS,EQ,=C'STOP '),EXIT,WAIT  A stop request
+         IF    ((@RS,EQ,=C'DUMP '),OR,(@RS,EQ,=C'CANCEL ')),BEGIN
+         SET   TMFDUMP+TMFABEND        always dump
+         EXIT  WAIT
+         END
+         ELSEIF (@RS,EQ,=C'DISP1 '),BEGIN
+         PSET  @FUNCPRM
+         PMOV  @FUNCDTA,GSTPARM
+         VCALL GSTDISP1
+         END   ,
+         ELSEIF (@RS,EQ,=C'SETCLOCK'),BEGIN
+         PSET  @FUNCPRM
+         PMOV  @FUNCDTA,GSTPARM
+         VCALL SETCLOCK            Set local time offset for guest
+         END   ,
+         END
+*
+*   Not a known request, just ignore it
+*
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(RB)  Release the buffer
+         IF    (R15,NZ),'QSNAP  "CIB FREE ERROR"'
+         END   ,
+*
+*  Not the Operator, check the main ECB
+*
+         IF    TMCBECB.X'40',EXIT,WAIT
+         END   ,
+         EJECT
+*
+* For some reason, Orvyl is going away.
+*
+GOODNITE LABEL ,
+* Terminate the guest unless it will mess up a dump
+         IF    (^TMFDUMP,AND,^TMFABEND),BEGIN
+         PSET  @FUNCPRM
+         PMOV  @FUNCDTA,GSTPARM
+         VCALL GSTTERMP                Preliminary termination
+         END   ,
+         ACALL STOPBAT                 Tell Jes what's up
+*        IF    ^TMFGDONE,'VCALL GSTSTOP'  Stop the guest machine
+         STATUS STOP                   Stop all the subtasks
+         ESTAE 0                       Cancel the ESTAE exit
+*
+* Do a formatted dump if that was requested, clean up everything
+*
+         IF    TMFDUMP,'LCALL DODUMP'  Do a formatted dump
+         LCALL DOCLEAN                 Do the cleanup
+*
+* Close all hiperspaces
+*
+         VCALL IOSHTERM
+*
+*  Do an MVS ABEND dump
+*
+         IF    TMFABEND,BEGIN
+         EXIT  ,                       PATCH OUT IF NEEDED
+         ABEND 122,DUMP,DUMPOPT=SDPARM
+         END   ,
+         PEND  ,                       Then return
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   STOPBAT -- This routine clears the Orvyl bit in the SCIP CVT  *
+*              so that JES will no longer schedule interactive    *
+*              jobs.  Hopefully it is temporary but you know how  *
+*              these things go.                                   *
+*                                                                 *
+*     Input -  None                                               *
+*                                                                 *
+*    Output -  None                                               *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+STOPBAT  PROC  SCOPE=GLOBAL
+         USING PSA,R0
+         L     RB,PSATNEW              CURRENT TCB
+         DROP  R0
+         WITH  (TCB,RB),'L  RB,TCBTIO'   TIOT POINTER
+         IF    (@RB,NE,'ORVYL'),EXIT   Production only
+         L     RB,CVTPTR               CVT
+         WITH  (CVT,RB),'L  RB,CVTUSER'   ADDRESS OF THE SCIP CVT
+         IF    (RB,Z),EXIT             NONE THERE
+         WITH  (SCIPCVT,RB)
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)   MODIFYING LOW CORE
+         CLEAR  SCVHSPFL.HSPFORVR      ORVYL (FILES) UNAVAILABLE
+         CLEAR  SCVHSPFL.HSPFORV       ORVYL (FILES) UNAVAILABLE
+         MODESET KEYREG=(2)            JUST A REGULAR GUY
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   DOCLEAN -- This routine calls the cleanup routines.           *
+*                                                                 *
+*     Input -  None                                               *
+*                                                                 *
+*    Output -  None                                               *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+DOCLEAN  PROC  SCOPE=LOCAL
+*
+* Call all the cleanup routines
+*
+         LA    RB,FTSTART              FUNCTION TABLES
+         WHILE (RB,LT,=A(FTEND)),BEGIN
+         WITH  (FUNCTAB,RB),BEGIN
+         PSET  @TERMPRM
+         MVC   @TERMDTA,FTPARM         Function parameter
+         ACALL FTTERM,*                Call the cleanup routine
+         END   ,
+         LA    RB,@RB+L'FUNCTAB
+         END   ,
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    DODUMP -- Take a dump of MP-ORVYL                            *
+*                                                                 *
+*     Input -  None                                               *
+*                                                                 *
+*    Output -  None                                               *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+DODUMP   PROC  SCOPE=GLOBAL
+         L     RX,TMCBADDR             Get the TMCB address
+         WITH  (TMCB,RX)
+         IF    (TMCBNAME,EQ,'ORVYL'),BEGIN  Production system...
+         LA    RB,DMPMSG               Operator message
+         MVC   @RB+8(8),TMCBNAME       Use actual name
+         WTO   MF=(E,(RB))             And write it out
+         END
+*-
+*-       Dump services.
+*-
+         PSET  @DUMPPRM
+         MVC   @DUMPSCB,TMCBSCB        Move in the scb
+         VCALL TASKDUMP                Dump the task Stuff
+*-
+*-       Dump Functions.
+*-
+         LA    RB,FTSTART              FUNCTION TABLES
+         WHILE (RB,LT,=A(FTEND)),BEGIN
+         WITH  (FUNCTAB,RB),BEGIN
+         PSET  @DUMPPRM
+         MVC   @DUMPDTA,FTPARM         Function parameter
+         MVC   @DUMPSCB,TMCBSCB        Also pass the Segcb
+         ACALL FTDUMP,*                Call the dump routine
+         END   ,
+         LA    RB,@RB+L'FUNCTAB
+         END   ,
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+* DOPUT -- This local routine is copied into memory below the     *
+*          16M line where it is called to execute the put macro   *
+*          instruction.  It is called with RVR pointing to the    *
+*          data and it returns with all registers intact.         *
+*                                                                 *
+*******************************************************************
+         SPACE
+DPS      STM   R0,R15,0(SPR)
+         LR    BR,EPAR                 Get the entry point address
+         USING DOPUT,BR
+         ST    SPR,PUTSTK              Save the stack pointer
+         LA    SPR,PUTSAVE
+         LA    RA,PUTLOC               where to pick up
+         BASSM RB,RA
+         L     SPR,PUTSTK
+         LM    R0,R15,0(SPR)           Restore calling registers
+         BSM   0,RAR                   Return to caller
+PUTLOC   PUT   DUMPDCB,(0)             Write the data out
+         BSM   0,RB                    Back to 31 bit mode
+         DROP  BR
+*
+PUTSTK   DS    A
+PUTSAVE  DS    18A
+OPARM    OPEN  (,OUTPUT),MF=L          Room for DCB pointer
+DUMPDCB  DCB   DDNAME=MPKAPUT,MACRF=(PM),RECFM=VBA,LRECL=140,          *
+               BLKSIZE=4000,DSORG=PS
+DOPUT    EQU   DPS,*-DPS,C'X'
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    DUMPWRT - This is the processing routine for dump writing  *
+*                                                               *
+*                                                               *
+*                                                               *
+*                                                               *
+*****************************************************************
+         SPACE ,
+DUMPWRT  PROC  @SEGRTN,SCOPE=LOCAL
+         L     RK,@SEGRCB              Address of the SEGCB
+         WITH  (SEGCBD,RK)             Addressability
+*
+* Find out what is going on
+*
+         IF    SEGFINIT,BEGIN          Initialization Call
+*
+* We have to set up the AMODE24 stuff, and the buffer which has
+* not yet been getmained.
+*
+         POOLGET 140,TYPE=(LOCAL,BELOW16M)
+         ST    RVR,SEGADD              Save the buffer address
+         MVC   SEGBLEN,=H'140'         And the buffer length
+*
+* Cause the first text to start a page and set other counts to 0.
+*
+         L     RA,SEGADD               Get the address of the buffer
+         CLEAR (@RA,4)                 Clear the RDW area
+         MVI   @RA+4,C'1'              Page control character
+         MVC   SEGCNT,=H'5'            Count the cc char
+         MVC   SEGMCNT,=H'5'           clear the mark value
+         MVC   SEGRCNT,=H'5'           And the record value
+*
+* Initialize the AMODE24 Stuff
+*
+         POOLGET L'DOPUT,TYPE=(LOCAL,BELOW16M)
+         LR    RY,RVR
+         ST    RY,SEGUSER              Save AMODE24 address
+*
+* Move the DOPUT code in
+*
+         LM    RA,RB,=A(DOPUT,L'DOPUT)
+         LR    RS,RB
+         MVCL  RVR,RA                  Move it
+         WITH  (DOPUT,RY)
+*
+* Do the open
+*
+         OPEN  (DUMPDCB),MF=(E,OPARM)  Open up the DCB
+         END   ELSE,BEGIN
+         EJECT ,
+*
+* A write call.  This writes the data out of the buffer and
+* sets up a new one.  The same happens if the buffer overflows..
+* except that an indication is also saved reguarding that case.
+*
+*  Write the data out
+*
+         L     RY,SEGUSER              Get the data address
+         WITH  (DOPUT,RY)              Address the low version
+         L     RA,SEGADD               Address of the data
+         LH    RB,SEGCNT               Count of the data
+         STH   RB,@RA                  Set up the RDW
+         LR    RVR,RA                  Address of the record
+         LCALL DOPUT                   Write the record out
+*
+*  Clean up the buffer
+*
+         IF    SEGFEOB,BEGIN
+         MVI   @RA+4,C'1'              New page
+         END   ELSE,BEGIN
+         MVI   @RA+4,C' '              New line
+         END   ,
+         MVC   SEGCNT,=H'5'            Count the cc char
+         MVC   SEGMCNT,=H'5'           clear the mark value
+         MVC   SEGRCNT,=H'5'           And the record value
+         IF    SEGFOVER,BEGIN
+         SEG   '-- OV --> ',,(RK)
+         END   ,
+         END   ,
+         PEND  ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*   @ALLOSYM - Parameters passed to SYSMDUMP allocation routine   *
+*                                                                 *
+*******************************************************************
+         SPACE
+@ALLOSYM RECORD BEGIN
+@ASMTMCB DS    A                       Address of the TMCB
+         END   ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*     ALLOSYSM - Routine to dynamically allocate a SYSMDUMP       *
+*                data set.                                        *
+*                                                                 *
+*                                                                 *
+*      Input - none                                               *
+*                                                                 *
+*     Output - none                                               *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+ALLOSYSM PROC  @ALLOSYM,SCOPE=LOCAL
+         L     RY,@ASMTMCB
+         WITH  (TMCB,RY)
+*
+*  Build the dynamic allocation parameter area
+*
+         MEMGET L'@DSALLO
+         LR    RK,RVR
+         WITH  (@DSALLO,RK)
+         MVC   @DSDSN,TMCBDSN           Set the data set name
+         MVC   @DSDDN,=CL8'SYSMDUMP'    dd name
+         MVC   @DSVOL,TMCBVOL           volume
+         SET   @DSNEW                   new data set
+         SET   @DSARLSE                 release unused space
+         IF    (TMCBGDG,NZ),BEGIN
+         MVC   @DSMEM,TMCBGDG           generation
+         SET   @DSGDG                   indicate gdg
+         END   ,
+*        MVC   @DSPTQ,TMCBTRK           primary space
+         MVC   @DSSTQ,TMCBTRK           secondary space
+*
+*  Do the dynamic allocation
+*
+         PSET  @DSDALLO
+         ST    RK,@DSDPARM
+         VCALL DSALLO
+*
+*  If allocation failed log the error
+*
+         IF    ('LTR  RB,RVR',NZ),BEGIN
+         WTO   'Unable to allocate SYSMDUMP',ROUTCDE=11
+         QSNAP @DSRTN,6
+         LCALL ALLOUDMP                Use sysudump instead
+         END
+         DROP  RK
+*
+*  Free the Dynamic allocation parameter area
+*
+         MEMFREE L'@DSALLO,A=(RK)
+         LR    RVR,RB                  Set return
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*     ALLOUDMP - Routine to dynamically allocate a SYSUDUMP       *
+*                sysout data set.                                 *
+*                                                                 *
+*                                                                 *
+*      Input - none                                               *
+*                                                                 *
+*     Output - none                                               *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+ALLOUDMP PROC  ,SCOPE=LOCAL
+*
+*  Build the dynamic allocation parameter area
+*
+         MEMGET L'@JSALLO
+         LR    RK,RVR
+         WITH  (@JSALLO,RK)
+         MVC   @JSDDNM,=CL8'SYSUDUMP'  Set the ddname
+*         SET   @JSHOLD                  output hold
+         MVI   @JSCLAS,C'A'             sysout=a
+*
+*  Do the dynamic allocation
+*
+         PSET  @JSDALLO
+         ST    RK,@JSDPARM
+         VCALL JSALLO
+*
+*  If allocation failed log the error
+*
+         IF    ('LTR  RB,RVR',NZ),BEGIN
+         WTO   'Unable to allocate SYSUDUMP',ROUTCDE=11
+         QSNAP @JSRTN,6
+         END
+         DROP  RK
+*
+*  Free the Dynamic allocation parameter area
+*
+         MEMFREE L'@JSALLO,A=(RK)
+         PEND
+         EJECT
+         LTORG
+         END   .

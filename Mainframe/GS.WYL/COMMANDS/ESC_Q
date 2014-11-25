@@ -1,0 +1,440 @@
+;
+;;  (This is WYL.GS.WYL.COMMANDS#ESC_Q.)
+;;
+;;  View mode QUERY command.
+;;
+;;    This exec gets executed when the user presses the QUERY
+;;    [ESC Q] key while in VIEW mode.  The exec gets called
+;;    by the VIEW command by using the SYSVIEW variable feature
+;;    (see DOC#TESTWYL PUBLIC for details).
+;;
+;;    ----
+;;
+;;    The first line of the current Active file must contain
+;;    the information about which server the query is to be
+;;    sent to.  The basic options are:
+;;
+;;           1.   query: <server> [UNFORMATTED] [CLEAR|APPEND]
+;;
+;;    This exec sends the current Active file as a query to the
+;;    RSQL server and then puts the results in the QUERY RESULTS
+;;    Active file.
+;;
+;;
+;;  Created,  11/19/90, Jim Nisbet
+;;
+;;  Modifications:
+;;     11/19/90  Niz  Initial version.
+;;     11/20/90  Niz  Add support for new SYSCALLs which handle
+;;                      window management.
+;;     11/25/90  Niz  Add marked block support; improved cleanup.
+;
+
+xproc () begin
+   ;
+   ;  General initialization.
+   ;
+   x.origact = actno
+   x.qno = 0                       ; saved query number
+   x.attn = 0                      ; attn counter (see attnexit)
+   x.noattn = false                ; allow ATTNs
+   x.block_unmark = false          ; assume we don't unmark block
+
+   x.pgm = 'QUERY [ESC Q]'         ; our program name
+   x.maint = '(gg.jdn)'            ; maintenance people
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit'
+
+   ;
+   ;  Initialize command options.
+   ;
+   x.qopen  = ''                   ; query commands to execute
+   x.qrun   = ''                   ; (filled in by query_options routine)
+   x.qfetch = ''
+   x.qclose = ''
+   x.qrange = ''
+
+   ;
+   ;  Process QUERY options line.
+   ;
+   if (wylbur eq 'WYLBUR') begin   ; temporary restriction (11/19/90)
+      pcall cleanup('Query command is not yet available in Wylbur.')
+   end
+
+   if (lines eq 0) begin
+      pcall cleanup('Can''t do query, no Active file.')
+   end
+
+   opts = strip(line(first))
+
+   if (lower(left(opts,6)) ne 'query:') begin
+      pcall cleanup('Can''t do query, \
+         first line is not a "Query:" line.')
+   end
+   opts = strip(substr(opts,7))    ; skip over "query:" prefix
+
+   ;
+   ;  Parse "QUERY:" options line.
+   ;
+   pcall query_options(opts)
+
+   ;
+   ;  Open connection to server (if appropriate).
+   ;
+   if (x.qopen ne '') begin
+      try quietly &(x.qopen)
+      if (tryerr) begin
+         pcall cleanup('Qopen error: ' || trymsg)
+      end
+      x.qno = qno
+   end
+
+   ;
+   ;  Send commands to server.
+   ;
+   try quietly &(x.qrun)
+   if (tryerr) begin
+      pcall cleanup('Qrun error: ' || trymsg)
+   end
+
+   ;
+   ;  Get responses.
+   ;
+   if (vartype('ses.query_fetch_ano') eq 'UNDEFINED') \
+      ses.query_fetch_ano = 0
+
+   if (ses.query_fetch_ano gt 0) begin
+      try quietly pick &(ses.query_fetch_ano) noprompt
+      if (actno ne ses.query_fetch_ano) \
+         ses.query_fetch_ano = 0
+   end
+
+   if (ses.query_fetch_ano le 0) begin
+      open QUERY title 'Query responses'
+      ses.query_fetch_ano = actno
+      putend Query Responses created on &(xdate)
+   end
+
+   putend &(copies('=',40))
+   putend
+   putend &(xdate) -- Server &(qno) &(qname):
+   putend
+
+   pcall log_command
+
+   if (line(last) ne '') putend
+   putend Response:
+
+   prevlast = last
+   try quietly &(x.qfetch)
+   if (tryerr) begin
+      pcall cleanup('QFetch error: ' || trymsg)
+   end
+   ourfirst = lno_next(prevlast)
+   if (ourfirst ge 0) begin
+      pcall view_result(actno, ourfirst)
+   end
+
+   ;
+   ;  Close connection to server (if appropriate).
+   ;
+   if (x.qclose ne '') begin
+      try quietly &(x.qclose)
+      if (tryerr) begin
+         pcall cleanup('QClose error: ' || trymsg)
+      end
+      x.qno = 0
+   end
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+; query_options -- Scan the options and build the QRUN/QFETCH
+;   commands with the requested options.
+;
+
+proc query_options(opts) begin
+   token = ''
+
+   ;
+   ;  The first positional operand is the server name.
+   ;
+   server = ''
+   syscall scan_parm(server, opts)
+   if (server eq '') server = '*'
+
+   ;
+   ;  Figure out what lines are to be sent to the server.
+   ;
+   x.qrange = ''
+   pcall get_query_range(x.qrange)
+
+   ;
+   ;  Build the commands; if it is a server number then
+   ;    we don't want to open and close the server.  If it
+   ;    is a server name, then we do.
+   ;
+   if (server eq '*' or verify(server,'0123456789') eq 0) begin
+      x.qopen  = ''
+      x.qfetch = 'qfetch ' || server || ' append'
+      x.qrun   = 'qrun ' || x.qrange || ' server=' || server
+      x.qclose = ''
+   end
+   else begin
+      x.qopen  = 'qopen ' || server
+      x.qfetch = 'qfetch * append'
+      x.qrun   = 'qrun ' || x.qrange
+      x.qclose = 'qclose *'
+   end
+
+   while (opts ne '') begin
+      syscall scan_parm(token, opts)
+      token = lower(token)
+
+      cases begin
+         case (abbrev('formatted', token, 3) \
+               or abbrev('semiformatted', token, 3) \
+               or abbrev('unformatted', token, 3)) begin
+            x.qfetch = x.qfetch || ' ' || token
+         end
+
+         case (abbrev('clear', token, 3) \
+               or abbrev('append', token, 3) \
+               or abbrev('display', token, 3)) begin
+            x.qfetch = x.qfetch || ' ' || token
+         end
+
+         case (true) begin
+            pcall cleanup(token ||':  unrecognized QUERY option.')
+         end
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  get_query_range -- Routine to determine the range of lines to be
+;    sent as the query command.
+;
+
+proc get_query_range(qrange) begin
+   blockinfo = ''
+   syscall view_cmd('getblock', blockinfo)
+   blkano = 0
+   p = index(blockinfo, 'ACTIVE=')
+   if (p gt 0) begin
+      blkano = scan_token(substr(blockinfo, p+7))
+      if (blkano ne actno) blkano = 0  ; Not our Active file
+   end
+
+   ;
+   ;  There is a block of text marked in this Active file.
+   ;
+   if (blkano gt 0) begin
+      blkfirst = scan_token(substr(blockinfo, index(blockinfo,'FBLOCK=')+7))
+      blkfcol = scan_token(substr(blockinfo, index(blockinfo,'FCOL=')+4))
+      blklast = scan_token(substr(blockinfo, index(blockinfo,'LBLOCK=')+7))
+      blklcol = scan_token(substr(blockinfo, index(blockinfo,'LCOL=')+4))
+      qrange = blkfirst || '/' || blklast
+      x.block_unmark = true
+   end
+
+   ;
+   ;  Otherwise send the entire Active file (after the query: line).
+   ;
+   else begin
+      qrange = 'first+.001/last'
+   end
+
+   return(qrange)
+end
+
+
+
+; <.page>
+;
+;  view_result -- Routine to make sure the result Active file
+;    is on the screen.  This routine uses some little known
+;    SYSCALLs which control the VIEW manager.
+;
+
+proc view_result(result_ano, top_lno) begin
+   dcl string windinfo, rc
+
+   ;
+   ;  See if the Active we are looking for is already in a
+   ;    a window.  Search the windows from highest to lowest
+   ;    so we will use the lowest one physically on the screen.
+   ;
+   wno = view_nwind             ; number of windows on page
+   while (wno ge 1) begin
+      syscall view_windget(wno, windinfo)
+      if (wno ne view_window \
+            and index(windinfo,'ACTIVE=') ne 0) begin
+         cur_ano = scan_token(substr(windinfo, \
+            index(windinfo, 'ACTIVE=')+7))
+         if (result_ano eq cur_ano) goto found_window
+      end
+      wno = wno - 1
+   end
+
+   ;
+   ;  Make a new window.
+   ;
+   syscall view_cmd('newwindow window=' || view_window, rc)
+   if (left(rc,3) ne 'OK ') wno = -1
+   else begin
+      wno = scan_token(substr(rc, index(rc, 'WINDOW=')+7))
+   end
+   syscall view_windput(wno, 'active=' || result_ano, rc)
+
+   ;
+   ;  Scroll the window to the first line we added.
+   ;
+found_window:
+   syscall view_windput(wno, 'top=' || top_lno, rc)
+
+   ;
+   ;  Unmark the block of text we processed if appropriate.
+   ;
+   if (x.block_unmark) begin
+      syscall view_cmd('unmark')
+      x.block_unmark = true
+   end
+end
+
+
+
+; <.page>
+;
+;  log_command -- This routine copies the command text to the
+;    response Active file.
+;
+
+proc log_command() begin
+   oldano = actno
+   pick &(x.origact)
+   orig_lines = lines
+   pick &(oldano)
+   ;
+   ;  Keep a log of the command (unless it's huge).
+   ;
+   try quietly copya &(x.origact): first &(x.qrange) \
+      to &(actno): append
+   if (orig_lines gt 50) putend ... continued ...
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(msg) begin
+   bell = s'2f'                    ; bell special character
+
+   pick &(x.origact)               ; go back to original active
+
+;
+;  Try to close the server connection if it's still open.
+;
+   if (x.qopen ne '') begin        ; we need to close...
+      if (x.qno ne 0) begin        ; we opened it...
+         try quietly qclose &(x.qno)
+         x.qno = 0
+      end
+   end
+
+;
+;  Try to return to view mode.
+;
+   if (emode eq 'LINE') begin
+      if (msg ne '') write bell || msg
+      dummystr = input('Press RETURN to resume VIEW...', 'attn')
+      if (ioresult eq 'OK') xcommand view
+      xreturn attn
+   end
+
+   opt = ''
+   if (msg ne '') \
+      opt = 'errmsg="' || bell || chstr(msg,'"','""') || '"'
+   xreturn &(opt)
+end
+
+
+
+; <.page>
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   if (not x.noattn) begin
+      x.attn = x.attn + 1
+      write 'BREAK interrupted ' || x.pgm || ' command.'
+      pcall cleanup('')
+   end
+end
+
+
+
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    We write out some brief diagnostic information to the
+;    terminal and then send mail to the maintenance people.
+;
+
+proc errorexit() begin
+   write ''
+   write '-----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write 'The programming staff will be notified.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+;  Mail debugging information to maintenance people.
+
+   open errors title '&(x.pgm) dump'
+   putend An error occurred in the &(x.pgm) command.
+   putend
+   putend Debugging information:
+   putend
+   dump xdate
+   dump account
+   putend errid = &(errid)
+   putend errmsg = &(errmsg)
+   putend errinfo = &(errinfo)
+   putend
+   putend ---
+   putend
+   putend >>> show vars type ses
+   dump vars type ses
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   putend
+   putend End of dump.
+
+   if (xaccount eq 'GG.JDN') \
+      comment &(s'2f')Look at active file &(actno) for error log.
+   else begin
+      try quietly mail to &(x.maint) title '&(x.pgm) error'
+      close
+   end
+
+   pcall cleanup(x.pgm || ' logic error (debugging info logged).')
+end

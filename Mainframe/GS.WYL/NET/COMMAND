@@ -1,0 +1,575 @@
+;
+;;  TELNET -- Telnet command.
+;;
+;;
+;;  This exec file implements the "user telnet" service for
+;;  Wylbur users.  The "SYSCALL NET_xxx" function in Wylbur
+;;  provide the basic capability to open a TCP/IP connection to
+;;  another computer.  Documentation for the PATH and NET
+;;  SYSCALLs can be obtained from Anne Janzer (gg.ahj@forsythe).
+;;
+;;  In the first version of this exec file, the exec did all the
+;;  character echoing processing.  It was too slow, so the NET_TALK
+;;  SYSCALL function was added to Wylbur to support all the normal
+;;  interacting with the remote computer.  It is only when the user
+;;  presses BREAK (or Ctrl-C), that NET_TALK returns to the exec
+;;  file.
+;;
+;;
+;;  Session variables used:
+;;    ses.netcmd_cur      = current telnet session number
+;;                            (for arrays).
+;;    ses.netcmd_hosts[]  = remote host name.
+;;    ses.netcmd_pno[]    = our path number for current connection.
+;;    ses.netcmd_ano[]    = working active file (used by NET_TALK).
+;;
+;;
+;;  Created 4/02/88, Niz
+;;
+;;  Modifications:
+;;    4/06/88  Niz    Support multiple telnet sessions; also change
+;;                    local command processing to use the new INCHAR
+;;                    function.
+;
+
+
+
+xproc () begin
+   x.origact = actno
+   x.attn = 0           ; attn counter (see attnexit)
+
+   x.pgm = 'TELNET'               ; program name
+   x.maint = '(netexec-maint)'    ; maintenance people
+
+   x.host = ''          ; current host name
+   x.pno = 0            ; current netpath number
+   x.ano = 0            ; current NET_TALK working active file no
+
+;; on error cmd 'pcall errorexit'
+;; on error cmd 'pcall attnexit'
+
+   set exec over        ; see Niz for details
+
+   x.maxses = 10        ; constant--max number of telnet sessions
+
+   dcl str  host, talk_opts, rc
+   dcl bool need_reprompt
+
+;
+;  Initialize telnet session variables if this is the first time.
+;
+
+   if (vartype('ses.netcmd_cur') eq 'UNDEFINED') begin
+      try dcl num ses.netcmd_cur
+      try dcl str ses.netcmd_hosts[x.maxses]
+      try dcl str ses.netcmd_pno[x.maxses]
+      try dcl str ses.netcmd_ano[x.maxses]
+   end
+
+;
+;  If "ses.netcmd_debug = true" then we don't do error recovery.
+;
+
+   if (vartype('ses.netcmd_debug') ne 'UNDEFINED') begin
+      if (ses.netcmd_debug) begin
+         on error clear
+         on attn clear
+      end
+   end
+
+;
+;  If the user specified a parm then he wants to open a connection
+;    to the host he specified.
+;
+
+   if (parm_string ne '') begin
+      pcall tel_open(parm_string)
+      if (x.pno eq 0) pcall cleanup('')
+   end
+
+   else begin
+      if (ses.netcmd_cur ne 0) begin
+         x.cur = ses.netcmd_cur
+         x.host = ses.netcmd_hosts[x.cur]
+         x.pno = ses.netcmd_pno[x.cur]
+         x.ano = ses.netcmd_ano[x.cur]
+      end
+      else begin
+         write 'No remote connections have been established.'
+         write 'Type "o" to open a connection to a remote computer.'
+         write 'Type "q" to quit and return to Wylbur.'
+         write ''
+      end
+   end
+
+
+; <.page>
+;
+;  Main loop.
+;
+
+   done = false
+   need_reprompt = true
+
+   while (not done) begin
+      while (x.pno eq 0) begin
+         if (need_reprompt) \
+            Write 'Telnet (type ? for help)... ' nonl
+         pcall local_cmds(need_reprompt)
+      end
+
+      syscall net_talk(x.pno, talk_opts, x.ano, rc)
+      talk_opts = ''
+
+      cases begin
+         case (rc eq 'ATTN') begin
+            pcall local_cmds(need_reprompt)
+            if (not need_reprompt) talk_opts = 'noreprompt'
+         end
+
+         case (rc eq 'EOF') begin
+            pcall tel_close()
+            done = (x.pno eq 0)
+         end
+
+         case (true) begin
+            write ''
+            write '-----'
+            write 'Telnet trouble, \
+               unrecognized NET_TALK return code: '||rc
+            write '-----'
+            done = true
+         end
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  local_cmds -- Routine to execute our own local telnet commands.
+;
+
+proc local_cmds(reprompt_flag) begin
+   reprompt_flag = false
+
+   our_prompt = '[What?  ]'||s'1616'
+   our_erase  = copies(s'16',7)||copies(' ',9)||copies(s'16',9)
+
+   done = false
+   while (not done) begin
+      cmd = lower(inchar(our_prompt, 'noecho attn'))
+
+      if (ioresult eq 'ATTN') cmd = s'03'
+
+      cases begin
+         case (cmd eq s'03') begin     ; <BREAK>
+            write our_erase
+            write '[Connection to '||x.host||' suspended.  Type \
+               TELNET to continue.]'
+            pcall cleanup('')
+         end
+
+         case (cmd eq ' ') begin       ; <SPACE>
+            write our_erase nonl
+            pcall next
+         end
+
+         case (cmd eq s'0d') begin     ; <RETURN>
+            write our_erase nonl
+            done = true
+         end
+
+         case (cmd eq 'q') begin
+            pcall tel_close_all
+            pcall cleanup('')         ; no return
+         end
+
+         case (cmd eq '?' or lower(cmd) eq 'h') begin
+            write our_erase
+            pcall help
+            reprompt_flag = true
+         end
+
+         case (cmd eq 'o') begin
+            write our_erase
+            write '-----'
+
+            repeat begin
+               open_info = input('Enter host name? ', \
+                  'attn')
+            end
+            until (open_info ne '')
+            if (ioresult eq 'OK') begin
+               pcall tel_open(open_info)
+            end
+            else begin
+               write 'No action taken.'
+               write '-----'
+               reprompt_flag = true
+            end
+            reprompt_flag = true
+            done = true
+         end
+
+         case (cmd eq 'c') begin
+            write our_erase
+            pcall tel_close
+            done = true
+         end
+
+         case (cmd eq 'l') begin
+            pcall redisplay
+            reprompt_flag = true
+            done = true
+         end
+
+         case (cmd eq '@') begin
+            wyl_cmd = input(our_erase||'@', 'attn')
+            if (ioresult eq 'OK') begin
+               try &(wyl_cmd)
+            end
+            reprompt_flag = true
+            done = true
+         end
+
+         case (true) begin
+            write s'2f' nonl          ; beep
+         end
+      end
+   end
+
+   return (reprompt_flag)
+end
+
+
+
+; <.page>
+;
+;  open -- Routine to open a new telnet connection.
+;
+
+proc tel_open(options) begin
+   dcl str host, rc
+   dcl num c, pno
+
+   syscall scan_parm(host, options)
+   if (host eq '') begin
+      write 'Host name is missing.'
+      return
+   end
+
+;
+;  Find slot for this new telnet session.
+;
+
+   c = 1
+   while (c le x.maxses) begin
+      if (ses.netcmd_pno[c] eq 0) goto open_got
+      c = c+1
+   end
+   write 'Too many telnet sessions already active.'
+   write 'Please close a connection before opening a new one.'
+   return
+
+open_got:
+
+;
+;  Open connection to remote host.
+;
+
+   syscall net_open(pno, \
+      'host='||host||' port=514', rc)
+   if (rc ne 'OK') begin
+      if (rc eq 'NOTFOUND') \
+         write 'Can''t open connection, '||host||' not found.'
+      else \
+         write 'Can''t open connection: '||rc
+   end
+
+   if (pno eq 0) return
+
+;
+;  Open an Active file for responses from this session.
+;
+
+   origact = actno
+   open telnet title 'Telnet &(squash(lower(options)))'
+
+;
+;
+;
+
+   syscall net_write(pno, 'nonl', \
+      '0' || s'00' || \
+      substr(account,5,2) || '.' || substr(account,1,3) || s'0' || \
+      'niz' || s'0' || \
+      options || s'0', rc)
+
+;
+;  Save information about current telnet session.
+;
+
+   ses.netcmd_cur = c
+   ses.netcmd_hosts[c] = host
+   ses.netcmd_pno[c] = pno
+   ses.netcmd_ano[c] = actno
+
+   x.cur = c
+   x.host = host
+   x.pno = pno
+   x.ano = actno
+
+   pick &(origact)
+end
+
+
+
+; <.page>
+;
+;  tel_close -- Routine to close the current telnet connection.
+;
+
+proc tel_close() begin
+   dcl str msg, rc
+
+   if (x.cur eq 0) begin
+      write 'No connection is open.'
+   end
+
+   else begin
+      write ''
+      syscall net_close(x.pno, '', rc)
+      if (rc eq 'OK') msg = '[Connection closed.]'
+      else msg = '[Connection closed ('||rc||').]'
+      write msg
+
+      ses.netcmd_cur = 0
+      ses.netcmd_hosts[x.cur] = ''
+      ses.netcmd_pno[x.cur] = 0
+      ses.netcmd_ano[x.cur] = 0
+
+      x.cur = 0
+      x.host = ''
+      x.pno = 0
+      x.ano = 0
+
+      c = x.maxses
+      while (c le 0) begin
+         if (ses.netcmd_pno[c] ne 0) begin
+            x.cur = c
+            x.host = ses.netcmd_hosts[c]
+            x.pno = ses.netcmd_pno[c]
+            x.ano = ses.netcmd_ano[c]
+            Write '[Resuming connection to '||x.host||'.]'
+            return
+         end
+         c = c-1
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  tel_next -- Routine to select the next telnet session.
+;
+
+proc tel_next() begin
+   old_ses = x.cur
+   c = old_ses + 1
+   if (c gt x.maxses) c = 1
+
+   while (c ne old_ses) begin
+      if (x.netcmd_pno[c] ne 0) begin
+         x.cur = c
+         x.host = x.netcmd_hosts[c]
+         x.pno = x.netcmd_pno[c]
+         x.ano = x.netcmd_ano[c]
+         return
+      end
+
+      c = old_ses + 1
+      if (c gt x.maxses) c = 1
+   end
+end
+
+
+
+; <.page>
+;
+;  tel_abort -- Routine to send "abort output" control to connection.
+;
+
+proc tel_abort() begin
+   write 'abort called!!'
+end
+
+
+
+; <.page>
+;
+;  help -- Display help text for our local commands.
+;
+
+proc help() begin
+   comm -----
+   comm
+   comm Local Telnet Commands.  In response to the "What?" prompt answer
+   comm with one of the following:
+   comm
+   comm    <.u+>Key to type<.u->       <.u+>Action<.u->
+   comm      <BREAK>         Suspend telnet connection and return to Wylbur.
+   comm      <SPACE>         Go to next telnet session.
+   comm      <RETURN>        Return to current telnet session.
+   comm       a              ABORT: Send Abort signal to remote computer.
+   comm       o              OPEN:  Open a new telnet session.
+   comm       c              CLOSE: Close the current telnet session.
+   comm
+   comm       ^ alpha        Transmit any control character.  For example,
+   comm                      typing the character "^" and then the character
+   comm                      "q" will transmit a CTRL-Q to the remote host.
+   comm
+   comm       l              Re-display the last few lines of output.
+   comm
+   comm       @ command      Execute a single Wylbur command.
+   comm
+   comm       h or ?         Display help options (this text).
+   comm
+   comm -----
+end
+
+
+
+; <.page>
+;
+;  tel_close_all -- Routine to close all active connections.
+;
+
+proc tel_close_all() begin
+   dcl str msg, rc
+
+;
+;  Close the current connection.
+;
+
+   if (x.cur ne 0) begin
+      yn = yesno('OK to close connection to '||x.host, \
+         'yes no attn')
+      if (yn ne 'YES') return
+      pcall tel_close
+   end
+
+;
+;  Now close any other connections that may be active.
+;
+
+   c = x.maxses
+   while (c le 0) begin
+      if (ses.netcmd_pno[c] ne 0) begin
+         x.cur = c
+         x.host = ses.netcmd_hosts[c]
+         x.pno = ses.netcmd_pno[c]
+         x.ano = ses.netcmd_ano[c]
+         Write '[Resuming connection to '||x.host||'.]'
+         return
+      end
+      c = c-1
+   end
+end
+
+
+
+; <.page>
+;
+;  attnexit -- Exec attn exit routine.  The user pressed attn,
+;    just kick the "x.attn" counter.  If the user has pressed lots
+;    of ATTNs this routine will ask him if he wants to quit.
+
+proc attnexit() begin
+   x.attn = x.attn + 1
+   if (x.attn ge 2) begin
+      write ''
+      yn = yesno('Do you want to break out of telnet', \
+         'yes no attn')
+      if (yn eq 'YES') begin
+         x.attn = 0
+         pcall cleanup('')
+      end
+
+      else \
+         write '----'
+   end
+
+   on attn reenable
+end
+
+
+
+; <.page>
+;
+;  errorexit -- Exec error exit routine.  Something bad happened,
+;    write out some diagnostic messages, close the path and
+;    scram.
+;
+
+proc errorexit() begin
+   write ''
+   write '-----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write 'The programming staff will be notified.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+;  Mail debugging information to maintenance people.
+
+   open errors
+   putend An error occurred in the &(x.pgm) command.
+   putend
+   putend Debugging information:
+   putend
+   dump xdate
+   dump account
+   putend command = &(x.origparm)
+   putend errmsg = &(errmsg)
+   putend errinfo = &(errinfo)
+   putend
+   putend ---
+   putend
+   putend >>> show vars type ses
+   dump vars type ses
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   putend
+   putend End of dump.
+
+   try quietly mail to &(x.maint) title '&(x.pgm) error'
+   close
+
+   pcall cleanup('error')
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   set exec noover
+
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

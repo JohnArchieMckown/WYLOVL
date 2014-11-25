@@ -1,0 +1,1288 @@
+;
+;  SMTP EXEC FILE.
+;     This exec file handles an SMTP dialog.  The exec is started
+;     when a remote host connects to the SMTP TCP socket.
+;
+;     Saved as WYL.GS.NET.MAILEXEC#SMTP
+;
+;  Notes:
+;     All terminal I/O must be done with the FORCE option because
+;     this exec runs in SET TERMINAL QUIET mode.  This prevents unwanted
+;     terminal messages from being sent to the SMTP sender.
+;
+;     To reduce overhead, PUBLOAD this exec.
+;
+;  On entry:
+;    local_host   - local host name (fully qualified)
+;    local_domain - local domain suffix (i.e. 'Stanford.EDU')
+;    local_ip     - local IP address
+;
+;  Modifications:
+;     01/12/89  jws  New version
+;     04/03/89  jws  Reject long recipient address
+;     05/25/89  jws  Add IP address parm
+;     06/05/89  jws  Header cleanup change
+;     08/07/89  jws  Add 'dattn' to upload, 'nostars' to input
+;     08/10/89  jws  3-char userid check out
+;     11/29/89  jws  Check reply addr length to avoid command length ovfl
+;     12/13/89  jws  Check for SMTP command length overflow
+;     01/26/90  jws  Don't do err logging on unrecognized command
+;     02/14/90  jws  Fix wrap_header loop (line 927)
+;     03/15/90  jws  Add 1 sec wait before mail ACK (for new JES CKPT logic)
+;     07/05/90  jws  Fix long input record check in SMTP_READ
+;     10/29/90  jws  Check for Bitnet address too long
+;     01/23/91  jws  Reset subject at 'MAIL FROM'
+;     04/27/93  jws  Check for max recipients
+;     05/20/93  jws  Don't log headers
+;     08/16/93  jws  Add host alias checking
+;     02/03/94  jws  Build BSMTP job for mail to dist list
+;     02/18/94  jws  Convert to MAILINFO
+;     01/17/96  jws  change dist list check
+;     01/19/96  jws  Add RLG host alias
+;     03/29/96  jws  Add external host logging
+;     05/09/96  jws  log fe_netaddr value
+;     05/28/96  jws  turn off Bitnet host check
+;     06/05/96  jws  fix null return bug
+;     07/27/96  jws  set delta to .1 during upload...handle big files better
+;     12/19/96  jws  fix large mail file bug
+;     09/10/97  jws  external logging change
+;     09/11/97  jws  spam check - block mail relay
+;     11/05/97  jws  turn off header wrapping
+;     03/02/98  jws  add mainframe.rlg.org alias
+;     03/17/98  jws  add remote host to received line
+;     03/18/98  jws  retry 'mailbox unavailable' error
+;     05/31/04  slp  add '204.152' IP addrs as local
+;
+
+xproc (local_host, local_domain, local_ip) begin
+
+   dcl string  route userid domain verb text address stemp
+   dcl string  x.local_ip x.return x.reply x.reply_name x.subject
+   dcl string  x.org_host, x.dns_host
+   dcl bool    x.verbose x.ext_rcpt x.ext_sender x.ext_reject
+
+   x.max_rcpt = 200
+   dcl string  x.rcpt[x.max_rcpt]
+
+   if (group eq 'GS') \
+      on error cmd 'pcall exec_error'
+
+   set jes prefix smtp             ;for dist list BSMTP jobs
+
+   x.maint = 'gg.slp'              ;receives error info
+   x.bounce = 'gg.slp'             ;receives bounce info
+   x.bounce = ''
+   x.verbose = false               ;controls extra logging
+
+   x.local_host = local_host
+   x.local_domain = local_domain
+   x.short_host = ''
+   if (x.local_domain ne '')  \
+      x.short_host = sub(x.local_host,1,size(x.local_host)-size(x.local_domain)-1)
+
+   x.host_alias = ' localhost '
+   if (low(local_host) eq 'forsythe.stanford.edu') \
+      x.host_alias = ' localhost localhost.stanford.edu \
+      elf elf.stanford.edu \
+      elf1 elf1.stanford.edu \
+      forsythetn forsythetn.stanford.edu '
+
+   if (low(local_host) eq 'rlg.org') \
+      x.host_alias = ' localhost localhost.rlg.org mainframe.rlg.org '
+
+   if (parm_count gt 2) \
+      x.local_ip =  local_ip
+
+   x.ext_sender = false
+   x.ext_reject = false
+   x.ext_rcpt = false
+
+; Open active files
+
+   open smtplog                    ;log file
+   x.smtp_log = actno
+   putend
+   putend
+   putend ****** SMTP log file  &(xdatef)  connection from &(fe_netaddr) ******
+   putend
+   x.log_count = 4
+
+   open scanhdr                    ;scan_mailhdr output file
+   x.scanhdr = actno
+   open mailact                    ;mail active file
+   x.mailact = actno
+
+; Check connecting host
+
+   x.ext_sender = true
+
+   if (rmatch(fe_netname,'stanford.edu','c') or \
+      match(fe_netaddr,'36.') or \
+      match(fe_netaddr,'171.64.') or \
+      match(fe_netaddr,'171.65.') ) \
+      x.ext_sender = false
+
+   if (rmatch(fe_netname,'rlg.org') or \
+      match(fe_netaddr,'204.152.101.') or \
+      match(fe_netaddr,'204.152.102.') or \
+      match(fe_netaddr,'204.152.103.') ) \
+      x.ext_sender = false
+;<.page>
+; Write initial greeting message
+
+   pcall smtp_write \
+      ('220 &(x.local_host) SMTP service ready '||xdatef)
+   pcall set_line ('SMTP First read')
+   state = 'opening'
+
+;
+; Main loop: read and process SMTP messages until we get a
+;  'QUIT' message
+;
+
+read_next:
+   rc = ''
+   pcall smtp_read(verb, text, rc)  ; get next SMTP command
+   if (rc ne 'OK') pcall finish
+   pcall set_line ('SMTP Rcv ' || sub(verb||' '||text,1,12))
+
+   cases begin
+
+      case (verb eq 'HELO') begin
+         if (state ne 'opening') begin
+            pcall smtp_write ('503 Command out of sequence')
+            goto read_next
+         end
+
+         x.org_host = ''
+         syscall scan(x.org_host,text)
+
+         if (x.org_host eq '' or size(x.org_host) gt 64) begin
+            ;;quiet try send gg.jws &(fe_netaddr) Bad HELO &(sub(x.org_host,1,100))
+            pcall smtp_write ('501 HELO requires domain address')
+            goto read_next
+         end
+         pcall smtp_write('250 Hello '||x.org_host)
+         state = 'mail_wait'
+      end
+
+      case (verb eq 'MAIL') begin
+         if (state ne 'opening' and state ne 'mail_wait') begin
+            pcall smtp_write ('503 Command out of sequence')
+            goto read_next
+         end
+         err_flag = true
+         pcall get_address (verb, text, x.return, err_flag)
+;;**
+;;**     if (match(x.return,'sgoetz@gsb-peso','c')) begin
+;;**        pcall smtp_write ('501 Mail blocked')
+;;**        goto read_next
+;;**     end
+;;**
+         if (err_flag or \
+               (x.return ne '' and ind(x.return,'@') eq 0)) begin
+            pcall smtp_write ('501 Syntax error')
+            goto read_next
+         end
+         x.reply = x.return
+         x.reply_name = ''
+         x.subject = ''
+         x.num_rcpt = 0
+         x.distlist = false
+         x.ext_rcpt = false
+         x.ext_reject = false
+         state = 'rcpt_wait'
+         pcall smtp_write('250 Sender OK')
+      end
+
+      case (verb eq 'RCPT') begin
+         if (state ne 'rcpt_wait' and state ne 'data_wait') begin
+            pcall smtp_write ('503 Command out of sequence')
+            goto read_next
+         end
+
+         address = ''
+         err_flag = true
+         pcall get_address (verb, text, address, err_flag)
+
+         if (err_flag or ind(address,'@') eq 0) begin
+            pcall smtp_write ('501 Syntax error')
+            goto read_next
+         end
+
+         if (size(address) gt 100) begin
+            pcall smtp_write ('501 Address too long')
+            goto read_next
+         end
+
+         pcall fix_rcpt_addr (address)
+
+         pcall split_addr (address,route,userid,domain)
+
+         if (x.ext_sender and \
+               ind(domain,'.') gt 1 and \
+               domain ne '&(x.local_ip)' and \
+               domain ne '[&(x.local_ip)]' and \
+               ~rmatch(domain,'stanford.edu','c') and \
+               ~rmatch(domain,'rlg.org','c') ) begin
+            x.ext_reject = true
+            wait 5
+            pcall smtp_write \
+               ('550 Mail relay not allowed')
+            goto read_next
+         end
+
+         ; Validity check host name
+         if (find(' ,;()&''',domain) gt 0 ) begin
+            ;;pcall smtp_write ('501 Syntax error in domain name')
+            ;;goto read_next
+            ;;quiet try send gg.jws SMTP invalid domain &(domain)
+         end
+
+         if (ind(low(domain),'bitnet') eq 0 and \
+               ind(low(domain),'rlg') eq 0 and \
+               ind(low(domain),'forsythe') eq 0) begin
+            x.ext_rcpt = true
+         end
+
+         if (upp(domain) eq upp(x.local_host) or \
+               upp(domain) eq upp(x.short_host) or \
+               domain eq x.local_ip or \
+               domain eq '['||x.local_ip||']' ) begin
+
+            if (size(userid) eq 6 and sub(userid,3,1) eq '$') \
+               userid = sub(userid,1,2)||'.'||sub(userid,4)
+
+            quiet try show name &(userid)
+            if (tryerror) begin
+               stemp = ''
+               try stemp = rec_get(pub.mail_distno,upp(userid))
+               if (stemp eq '') begin
+                  pcall smtp_write \
+                     ('550 Unknown user id:  '||userid)
+                  goto read_next
+               end
+
+               ; Check for large dist list by looking for -#010 extension
+               stemp = ''
+               try stemp = rec_get(pub.mail_distno,upp(userid||'-#010'))
+               if (stemp ne '') \
+                  x.distlist = true
+            end
+         end
+
+;;       elseif (rmatch(domain,'.BITNET','c')) begin
+;;          dtemp = upp(sub(domain,1,size(domain)-7))
+;;          stemp = ''
+;;          try stemp = rec_get(pub.bitnet_hosts,dtemp)
+;;          if (stemp eq '') begin
+;;             if (ind(dtemp,'.') ne 0 or size(dtemp) gt 8) \
+;;                pcall smtp_write \
+;;                ('550 Invalid Bitnet system name:  '||domain)
+;;             else \
+;;                pcall smtp_write \
+;;                ('550 Unknown Bitnet system:  '||domain)
+;;             goto read_next
+;;          end
+;;
+;;          if (size(address) gt 70) begin
+;;             pcall smtp_write \
+;;                ('550 Address too long for Bitnet')
+;;             goto read_next
+;;          end
+;;       end
+
+         if (x.num_rcpt eq x.max_rcpt ) begin
+            pcall smtp_write \
+               ('554 Cannot handle mail with over &(x.max_rcpt) recipients')
+            goto read_next
+         end
+
+         x.num_rcpt = x.num_rcpt+1
+         x.rcpt[x.num_rcpt] = address
+
+         state = 'data_wait'
+         pcall smtp_write('250 Recipient OK')
+      end
+
+      case (verb eq 'DATA') begin
+         if (state ne 'data_wait') begin
+            pcall smtp_write ('503 No recipients specified')
+            goto read_next
+         end
+         pcall smtp_write \
+            ('354 Send mail message, end with single "."')
+         pcall process_mail
+         state = 'opening'
+         pcall set_line ('SMTP Mail sent')
+         goto read_next
+      end
+
+      case (verb eq 'HELP') begin
+         pcall smtp_write \
+            ('214 Send mail to postmaster@&(x.local_host) for help')
+      end
+
+      case (verb eq 'RSET') begin
+         pcall smtp_write ('250 SMTP session reset')
+         state = 'opening'
+         if (lines gt 0) del all
+         goto read_next
+      end
+
+      case (verb eq 'NOOP') begin
+         pcall smtp_write ('250 OK')
+      end
+
+      case (verb eq 'SAML' or \
+            verb eq 'SOML' or \
+            verb eq 'SEND' or \
+            verb eq 'VRFY' or \
+            verb eq 'EXPN' or \
+            verb eq 'TURN') begin
+         pcall smtp_write('502 Command not available')
+      end
+
+      case (verb eq 'QUIT') begin
+         pcall smtp_write \
+            ('221 &(x.local_host) closing connection')
+         pcall finish
+      end
+
+      case (verb ne '') begin
+         pcall smtp_write('500 Unrecognized command')
+      end
+   end
+
+   goto read_next
+
+end
+;<.page>
+;;
+;;  PROCESS_MAIL -- Get mail data and pass it to Wylbur
+;;
+
+proc process_mail () begin
+
+   pick &(x.mailact)
+   quiet try del all
+
+;  Read data into active file
+
+;; pcall set_line ('SMTP Doing upload')
+   set del .1
+   try upload wrap=230 stop=. timeout=300 buffer force dattn
+   set del 1
+   if (tryerror or lines ge 15000) begin
+      if (lines ge 15000) \
+         pcall smtp_write ('550 Mail file too large')
+      else begin
+         pcall smtp_write ('451 Processing error during receive - '|| trymsg || ' - ' || rc_upload)
+         try put smtp.error rep
+      end
+      pcall finish
+   end
+
+   if (lines gt 0) num from 1 by 1
+
+   if (rc_upload ne 'OK') begin
+      pcall smtp_write ('451 Receive error: &(rc_upload)')
+      if (rc_upload ne 'TIMEOUT') begin
+         try mail to &(x.maint) tit 'SMTP Upload error: RC=&(rc_upload)'
+      end
+      pcall finish
+   end
+
+   if (lines eq 0) begin
+      pcall smtp_write ('550 Empty mail file')
+      return
+   end
+
+   pcall set_line ('SMTP Sending mail')
+
+   pcall logmsg ('     &(lines) mail lines received')
+
+   if (~x.distlist) \
+      change '..'1 to '.' nolist
+
+; Scan mail header
+
+   pcall scan_header
+
+
+; Add 'Received:' line if mail header present
+
+   if (x.mailhdr) begin
+      pcall get_hostname
+      stemp = ' ([' || fe_netaddr || '])'
+      if (x.dns_host ne '') \
+         stemp = x.dns_host || stemp
+      else \
+         stemp = x.org_host || stemp
+
+      putline .001 Received: from &(stemp) by &(x.local_host);
+      putline .002           &(xdatef)
+   end
+
+; Edit source addresses
+
+   if (x.return ne '') begin
+      pcall fix_from_addr (x.return)
+      pcall fix_string (x.return)
+   end
+
+   if (x.reply ne '') begin
+      pcall fix_from_addr (x.reply)
+      pcall fix_string (x.reply)
+   end
+
+; If mail to a distribution list or to a large number of recipients
+;  submit BSMTP job for remailing, otherwise send mail to each recipient.
+;  The remailing is done because mail to a large number of recipients
+;  can take so long that the remote system disconnects during the mailing.
+
+   if (x.distlist or x.num_rcpt gt 100) begin
+      putend .
+      putend QUIT
+
+      putline 99000 HELO SMTP.EXEC
+      putend MAIL FROM:<&(x.return)>
+      n = 1
+      while (n le x.num_rcpt) begin
+         putend RCPT TO:<&(x.rcpt[n])>
+         n = n+1
+      end
+      putend DATA
+      pri 99000/l 0/89999 unn sys e to mailer@&(x.short_host)
+      ;;;pri 99000/l 0/89999 unn sys e dest u990 h  ;**TEMP, LOG COPY **
+      pcall logmsg ('     Dist list mail - queued for mailing')
+
+   end
+   else begin
+      pcall send_mail
+   end
+
+; Send SMTP ack message
+
+   wait 1   ;; insure JES2 ckpt cycle
+   pcall smtp_write \
+      ('250 Mail accepted')
+
+; Save log file
+
+   pcall logsave
+end
+;<.page>
+;;
+;;  SMTP_READ -- Routine to read an SMTP line.
+;;
+
+proc smtp_read (verb, text, rc) begin
+
+reread:
+   try text = strip(input('', 'force timeout=300 nostars'))
+   rc = ioresult
+
+   if (ioresult ne 'OK') begin
+      pcall smtp_write ('451 Aborted, receive error: '||ioresult)
+      pcall finish
+   end
+
+   pcall logmsg ('Rec:  ' || strip(sub(text,1,200)))
+
+   if (size(text) gt 210) begin
+      pcall smtp_write ('501 Syntax error, line too long')
+      goto reread
+   end
+
+   syscall scan (verb,text)
+   verb = upper(verb)
+   text = strip(text)
+   return (verb, text, rc)
+end
+
+
+;;
+;;  SMTP_WRITE -- Routine to write an SMTP message.
+;;
+
+proc smtp_write (text) begin
+
+   pcall logmsg('Send: '||text)
+   if (sub(text,1,1) ge '4' and \
+         sub(text,1,3) ne '500' and \
+         ind(text,'TIMEOUT') eq 0) begin
+      asave = actno
+      pick &(x.smtp_log)
+;;    if (sub(text,1,1) eq '4') \
+;;       try mail to &(x.maint) sub 'SMTP error'
+;;    elseif (x.bounce ne '') \
+;;       try mail to &(x.bounce) sub 'SMTP rejection'
+      pcall logsave
+      pick &(asave)
+   end
+
+   write text force
+end
+
+
+;;
+;;  GET_ADDRESS -- Get address from MAIL or RCPT line
+;;
+
+proc get_address (verb, text, address, err_flag) begin
+
+   err_flag = true
+
+   if (verb eq 'MAIL'  and upp(sub(text,1,4)) eq 'FROM') begin
+      text = sub(text,5)
+   end
+   elseif (verb eq 'RCPT' and upp(sub(text,1,2)) eq 'TO') begin
+      text = sub(text,3)
+   end
+   else begin
+      return (err_flag)
+   end
+
+   text = strip(text)
+   if (sub(text,1,1) ne ':') \
+      return (err_flag)
+   text = strip(sub(text,2))
+   if (sub(text,1,1) ne '<' or sub(rev(text),1,1) ne '>') \
+      return (err_flag)
+
+   address = strip(sub(text,2,size(text)-2))
+
+   if (rmatch(address,'.')) \
+      address = sub(address,1,size(address)-1)
+
+   err_flag = false
+   return (address,err_flag)
+end
+
+
+;<.page>
+;:
+;;  SEND_MAIL -- Send mail to recipients
+;;
+
+proc send_mail () begin
+
+   del 99000/99999
+
+; Fix up recipient addresss and add to MAIL_INFO record group
+
+   syscall mail_info('INIT')
+
+   n = 1
+   while (n le x.num_rcpt) begin
+      rcpt = x.rcpt[n]
+      pcall fix_rcpt_addr (rcpt)
+
+      if (rmatch(rcpt,'@'||x.local_host,'c')) \
+         rcpt = sub(rcpt,1,size(rcpt)-size(x.local_host)-1)
+      elseif (rmatch(rcpt,'@'||x.short_host,'c')) \
+         rcpt = sub(rcpt,1,size(rcpt)-size(x.short_host)-1)
+      elseif (rmatch(rcpt,'@'||x.local_ip)) \
+         rcpt = sub(rcpt,1,size(rcpt)-size(x.local_ip)-1)
+      elseif (rmatch(rcpt,'@['||x.local_ip||']')) \
+         rcpt = sub(rcpt,1,size(rcpt)-size(x.local_ip)-3)
+
+      if ( ind(rcpt,'@') eq 0 and \
+         size(rcpt) eq 6 and sub(rcpt,3,1) eq '$') \
+         rcpt = sub(rcpt,1,2)||'.'||sub(rcpt,4)
+
+      rc = ''
+      syscall mail_info('RCPT', rcpt, rc)
+      if (rc ne 'OK') begin
+         try send gg.jws error return from SYSCALL MAIL_INFO   &(rc)
+         MAIL_INFO_ERROR ; generate exec error
+      end
+
+      n = n+1
+   end
+
+; Set return option for mail command
+
+   if (x.return ne '' and upp(x.return) eq upp(x.reply)) \
+      retopt = ''
+   else begin
+      retopt = "return '" || x.return || "'"
+      if (size(x.return) gt 68) \
+         retopt = "return 'Mailer@&(x.local_host)'"
+   end
+
+; Strip local host from reply address
+
+   reply = x.reply
+   if (rmatch(reply,'@'||x.local_host,'c')) \
+      reply = sub(reply,1,size(reply)-size(x.local_host)-1)
+
+; Avoid Wylbur command length overflow
+
+   if (size(retopt)+size(reply)+size(x.reply_name) \
+         +size(x.subject) gt 160) begin
+      x.subject = ''
+      if (size(retopt)+size(reply)+size(x.reply_name) gt 160) \
+         x.reply_name = ''
+      if (size(retopt)+size(reply) gt 160) \
+         reply = ''
+   end
+
+; Issue Wylbur mail command, retrying if 'mailbox unavailable' error
+
+   xreply = reply
+   if (reply eq '' and x.reply_name eq '') xreply = '** No reply address **'
+
+   n = 0
+   while (n lt 10) begin
+      quiet try del 99000/99999
+      try Mail col 99000 silent noh MAILINFO &(retopt) send '&(xreply)' \
+         name '&(x.reply_name)' sub '&(x.subject)'
+
+      p c'mailbox unavailable' in 99000/99999 nol
+      if (* lt 0) begin
+         n = 99
+      end
+      else begin
+         wait &(1 + 2*rand)
+      end
+      n = n+1
+   end
+
+; Add info to log
+
+   asave = actno
+   pick &(x.smtp_log)
+   num from .001 by .001
+   putline 89000
+   putline 89001 mail &(retopt) sender '&(reply)' \
+      name '&(x.reply_name)' subject '&(x.subject)'
+   copya &(asave): 99000/99999 to &(actno):
+   putend
+   if (fetype ne 'TCP') \
+      list 89000/99999 unn
+   pick &(asave)
+
+   del ~c'mail not sent' and ~c'stack overflow' in 99000/99999 nol
+   quiet try count 99000/99999
+   if (count eq 0) return
+
+; Send error reply
+
+   pcall mail_error
+
+end
+;<.page>
+;;
+;;  MAIL_ERROR -- error sending mail
+;;
+;;   On entry active file contains mail message, with Wylbur
+;;   mail command error messages starting at line 99000
+;;
+
+proc mail_error () begin
+
+; Send local notification message
+
+   putend
+
+   if (x.bounce ne '') \
+      try mail 99000/99999 1/20 to &(x.bounce)  \
+      tit 'SMTP Mail error from &(x.return)'
+
+; Check return path address
+
+   if (x.return eq '') return
+   if (upp(sub(x.return,1,14)) eq 'MAILER-DAEMON@') return
+   if (upp(sub(x.return,1,7)) eq 'MAILER@') return
+
+; Send rejection notice to return path address
+
+   putline 98000 The mail listed below could not be delivered to some
+   putline 98001 of its recipients:
+   putline 98002
+
+   putend
+   putend Send mail to postmaster@&(x.local_host) for assistance.
+   putend
+   putend ----------- Undelivered mail file follows ------------
+
+   try  Mail 98000/l f/200 to &(x.return) \
+      sen 'MAILER@&(x.local_host)'  nam 'Mail system' \
+      sub 'Undelivered mail' col 99900
+
+   list 99900/99999 unn
+
+   del 98000/last
+end
+;<.page>
+;;
+;;  FINISH -- save log file and exit
+;;
+
+proc finish () begin
+   pick &(x.smtp_log)
+   if (lines - x.log_count gt 2) \
+      pcall logsave
+   xreturn
+end
+
+;;
+;;  LOGMSG -- add message to log file
+;;
+
+proc logmsg (msg) begin
+   stemp = line_append (time||' '||msg,x.smtp_log)
+end
+
+;;
+;;  LOGSAVE -- save log file
+;;
+
+proc logsave () begin
+   asave = actno
+   pick &(x.smtp_log)
+   try put smtp.log append
+   if (tryerror) begin
+      wait &(2+4*ran)
+      try put smtp.log append
+   end
+   if (tryerror) begin
+      wait &(2+4*ran)
+      try put smtp.log append
+   end
+;;
+;; if (x.ext_rcpt) \
+;;    try put smtp.log.external append
+;;
+;; if (x.ext_reject) \
+;;    try put smtp.log.reject append
+;;
+   x.log_count = lines
+   pick &(asave)
+end
+
+
+;;
+;; SET_LINE - Set Milten line info
+;;
+
+proc set_line (text) begin
+
+   if (group ne 'GG') \
+      try set line '&(text)'
+end
+;<.page>
+;;
+;;  EXEC_ERROR -- Entered after an exec error.
+;;
+;;    Collect diagnostic info and send a 451 message to requestor.
+;;    Then terminate the exec.
+;;
+
+proc exec_error() begin
+
+;  Mail debugging information to maintenance people.
+
+   open
+   putend SMTP exec file error
+   putend
+   putend  errmsg = &(errmsg)
+   putend  errinfo = &(errinfo)
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type err
+   dump vars type err
+   putend
+
+   try mail to &(x.maint) title 'SMTP server exec error'
+   close
+
+   pcall smtp_write ('451 Processing error, SMTP server failed')
+
+   pcall finish
+end
+;<.page>
+;;
+;;  SCAN_HEADER -- Scan RFC-822 header
+;;
+;;
+;;   Call header scan routine in Wylbur.  Results of scan are
+;;   returned in x.scanhdr active file, with the field name in
+;;   columns 1-19 and the field value starting in column 20.
+;;   Address fields have 't' or 'f' in column 18 to identify
+;;   'from' or 'to' address type.
+;;
+;;   If RFC-822 header is present, sender addresses are edited
+;;   and a 'received' line is added
+;;
+
+proc scan_header () begin
+
+; Call header scan routine
+
+   stemp = line_delete (0,99999,x.scanhdr)
+   rc = ''
+   x.hdr_end = 0
+   syscall scan_mailhdr(x.scanhdr,'',x.hdr_end,rc)
+
+   pick &(x.scanhdr)
+
+   if (lines eq 0) begin
+      x.mailhdr = false
+      putend
+      pick &(x.mailact)
+      return
+   end
+
+   x.mailhdr = true
+
+; Get subject text
+
+   p 'subject'1/20(1) nol
+   if (* gt 0) begin
+      x.subject = sub(line(*),20)
+      pcall fix_string (x.subject)
+   end
+
+; Get reply address and name
+
+   if (x.return ne '') \
+      x.reply = x.return
+
+   p 'resent-reply-to'1(1) nol
+   if (* lt 0) \
+      p 'reply-to'1(1) nol
+   if (* lt 0) \
+      p 'resent-from'1(1) nol
+   if (* lt 0) \
+      p 'from'1(1) nol
+
+   if (* gt 0) begin
+      x.reply = sub(line(*),20)
+      if (sub(line(*+1),1,4) eq 'name') begin
+         x.reply_name = sub(line(*+1),20)
+         if (sub(x.reply_name,1,1) eq '(' and \
+            rmatch(x.reply_name,')')) \
+            x.reply_name = sub(x.reply_name,2,size(x.reply_name)-2)
+         pcall fix_string (x.reply_name)
+      end
+   end
+
+; Log mail header
+
+   if (x.verbose) begin
+      pick &(x.smtp_log)
+      putend
+      putend Original mail header:
+      putend
+      num from .001 by .001
+      copya &(x.mailact): 0/&(x.hdr_end) to &(actno):
+      if (fetype ne 'TCP') \
+         list 1/l unn
+      pick &(x.scanhdr)
+   end
+
+; Edit addresses in mail header (do in reverse order so that multiple
+;  addresses on the same line will be done right to left).
+
+   changed = false
+   ln = last
+   while (ln gt first) begin
+      ln = ln-1
+      if (sub(line(ln),18,1) eq 'f' or \
+            sub(line(ln),18,1) eq 't') begin
+         addr = sub(line(ln),20)
+         if (sub(line(ln+1),1,8) eq 'pointers') \
+            ptrs = sub(line(ln+1),20)
+         else \
+            ptrs = sub(line(ln+2),20)
+
+         oldaddr = addr
+         if (sub(line(ln),18,1) eq 'f') \
+            pcall fix_from_addr (addr)
+         else \
+            pcall fix_rcpt_addr (addr)
+
+         if (addr ne oldaddr) begin
+            pick &(x.mailact)
+            pcall rewrite_addr (addr,ptrs)
+            pick &(x.scanhdr)
+            changed = true
+         end
+      end
+   end
+
+   pick &(x.mailact)
+
+; Wrap long header lines
+
+;;;pcall wrap_header (x.hdr_end)
+
+; Log new header if addresses changed
+
+   if (changed and x.verbose) begin
+      pick &(x.smtp_log)
+      putend
+      putend New mail header:
+      putend
+      num from .001 by .001
+      copya &(x.mailact): 0/&(x.hdr_end) to &(actno):
+      if (fetype ne 'TCP') \
+         list 1/l unn
+      pick &(x.mailact)
+   end
+
+   return
+end
+;<.page>
+;;
+;;  FIX_FROM_ADDR -- Edit sender or reply address
+;;
+
+proc fix_from_addr (addr) begin
+
+   dcl str route, userid, domain
+
+; Split address into components
+
+   pcall split_addr (addr, route, userid, domain)
+
+; Clean up compound '%' address
+
+   if (ind(userid,'%') gt 0) begin
+      repeat begin
+         oldu = userid
+         if (rmatch(userid,'.BITNET','c')) \
+            pcall split_local (userid,domain)
+      end
+      until (oldu eq userid)
+   end
+
+; Process route
+
+   while (route ne '') begin
+      n = ind(rev(domain),'.')
+      stemp = ' '||upp(sub(domain,size(domain)-n+2))||' '
+      if (ind(' EDU NET ORG COM GOV ARPA US BITNET ',stemp) gt 0) \
+         route = ''
+      else begin
+         n = ind(rev(route),',')      ;check for list
+         if (n eq 0) begin            ;if not list, use whole route
+            rtemp = sub(route,2)
+            route = ''
+         end
+         else begin                   ;else have list, use last entry
+            rtemp = sub(route,size(route)-n+3)
+            route = sub(route,1,size(route)-n)
+         end
+         if (upp(rtemp) eq 'PUCC.PRINCETON.EDU') \
+            route = ''
+         else begin
+            userid = userid || '%' || domain
+            domain = rtemp
+         end
+      end
+   end
+
+; Fix up '%' address to our host
+
+   if (ind(userid,'%') gt 1 or ind(userid,'@') gt 1) begin
+      if (upp(domain) eq upp(x.local_host)) \
+         pcall split_local (userid,domain)
+   end
+
+; Generate new address
+
+   addr = userid || '@' || domain
+   return (addr)
+end
+;<.page>
+;;
+;;  FIX_RCPT_ADDR -- Edit recipient address
+;;
+
+proc fix_rcpt_addr (addr) begin
+
+   dcl str route, userid, domain
+
+; Split address into components
+
+   pcall split_addr (addr, route, userid, domain)
+
+; Process route.
+
+   while (route ne '') begin
+      n = ind(rev(domain),'.')
+      stemp = ' '||upp(sub(domain,size(domain)-n+2))||' '
+      if (ind(' EDU NET ORG COM GOV ARPA BITNET ',stemp) gt 0) \
+         route = ''
+      else begin
+         n = ind(rev(route),',')      ;check for list
+         if (n eq 0) begin            ;if not list, use whole route
+            rtemp = sub(route,2)
+            route = ''
+         end
+         else begin                   ;else have list, use last entry
+            rtemp = sub(route,size(route)-n+3)
+            route = sub(route,1,size(route)-n)
+         end
+         if (upp(rtemp) eq upp(x.local_host) or \
+            upp(rtemp) eq upp(x.short_host) or \
+            rtemp eq x.local_ip or \
+            rtemp eq '['||x.local_ip||']' ) \
+            route = ''
+         else begin
+            userid = userid || '%' || domain
+            domain = rtemp
+         end
+      end
+   end
+
+; Fix up '%' address to our host
+
+   if (ind(userid,'%') gt 1 or ind(userid,'@') gt 1) begin
+      if (upp(domain) eq upp(x.local_host) or \
+            upp(domain) eq upp(x.short_host) or \
+            ind(x.host_alias,low(' '||domain||' ')) gt 0 or \
+            domain eq x.local_ip or \
+            domain eq '['||x.local_ip||']' ) begin
+         if (sub(userid,1,1) eq '"' and \
+            sub(userid,size(userid)) eq '"') \
+            userid = sub(userid,2,size(userid)-2)
+         pcall split_local (userid,domain)
+      end
+   end
+
+; Final fixups
+
+   if (rmatch(domain,'.EDU.BITNET','c')) \
+      domain = sub(domain,1,size(domain)-7)
+   if (rmatch(domain,'.EARN','c')) \
+      domain = sub(domain,1,size(domain)-5)||'.BITNET'
+
+; Generate new address
+
+   addr = userid || '@' || domain
+
+   return (addr)
+end
+;<.page>
+;;
+;; FIX_STRING -- Fix up string quotes for Wylbur MAIL command
+;;
+
+proc fix_string (s) begin
+
+   if (sub(s,1,1) eq '"') begin
+      if (s ne '"' and \
+         ind(sub(s,2),'"') eq size(s)-1) \
+         s = sub(s,2,size(s)-2)
+   end
+
+   if (ind(s,"'") gt 0) begin
+      putend &(s)
+      ch "'" to "''" in last nol
+      s = line(l)
+      del last
+   end
+
+   return (s)
+end
+
+
+;;
+;;  REWRITE_ADDR -- Rewrite address in mail header
+;;
+;;    On entry:
+;;      addr  - address to be inserted in header
+;;      ptrs  - string containing pointers to address to be
+;;               replaced (provided by scan_mailhdr syscall)
+;;
+
+proc rewrite_addr (addr,ptrs) begin
+
+   dcl num ln1, col1, ln2, col2
+
+; Scan active file pointers
+
+   syscall scan (ln1,ptrs)
+   syscall scan (col1,ptrs)
+   syscall scan (ln2,ptrs)
+   syscall scan (col2,ptrs)
+
+; Handle case where address does not span multiple active file lines
+
+   if (ln1 eq ln2) \
+      putline &(ln1) &(sub(line(ln1),1,col1-1) || addr || sub(line(ln1),col2+1))
+
+; Handle case where address spans multiple lines
+
+   else begin
+      putline &(ln1) &(sub(line(ln1),1,col1-1) || addr)
+      try del &(ln1)+.001/&(ln2)-.001
+      if (col2 eq size(line(ln2))) \
+         del &(ln2)
+      else begin
+         n = ver(line(ln2),' '||s'05')
+         putline &(ln2) &(sub(line(ln2),1,n-1) || sub(line(ln2),col2+1))
+      end
+   end
+end
+;<.page>
+;;
+;;  WRAP_HEADER -- Wrap header lines longer than 80 characters
+;;
+;;    On entry:  endln = header end line
+;;
+
+proc wrap_header (endln) begin
+
+   ln = first
+   while (true) begin
+      p ~'' and ~'&(copies(" ",120))'81(1) in &(ln)/&(endln) nol
+      if (* lt 0) \
+         return (endln)
+      ln = *
+      stemp = rev(sub(line(ln),1,80))
+      n = ind(stemp,',')
+      if (n eq 0 or n gt 50) begin
+         n2 = ind(stemp,' ')
+         if (n eq 0 or (n2 gt 0 and n2 lt n)) \
+            n = n2
+      end
+      if (n eq 0 or n gt 70) return
+      n = 81-n
+      putline &(ln+.001)  &(sub(line(ln),n+1))
+      putline &(ln) &(sub(line(ln),1,n))
+      if (ln eq endln) \
+         endln = ln+.001
+   end
+end
+
+
+;;
+;; SPLIT_LOCAL -- split local part if has the format user%domain
+;;
+
+proc split_local (local,domain) begin
+   lrev = reverse(local)
+   n = ind(lrev,'@')
+   if (n lt 2 or n eq size(lrev)) \
+      n = index(lrev,'%')
+   if (n lt 2 or n eq size(lrev)) return
+   if (index(sub(lrev,1,n),'"') gt 0) return
+   n = size(local)+1-n
+   domain = sub(local,n+1)
+   local = sub(local,1,n-1)
+   return (local,domain)
+end
+
+
+;;
+;;  SPLIT_ADDR -- split address into components
+;;
+
+proc split_addr(addr,route,local,domain) begin
+
+   route = ''
+   local = ''
+   domain = ''
+
+; Strip off route if present
+   if (sub(addr,1,1) eq '@') begin
+      n = index(addr,':')
+      if (n gt 0) begin
+         route = sub(addr,1,n-1)
+         addr = sub(addr,n+1)
+      end
+   end
+
+; Split address into local part and domain
+
+   n = index(rev(addr),'@')        ;get string position
+   n = size(addr)+1-n              ; of last '@'
+   local = strip(sub(addr,1,n-1))  ;local part
+   domain = strip(sub(addr,n+1))   ;get domain
+
+   return (route,local,domain)
+end
+
+
+;;
+;; GET_HOSTNAME -- Get remote host name
+;;
+
+proc get_hostname () begin
+
+   dcl str stemp, ltemp, hostname
+   dcl num maxtries ntries
+
+   x.dns_host = ''
+
+   if (fe_netaddr eq '') return
+
+   open
+
+   maxtries = 15
+   ntries = 0
+
+   while (ntries lt maxtries) begin
+      amelia dump host &(fe_netaddr)
+
+      if (lines gt 0) begin
+         p p'<*N>.<*N>.<*N>.<*N> '1 (1) nol
+         if (* gt 0) begin
+            ltemp = line(*)
+            syscall scan (stemp ,ltemp)
+            syscall scan (x.dns_host, ltemp)
+            if (x.dns_host ne '') begin
+               if (ind(x.dns_host,'.') le 1) \
+                  x.dns_host = x.dns_host || '.' || x.local_domain
+               goto gethx
+            end
+         end
+         quiet try del all
+      end
+      wait 1
+      ntries = ntries+1
+
+   end
+
+gethx:
+   close
+
+end
+
+
+proc virus_check(rc) begin
+
+   rc = 'OK'
+;
+;  Look for the Sircam worm
+;
+   p c'I send you this file in order to have your advice' nol
+   if (* gt 0) begin
+      rc = 'SIRCAM'
+   end
+   else begin
+      p c'Te mando este archivo para que me des tu punto de vista' nol
+      if (* gt 0) begin
+         rc = 'SIRCAM'
+      end
+   end
+
+;
+;  Look for Shanghai spam
+;
+   p c'.hanasha.' nol
+   if (* gt 0) begin
+      rc = 'HANASHA'
+   end
+
+   return (rc)
+end
+

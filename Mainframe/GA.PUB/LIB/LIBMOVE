@@ -1,0 +1,687 @@
+;  LIBMOVE:  Rebuild a partitioned data set
+CLR VARI
+DECLARE STRING REVDATE ; date of last revision
+REVDATE='1999/02/03'
+;  recent revisions ------------------------------------------
+;  1999/02/03 DUMP UCB INTERNAL replace $DUMP UCB, correct proc name
+;  1996/10/29 don't use IEFBR14 for empty lib - doesn't copy DCB!
+;             (used to use it because IOPROGM gave RC=4 if empty pds)
+;  1996/02/13 fix directory size check logic for TRACKS allocation
+;  11/02/95   check prev on nocat; various minor tweaks; new
+;             catlg'd proc with mcl rename pgm replaceing IEHPROGM
+;             various fixes to non-cat logic.
+;  10/23/95   check minimum newmems = oldmems; clean up allocate
+;             retry logic, delete batch alloc, nonwyl code
+;  09/13/95   fix default mems, dirsize when smaller but no RLSE
+;  08/04/95   verify volume after allocate
+;  05/21/95   fix dir blocks code for new fmt
+;  01/05/95   obtain directory alloc/used info from SHOW DIR
+;  08/06/92:  suppress "xxx is a lot of space...are you sure"? in alloc
+;  07/06/92:  further VOL= fixes
+;  04/29/92:  SHO DIR IN <lib> VOL=volser fixes bug with OPSRLG
+;  08/28/91:  Fix bug in cross-device "shrink" logic
+;  05/15/91:  Use YESNO for some prompts
+;  05/10/91:  Fix problem with LIBMOVE * (prefix lost when new
+;             active opened).  Allow use of strange dsn prefixes.
+;  02/16/91:  Delete VERSION=TEST for 3390 output
+;  02/15/91:  Use generic unit name in IEHMOVE CATLG command
+;  11/28/90:  Minor prompt fixes
+;  11/26/90:  Support for 3390 disks
+;  04/17/90:  Always allocate templib under logged-on acct.
+;  01/05/90:  Correct problem with LIBMOVE * when no prefix
+;  12/20/89:  Use WVOL to get new volume, then batch alloc
+;             if that fails
+;  12/15/89:  batch allocate option; open new active file
+;             Delete non-RACF (old security system) code
+;             Renumber
+;  11/15/89:  fix in acct restore logic
+;  04/07/89:  restore normal acct if did set acc pass
+;  05/13/88:  minor "G-acct" logic cleanup, msg cleanup
+;
+;  05/02/88:  check for RACF protection
+;
+
+;  Mark C. Lawrence (GA.MCL), Stanford Data Center
+
+;  variable usage --
+
+;  PARM  library name
+;  DSNPREF     dsname prefix as WYL.gg.uuu.  or  SYSn.
+;  LIBNAME     library name
+;  NEWUNIT     unit name for new vol
+;  NEWVOL      target volume serial
+;  ACTVOL      actual allocated new vol
+;  OLDESC      user's escape character
+;  OLDPREF     user's active file name (PREFIX)
+;  OLDVOL      volume on which library now resides
+;  RLSE        Flag for "release unused tracks"
+;  S0          various prompts
+;  TEMPNAME    temporary library name
+;  TRYVOL      default new vol--initially OLDVOL, may be changed
+;
+;  DFLTMEMS    default directory allocation, in members
+;  DIRQTY      directory quantity
+;  NEWTRKL     kbytes/track, new disk
+;  N0          various index values etc.
+;  N1          temp for index use
+;  OLDACT      User's old active file number
+;  OLDKBA      kbytes allocated in old library
+;  OLDKBU      kbytes used in old library
+;  OLDMEMS     number of members in original library
+;  OLDBLKA     blocks allocaterd in original library
+;  OLDBLKU     blocks used in original library
+;  OLDTRKA     number of tracks allocated in original library
+;  OLDTRKL     kbytes/track, old disk
+;  OLDTRKU     number of tracks used in original library
+;  PRIKB       primary kbytes--new library
+;  PRIQTY      primary space allocation, KB or TRACKS
+;  SECQTY     secondary space allocation
+;  TRKL        used by disk type routine:  kbytes/trk on given disk
+;  WORKEND     END line-number in workfiles
+;  W0          line number in loops
+;  YNO         YESNO standard options
+;
+;  INNOTCAT    (boolean) input not cataloged
+;  OUTNONWYL   (boolean) output on non-WYLBUR volume
+;  UTRK        (boolean) use TRACKS not KB for space allocation
+
+DECLARE STRING LIBNAME NEWVOL OLDVOL TRYVOL TEMPNAME
+DECLARE STRING DSNPREF OLDESC XPROT OLDPREF
+DECLARE STRING DSN VOLSER DSORG RCODE NEWUNIT YNO DINF0 DINF1 DINF2
+DECLARE NUM OLDTRKL NEWTRKL TRKL OLDKBU OLDKBA OLDBLKA OLDBLKU
+DECLARE NUM WORKEND PRIQTY DIRQTY SECQTY PRIKB OLDMEMS OLDTRKU OLDACT
+DECLARE NUM TRKALLOC TRKUSED EXTENTS OLDTRKA DFLTMEMS KBALLOC KBUSED
+DECLARE BOOLEAN UTRK OUTNONWYL INNOTCAT RLSE
+OLDESC =ESC
+OLDACT = ACTNO
+OLDPREF = PREFIX
+YNO = 'YES,NO,HELP,ATTN,NULL'
+SET ESC &
+OPEN LIBMOVE TITLE 'Work file for LIBMOVE'
+
+;  Library name
+LIBNAME =STRIP(UPPER(PARM))
+DSNPREF ='WYL.'||SUB(ACC,5,2)||'.'||SUB(ACC,1,3)||'.'
+COMM LIBMOVE version of &(REVDATE)
+IF (LIBNAME NE '') EXE 116             ; PARM IS LIBRARY NAME
+COMM This EXEC file submits a job to rebuild a library with a new
+COMM space allocation value.  If you need help, you can respond with
+COMM a ? to any prompt.
+
+S0 = YESNO('Do you want instructions (RETURN=NO)? ',YNO)
+IF (S0 EQ 'ATTN') EXE 770
+IF (S0 EQ 'HELP' OR S0 EQ 'YES') EXE 1000  ; HELP
+
+REA STR LIBNAME UPP ATTN=110 PRO 'Name of library to be rebuilt (RETURN=&(LIBRARY)): '
+
+LIBNAME=STRIP(LIBNAME)            ; FIND FIRST NONBLANK
+IF (LIBNAME EQ '') EXE 122          ; ALL BLANK
+N0 = FIND(LIBNAME,' ')            ; Embedded blank?
+IF (N0 NE 0) OLDVOL =SUB(LIBNAME,N0+1) ; Part after blank=vol
+   THEN LIBNAME = STRIP(SUBSTR(LIBNAME,1,N0-1)) ; DSN is part before
+
+IF (LIBNAME EQ '') LIBNAME =LIBRARY   ;  DEFAULT
+IF (LIBNAME EQ '*') LIBNAME=OLDPREF
+IF (LIBNAME EQ '') WRI '* is undefined.'
+   THEN EXEC 114
+IF (LIBNAME EQ '?') EXE 1100
+IF (LINES GT 0) DEL 0/LAST ; Clean up residue from previous 'SHOW CAT' etc.
+; SEE IF VOLUME SPECIFIED ("DSN ON VOL" ENTERED)
+N0 = IND(OLDVOL,'ON ')
+IF (N0 EQ 0) OLDVOL =''
+   THEN EXE 150
+OLDVOL =SUB(OLDVOL,N0+3) ; PART AFTER "ON "
+N0 = VER(OLDVOL,' ')  ; NEXT NONBLANK
+IF (N0 EQ 0) OLDVOL =''  ; SHOW NO VOL
+   THEN EXE 150
+IF (~PRIV_SYS) OLDVOL=''
+   THEN EXE 150          ; PRIV req'd to alloc uncatlg'd
+OLDVOL =SUB(OLDVOL,N0,6) ; GET VOL-SER
+INNOTCAT = TRUE          ; SHO NOT CATLG'D
+
+;  CHECK DSNAME
+
+LIBNAME =DSNFORMAT(LIBNAME)
+IF (LIBNAME EQ 'BAD DSN') WRI LIBNAME
+   THEN EXEC 114
+;  NOW WE HAVE A QUALIFIED NAME, SEE IF IT'S OURS
+IF (SUB(LIBNAME,1,11) EQ DSNPREF) EXE 205 ;   OURS
+
+;  HERE IF NOT OUR DATA SET.
+
+; when available, add a check to see if we have write access to the
+; dataset.
+
+;  LOOK UP DSN IN CATALOG, GET ATTRIBUTES
+IF (OLDVOL NE '') EXE 217 ; IF ALREADY GOT VOLUME
+
+DUM CAT LIK $&(LIBNAME) INTERNAL VOL
+IF (LINES EQ 0) WRI 'ERROR:  &(LIBNAME) is not cataloged.'
+   THEN EXE 114
+POI '&(SUB(LIBNAME||' ',1,44))'3 (1) NOLIST ; FIND EXACT NAME
+IF (* LT 0) WRI 'ERROR:  &(LIBNAME) is not cataloged.'
+   THEN EXE 114
+REA STR OLDVOL USI * COL 47/52         ; Volser from catlg entry
+;  OK, GOT A CATALOG ENTRY
+
+IF (LINES GT 0) DEL 0/LAST
+DSN=LIBNAME||' VOL='||OLDVOL
+EXEC 900 SAVE
+IF (DSNFLAG NE 'OK') WRI 'ERROR: &(LIBNAME) &(DSNFLAG)'
+   THEN EXE 114
+N0 = SIZE(LIBNAME)                ;  DSN LENGTH
+IF (LINES GT 0) DEL 0/L
+IF (DSORG EQ 'PO') EXE 229    ; OK, IT'S A LIBRARY
+WRI 'ERROR:  Data set &(LIBNAME) is not a library. '
+WRI 'Data set attributes are '||DSNDESCR
+EXE 114
+
+OLDTRKU = TRKUSED
+OLDTRKA = TRKALLOC
+OLDKBA = KBALLOC                   ; Now get these from DSNINFO mcl 1995/08/04
+OLDKBU = KBUSED
+S0 = OLDVOL  ; VOLUME SERIAL
+EXEC 800 SAVE  ; GO GET TYPE, TRACK SIZE
+OLDUNIT=STRIP(S0)
+OLDTRKL =TRKL  ; kbytes/trk from subroutine
+NEWTRKL=OLDTRKL ; make sure it's never zero
+COMM Library &(LIBNAME) is on volume &(OLDVOL) and uses &(FORMAT(OLDKBU,-1,0)) of &(FORMAT(OLDKBA,-1,0 )) kbytes (&(OLDTRKU) of &(OLDTRKA) tracks).
+SHOW DIR IN $&(LIBNAME) VOL=&(OLDVOL) BLOCKS COLLECT 1 BY 1
+OLDMEMS =LAST-4              ;  NO. MEMBERS
+; line 1: "Directory of WYL.gg.uuu.lib"
+; line 2: blank
+; line 3: headings
+; lines 4/last-1:  the members
+; last:  "21 directory blocks in use out of 34 allocated"
+REA STR DINF0 UPP USI LAST
+N1=IND(DINF0,' DIRECTORY ')
+DINF1=STRIP(SUB(DINF0,1,N1))
+N1=IND(DINF0,' OUT OF ')
+DINF0=STRIP(SUB(DINF0,N1+7))   ; sumpin' like "32 ALLOCATED" "
+N1=IND(DINF0,' ') ; next blank ends field
+DINF2=SUB(DINF0,1,N1)            ; blocks allocated
+OLDBLKA = NCON(DINF2)
+OLDBLKU = NCON(DINF1)
+COMM It contains &(OLDMEMS) members and has &(OLDBLKA) directory blocks, of which &(OLDBLKU) are used.
+DEL 0/LAST
+
+WRI '&(OLDVOL) is a &(OLDUNIT) disk (&(OLDTRKL) kbytes/track)'
+TRYVOL=OLDVOL
+;  VOLUME
+
+COMM
+WRI 'Volume on which new library will reside? '
+REA STR NEWVOL UPP ATTN=110 PRO '(ANY=find new volume, RETURN=&(TRYVOL)): '
+NEWVOL=STRIP(NEWVOL)
+NEWUNIT=''
+IF (NEWVOL EQ '') NEWVOL =TRYVOL        ; Use default
+   THEN EXE 300
+IF (NEWVOL EQ '?') EXE 1210            ; HELP VOLUME
+IF (NEWVOL EQ 'ANY') NEWVOL=''         ; be nonspecific
+   THEN NEWTRKL=OLDTRKL                ; best guess so far...
+   THEN EXE 300
+IF (SIZE(NEWVOL) NE 6) EXE 1200        ; BAD VOLUME
+IF (NEWVOL EQ OLDVOL) NEWTRKL=OLDTRKL  ; Track length
+   THEN NEWUNIT=OLDUNIT
+   THEN EXE 300                        ; same vol...
+
+; NEW VOLUME DIFFERENT FROM OLD.  CHECK IT OUT
+
+S0 = NEWVOL                      ; VOLUME
+EXE 800 SAVE                       ; GET TYPE
+IF (TRKL EQ 0) EXE 250 ; IF BAD VOL, REPROMPT
+NEWTRKL =TRKL                      ; kbytes/trk
+N1 = TRKL                      ; SAME FOR MSG
+NEWUNIT=STRIP(S0)                  ; unit name e.g. 3380
+WRI '&(NEWVOL) is a &(NEWUNIT) disk (&(FORMAT(NEWTRKL,-1,0)) kbytes/track)'
+
+; common to wyl, nonwyl volumes
+
+;  SPACE ALLOCATION
+
+COMM
+UTRK = FALSE
+RLSE = FALSE
+REA STR S0 UPP ATTN=250 PRO 'Space (in kbytes) to be allocated for new library (RETURN=&(NCON(OLDKBA))): '
+S0 = STRIP(S0)                     ; Strip blanks
+IF (S0 EQ '') PRIQTY =OLDKBA        ;  DEFAULT IS PREVIOUS SIZE
+   THEN EXEC 340
+IF (S0 EQ '?') EXE  1310           ;  HELP PRIMARY
+IF (IND(S0,'TRA') EQ 0 AND IND(S0,'TRK') EQ 0) EXE 315 ; JUST KBYTES
+UTRK = TRUE  ; It's in tracks
+S0 = SUB(S0,1,IND(S0,'T')-1) ; STRIP "TRK" OR "TRACK" OR WHATEVER
+S0 = STRIP(S0)                     ; STRIP TRAILING BLANKS
+IF (S0 EQ 'SHRINK') RLSE = TRUE        ; IF SHRINK WANTED
+   THEN PRIQTY =OLDKBU                 ;  NEW KB=OLD KB USED
+   THEN EXE 340
+IF (VERIFY(S0,'0123456789') NE 0) EXE 1300  ; INVALID
+PRIQTY =S0                      ;  PRIMARY
+IF (PRIQTY EQ 0) EXE 1300              ;  ZERO INVALID
+
+; CONVERT TO KB if necessary
+
+PRIKB = PRIQTY                            ; primary, KB unless user forced trks
+IF (UTRK) PRIKB=INT(PRIQTY*NEWTRKL)      ; user forced tracks -- get kbytes
+SECQTY = INT(PRIQTY/3)+1                  ;  SECONDARY (kbytes or tracks)
+PRIQTY = INT(PRIQTY)
+
+;  RELEASE
+
+IF (RLSE) EXE 400
+IF (PRIKB GE OLDKBU) EXE 400     ;  DON'T ASK RELEASE IF SIZE WAS INCREASED
+COMM
+S0 = YESNO('Do you want to shrink the library so that no free tracks remain? ',YNO)
+IF (S0 EQ 'ATTN') EXE 300
+IF (S0 EQ 'NULL' OR S0 EQ 'NO') EXE 400          ; NO
+IF (S0 EQ 'HELP') EXE 1510                       ;  HELP RELEASE
+RLSE = TRUE                   ;  FOR RELEASE
+
+;  DIRECTORY
+
+IF (RLSE) DIRQTY =OLDMEMS  ; IF SHRINKING, USE JUST ENUF
+   THEN EXEC 440
+COMM
+;  DEFAULT DIRECTORY
+DFLTMEMS = PRIKB/18   ; about 3 mems/trk
+IF (DFLTMEMS LT 30) DFLTMEMS=30    ; 30 min.
+IF (DFLTMEMS GT 300) DFLTMEMS=300  ; 300 max.
+IF (DFLTMEMS LT OLDMEMS) DFLTMEMS=OLDMEMS   ; gotta keep what we have
+IF (DFLTMEMS LT OLDMEMS+20 AND OLDMEMS+20 LE PRIKB*37) DFLTMEMS =OLDMEMS+20  ; LEAVE ROOM TO ADD 20 MEMBERS, IF POSSIBLE
+DFLTMEMS = INT(DFLTMEMS)
+;  NOTE:  37 MEMBERS/TRK IS MAX. INCL. DIRECTORY ON 3350, 3380
+
+WRI 'How many members do you want to leave room for in the '
+REA STR S0 ATTN=300 PRO 'directory of the new library (RETURN=&(DFLTMEMS)): '
+S0=STRIP(S0)
+IF (S0 EQ '') DIRQTY =DFLTMEMS        ;  USE DEFAULT
+   THEN EXEC 430
+IF (S0 EQ '?') EXE  1410           ;  HELP DIRECTORY
+IF (VERIFY(S0,'0123456789') NE 0) EXE 1400  ; INVALID
+DIRQTY =S0                      ;  DIRECTORY
+IF (DIRQTY LT OLDMEMS) EXE 1400              ;  too small
+
+; CHECK DIRECTORY SIZE
+X1=INT((DIRQTY*1.27)+.99)          ; 1.27 kbytes/member (data+dir)
+IF (PRIKB GE X1) EXE 440          ; if there is enough room
+; not enough room for the directory and data
+S1 = 'KBYTES'  ; unit of alloc
+IF (UTRK) S1='TRACKS'             ; if tracks forced
+N0 = PRIQTY                       ; save prev. kbytes or tracks
+PRIQTY = X1                       ; minimum (kbytes)
+IF (UTRK) PRIQTY=INT((X1/NEWTRKL)+0.999) ; want trks: convert and round up
+WRI '&N0 &S1 is not enough room to hold &(DIRQTY) members;'
+WRI 'space allocation increased to &(PRIQTY) &(S1).'
+
+; Convert DIRQTY from members to blocks:
+DIRQTY = INT((DIRQTY+2)/3)  ; 3 MEMBERS/BLOCK, AND ROUND UP
+
+;  ALLOCATE LIB.TEMP
+
+;  TEMPORARY LIBRARY NAME
+S0 = SUB(DATE,20,2)||SUB(DATE,23,3)||'.ZZ'||SUB(DATE,1,2)||SUB(DATE,4,2)||SUB(DATE,7,2)
+TEMPNAME =DSNPREF||'TMP'||S0
+IF (OUTNONWYL) EXE 600 ; output on non-WYLBUR vol, don't allocate
+WRI ' '
+S1 = 'KBYTES'  ; unit of alloc
+IF (UTRK) S1='TRACKS'             ; if tracks forced
+S2 = ''
+IF (INNOTCAT AND NEWVOL NE '') S2='NOCAT'        ; Not catlg'd, leave it that way
+IF (NEWVOL NE '') TRY ALLOC &(TEMPNAME) VOL=&(NEWVOL) &(S2) &(S1) &(PRIQTY) BLOCKS &(DIRQTY) QUI NOVER
+   ELSE TRY ALLOC &(TEMPNAME) &(S1) &(PRIQTY) BLOCKS &(DIRQTY) QUI NOVER
+
+IF (NOT TRYERR) EXE 590 ; OK
+WRI TRYMSG
+
+;  Recover from allocate failure
+;  fix default if user goes back to specify a vol:
+TRYVOL=''    ;  no default, nonspecific has already failed in WYLBUR
+NEWUNIT=''                     ; don't know the unit we'll get
+REA STR S0 UPP PRO 'Reply SPACE to respecify space request, VOL to specify a new volume, or QUIT: '  ATTN=770
+S0=STRIP(S0)
+IF (S0 EQ '') EXEC 250 ; go pick one
+IF (S0 EQ '?') EXE 1800 ; Help vol recov
+IF (ABB(S0,'QUI') EXE 770 ;  QUIT
+IF (ABB(S0,'SPA') EXE 300 ;  SPACE
+IF (ABB(S0,'VOL') EXE 250 ;  VOL
+IF (ABB(S0,'LIS') TRY SHOW VOLS ; LIST volumes
+   THEN EXEC 470
+IF (SIZE(S0) EQ 6) NEWVOL=S0 ; 6-char answer...likely a volser
+   THEN EXEC 270
+WRI S0||':  Invalid.  Reply SPACE, VOLUME, or with a volume name.  Reply ? for help.'
+EXEC 470
+
+;  check volume, ALLOCATE might wing it
+IF (INNOTCAT) EXE 600  ; can't look for it
+ACTVOL=SUB(DSNINFO(TEMPNAME),1,6)  ; actual cataloged volser
+IF (ACTVOL EQ NEWVOL) EXE 600      ; OK
+IF (NEWVOL EQ '') TRY WRI 'Note:  New library allocated on '||ACTVOL
+   ELSE TRY WRI 'Note:  Unable to allocate library on '||NEWVOL||', '||ACTVOL||' used instead.'
+NEWVOL=ACTVOL
+S0 = NEWVOL                      ; VOLUME
+EXE 800 SAVE                       ; GET TYPE
+NEWTRKL =TRKL                      ; kbytes/trk
+NEWUNIT=STRIP(S0)                  ; unit name e.g. 3380
+WRI '&(NEWVOL) is a &(NEWUNIT) disk (&(FORMAT(NEWTRKL,-1,0)) kbytes/track)'
+
+;  BUILD JCL
+PUTEND // JOB ,CLASS=F
+PUTEND //  EXEC LIBMOVE,DSN='&(LIBNAME)',
+;;IF (OLDMEMS EQ 0) PUTEND //  PROG=IEFBR14, **deleted 96/10/29 mcl
+;;                                  IOPROGM used to give RC=4 if empty
+PUTEND //  TDSN='&(TEMPNAME)',
+IF (OLDTRKL EQ NEWTRKL) PUTEND //  PARM.COPY=NOREBLOCK,
+IF (RLSE) PUTEND //  SPACE='(&(PRIQTY),&(SECQTY),&(DIRQTY)),RLSE',USER=&(SUB(ACCOUNT,1,6))
+   ELSE PUTEND //  SPACE='(&(PRIQTY),&(SECQTY),&(DIRQTY))',USER=&(SUB(ACCOUNT,1,6))
+IF (INNOTCAT) PUTEND //COPY.SYSUT1 DD UNIT=SYSALLDA,VOL=SER=&(OLDVOL)
+   THEN       PUTEND //COPY.SYSUT2 DD UNIT=SYSALLDA,VOL=SER=&(NEWVOL)
+IF (OUTNONWYL) PUTEND //COPY.SYSUT2 DD DISP=(,CATLG),UNIT=&(NEWUNIT),VOL=SER=&(NEWVOL)
+IF (INNOTCAT) PUTEND //DELETE.DEL DD UNIT=SYSALLDA,VOL=SER=&(OLDVOL)
+PUTEND //RENAME.SYSIN DD *,LRECL=94
+CHA 73 TO 'UNN' IN LAS NOL
+PUTEND &(TEMPNAME)
+CHA 51 TO '&(LIBNAME)' IN LAS NOL
+IF (INNOTCAT) CHA 45/50 TO '&(NEWVOL)' IN LAS NOL
+
+;  KEEP OUTPUT?
+WRI ' '
+S0 = YESNO('Do you want the printed output from the job? ',YNO)
+IF (S0 EQ 'NULL' OR S0 EQ 'NO' OR S0 EQ 'ATTN') EXE 656    ; NO
+IF (S0 EQ 'HELP') EXE 1710         ;  HELP OUTPUT
+IF (S0 EQ 'YES')  EXE 700          ;  YES
+
+PUTEND //$GONE EXEC NOLIST,COND=(0,NE)
+
+;  RUN
+
+COMM
+REA STR S0 UPP ATTN=770 PRO 'RUN? '
+S0=STRIP(S0)
+IF (S0 EQ '') EXE 720
+IF (S0 EQ '?') EXE 1610            ;  HELP RUN
+IF (INDEX('YESOK',S0) NE 0) EXE 720
+IF (SUBSTR(S0,1,1) EQ 'N') EXE 730    ;  NO
+IF (SUBSTR(S0,1,3) EQ 'PAU') EXE 740  ;  PAUSE
+IF (S0 EQ 'QUIT') EXE 770
+EXE 1600                           ;  ERROR
+
+;  RUN
+
+RUN HOLD NOTIFY
+CLOSE
+PIC &(OLDACT)
+EXE 750
+
+;  NO
+
+COMM The JCL is in your active file.
+COMM Be sure to SCRATCH &(TEMPNAME) PDS if you decide not to
+COMM run the job.
+COMM Type PICK &(OLDACT) to restore your previous active file.
+EXE 750
+
+;  PAUSE
+
+COMM The JCL is in your active file.
+COMM Type EXEC to continue.
+EXE PAUSE
+EXE 700
+
+;  CLEANUP
+
+SET ESC &(OLDESC)
+CLR EXE
+
+;  QUIT
+
+IF (TEMPNAME NE '') TRY SCRATCH &(TEMPNAME) PDS
+CLOSE
+PIC &(OLDACT)
+EXEC 750
+
+;  SUBROUTINE TO FIND OUT DISK TYPE
+
+;  ON INPUT:  S0=VOLSER
+;  ON OUTPUT: S0=DEVICE TYPE (6 CHAR.)    TRKL=TRACK LENGTH
+;  RETURNS VIA "EXEC RETURN"
+;  IF INVALID VOLUME, ISSUES ERROR MSG, SETS TRKL=0
+
+WORKEND = END
+DUMP UCB &S0 INTERNAL                            ;; 1999/02/03 MCL
+IF (LAST LT WORKEND) EXE 850 ; Null result means not found
+;; results from DUMP UCB INTERNAL  [No data returned if not found]
+;;       ....v....1....v....2....v....3....v....4....v....5....v....6
+;;       unit stat  devt volser devtype    cyls      use misc.
+;;       -------------------------------------------------------------
+;;       0420 A     DISK STR200 3390-3     3340      SMS Shared
+;;
+IF (SUB(LINE(WORKEND),12,4) NE 'DISK') EXE 850 ; IF NOT DA DEVICE
+S0 = SUB(LINE(WORKEND),24,8) ; device description e.g. 3390-3
+DEL &(WORKEND)/LAST
+TRKL = 56.0  ;   we only got 3390 type now  mcl 1999/02/03
+EXEC RETURN
+
+; ERROR...BAD VOLUME
+TRKL =0  ; SHOW NO DEVICE
+DEL &(WORKEND)/LAST
+WRI 'Error:  Volume &S0 does not exist.'  ATTN=860
+WRI 'The following volumes are on the system:' ATTN=860
+TRY SHO VOLS
+
+EXEC RETURN
+;  subroutine to get dsn info
+;  break down DSNINFO
+;  on input:  DSN string filled in
+;  on output: DSNFLAG will be one of the values from DSNVERIFY.  If
+;             DSNFLAG='OK' or 'BAD MEMBER', then the following are
+;             set:
+;             DSN is fully qualified, and TRKALLOC, TRKUSED, EXTENTS,
+;             DSORG are filled in.
+;             DSNDESCR has format information for msg
+
+DSNSTRING=COPIES(' ',256)
+DSNFLAG=DSNVER('$'||DSN)
+IF (DSNFLAG EQ 'OK' OR DSNFLAG EQ 'BAD MEMBER' OR DSNFLAG EQ 'IN USE' OR DSNFLAG EQ 'NO ACCESS' OR DSNFLAG EQ 'UNUSABLE') THEN DSNSTRING=DSNINFO('$'||DSN)
+   THEN DSN=STRIP(SUBSTR(DSNSTRING,8,44))
+VOLSER=SUBSTR(DSNSTRING,1,6)
+TRKALLOC=SUBSTR(DSNSTRING,59,5)
+TRKUSED=SUBSTR(DSNSTRING,53,5)
+EXTENTS=SUBSTR(DSNSTRING,65,3)
+KBALLOC=SUBSTR(DSNSTRING,144,8)
+KBUSED=SUBSTR(DSNSTRING,135,8)
+DSORG=STRIP(SUBSTR(DSNSTRING,69,3))
+DSNDESCR='DSORG='||DSORG||' RECFM='||SUBSTR(DSNSTRING,73,5)||' LRECL='
+DSNDESCR=DSNDESCR||SUBSTR(DSNSTRING,79,5)||' BLKSIZE='||SUBSTR(DSNSTRING,85,5)
+
+EXEC RETURN
+
+
+; HELP FILES--------------------------------------------------------
+LIST 1050/1099 EXE UNN ATTN=114
+EXE 114
+This EXEC file is used to rebuild a library.  This is necessary when you wish
+to:
+
+1.  Enlarge a library (increase the amount of data or the number of members
+    that it can hold).  Do this if you can't save in the library after a
+    CONDENSE, or if the directory is full.
+
+2.  Shrink a library.  Do this if there are several unused tracks and you don't
+    plan to add members.
+
+You can also use LIBMOVE to move a library to a different disk volume.
+
+This EXEC file allocates a new library using a new (generated) temporary name,
+copies your library into it, deletes the original library, and then renames
+the "TEMP" version so it has the original library name.  Do NOT use this EXEC
+file to "copy" a library, since you end up with only ONE library, not two.
+Use UTIL LIBCOPY to make a copy of a library.
+
+In the prompts that follow, RETURN means "just press the RETURN key without
+typing anything".  If you don't understand a prompt, reply with a question mark
+(?).  If you press the BREAK key in response to any prompt other than the RUN
+prompt, you will be returned to the previous prompt.
+
+In the future, you can invoke this EXEC file specifying the name of the library
+to be rebuilt, for example,
+
+  UTIL LIBMOVE LIB
+
+;  help library name
+LIST 1150/1169 EXE UNN ATTN=114
+IF (PRIV_SYS) LIST 1171/1199 EXE UNN ATTN=114
+EXE 114
+Specify the name of the library you want to rebuild.  If you just press
+RETURN, the library mentioned in the prompt will be used.
+
+--for internal users, "uncataloged" option
+If the library is not cataloged, you can specify this by including the volume
+with the name.  Enter the name as "libname ON volume".
+
+;  BAD VOLUME
+
+COMM &(NEWVOL):  INVALID VOLUME.
+;  HELP VOLUME
+
+WRI 'The library is now on &(OLDVOL).' ATTN=250
+LIST 1250/1299 EXE UNN ATTN=250
+EXE  250
+
+If you just press RETURN, the library will remain on that volume; if you
+respond with the name of another WYLBUR volume, the library will be moved to
+that volume.  If you reply ANY, the system will pick an available storage
+volume.
+
+If you specified a volume and there is not enough room on the volume for the
+new library, the system will allocate it elsewhere; you will get a message
+indicating that a different volume was used.  If there is not enough room
+anywhere, you will get a message like
+
+  LIB.TEMP allocated on <newvol> (unable to allocated on requested volume)
+
+If this happens, you will be given the choice of specifying another volume, or
+respecifying your space request.  Specifying another volume is useful only if
+you have a private volume available for your use.
+
+The location of the library is recorded in the system catalog, so it is not
+necessary to have it on the same volume as your other data sets.
+
+;  BAD PRIMARY
+
+COMM &S0:  INVALID; must be a number greater than zero.
+
+;  HELP PRIMARY
+
+LIST 1350/1360 EXE UNN ATTN=300
+WRI 'Your library is on &(OLDVOL), a &(OLDUNIT) disk (&(OLDTRKL) kbytes/track).'
+LIST 1375/1399 EXE UNN ATTN=300
+WRI 'Currently, the library is using &(NCON(OLDKBU)) of &(NCON(OLDKBA)) kbytes (&(OLDTRKU) of &(OLDTRKA) tracks).  If it' ATTN=100
+WRI 'has not been condensed recently, there may be more free space than shown here.' ATTN=100
+EXE 300
+Disk space is measured in kilobytes (kbytes); a kilobyte is 1,024 characters
+(about 15 lines of text).  However, space must be allocated as an integral
+number of "tracks" on the disk; a track on a 3390 disk (the kind used for the
+PUB volumes) holds 56 kbytes.  LIBMOVE will round up the value you specify to
+an integral number of tracks.
+
+; more, after disk report--
+
+You must allow some extra room so you can update members (you need at least as
+much extra space as the size of the largest member).  If you leave too little
+space, you will need to CONDENSE frequently.  You are charged for all
+allocated tracks, whether or not you are using them, since they are reserved
+for you and no one else can use them.  Therefore, it is expensive to allocate
+too much space.  Currently, disk storage costs 0.85 cents per kilobyte-month;
+refer to DOC#RATES PUBLIC for latest rates.
+
+If you want to shrink the library to release all unused space, reply SHRINK to
+this prompt.  LIBMOVE will then release all unused tracks.
+
+If you prefer to specify space in tracks, type a number followed by the word
+TRACKS; this may be abbreviated TRK or TRA.
+;  BAD DIRECTORY.
+
+COMM &S0 is less than the number of members already in the library.
+
+;  HELP DIRECTORY
+
+LIST 1450/1469 EXE UNN ATTN=400
+EXE 1470   ; THE REST IS "WRITE" SO WE CAN SUBSTITUTE VALUES
+The directory is used to store pointers to the members.  The number of members
+that will fit depends on the length of the title, if any, saved with the
+member.  LIBMOVE will allocate directory space assuming that each member has a
+maximum length title.  One block of directory space will hold pointers to
+about three members.  The space used by the directory is taken out of the
+space allocated to the library, that is, making the directory larger reduces
+the room available for the actual data.
+
+If the library was not created by WYLBUR, or if it is very old, you may find
+that your directory is full even though you haven't added any new members.
+The default new directory allocation mentioned in the prompt above will be
+sufficient to store all current members, plus at least 20 new ones.
+
+WRI 'The library now contains &(OLDMEMS) members using &(OLDBLKU) blocks.' ATTN=400
+WRI 'There are &(OLDBLKA) blocks allocated in its directory.   ' ATTN=400
+EXE 400  ; BACK TO ASK AGAIN
+;  HELP RELEASE
+
+LIST 1550/1599 EXE UNN ATTN=NEXT
+EXE 360
+If you respond YES to this prompt, all unused tracks will be released (given
+back to the system) after the library is copied.  The library will then have
+some fraction of a free track (only whole tracks may be allocated or
+released).  Request this option if you want to shrink the library, and do not
+plan to add members or update members.  Do NOT request this option if you want
+to expand the library, as it will undo the expansion and leave you with little
+or no free space.
+
+;  BAD "RUN" RESPONSE
+
+COMM &S0:  INVALID.  Reply "YES", "NO", "PAUSE", or "QUIT"
+;  HELP RUN
+
+LIST 1650/1699 EXE UNN ATTN=NEXT
+EXE 700
+If you respond YES or just press RETURN, the job to rebuild your library will
+be submitted; you will be notified when it completes if you are still logged
+on at that time.
+
+If you respond NO, the JCL will be left in your active file so you can inspect
+or modify it; you will then need to issue the RUN command yourself.
+
+If you respond PAUSE or press the BREAK key, the JCL will be left in your
+active file so you can inspect or modify it, and you should issue the EXEC
+command to have this EXEC file run the job.
+
+If you respond QUIT, the job will not be run, the new library allocated by
+LIBMOVE will be scratched, and the JCL will be deleted from your active file;
+your old library will be unchanged.
+;  HELP OUTPUT
+
+LIST 1750/1799 EXE UNN ATTN=NEXT
+EXE 650
+
+If you reply YES, the printed output from the LIBMOVE will be kept in OUTPUT
+HOLD so that you may inspect it at your terminal or RELEASE it for printing.
+This output reports the member names in the library and the number of lines in
+each.
+
+If you reply NO or press the RETURN key, this output will be purged from the
+system if the LIBMOVE job is successful.  If the job fails, the output will be
+kept; you should examine it or have a consultant examine it to determine the
+cause of the trouble.
+
+;
+; HELP BATCH ALLOCATE/ALLOC RECOVERY
+LIST 1850/1899 EXE UNN ATTN=470
+EXE 470
+
+LIBMOVE was unable to allocate space for the rebuilt library on the volume you
+requested, and also failed when it made a nonspecific volume request to the
+system.  This means that there is not sufficient space for it on the volume
+you requested (if you specified a volume), nor on any other volume available
+for general use.  You should check your space request to make sure it is
+reasonable.  If you have a private disk volume available for your use, you can
+specify that volume.
+
+If you reply LIST to this prompt, you will be shown a list of disk volumes on
+the system, then prompted for a decision again.

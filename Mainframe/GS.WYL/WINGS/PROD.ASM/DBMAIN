@@ -1,0 +1,2958 @@
+DBMAIN   TITLE 'Wings: DBMAIN -- Debugger main program'
+********************************************************************
+*** %%Module: wings asm dbmain;                                    *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- DBMAIN; OSFILE debugger subtask                      *
+***                                                                *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***    2002/06/05 mcl   MSG->SETMSG                                *
+***    1996/10/10 mcl   TZ fixes                                   *
+***    1994/06/06 mcl   support S9 cmd (SVC99 area display)        *
+***    1994/03/30 MCL   support TRACE cmd, reduce PTRACE mainloop  *
+***    1994/03/15 mcl   timestamp in TVTLRCLK                      *
+***    1992/07/16 Niz   Change to common MYTAG and use path        *
+***                     "password" to indicate path type.          *
+***    1991/11/00 sch   created                                    *
+***                                                                *
+********************************************************************
+         SPACE 3
+DBMAIN   HIBAL ,                   Initialize HIBAL macro system
+DBMAIN   AMODE 31                  Initial 31-bit addressing mode
+DBMAIN   RMODE 24                  Reside below 16MB line
+DBMAIN   CSECT ,                   Define module control section
+         SPACE 3
+         REGS  FSR,,,,,,,,WAR,BRR,BR,TVTR,(GVTR,LSR),SPR,RAR
+         GBLC  &ZONE               Define local time zone
+         GBLC  &ALTZONE            Define alternate time zone
+         SPACE ,
+         SYSDEFN ,                 Include Stanford defaults
+         EJECT ,
+*box
+*
+*   CPROC differs from PROC in that it saves the current stack
+*     and return address in the TVT so error exits can return
+*     to the "command proc" caller.  See CMDCLEAN routine.
+*
+         MACRO
+&L       CPROC &P1,&P2,&PTR=WAR,&BASE=YES,&TRACE=YES
+&L       PROC  &P1,&P2,PTR=&PTR,BASE=&BASE,TRACE=&TRACE
+*
+         ST    WAR,TVTCMDAS        Current stack frame ptr
+         MEND
+         SPACE 2
+*box
+*
+*   Define system mapping macros
+*
+         SPACE 2
+         PRINT NOGEN
+         CVT   DSECT=YES           Communications vector table
+         IHASDWA                   Stae/dump work area
+         DCBD  DEVD=DA,DSORG=PS    Data control bock
+JFCBDSCT IEFJFCBN ,                Job file control block
+UCB      DSECT ,
+         IEFUCBOB ,                Unit control block
+         IEFZB4D0 ,                Dynamic allocation
+         IEFZB4D2 ,                Dynamic allocation
+         IHAASCB ,                 Address Space Control Block
+         IHADVCT ,                 Device characteristics table
+         IKJTCB DSECT=YES          Task control block
+TIOTDSCT IEFTIOT1 ,                Task input/output table
+         IEZDEB ,                  Data extent block
+         PRINT GEN
+         IHAEPIE
+         SPACE 2
+*-
+*-  Version info is zapped into the following area.
+*-
+VERSION  CSECT ,                   The comma only for JDN
+         DC  CL235'Wings:DBMAIN (&SYSDATE) (&SYSTIME)'
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+         TITLE 'Wings: Disk I/O support: Global vector table'
+GVT      RECORD BEGIN
+         COPY  GVT
+         END   ,
+         TITLE 'Wings: Disk I/O support: Mapping macros'
+         COPY  UPATH               INCLUDE PATH MAPPING INFORMATION
+         EJECT ,
+         COPY  SYMTAB
+         SPACE 3
+         COPY  TRCENTRY
+         SPACE 3
+         COPY  DYNTABLE
+         EJECT ,
+*box
+*
+*  Map segment control block fields
+*
+         SPACE 2
+SEGCB    RECORD 'SEGCB'
+         SPACE 3
+*box
+*
+*  Map scanner control block fields
+*
+         SPACE 2
+         SCANCB TYPE=DSECT
+         TITLE 'Wings: Disk I/O support: Task vector table'
+TVT      RECORD BEGIN
+         COPY  TVT                 Basic TVT
+         COPY  TVTDBM              TVT DBMAIN tvt extension
+         END
+         TITLE 'Local Macros'
+*
+*  2 macros to push and pop SCANNER state as expected
+*  by monitors version of the scanner.  We must push
+*  the return address and the scancb pointer (r15).
+*  we do not normally push the loc,len... as we want
+*  that part to continue to increment as stuff is
+*  scanned off.  essentially we just want to be able
+*  to continue a scan in a scan routine.  so ...
+*
+*  NOTE: ARGS TO SCPUSH, SCPOP ARE IGNORED.
+*
+*  NOTE, CAUTION !! AHHHGG !!::
+*  IT IS TRUE THOUGH I CAN NOT BELIEVE IT !!
+*  R15 MUST BE SET TO SCANCB POINTER FOR A ROUTINE
+*  TO RETURN TO THE SCANNER! YUCK.  IT IS PUSHED
+*  AND POPPED BY SCPUSH,SCPOP !!
+*
+*  ** FREE REGISTER R15 **
+*
+*  OPPRESSIVE USAGE BY ORVYL SCANNER IS TERRIBLE.
+*
+*
+         MACRO
+&L       SCPUSH &M,&N
+&L       ST    R15,@R13
+         MVC   @R13+4(4),TVDBSCNRA
+         LA    R13,8(R13)
+         MEND
+*
+*
+         MACRO
+&L       SCPOP &M,&N
+         S     R13,=A(8)
+         L     R15,@R13
+         MVC   TVDBSCNRA,@R13+4
+         MEND
+*
+         MACRO
+&L       GETIA &REG,&PSW
+&L       L     &REG,&PSW+4
+         LA    &REG,0(&REG)
+         MEND
+*
+*  BOMB MACRO - PROGRAM CHECK CURRENT PROGRAM
+*
+         MACRO
+&L       BOMB  &D1,&D2
+&L       DC    H'0'
+         MEND
+         TITLE 'Wings: Disk I/O support: Initialization'
+*box
+*
+*        Main entry point - initialization
+*
+*
+*   debug program.  this program has two mutually exclusive
+*   modes (as of 1/1/92, this work in progess).  the program
+*   can be running in monitor or debug mode.  monitor mode is
+*   the default.  there can be multiple monitor mode programs
+*   running at once.  there can only be one debug mode program
+*   at one time.  (also there can only be one debuggee program
+*   (subtask) at one time.)  anyway the command processing and
+*   event (ECB) table handling is slightly different in each
+*   mode.  thus you will note there area 2 event tables used;
+*   one for each mode.  and there are 2 sckw cmd lists; one for
+*   each mode.
+*
+*   to invoke debugger:
+*   a) make sure debugger is in parm file for wings initiation.
+*   b) xcall #wcmd use sch (1/1/92) this is sure to change
+*   c) type 'help' to see commands available.
+*
+*   Note for multiple 'debug' or 'monitor' terminal sessions.
+*   Multiple debug subtasks must be running.
+*
+*   More comments later. for now much is still being sorted
+*   out. work in progress. CAUTION!  (ie read code, not comments)
+*
+*
+         SPACE ,
+DBMAIN   CSECT ,                   Define control section start
+         USING GVT                 Global vector table ptr
+         USING TVT                 Task vector table
+         SPACE ,
+         ENTRY STARTUP             Define module entry point
+STARTUP  LABEL ,                   Module entry point
+         STM   R14,R12,@R13+12     Save calling registers
+         LR    BR,R15                Move program base register
+         USING STARTUP,BR              Set addressabiltity
+         LR    R6,R1                     Save VS parameter pointer
+         LR    R3,R13                      Save VS save area address
+         SPACE ,
+         L     BRR,=A(OSFCOMMN)    Address of common routines
+         USING OSFCOMMN,BRR        Declare addressability
+         SPACE ,
+*-
+*-       Save VS save area address and allocate internal
+*-       save stack mechanism.
+*-
+         GETMAIN RC,LV=32*1024,    Get a 32K stack                     X
+               BNDRY=PAGE,LOC=(BELOW,ANY)
+         IF    (R15,NZ),BEGIN      Insufficient memory for stack
+         LA    R15,12              Load return code
+         B     OSFXIT2             Abort processing
+         END   ,
+         LR    SPR,R1              Set stack
+         LR    WAR,R1              Ditto
+         SPACE ,
+*-
+*-       Test for batch mode invocation
+*-
+         TM    @R6,X'80'           Test for batch mode
+         IF    ONES,BEGIN          Invoked in batch test mode
+         CLEAR GVTR                Indicate no GVT yet
+         CLEAR TVTR                Indicate no TVT yet
+         GETMAIN RC,LV=L'GVT,      Request memory for GVT              X
+               BNDRY=PAGE,LOC=(BELOW,ANY)
+         IF    (R15,NZ),BEGIN      Insufficient memory
+         LA    R15,12              Load return code
+         B     OSFXIT2             Abort processing
+         END   ,
+         SPACE ,
+         LR    GVTR,R1             Move address of GVT
+         LR    R0,R1               Clear GVT to zero values
+         LA    R1,L'GVT              Set length to clear
+         CLEAR R15                     Zero from length
+         MVCL  R0,R14                    Clear GVT to zeros
+         SPACE ,
+         MVI   GVTBLANK,C' '       Set blank constant value
+         MVC   GVTBLANK+1(L'GVTBLANK-1),GVTBLANK
+         MVC   GVTTRACE,=V(PTRACE) Set PTRACE addr
+         SPACE ,
+*-
+*-       Acquire and initialize TVT
+*-
+         L     R2,=A(TVTSIZE)      Set length of TVT
+         GETMAIN RC,,LV=(R2),      Request memory for TVT              X
+               BNDRY=PAGE,LOC=(BELOW,ANY)
+         IF    (R15,NZ),BEGIN      Insufficient memory
+         LA    R15,12              Load return code
+         B     OSFXIT2             Abort processing
+         END   ,
+         LR    TVTR,R1             Move address of TVT
+         LR    R0,TVTR             Clear TVT to zero values
+         LR    R1,R2                 Set length of TVT to clear
+         CLEAR R15                     Zero from length
+         MVCL  R0,R14                    Clear TVT to zero
+         SPACE ,
+         ST    GVTR,TVTGVTP        Set address of GVT
+         MVC   GVTSTART(4),=C'GVT' Set identification
+         HASPSERV JOBNAME,@R13     Get our job name
+         MVC   GVTJOBNM,@R13       Move in jobname
+         SET   TVTBATCH            Set test mode
+         MVC   TVTSTART(4),=C'TVT' Set identification
+         MVC   TVTTLEN,=AL2(TVTSIZE)   set TVT total size
+         MVC   TVTNO,=A(1)             SET TVT IDENTIFICATION
+         L     R1,CVTPTR           SET CVT POINTER FOR TCB RETRIEVE
+         WITH  (CVT,R1),'L R1,CVTTCBP'  TCB Words
+         MVC   TVTTCBP,@R1+4       Save our TCB ptr
+         END   ,
+*
+*                                  If invoked by monitor
+*                                  TVT is passed as parm
+         ELSE  BEGIN
+         L     TVTR,@R6            Addr of passed TVT
+         LA    TVTR,0(TVTR)        get rid of high order bit if any
+         L     GVTR,TVTGVTP        Addr of GVT
+         LA    R6,@R6+4            Bump to parm string pointer
+         END
+         SPACE ,
+*-
+*-       Initialize values in TVT
+*-
+         ST    R3,TVTSAVE          Save vs save area address
+         SET   TVTSTINIT           Subtask initialization in progress
+         MVC   TVTRLAST,=A(-1)     Set for recovery stack overflow
+         MVC   TVTPATHN,GVTPATHN   Set path name
+         IF    (TVTWTIME,Z),'MVC TVTWTIME,=A(100*60)'
+         OI    TVTOPEN,X'80'       Mark only one DCB
+         OI    TVTCLOSE,X'80'      Mark only one dcb
+         L     R1,=A(MODSETZM)     Model MODESET for key=zero
+         MVC   MODSETZ(4),@R1        Set into tvt
+         L     R1,=A(MODSETPM)     Model MODESET for key=zero
+         MVC   MODSETP(4),@R1        Set into tvt
+         L     R1,=A(8192)         Set stack for 8K bytes
+         GETMAIN RC,LV=(0),LOC=(BELOW,ANY)
+         ST    R1,TVTESTAK         Reserve for ESTAE stack processing
+         LA    R3,TRCNENT#         Number of trace entries
+         M     R2,=A(L'TRCENTRY)   Compute total table size
+         GETMAIN RC,LV=(3)         Get trace table storage
+         IF    (R15,NZ),BEGIN      Insufficient memory
+         MVI   TVTRETCD+3,12       Set return code
+         B     OSFXIT              Abort processing
+         END   ,
+         SPACE ,
+         ST    R1,TVTTRBEG         Save pointer
+         ST    R1,TVTTRCUR         Init entry pointer
+         LA    R0,0(R1,R3)         Table end address
+         ST    R0,TVTTREND         Save address
+         LR    R2,R1               Copy address for MVCL
+         CLEAR R15                 Clear from length
+         MVCL  R2,R14              Clear trace table
+         SET   TVTFTRC             Flag tracing active
+         LA    R1,TVTSTOPECB       ADDRESS OF TASK ACTION ECB
+         ST    R1,TVTECBRQ           SAVE FOR MOTHER TASK POST
+         PTRACE Startup            Add first entry
+         TM    @R6,X'80'           Test for exec parameter pointer
+         IF    ONES,'LR R1,R6'     Move pointer to exec parameters
+         ELSE  'LA R1,@R6+4'       Set pointer to exec parameters
+         ACALL SCANPARM            Scan initialization parameters
+         SPACE 2
+*-
+*-       Define extended STAE recovery environment
+*-
+*-             Insure that this ESTAE is queued prior to calling
+*-             DUMPINIT so that the dumper has a chance before
+*-             we release all of the GD control blocks!!
+*-
+         ACALL SETESTAE            ENABLE ESTAE EXIT
+         SPACE 2
+*-
+*-       Initialize dump formatter.
+*-
+         CLEAR R1                  NO AUXILIARY DUMP ROUTINE
+         VCALL DUMPINIT            Initialize dump formatter
+         SPACE 2
+*-
+*-       Initialize trace table addresses and the symbol table
+*-
+         XPUSH ,,16,PTR=R2             Get stack space
+         ADDSYM ENTRY=(R2),NAME='TVT',LOC=(TVTR),LEN=LH:TVTTLEN
+         ADDSYM ENTRY=(R2),NAME='GVT',LOC=(GVTR),LEN=L'GVT
+         ADDSYM ENTRY=L:=A(SYMDBM)     Add DBMAIN Symbols
+         ADDSYM ENTRY=L:=V(SYMDEBUG)   Add DEBUG utilites Symbols
+         ADDSYM ENTRY=L:=V(SYMUTILS)   Add UTILITY symbols
+         ADDSYM ENTRY=L:=V(SYMMVSUT)   Add MVSUTILS symbols
+         ADDSYM ENTRY=L:=V(SYMPATH)    Add PATH symbols
+         ADDSYM ENTRY=L:=V(SYMDUMP)    Add DUMPER symbols
+         ADDSYM ENTRY=L:=V(SYMSCANN)   Add SCANNER symbols
+         XPOP  PTR=R2                  Pop stack work area
+         SPACE 2
+*-
+*-       Allocate dynamic allocation buffer
+*-
+         DYNINIT TABLE=TVTDYNBF,LENGTH=L:=A(512)
+         IF    (R15,NZ),BEGIN      Insufficient memory
+         MVI   TVTRETCD+3,12       Set return code
+         B     OSFXIT              Abort processing
+         END   ,
+         L     R2,TVTDYNBF         Set address of dynamic buffer
+         XPUSH ,,16,PTR=R3         Reserve space
+         ADDSYM ENTRY=(R3),NAME='DYNAMBF',LOC=(R2),LEN=512
+         XPOP  PTR=R3              Release stack space
+         L     R0,TVTNO            Set TVT id number
+         CVD   R0,@SPR             Convert to decimal
+         UNPK  TVTLOGDD,@SPR(8)    Convert to zoned
+         OI    TVTLOGDD+7,X'F0'    Set valid sign
+         MVC   TVTLOGDD(3),=C'OSF' Set complete ddname
+         DYNADD (DALDDNAM,1,8),TVTLOGDD
+         DYNADD (DALSYSOU,0,0)
+         DYNCALL ,                 ALLOCATE FILE
+         SPACE ,
+*-
+*-       Allocate client/server seg buffer for path support
+*-
+         L     R0,=A(16384)        Acquire 16k buffer
+         LR    R5,R0               Copy length
+         VCALL GETCORE             Allocate memory
+         ST    R1,TVTPATBF         Save buffer address
+         LR    R0,R5               Set length of buffer
+         VCALL GETCORE             Allocate memory
+         ST    R1,TVTPATB2         Set secondary buffer
+*-
+*-       ALLOCATE CLIENT/SERVER DATA/COMMAND PATH
+*-
+         ACALL SETPATH             Reset new path and queue to event
+*-
+*-       Start periodic timer.
+*-
+         ACALL SETTIMER            Start up periodic timer
+*-
+*-       SET UP EVENT TABLE, ECB AND ROUTINES
+*-
+         CLEAR TVTDECBL            CLEAR DEBUGGER ECB LIST
+         CLEAR TVTDEVNTL           CLEAR DEBUGGER EVENT LIST
+         ACALL SETMECBL            SET UP MONITOR ECB LIST
+         ACALL INITECBS            CLEAR MONITOR ECBS
+         SPACE 2
+         TITLE 'Wings: Disk I/O support: Main processing loop'
+*box
+*
+*    Main processing loop
+*
+MAINWAIT LOOP  BEGIN
+*
+*                                  WAIT FOR EVENT
+         PTRACE MainWait           TRACE WAIT
+         IF    (TVTFQUISCE,AND,~TPATCMND),OSFXIT
+         SET   TVTSTWAITING        SET SUBTASK WAITING FOR WORK
+         WAIT  ECBLIST=TVTDECBL    WAIT FOR EVENT TO OCCUR
+**-ml    PTRACE GotEVNT
+         SET   TVTSTBUSY           SET SUBTASK BUSY WITH WORK
+*
+*                                  MAKE LIST OF EVENTS TO PROCESS
+         CLEAR R0                  R0 - ZERO
+         LA    R1,TVTDECBL         R1 - ECBLIST NDX, END
+         L     R2,@R1              R2 - ECB PTR
+         LA    R2,0(R2)
+*                                  R3 - ECB VALUE
+         LA    R4,TVTDEVNTL        R4 - EVENT LIST
+         CLEAR TVTDEVNTL
+         WHILE (R2,NZ),BEGIN       LOOP THRU ALL ECB POINTERS
+         L     R3,@R2
+         N     R3,=X'40000000'
+         IF    (R3,NZ),BEGIN       IF POSTED, ,,,
+         ST    R2,@R4              PUT ECB POINTER IN EVENT LIST
+         LA    R4,4(R4)            CLEAR ECB
+         ST    R0,@R2
+         END
+         LA    R1,4(R1)
+         L     R2,@R1
+         LA    R2,0(R2)
+         END
+*
+*                                  PROCESS EVENTS
+         LA    R4,TVTDEVNTL
+         L     R2,@R4
+         WHILE (R2,NZ),BEGIN
+         LR    R0,R2
+**-ml    PTRACE EVNTexec
+         IF    (R2,EQ,TVTPATHPTR),BEGIN
+         PTRACE PathEvnt
+         ACALL PROCPATH
+         END
+         ELSEIF (R2,EQ,TVTTIMRPTR),BEGIN
+         ACALL SETTIMER
+         END
+         ELSEIF (R2,EQ,TVTDBUGPTR),BEGIN
+         ACALL DODEBUG
+         END
+         ELSEIF (R2,EQ,TVTSTOPPTR),BEGIN
+         ACALL MONPOST
+         END
+         LA    R4,4(R4)
+         L     R2,@R4
+         END
+*
+         END   , LOOP WAITING/PROCESSING EVENTS
+         EJECT ,
+         QLTORG
+         TITLE 'Wings: Disk I/O support: Termination control'
+*box
+*
+*   Wings: OSFILE termination process control
+*
+*        Release acquired resources and terminate task
+*
+         SPACE 2
+OSFCOMMN LABEL ,
+OSFXIT   LABEL ,                   Exit processing
+         IF    TVTFTRC,'PTRACE OSFXIT' Trace termination if active
+         SPACE ,
+         IF    TVTREPT,BEGIN       Close out report file
+         VCALL AMODE24             Enter 24-bit addressing mode
+         LA    R2,OSFDCBPR
+         CLOSE (R2),MF=(E,TVTOPEN) Close report file
+         FREEPOOL OSFDCBPR         Release buffer pool
+         LH    R0,OSFSCBMAXF       Set buffer length
+         L     R1,OSFSCBLOC        Set buffer address
+         S     R1,=A(4)            Decrement for header
+         A     R0,=A(4)            Adjust for header
+         FREEMAIN R,LV=(0),A=(1)   Release seg buffer
+         VCALL AMODE31             Enter 31-bit addressing mode
+         END   ,
+         SPACE ,
+         L     R3,TVTSAVE          Reload passed vs save area addr
+         L     R4,TVTRETCD         Load global return code
+         SPACE ,
+         IF    TVTBATCH,BEGIN      Release GVT, TVT if in test mode
+         FREEMAIN R,LV=L'GVT,A=(GVTR)  Release GVT memory
+         LH    R0,TVTTLEN          Set total length of TVT
+         FREEMAIN R,LV=(0),A=(TVTR)    Release TVT memory
+         END
+         LR    R15,R4              Set final return code
+         SPACE ,
+OSFXIT2  LABEL ,                   Exit point prior to initialization
+*-
+*-       Assumes R13, R15, and R0 set
+*-
+         L     R14,@R3+12          Load return address
+         LM    R1,R12,@R3+24         Reload remaining registers
+         BR    R14                     Return to caller
+         SPACE 2
+         DROP  BR                  Release base addressability
+         TITLE 'Wings: Disk I/O support: Global keyword exit routs'
+*box
+*
+*  Bad option processing
+*
+         SPACE 2
+BADOPT   LABEL ,
+         PTRACE BADOPT             Trace bad option
+         XPUSH R0,R1               Save pointer to length, address
+         SEGCLR ERRSCB             Clear error seg control block
+         SEGB  'ERRID=UNREC'       Set error to unrecognized
+         SEG   'ERRMSG='''         Build error message
+         SEGB  ':'                 Add separator
+         XPOP  R0,R1               Retrieve parameter pointers
+         IF    (R0,P),BEGIN
+         SEG   (R1),(R0)           Add bad parameter
+         SEG   ' unrecognized option.' add to error message
+         END   ,
+         SEG   ''''                Add trailing quote
+         SET   TPATERR+TERRMSG     Set flags for path re-queue+msg
+         B     CMDCLEAN            Cleanup path and re-wait
+         EJECT ,
+*box
+*
+*  Missing option processing
+*
+         SPACE 2
+MISSING  LABEL ,
+         PTRACE MISSING            Trace bad option
+         SEGCLR ERRSCB             Clear error seg control block
+         SEGB  'ERRID=MISSING'     Set error to unrecognized
+         SEG   'ERRMSG='''         Build error message
+         LA    R1,TVTSCNKW         Address of error keyword
+         LA    R0,8                Maximum length of keyword
+         VCALL RTRIM               Trim trailing blanks
+         SEG   (R1),(R0)           Add bad parameter
+         SEGB  ':'                 Add separator
+         SEG   ' missing option.'  Add to error message
+         SEG   ''''                Add trailing quote
+         SET   TPATERR+TERRMSG     Set error flags for cmdclean
+         B     CMDCLEAN            Cleanup path and re-wait
+         SPACE 2
+*BOX
+*
+*  Error recovery stack overflow
+*
+         SPACE ,
+STCKOVFL LABEL ,
+         FAIL  'ERROR RECOVERY STACK OVERFLOW.'
+         TITLE 'WINGS: ENABLE ESTAE EXIT'
+*BOX
+*
+*  SETESTAE - ENABLE OSFILE ESTAE EXIT
+*
+         SPACE ,
+SETESTL  RECORD BEGIN
+TVTESTPL ESTAE *-*,PURGE=NONE,ASYNCH=YES,TERM=YES,MF=L
+         END   ,
+         SPACE ,
+SETESTAE PROC  SETESTL
+         CLEAR SETESTL
+         L     R0,=A(OSFESTAE)
+         ESTAE (0),PURGE=NONE,ASYNCH=YES,TERM=YES,                     X
+               PARAM=(TVTR),MF=(E,TVTESTPL)
+         IF    (R15,NZ),BEGIN      Can't set STAE exit...
+         WTO   'Note: ESTAE exit can not be set.'
+         END
+         SET   TVTESTAE            Set ESTAE environment active
+         PTRACE ESTAEOK            Trace ESTAE successful
+         PEND  ,
+         TITLE 'WINGS: COMMAND CLEANUP ROUTINE'
+*box
+*
+*  Command cleanup routine
+*
+*    1.  Return error message across path to client.
+*    2.  Re-queue path.
+*    3.  Call error recovery routines in reverse order
+*
+CMDCLEAN PROC  ,                   Entry for general command cleanup
+*-
+*-       Close and re-queue client path
+*-
+         IF    TPATERR,BEGIN       Close and re-queued client path
+         CLEAR TVTPATFL            Clear path flags
+         MVC   TVTPATCM,GVTBLANK   Clear command in progress
+         ACALL SETPATH             Close and the and re-open
+         END   ,
+         SPACE ,
+*-
+*-       Call all recovery routines in recovery stack
+*-
+         ACALL RECOVERY            Process the error recovery stack
+*-
+*-       Reset command in progress
+*-
+         CLEAR TPATCMND            Clear command in progress
+         CLEAR TVTPATCM            Clear current command name
+         CLEAR TVTPATNX            And next command expected
+*-
+*-       Restore stack frame ptr.
+*-
+         LT    WAR,TVTCMDAS        Reset stack pointer
+         FAIL  Z,'Bad CMDCLEAN call.'
+         PEND
+         EJECT ,
+*box
+*
+*  Define common routine literal pool
+*
+         SPACE 2
+         LTORG ,
+         TITLE 'Wings: PROCPATH - Process path activity'
+*box
+*
+*  PROCPATH - PROCESS PATH ACTIVITY
+*
+*        1.  Handle path open requests.
+*        2.  Handle path close request.
+*        3.  Handle new information post codes.
+*
+         SPACE 2
+PROCPATH PROC  ,
+         L     R2,TVTUPATH         Address of upath control
+         WITH  (UPATH,R2),BEGIN    Addressability to UPATH
+         L2    R0,UPATSPST         LOAD POST FLAGS
+         PTRACE Upatspst
+         IF    UPATSPST.UPATFCLS,BEGIN opened path has closed
+         PTRACE PCLOSED            Trace path closed
+         CLEAR TPATOPEN            QSNAP DEBUG
+         ACALL SETPATH             Restart a fresh path
+         EXIT  PROCPATH            Return to main wait loop
+         END   ,
+         IF    UPATSPST.UPATFOPN,BEGIN fresh path open
+         PTRACE POPENED            Trace path opened
+         SET   (TPATOPEN,EQ)       Reset path flags
+         INCR  R1,TVTCNTPOPENS     TALLY A PATH OPEN
+         CLEAR UPATSPST.UPATFOPN,MODE=LOCKED,REF=UPATH
+         LR    R1,R2               Set address of upath control
+         VCALL PATHINFO            Request path information
+         MVC   TVTUSER,UPATPACT+3  Requestor's userid (uuu)
+         MVC   TVTGROUP,UPATPACT   Requestor's group code (gg)
+         MVC   TVTLINE,UPATPLNO    Requestor's line number ml940330
+         STCK  TVTLRCLK            Save time stamp         ML940315
+         L     R0,TVTLRCLK         time, left part
+         L     R5,CVTPTR
+         WITH  (CVT,R5),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,TVTLRCLK         save adjusted (local) time
+         MVC   TVTLACLK,TVTLRCLK   Copy time stamp         ml940330
+         END
+         IF    UPATSPST.UPATFNI,BEGIN  New information processing
+         PTRACE PNEWINFO           Trace new information post
+         CLEAR UPATSPST.UPATFNI,MODE=LOCKED,REF=UPATH
+         LR    R1,R2               Set upath pointer
+         VCALL PATHREAD            Read buffer from partner
+         PTRACE AFTPATHR           R0=Length, R1=Address, R15=return
+         SPACE ,
+         WHILE (R15,Z),BEGIN       Process ALL data in buffer
+         LR    R2,R0               Save length
+         L     R3,TVTPATB2         Set to address
+         LR    R15,R0                Save length
+         LR    R14,R1                  Save address of data
+         LR    R0,R3                     Set move to address
+         LR    R1,R2                       Set move to length
+         MVCL  R0,R14                        Move to secondary buffer
+         SPACE ,
+         LA    R15,CMDVECT         Address of command vector table
+         LOOP  BEGIN               Scan possible major commands
+         L     R14,@R15+16         Load processing command address
+         CLC   @R15(16),@R3        Compare against passed request
+         IF    EQ,BEGIN            Found command processing routine
+         LA    R1,@R3              Start of message
+         LA    R1,@R3+16           Skip past prefix
+         LR    R0,R2
+         SH    R0,=H'16'           Adjust length
+         BALR  R14,R14             Don't change addressing mode
+         CLEAR R14                 Terminate loop
+         END   ELSE,BEGIN
+         IF    (R15,Z),BEGIN
+         WINGSHDR SET,HEADER='FILE_ERROR:'
+         SEGCLR TVTSCB
+         SEGB  'ERRID=BADCMD'
+         SEGT  @R3,16
+         SEG   ': INVALID WINGS COMMAND'
+         SEGWR ,
+         SET   TPATERR+TERRMSG
+         B     CMDCLEAN            ABORT COMMAND
+         END   ,
+         LA    R15,@R15+20         Bump to next major command
+         END   ,
+         UNTIL (R14,Z),END         Loop back for next command
+         L     R1,TVTUPATH         Address of upath control
+         VCALL PATHREAD            Read next transaction if any
+         PTRACE AFTPATHR
+         END   ,
+         END   ,
+         END   ,
+         PEND  ,
+*
+         QLTORG
+         EJECT
+         SEGDEF TVTSCB
+*
+*  DODEBUG
+*
+*  NOTIFY TERMINAL PATH THAT DEBUG INTERRUPT OR TRAP
+*  HAS OCCURRED.
+*
+*
+DODEBUG  PROC
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  DO SOME CHECKS
+*                                  CHECK THAT WE ARE DEBUGGER
+         ACALL CHKDBGER
+         IF    NZ,BEGIN
+         BOMB
+         END
+*                                  PATH TO TERMINAL MUST BE OPEN
+         IF    ~TPATOPEN,BEGIN
+         BOMB
+         END
+*
+*                                  GET FAILED INSTRUCTION ADDR
+         L     R5,DVEPIEP
+         USING EPIE,R5
+         LA    R0,DVWA
+         GETIA R1,EPIEPSW
+         VCALL FINDTRAP
+         IF    (Z,AND,~DVFIRUPT),BEGIN
+         SEG   'Trap hit at '
+         GETIA R1,EPIEPSW
+         L     R2,DVSYMP
+         L     R15,TVDBSEGP
+         VCALL SEGSYMAD
+         SEGWR
+         END
+         ELSE  BEGIN
+         SEG   'Program check '
+         L     R3,EPIEINT
+         N     R3,=X'0000FFFF'
+         SEGHX (R3),4
+         SEG   ' at '
+         GETIA R1,EPIEPSW
+         L     R2,DVSYMP
+         L     R15,TVDBSEGP
+         VCALL SEGSYMAD
+         SEGWR
+         END
+*
+*                                  SEND END OF MSG
+         SEGWR 'EOF:             '
+*
+*                                  SET/CLEAR APPROPRIATE FLAGS
+         SET   TVDBFBRK
+         CLEAR DVFIRUPT
+*
+         PEND
+         DROP  R5
+         DROP  R6
+*
+         QLTORG
+         TITLE 'Debug: Commands'
+*box
+*
+*   WINGS - Major command vector table:
+*
+         SPACE 2
+CMDVECT  DC    0A(0)               Command vector table
+         CMDVECT COMMAND='DEBUG_COMMAND:  ',ROUT=CMDS
+         CMDVECT ,                 Terminate command vector list
+*
+         EJECT
+*
+*  PROCESS DEBUG COMMANDS
+*
+*  ON ENTRY: R1,R0 CMD LOCATION LENGTH
+*            R15 - SEGCB PTR (NOT YET)
+*
+*
+CMDS     CPROC
+*
+         ST    R0,TVDBCLEN
+         ST    R1,TVDBCLOC
+         LA    R15,TVTSCB          PATH SEG CONTROL BLOCK
+         ST    R15,TVDBSEGP
+         SEGDEF L:TVDBSEGP
+*
+         INCR  R15,TVTCNTREQ
+*
+*
+         ACALL CHKDEBUG
+*
+*                                  IF DEBUGGER, PROCESS DEBUG CMDS
+         ACALL CHKDBGER
+         IF    Z,BEGIN
+         ACALL SETDEBUG
+         SCINIT (R1),(R0),TVDBSCNCB
+         SCAN  DBCMDPRT,TVDBSCNCB
+         IF    M,BEGIN
+         LCR   R0,R0
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         B     CMDSEXIT
+         END
+         END
+*
+*                                  IF NOT DEBUGGER,
+*                                    PROCESS MONITOR COMMANDS
+         ELSE  BEGIN
+         ACALL SETMON
+         SCINIT (R1),(R0),TVDBSCNCB
+         SCAN  MONPRT,TVDBSCNCB
+         IF    M,BEGIN
+         LCR   R0,R0
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         B     CMDSEXIT
+         END
+         END
+*
+CMDSEXIT LABEL ,
+         SEGWR 'EOF:             '
+         PEND
+         EJECT
+*
+*  DEBUG CMDS
+*
+DBCMDPRT SCKW  HELP,HELP,A         HELP
+         SCKW  ?,HELP
+*
+         SCKW  DEBUG,CMDDEBUG,A    DEBUG COMMANDS
+         SCKW  QUIT,CMDQUIT
+         SCKW  SD,CMDSD
+         SCKW  SI,CMDSI
+         SCKW  SC,CMDSC
+         SCKW  S9,CMDS9
+         SCKW  DC,CMDDC
+         SCKW  SG,CMDSG
+         SCKW  SP,CMDSP
+         SCKW  SA,CMDSA
+         SCKW  SS,CMDSS
+         SCKW  PC,CMDPC
+         SCKW  PG,CMDPG
+         SCKW  PIA,CMDPIA
+         SCKW  G,CMDGO
+         SCKW  GO,CMDGO
+         SCKW  GOTO,CMDGOTO
+         SCKW  ST,CMDST
+         SCKW  STS,CMDSTS
+         SCKW  CT,CMDCT
+         SCKW  CTS,CMDCTS
+*
+         SCKW  MONITOR,MONCMD,A    MONITOR COMMANDS
+         SCKW  DEFINE,MONPASS,A
+         SCKW  START,MONPASS,A
+         SCKW  STOP,MONPASS,A
+         SCKW  CANCEL,MONPASS,A
+         SCKW  SUSPEND,MONPASS,A
+         SCKW  RESUME,MONPASS,A
+         SCKW  STATUS,MONPASS,A
+         SCKW  TRACE,MONPASS,A                             ML940330
+*
+         SCKW  ,BADCMD
+*
+*  MONITOR CMDS
+*
+MONPRT   SCKW  HELP,HELP,A         HELP
+         SCKW  ?,HELP
+*
+         SCKW  DEBUG,CMDDEBUG,A    DEBUG COMMANDS
+         SCKW  QUIT,MONQUIT
+         SCKW  SD,CMDSD
+         SCKW  SI,CMDSI
+         SCKW  SC,NOTDEBUG
+         SCKW  DC,NOTDEBUG
+         SCKW  SG,NOTDEBUG
+         SCKW  SP,NOTDEBUG
+         SCKW  SA,NOTDEBUG
+         SCKW  SS,NOTDEBUG
+         SCKW  PC,NOTDEBUG
+         SCKW  PG,NOTDEBUG
+         SCKW  PIA,NOTDEBUG
+         SCKW  G,NOTDEBUG
+         SCKW  GO,NOTDEBUG
+         SCKW  GOTO,NOTDEBUG
+         SCKW  ST,NOTDEBUG
+         SCKW  STS,NOTDEBUG
+         SCKW  CT,NOTDEBUG
+         SCKW  CTS,NOTDEBUG
+*
+         SCKW  MONITOR,MONCMD,A    MONITOR COMMANDS
+         SCKW  DEFINE,MONPASS,A
+         SCKW  START,MONPASS,A
+         SCKW  STOP,MONPASS,A
+         SCKW  CANCEL,MONPASS,A
+         SCKW  SUSPEND,MONPASS,A
+         SCKW  RESUME,MONPASS,A
+         SCKW  STATUS,MONPASS,A
+         SCKW  TRACE,MONPASS,A                             ML940330
+*
+         SCKW  ,BADCMD
+*
+         QLTORG
+         EJECT
+*
+*
+*
+HELP     PROC
+         SCPUSH
+*
+ SEGWR 'Debug commands:'
+ SEGWR '   DEBUG <task-name>  - become debugger'
+ SEGWR '   SI  show info    SD   show debug    QUIT debugging'
+ SEGWR '   SC  show core    SA   show address  SP  show psw'
+ SEGWR '   DC  disassemble  SG   show GPR      SS  show symbols'
+ SEGWR '   PC  patch core   PG   patch GPR     PIA patch IA'
+ SEGWR '   GO  resume       GOTO resume @loc   ST  set trap'
+ SEGWR '   STS show traps   CT   clear trap    CTS clear all traps'
+ SEGWR '   S9  show SVC99 info                                    '
+ SEGWR '   MONITOR <command> - pass command to monitor'
+ SEGWR ' '
+ SEGWR 'Monitor commands:'
+ SEGWR '   DEFINE <task-name> MODULE <module-name> ...'
+ SEGWR '   START <task-name> | ALL'
+ SEGWR '   similarly STOP, CANCEL, SUSPEND, RESUME, STATUS, TRACE'
+ SEGWR '   MONITOR SC <task-name> <address>'
+ SEGWR '   similarly SA (show addres), DC (disassemble core), PC'
+ SEGWR ' '
+ SEGWR 'Note: To issue debug commands, you must become the debugger.'
+ SEGWR '   (Only one debugger/debuggee subtask pair is allowed.)'
+ SEGWR '   Monitor commands are valid at all times.  DEBUG, SI,'
+ SEGWR '   SD, QUIT commands are valid at all times.'
+*
+         CLEAR TVDBSCNLEN
+         SCPOP
+         PEND
+*
+MONQUIT  PROC
+         SCPUSH
+         CLEAR TVDBSCNLEN
+         SCPOP
+         PEND
+*
+         QLTORG
+         EJECT
+*
+*  DEBUG <task>
+*
+*
+CMDDEBUG PROC
+         SCPUSH
+*
+*                                  LOOK FOR ANY DEAD DEBUGGEE/ER
+         ACALL CHKDEBUG
+*
+*                                  SCAN TASK NAME
+         SCAN  ,TVDBSCNCB
+         IF    M,BEGIN
+         LCR   R0,R0
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         B     CDEBEXIT
+         END
+*
+*                                  IF NO TASK, JUST SHOW STATUS
+         IF    (R0,Z),BEGIN
+         SEGWR 'Command failed.  Missing task name.'
+         B     CDEBEXIT
+         END
+*
+*                                  MONITOR DEBUGGING NOT ALLOWED
+         LA    R1,TVDBSCNKW
+         IF    (@R1,EQ,'MONITOR '),BEGIN
+         SEGWR 'Monitor cannot be debugged.'
+         B     CDEBEXIT
+         END
+*
+*                                  CHECK FOR DEBUG TASK
+         LA    R1,TVDBSCNKW
+         ACALL FINDTCB
+         IF    NZ,BEGIN
+         SEG   'Unable to find task: '
+         SEGT  TVDBSCNKW
+         SEGWR
+         B     CDEBEXIT
+         END
+*
+*                                  TRY TO BECOME DEBUGGER
+         ACALL CHKDBGER
+         IF    NZ,BEGIN
+         ACALL SETDBGER
+         IF    NZ,BEGIN
+         SEGWR 'Command failed.  Another debugger is already active.'
+         ACALL DBSTATUS            SHOW DEBUGGER STATUS
+         B     CDEBEXIT
+         END
+         END
+*
+*                                  IF TASK SPECIFIED, SET DEBUGGEE
+         LA    R1,TVDBSCNKW
+         ACALL FINDTCB
+         IF    NZ,BEGIN
+         SEG   'Unable to find task: '
+         SEGT  TVDBSCNKW
+         SEGWR
+         END
+         ELSE  BEGIN
+         ACALL SETDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Unable to change task being debugged.'
+         END
+         END
+*
+*                                  SET DEBUG MODE INFO
+         ACALL SETDEBUG
+*
+*                                  SEG DEBUG STATUS
+         ACALL DBSTATUS
+*
+CDEBEXIT LABEL ,
+         CLEAR TVDBSCNLEN
+         SCPOP
+         PEND
+         EJECT
+*
+*  CMDQUIT - QUIT DEBUGGING
+*
+*  In this routine we attempt to clear both the DEBUGEE
+*  and the DEBUGGER.  The main problem is that we can
+*  not clear an active (at breakpoint, or waiting a
+*  task waiting to be debugged).  (though if not at
+*  breakpoint we will force the matter.)  to do proper
+*  clearing of the debuggee we try to set ourselves as
+*  the debuggEE (we are also the debuggER) this will
+*  clear all important DVWA fields.  We then clear the
+*  debuggee, and then we clear the debugger.
+*
+*
+CMDQUIT  PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  IF AT BREAK
+         IF    TVDBFBRK,BEGIN
+         SEGWR 'DEBUGGEE is at breakpoint. Unable to QUIT debug '
+         SEGWR 'session.  Type GO to resume task, then QUIT.'
+         B     CQUITXIT
+         END
+*
+*                                  CLEAR DEBUGGEE ,,
+         L     R1,DVERTCBP         TRY TO MAKE OURSELVES DEBUGEEE
+         ACALL SETDBGEE
+*
+*                                  CLEAR DEBUGEE ,,
+         L     R2,DVEETCBP
+         CLEAR R3
+         CLEAR R4
+         CLEAR R5
+         CDS   R2,R4,DVEETCBP
+         IF    NZ,BEGIN
+         SEGWR 'DEBUGGEE is active. Unable to QUIT debug session.'
+         SEGWR '(You may STOP (CANCEL) DEBUGGEE task to deactivate.)'
+         END
+*
+*                                  CLEAR ANY TRAPS
+         ACALL CMDCTS
+*
+*                                  CLEAR DEBUGGER
+         CLEAR DVERTCBP
+*
+CQUITXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSD - SHOW DEBUG
+*
+*
+CMDSD    PROC
+         SCPUSH
+*
+*                                  SHOW DEBUGGER/DEBUGGEE
+         ACALL DBSTATUS
+*
+         CLEAR TVDBSCNLEN
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSI - SHOW INFO
+*
+*  NOTE, CAUTION:
+*  UNUSUAL CODE AHEAD, THIS IS A COMPOUND COMMAND. IT
+*  IS THE SAME AS A 'SHOW STATUS ALL' AND A 'SD'
+*  (show debug) COMMAND.
+*
+*
+CMDSI    PROC
+         SCPUSH
+*
+*                                  SHOW DEBUGGER/DEBUGGEE
+         ACALL DBSTATUS
+         SEGWR '-----'
+*
+*                                  GO FOR IT
+         LA    R1,=CL10'STATUS ALL'
+         LA    R0,10
+         ACALL DOMONCMD
+*
+         CLEAR TVDBSCNLEN
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSC - SHOW CORE
+*
+*
+CMDSC    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSCEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Note: not at debug breakpoint'
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         L     R15,TVDBSEGP
+         VCALL SHOWC
+         B     CSCEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL SHOWC
+*
+CSCEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDS9 - Show SVC99 area
+*
+*
+CMDS9    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CS9EXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Note: not at debug breakpoint'
+         END   ,
+*
+         SCTELL TVDBSCNCB
+         L     R15,DVERTVTP        ->debugee's TVT
+         WITH (TVT,R15),'L R1,TVTDYNBF'   ->Dynamic alloc area
+         L     R15,TVDBSEGP
+         VCALL PRTDYN
+*
+CS9EXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDDC - DISASSEMBLE CORE
+*
+*
+CMDDC    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CDCEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Note: not at debug breakpoint'
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         L     R15,TVDBSEGP
+         VCALL DISASMC
+         B     CDCEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL DISASMC
+*
+CDCEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSG - SHOW REGS
+*
+*
+CMDSG    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSGEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CSGEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL SHOWG
+*
+CSGEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSP - SHOW PSW
+*
+*  NOTE, HEY!:
+*  FOR CONSISTENCY SAKE WE SHOULD PUT SHOWP ROUTINE
+*  IN DEBUG MODULE.   BUT ....
+*  THIS ROUTINE DOES NOT CALL DEBUG MODULE;
+*  WE KNOW PSW SO WE SHOW IT HERE.
+*
+*
+CMDSP    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSPEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CSPEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         SEG   'PSW = '
+         L     R3,EPIEPSW
+         SEGHX (R3),8
+         SEG   ' '
+         L     R3,EPIEPSW+4
+         SEGHX (R3),8
+         SEGWR
+         END
+*
+CSPEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSA - SHOW ADDRESS
+*
+*
+CMDSA    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSAEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Note: not at debug breakpoint'
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         L     R15,TVDBSEGP
+         VCALL SHOWA
+         B     CSAEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL SHOWA
+*
+CSAEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDSS - SHOW SYMBOLS
+*
+*
+CMDSS    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSSEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         L     R15,TVDBSEGP
+         VCALL SHOWS
+         B     CSSEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL SHOWS
+*
+CSSEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         QLTORG
+         EJECT
+*
+*  CMDPC - PATCH CORE
+*
+*
+CMDPC    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CPCEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Note: not at debug breakpoint'
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         L     R15,TVDBSEGP
+         VCALL PATCHC
+         B     CPCEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL PATCHC
+*
+CPCEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDPG - PATCH REGISTER
+*
+*
+CMDPG    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CPGEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CPGEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         L     R15,TVDBSEGP
+         VCALL PATCHG
+*
+CPGEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDPIA - PATCH INSTRUCTION ADDRESS
+*
+*
+CMDPIA   PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CPIAEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CPIAEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL PATCHIA
+*
+CPIAEXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         QLTORG
+         EJECT
+*
+*  CMDGO - CONTINUE DEBUGGEE PROGRAM
+*
+*
+CMDGO    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CGOEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CGOEXIT
+         END
+*
+*                                  POST DEBUGEE TO CONTINUE
+         LA    R1,DVEEECB
+         POST  (R1),0
+         CLEAR TVDBFBRK
+*
+CGOEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         EJECT
+*
+*  CMDGOTO - GOTO NEW ADDRESS
+*
+*  CODE IS SAME AS PIA+GO COMMAND
+*
+CMDGOTO  PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CGOTOXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SEGWR 'Command failed.  Not at debug breakpoint.'
+         B     CGOTOXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL PATCHIA
+*
+*                                  POST DEBUGEE TO CONTINUE
+         IF    (R15,Z),BEGIN       IF PATCH ADDRESS OK, GO
+         LA    R1,DVEEECB
+         POST  (R1),0
+         CLEAR TVDBFBRK
+         END
+*
+CGOTOXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CMDST - SET TRAP
+*
+*
+CMDST    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSTEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL SETT
+         B     CSTEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL SETT
+*
+CSTEXIT  LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         EJECT
+*
+*  CMDSTS - SHOW TRAPS SET
+*
+*
+CMDSTS   PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CSTSEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL SHOWTS
+         B     CSTSEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL SHOWTS
+*
+CSTSEXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         EJECT
+*
+*  CMDCT - CLEAR TRAP
+*
+*
+CMDCT    PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*                                  CHECK DEBUGGEE
+         ACALL CHKDBGEE
+         IF    NZ,BEGIN
+         SEGWR 'Task not found.  (may have died)'
+         B     CCTEXIT
+         END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL CLEART
+         B     CCTEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL CLEART
+*
+CCTEXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         EJECT
+*
+*  CMDCTS - CLEAR TRAPS SET
+*
+*
+CMDCTS   PROC
+         SCPUSH
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  REMOVE DECEASED DEBUGER/EE
+         ACALL CHKDEBUG
+*
+*        COMMENT                   CHECK DEBUGGEE
+*        ACALL CHKDBGEE
+*        IF    NZ,BEGIN
+*        SEGWR 'Task not found.  (may have died)'
+*        B     CCTSEXIT
+*        END
+*
+*                                  NOT AT BREAK
+         IF    ~TVDBFBRK,BEGIN
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+*                                  NO REGS, CURRENT ADDR
+         CLEAR R3
+         CLEAR R4
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL CLEARTS
+         B     CCTSEXIT
+         END
+*
+*                                  IF DEBUGGER AND AT BREAK
+         SCTELL TVDBSCNCB
+         L     R2,DVSYMP
+         L     R5,DVEPIEP
+         WITH  (EPIE,R5),BEGIN
+         LA    R3,EPIEGPR
+         GETIA R4,EPIEPSW
+         END
+         LA    R5,DVWA
+         L     R15,TVDBSEGP
+         VCALL CLEARTS
+*
+CCTSEXIT LABEL ,
+         CLEAR TVDBSCNLEN          CMD DONE, SCAN NO MORE
+         SCPOP
+         PEND
+         DROP  R6
+*
+         QLTORG
+         EJECT
+*box
+*
+*        Pass command to monitor.
+*
+MONPASS  PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+*
+*                                  GET MONITOR COMMAND
+         LR    R2,R1               START OF CMD
+         SCTELL TVDBSCNCB
+         AR    R0,R1               END OF CMD
+         LR    R1,R2               R1,R0 - ENTIRE CMD LOC LEN
+         SR    R0,R1
+*
+         ACALL DOMONCMD
+*
+         CLEAR  TVDBSCNLEN         Stop scan
+         SCPOP
+         PEND
+         EJECT
+*box
+*
+*  MONCMD - pass comand to monitor
+*
+*
+MONCMD   PROC
+         SCPUSH
+*
+*                                  GET MONITOR COMMAND
+         SCTELL TVDBSCNCB
+*
+         ACALL DOMONCMD
+*
+         CLEAR TVDBSCNLEN          Stop scan
+         SCPOP
+         PEND
+         EJECT
+*
+*  PROCESS MONITOR COMMAND REQUEST
+*
+*  ON ENTRY:
+*    R1,R0 - CMD LOC LENGTH
+*
+*
+MCWA     RECORD BEGIN
+MCLOC    DS    A
+MCLEN    DS    F
+         END
+CMDBUFLN EQU   8*1024
+*
+*
+DOMONCMD PROC  MCWA
+         ST    R0,MCLEN
+         ST    R1,MCLOC
+*
+*                                  GET BUFFER FOR CMD/RESPONSE
+         IF    (TVTRSPLN,NZ),BEGIN
+         L     R1,TVTRSPBF
+         VCALL FREECORE
+         CLEAR TVTRSPLN
+         END
+         L     R0,=A(CMDBUFLN)
+         VCALL GETCORE
+         ST    R1,TVTRSPBF
+         ST    R0,TVTRSPLN
+*
+*                                  MOVE COMMAND INTO BUFFER
+         L     R2,TVTRSPBF
+         LA    R2,@R2+4
+         L     R3,MCLEN
+         CEIL  R3,256
+         L     R4,MCLOC
+         LR    R5,R3
+         LR    R0,R3
+         MVCL  R2,R4
+         L     R2,TVTRSPBF
+         ST    R0,@R2
+*
+*                                  TELL MONITOR WE HAVE CMD
+         CLEAR TVTMONCM            CLEAR COMPLETION ECB
+         SET   TVTFPOST
+         SET   TVTFCMD
+         L     R1,GVTECBPT
+         POST  (R1),0              POST MONITOR
+         LA    R1,TVTMONCM
+         WAIT  ECB=(R1)            WAIT FOR RESPONSE
+*
+*                                  PUMP THRU RESPONSE BUFFER
+         L     R4,TVTRSPBF         R4 - BUFFER NDX
+         L     R5,@R4              R5 - END OF BUFFER
+         AR    R5,R4
+         LA    R4,4(R4)
+         WHILE (R4,LT,R5),BEGIN
+         CLEAR R0
+         IC    R0,@R4
+         LA    R1,1(R4)
+         SEGWR (R1),(R0)
+         CLEAR R0
+         IC    R0,@R4
+         AR    R4,R0
+         INCR  R4
+         END
+*
+*                                  FREE BUFFER
+         IF    (TVTRSPLN,NZ),BEGIN
+         L     R1,TVTRSPBF
+         VCALL FREECORE
+         CLEAR TVTRSPLN
+         END
+*
+         PEND
+         EJECT
+*box
+*
+*        Unrecognized command.
+*
+BADCMD   PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+         SEG  (R1),(R0)
+         SEGWR ': unrecognized command.'
+         CLEAR  TVDBSCNLEN         Stop scan
+         SCPOP
+         PEND
+*
+INVALID  PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+         SEGT  (R1),(R0)
+         SEG   ': invalid option.'
+         CLEAR  TVDBSCNLEN         Stop scan
+         SCPOP
+         PEND
+*
+NOTDEBUG PROC
+         SCPUSH ,
+         SEGWR 'You must be debugger to issue this command.'
+         SEGWR 'Type HELP for more information.'
+         CLEAR  TVDBSCNLEN
+         SCPOP
+         PEND
+         QLTORG
+         EJECT
+*
+*  DBSTATUS - SHOW DEBUG STATUS
+*
+*  4 POSSIBILITIES
+*        NO DEBUGGER, NO DEBUGGEE
+*        NO DEBUGGER, DEBUGEE
+*        DEBUGGER, NO DEBUGGEE
+*        DEBUGGER, DEBUGGEE
+*
+*
+DBSTATUS PROC
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*
+         IF    ((DVERTCBP,Z),AND,(DVEETCBP,Z)),BEGIN
+         SEGWR 'No debugging session active.'
+         END
+*
+*
+         IF    ((DVERTCBP,Z),AND,(DVEETCBP,NZ)),BEGIN
+         ACALL SEGDBEE
+         SEGWR ' is waiting to be debugged.'
+         END
+*
+*
+         IF    ((DVERTCBP,NZ),AND,(DVEETCBP,Z)),BEGIN
+         ACALL SEGDBER
+         SEGWR ' debugging deceased task. '
+         END
+*
+*
+         IF    ((DVERTCBP,NZ),AND,(DVEETCBP,NZ)),BEGIN
+         ACALL SEGDBER
+         SEG   ' is debugging '
+         ACALL SEGDBEE
+         SEGWR
+         END
+*
+         PEND
+         EJECT
+*
+*  SEGDBER - SEG DEBUGGER NAME
+*
+*
+SEGDBER  PROC  ,
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  FIND DEBUGGER TVT
+         L     R1,DVERTCBP
+         ACALL GETTVT
+         IF    NZ,BEGIN
+         SEG   '*** (deceased task)'
+         END
+         ELSE  BEGIN
+         LR    R5,R1
+         WITH  (TVT,R5),'SETMSG TVTNAME'
+         SEGT  (R1),(R0)
+         WITH  (TVT,R5),'L  R1,TVTACCT'
+         IF    (R1,NZ),BEGIN
+         SEG   ' ('
+         WITH  (TVT,R5),'SETMSG TVTGROUP'
+         SEG   (R1),(R0)
+         SEG   '.'
+         WITH  (TVT,R5),'SETMSG TVTUSER'
+         SEG   (R1),(R0)
+         SEG   ')'
+         END
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*  SEGDBEE - SEG DEBUGGER NAME
+*
+*
+SEGDBEE  PROC  ,
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  FIND DEBUGGEE TVT
+         L     R1,DVEETCBP
+         ACALL GETTVT
+         IF    NZ,BEGIN
+         SEG   '*** (deceased task)'
+         END
+         ELSE  BEGIN
+         LR    R5,R1
+         WITH  (TVT,R5),'SETMSG TVTNAME '
+         SEGT  (R1),(R0)
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*
+*        CHKDEBUG - CHECK DEBUGGER AND DEBUGGEE
+*
+*   WE MAKE SURE THAT DEBUGGER AND DEBUGGEE ARE STILL ALIVE.
+*   IF THEY ARE NOT (IE. THEY DIED), THEN WE CLEAR THE
+*   DEBUG WORK AREA.
+*
+*   NOTE:
+*   IF THE DEBUGGEE DIED.  WE TRY TO OWN THE DEBUG WORK AREA
+*   SO WE CAN CLEAN UP SOME DEBUG WORK AREA FIELDS.  WE GIVE
+*   BACK THE DEBUG WORK AREA WHEN WE ARE DONE.  OH YEAH!
+*
+*   NOTE:
+*   TO RESTART A BAD DEBUG SITUATION, STOP DEBUGGER/DEBUGGEE
+*   THEN EXECUTE DEBUG COMMAND.
+*
+*   PROBLEM:
+*   IF WE ARE NOT DEBUGGER, IE. DEBUGGER DIED. WE CANNOT AX
+*   ANY DEBUGGEE THAT DIED.  HOW DO WE REMOVE DEAD DEBUGGEE
+*   IN MULTI TASK ENVIRONMENT. IF WE BECOME DEBUGGER WE MAY
+*   NOT BE ALLOWED TO UNBECOME DEBUGGER.
+*
+CHKDEBUG PROC
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  CHECK DEBUGGER
+         L     R1,DVERTCBP
+         IF    ((R1,NZ),AND,(R1,NE,TVTTCBP)),BEGIN
+         ACALL CHKTCB
+         IF    NZ,BEGIN            IF NO DEBUGGER, CLEAR TCBP
+         CLEAR R2
+         CS    R1,R2,DVERTCBP
+         END
+         END
+*
+*                                  CHECK DEBUGGEE
+         L     R1,DVEETCBP
+         IF    (R1,NZ),BEGIN       IF DEBUGGEE POINTER, BUT
+         ACALL CHKTCB
+         IF    NZ,BEGIN            IF NO DEBUGGEE, CLEAR TCB
+         ACALL CHKDBGER
+         IF    Z,BEGIN             IF WE ARE DEBUGGER
+         LR    R2,R1
+         L     R3,DVEEACTV
+         CLEAR R4
+         CLEAR R5
+         CDS   R2,R4,DVEETCBP
+         IF    Z,BEGIN             IF WE CAN DEACTIVATE DEBUGGEE
+         CLEAR R1
+         L     R2,TVTTCBP
+         CS    R1,R2,DVEETCBP
+         IF    Z,BEGIN             IF WE CAN OWN DEBUGEE
+*                                  CLEAR MANY DEBUG FIELDS
+         CLEAR DVEEACTV
+         CLEAR DVERECB
+         CLEAR DVEEECB
+         CLEAR DVFNEWIA
+         CLEAR DVFIRUPT
+         CLEAR DVEPIEP
+         CLEAR DVSYMP
+         L     R1,TVTTCBP          GIVE UP DEBUG AREA OWNERSHIP
+         CLEAR R2
+         CS    R1,R2,DVEETCBP
+         END
+         END
+         END
+         END
+         END
+*
+         PEND
+         EJECT
+*
+*
+*  CHKTCB - CHECK IF TCB IS VALID
+*
+*  WE LOOK THRU TVT CHAIN
+*
+*  ON ENTRY:
+*        R1 - TASK TCB PTR
+*
+*  ON EXIT:
+*        R15=ZERO, TASK OK;
+*        R15=NZ TASK DOES NOT EXIST OR TASK DIED
+*
+*
+CHKTCB   PROC
+         WITH  (TVT,R2)
+         L     R2,GVTTVTQH
+         L     R2,TVTLINK          TVT PTR
+*                                  LOOP THROUGH ALL TVT'S
+         WHILE ((R2,NZ),AND,(R1,NE,TVTTCBP)),BEGIN
+         L     R2,TVTLINK
+         END
+         IF    (R2,NZ),BEGIN       IF FOUND
+         CLEAR R15
+         END
+         ELSE  BEGIN               TASK NOT FOUND
+         LA    R15,4
+         END
+         PEND
+         EJECT
+*
+*
+*  GETTVT - GET TVT POINTER FOR THIS TCB
+*
+*  WE LOOK THRU TVT CHAIN
+*
+*  ON ENTRY:
+*        R1 - TASK TCB PTR
+*
+*  ON EXIT:
+*        R1 - TVT POINTER, IF R15=0
+*        R15=ZERO, TASK OK;
+*        R15=NZ TASK DOES NOT EXIST OR TASK DIED
+*
+*
+GETTVT   PROC
+         WITH  (TVT,R2)
+         L     R2,GVTTVTQH
+         L     R2,TVTLINK          TVT PTR
+*                                  LOOP THROUGH ALL TVT'S
+         WHILE ((R2,NZ),AND,(R1,NE,TVTTCBP)),BEGIN
+         L     R2,TVTLINK
+         END
+         IF    (R2,NZ),BEGIN       IF FOUND
+         LA    R1,TVT
+         PRETURN (R1)
+         CLEAR R15
+         END
+         ELSE  BEGIN               TASK NOT FOUND
+         LA    R15,4
+         END
+         PEND
+         EJECT
+*
+*
+*  FINDTVT - CHECK IF TASK IS AROUND
+*
+*  WE LOOK THRU TVT CHAIN
+*
+*  ON ENTRY:
+*        R1 - TASK NAME
+*
+*  ON EXIT:
+*        R1 - TVT POINTER IF R15=0
+*        R15=ZERO, TASK OK;
+*        R15=NZ TASK DOES NOT EXIST OR TASK DIED
+*
+*
+FINDTVT  PROC
+         WITH  (TVT,R2)
+         L     R2,GVTTVTQH
+         L     R2,TVTLINK          TVT PTR
+*                                  LOOP THROUGH ALL TVT'S
+         WHILE ((R2,NZ),AND,(@R1,NE,TVTNAME)),BEGIN
+         L     R2,TVTLINK
+         END
+         IF    (R2,NZ),BEGIN       IF FOUND
+         LR    R1,R2
+         PRETURN R1
+         CLEAR R15
+         END
+         ELSE  BEGIN               TASK NOT FOUND
+         LA    R15,4
+         END
+         PEND
+         EJECT
+*
+*
+*  FINDTCB - CHECK IF TASK IS AROUND
+*
+*  WE LOOK THRU TVT CHAIN
+*
+*  ON ENTRY:
+*        R1 - TASK NAME
+*
+*  ON EXIT:
+*        R1 - TCB POINTER IF R15=0
+*        R15=ZERO, TASK OK;
+*        R15=NZ TASK DOES NOT EXIST OR TASK DIED
+*
+*
+FINDTCB  PROC
+         WITH  (TVT,R2)
+         L     R2,GVTTVTQH
+         L     R2,TVTLINK          TVT PTR
+*                                  LOOP THROUGH ALL TVT'S
+         WHILE ((R2,NZ),AND,(@R1,NE,TVTNAME)),BEGIN
+         L     R2,TVTLINK
+         END
+         IF    (R2,NZ),BEGIN       IF FOUND
+         L     R1,TVTTCBP
+         PRETURN R1
+         CLEAR R15
+         END
+         ELSE  BEGIN               TASK NOT FOUND
+         LA    R15,4
+         END
+         PEND
+         EJECT
+*
+*  CHKDBGER - CHECK IF WE ARE DEBUGGER
+*
+*  ON EXIT:
+*     R15=0, WE ARE DEBUGGER TASK
+*     R15=NZ, NO WE ARE NOT DEBUGGER TASK
+*
+CHKDBGER PROC
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+         IF    (TVTTCBP,EQ,DVERTCBP),BEGIN
+         CLEAR R15
+         END
+         ELSE  BEGIN
+         LA    R15,4
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*   SETDBGER - SET THIS TASK AS DEBUGGER
+*
+*   ON EXIT:
+*      R15=0, SUCCESS WE ARE NOW DEBUGGER TASK
+*      R15=NZ, UNABLE TO BECOME DEBUGGER
+*
+*
+SETDBGER PROC  ,
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+         CLEAR R1
+         L     R2,TVTTCBP
+         CS    R1,R2,DVERTCBP
+         IF    Z,BEGIN
+         CLEAR R15
+         END
+         ELSE  BEGIN
+         LA    R15,4
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*  CHKDBGEE - CHECK IF A DEBUGGEE EXISTS
+*
+*  ON EXIT:
+*     R15=0, DEBUGGEE TASK EXISTS
+*     R15=NZ, NO DEBUGGEE TASK FOUND. (MAY HAVE DIED)
+*
+*  NOTE/CAUTION!:
+*  WE ASSUME THAT CHKDEBUG IS CALLED PRIOR TO THIS ROUTINE.
+*  CHKDEBUG VALIDITY CHECKS THE DEBUGBEE TCB.  HERE WE
+*  JUST CHECK FOR NON-ZERO DEBUGGEE TCB.
+*
+*
+CHKDBGEE PROC
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+         IF    (DVEETCBP,NZ),BEGIN
+         CLEAR R15
+         END
+         ELSE  BEGIN
+         LA    R15,4
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*   SETDBGEE - SET THIS TASK AS DEBUGGER
+*
+*   ON ENTRY:
+*      R1 - NEW DEBUGGEE TCB POINTER
+*
+*   ON EXIT:
+*      R15=0, SUCCESS, NEW DEBUGGEE TASK SET
+*      R15=NZ, UNABLE TO SET DEBUGGEE
+*
+*   NOTE:
+*   WE ALSO REINITIALIZE DEBUG AREA FIELDS
+*   SO WE MUST OWN DEBUG AREA AND THEN FREE IT.
+*
+SDBEEWA  RECORD BEGIN
+SDBEETCB DS    F
+         END
+*
+*
+SETDBGEE PROC  SDBEEWA
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+*                                  SAVE NEW DEBUGGEE TCB PTR
+         ST    R1,SDBEETCB
+*
+*                                  WE MUST BE DEBUGGER TO DO THIS
+         ACALL CHKDBGER
+         IF    Z,BEGIN
+*
+*                                  IF THIS DEBUGGEE ALREADY SET
+*                                  AND WAITING, WE ARE DONE
+         L     R1,SDBEETCB
+         IF    ((R1,EQ,DVEETCBP),AND,(R1,EQ,DVEEACTV)),BEGIN
+         CLEAR R15
+         B     STEEEXIT
+         END
+*
+*                                  TRY TO OWN DEBUG WORK AREA
+         L     R2,DVEETCBP
+         CLEAR R3
+         L     R4,TVTTCBP
+         CLEAR R5
+         CDS   R2,R4,DVEETCBP
+         IF    Z,BEGIN             WE OWN DEBUG AREA
+*                                  CLEAR MANY DEBUG FIELDS
+         CLEAR DVEEACTV
+         CLEAR DVERECB
+         CLEAR DVEEECB
+         CLEAR DVFNEWIA
+         CLEAR DVFIRUPT
+         CLEAR DVEPIEP
+         CLEAR DVSYMP
+         L     R1,TVTTCBP
+         L     R2,SDBEETCB
+         CS    R1,R2,DVEETCBP
+         IF    Z,BEGIN             NEW DEBUGGEE SET OK, EXIT
+         CLEAR R15
+         B     STEEEXIT
+         END
+         END
+         END
+*
+*                                  UNABLE TO SET
+         LA    R15,4
+*
+STEEEXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*
+*  SETMON
+*
+*  SET MONITOR MODE INFO
+*
+*
+SETMON   PROC  ,
+*
+*                                  SET MONITOR ECB TABLE
+         ACALL SETMECBL
+*
+         PEND
+         EJECT
+*
+*  SETDEBUG
+*
+*  SET DEBUG MODE INFO
+*
+*
+SETDEBUG PROC  ,
+*
+*                                  WE MUST BE DEBUGGER !
+         ACALL CHKDBGER
+         IF    NZ,BEGIN
+         SEGWR 'Logic error.  We need to be DEBUGGER!'
+         B     SETDBXIT
+         END
+*
+*                                  SET DEBUG ECB TABLE
+         ACALL SETDECBL
+*
+*                                  MAKE SURE SYMP INFO CORRECT
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+         L     R1,DVEETCBP
+         IF    (R1,NZ),BEGIN
+         ACALL GETTVT
+*        IF    Z,BEGIN
+         IF    (R15,Z),BEGIN
+         ST    R1,DVERTVTP
+         WITH  (TVT,R1),' L R1,TVTSYMTB '
+         ST    R1,DVSYMP
+         END
+         END
+         DROP  R6
+*
+SETDBXIT LABEL ,
+         PEND
+         EJECT
+*
+*  INIT (CLEAR) ALL ECBS IN ECBLIST
+*
+*
+INITECBS PROC  ,
+*
+*                                  LOOP THRU ECB LIST
+         LA    R4,TVTDECBL
+         L     R2,@R4
+         CLEAR R0
+         WHILE (R2,NZ),BEGIN
+         ST    R0,@R2
+         LA    R4,4(R4)
+         L     R2,@R4
+         END
+*
+         PEND
+         EJECT
+*
+*
+*  SET MONITOR ECBLIST
+*
+*
+SETMECBL PROC
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+         IF    TVTFMONEL,BEGIN     IF MONITOR EVENTS SET
+*                                  DO NOTHING
+         END
+*
+*                                  IF NOT MONITOR EVENTS,
+*                                  RESET EVENTS TABLE TO MONITOR
+         ELSE  BEGIN
+         SET   TVTFMONEL
+         CLEAR TVTDECBL
+         LA    R4,TVTDECBL         R4 - ECB LIST NDX
+*
+*                                  PATH
+         LA    R2,TVTPATHECB
+         ST    R2,TVTPATHPTR
+         ST    R2,@R4
+         LA    R4,4(R4)
+*
+*                                  TIMER
+         LA    R2,TVTTIMRECB
+         ST    R2,TVTTIMRPTR
+         ST    R2,@R4
+         LA    R4,4(R4)
+*
+*        COMMENT                   NO DEBUG WAIT IF MONITOR
+*        COMMENT                   DEBUG
+*        LA    R2,DVERECB
+*        ST    R2,TVTDBUGPTR
+*        ST    R2,@R4
+*        LA    R4,4(R4)
+*
+*                                  MONITOR STOP
+         LA    R2,TVTSTOPECB
+         ST    R2,TVTSTOPPTR
+         O     R2,=X'80000000'     LAST ONE IN LIST
+         ST    R2,@R4
+*
+         END
+*
+         PEND
+         DROP  R6
+         EJECT
+*
+*
+*  SET DEBUG ECBLIST
+*
+*
+SETDECBL PROC
+*
+         LA    R6,GVTDVWA
+         USING DVWA,R6
+*
+         IF    TVTFDBEL,BEGIN      IF MONITOR EVENTS SET
+*                                  DO NOTHING
+         END
+*
+*                                  IF NOT MONITOR EVENTS,
+*                                  RESET EVENTS TABLE TO MONITOR
+         ELSE  BEGIN
+         SET   TVTFDBEL
+         CLEAR TVTDECBL
+         LA    R4,TVTDECBL         R4 - ECB LIST NDX
+*
+*                                  PATH
+         LA    R2,TVTPATHECB
+         ST    R2,TVTPATHPTR
+         ST    R2,@R4
+         LA    R4,4(R4)
+*
+*                                  TIMER
+         LA    R2,TVTTIMRECB
+         ST    R2,TVTTIMRPTR
+         ST    R2,@R4
+         LA    R4,4(R4)
+*
+*                                  DEBUG
+         LA    R2,DVERECB
+         ST    R2,TVTDBUGPTR
+         ST    R2,@R4
+         LA    R4,4(R4)
+*
+*                                  MONITOR STOP
+         LA    R2,TVTSTOPECB
+         ST    R2,TVTSTOPPTR
+         O     R2,=X'80000000'     LAST ONE IN LIST
+         ST    R2,@R4
+*
+         END
+*
+         PEND
+         DROP  R6
+         TITLE 'Wings: Process post of monitor ECB'
+*box
+*
+*   Process monitor post action required
+*
+*     Process monitor request based on the setting of TVT flags.
+*
+*
+         SPACE 2
+MONPOST  PROC  ,
+         IF    TVTFSTOP,BEGIN      Process stop request from monitor
+         SET   TVTFQUISCE          Set task quisce flag
+         CLEAR TVTFSTOP,MODE=LOCKED,REF=TVT
+         END   ,
+         POST  TVTECBCM,0          Post monitor request processed
+         PEND  ,
+         TITLE 'Wings: Startup periodic timer'
+*box
+*
+*   Start periodic timer
+*
+*      The purpose of the timer is to wake-up occasionally to
+*      avoid 522 wait abend conditions.  Also on each timer
+*      fire some global tables are processed to released older
+*      entries.
+*
+         SPACE 2
+SETTIMER PROC  ,
+         XPUSH ,,L'STIMERL,PTR=R2  Stack space of stimer parameters
+         L     R1,=A(STIMERL)        address of stimerm parameter list
+         MVC   0(L'STIMERL,R2),0(R1)   set parameter list
+         XPUSH R11,,PTR=R3               set user parameter
+         L     R15,=A(TIMREXIT)            address of exit routine
+         STIMERM SET,BINTVL=TVTWTIME,EXIT=TIMREXIT,PARM=(R3),          X
+               WAIT=NO,ID=TVTSTMID,MF=(E,(R2))
+         IF    (R15,NZ),'FAIL "Bad STIMERM call"'
+         PTRACE TIMEROK            Trace timer set
+         XPOP  PTR=R2              Release stack space
+         PEND  ,
+         SPACE 3
+*box
+*
+*   STIMERM exit routine (Called from OS and runs as an IRB).
+*     Post main task and return.
+*
+         SPACE ,
+TIMREXIT WITH  (TIMREXIT,R15),BEGIN
+         L     R11,@R1+4           Retreive address of TVT table
+         POST  TVTTIMRECB,0        Post timer ECB
+         BR    R14                 Return to OS
+         END
+         TITLE 'Wings: Seg control routine for batch report'
+*box
+*
+*  WINGS: OSFILE seg control routine
+*
+*
+         SPACE 2
+OSFPSEG  PROC  ,TRACE=NO
+         LR    R2,R15              Save segcb address
+         WITH  (SEGCB,R2),BEGIN    Addressability to SEGCB
+         IF    SEGCBWR,BEGIN       Seg write request
+         VCALL AMODE24             Enter 24-bit addressing mode
+         LR    R2,R0               Save length
+         LR    R3,R1               Save address
+         S     R3,=A(4)            Decrement for vbs header
+         XC    @R3(4),@R3          Clear VBS header
+         A     R0,=A(4)            Adjust for VBS header
+         STH   R0,@R3              Plug VBS length
+         PUT   OSFDCBPR,(R3)       Write to report file
+         LCR   R0,R2               Complement bytes written
+         PRETURN (R0)              Return bytes written
+         VCALL AMODE31             Set 31-bit addressing mode
+         END   ,
+         END   ,
+         PEND  ,
+         TITLE 'Wings: SETPATH - Requeue path control'
+*box
+*
+*  SETPATH - REQUEUE PATH CONTROL
+*
+*        1.    Close previous path control block in any
+*        2.    Allocate a new path control block
+*        3.    Open path for processing
+*        4.    Initialize SEG control buffer
+*        5.    Queue path ECB to events table
+*
+         SPACE 2
+SETPATH  PROC  ,
+         L     R0,TVTUPATH         Load address of upath block
+         IF    (R0,NZ),BEGIN       Release old upath control block
+         DELSYM NAME='UPATH',LOC=(R0)  Delete symbol from table
+         L     R1,TVTUPATH         Set UPATH pointer
+         VCALL PATHCLS             Close path
+         INCR  R1,TVTCNTPCLOSE     COUNT PATH CLOSE
+         IF    TVTREPT,BEGIN       Log path close
+         LA    R15,OSFSCB          Addres of report segcb
+         SEG   'Path closed.',,OSFSCB
+         SEGWR ,                   Write path closed message
+         SEGWR ,                   Blank line for neatness
+         END   ,
+         END   ,
+         SPACE ,
+         VCALL PATHALLO            Allocate new path control block
+         ST    R1,TVTUPATH         Save path pointer
+         LR    R2,R1               Copy address of path pointer
+         XPUSH ,,16,PTR=R3             Get stack space
+         ADDSYM ENTRY=(R3),NAME='UPATH',LOC=(R2),LEN=256
+         XPOP  PTR=R3                  Pop stack work area
+         WITH  (UPATH,R2),BEGIN    Addressability to UPATH
+         LA    R1,TVTPATHECB       Switch default path ecb
+         ST    R1,UPATECB          Save pointer in path block
+         MVC   UPATMY,TVTPATHN     Initialize path name
+         MVC   UPATPASS,=C'DBUG'   Debugger path type
+         LR    R1,R2               Move pointer to upath
+         VCALL PATHOPEN            Open path
+         END   ,
+         LA    R3,TVTSCB           Address of segment control bufr
+         L     R4,TVTPATBF         Get address of segment buffer
+         LA    R4,@R4+16           Skip past WINGS header
+         L     R5,=A(16384-16)     Load length of segment buffer
+         WITH  (SEGCB,R3),BEGIN    Seg buffer addressability
+         SEGINIT (R4),(R5),(R3),RTNTYPE=V,RTN=PATHSEG,ERR=PATHERR
+         L     R2,TVTUPATH         Address of upath control block
+         ST    R2,TVTSCBUSR        Save upath pointer to upath
+         END   ,
+         PEND  ,
+         TITLE 'Wings: Process error recovery stack'
+*BOX
+*
+*  RECOVERY - PROCESS THE ERROR RECOVERY STACK
+*
+         SPACE ,
+RECOVERY PROC  ,
+         IF    (TVTRLAST,NE,-1),BEGIN
+         FAIL  'RECOVERY STACK OVERFLOW!'
+         END   ,
+         L     R2,TVTRCYST         Load index to recovery stack
+         CLEAR R3                  Zero work register to stack clear
+         WHILE (R2,NZ),BEGIN       Call each recovery routine
+         L     RAR,TVTRCYST(R2)    Load address of recovery routine
+         ST    R3,TVTRCYST(R2)     Clear recovery routine address
+         BALR  RAR,RAR             Enter recovery routine (AMODE!)
+         S     R2,=A(4)            Decrement stack index
+         END   ,
+         CLEAR TVTRCYST            Clear recovery stack index
+         PEND  ,
+         TITLE 'Wings: PATHERR: Cleanup after SCOM error in PATH'
+*box
+*
+*  PATHERR - Process buffer full condition from path write
+*
+*        This routine is entered from the PATH routines when an
+*        error return code is encountered on the SCOM path write
+*        request.  The only error processed currently is a SUZAN
+*        client buffer full condition.
+*
+*  On Entry:   R15 contains the address of the SEGCB
+*              R1  contains the SCOM return code
+*
+*  On Exit:    R15=0 - Recovery successful, attempt to resend
+*              R15=NZ - Abort (Actually we just don't return)
+*
+         SPACE 2
+PATHERR  PROC  ,
+         L     R9,=A(OSFCOMMN)
+         LR    R2,R15              Move segcb address
+         WITH  (SEGCB,R2),BEGIN    Addressability to segcb
+         L     R3,SEGCBUSR         Address of upath control block
+         WITH  (UPATH,R3),BEGIN    Addressability to upath cb
+         IF    (R1,EQ,UPATRBAF),BEGIN Client buffer is full
+         L     R4,UPATECB          Load address of ucb
+         XC    @R4(4),@R4          Clear ecb for wait
+         WAIT  ECB=(R4)            Wait for buffer to empty
+         END   ,
+         ELSEIF (R1,EQ,UPATRNOP),BEGIN CLIENT HAS GONE AWAY
+         SEGCLR OSFSCB             CLEAR REPORT SEGCB
+         SEG   'CURRENT PARTNER HAS LEFT THE ROOM.'
+         SEGWR ,
+         SET   TPATERR             INDICATE PATH RE-QUEUE
+         B     CMDCLEAN            ABORT CURRENT COMMAND
+         END   ,
+         ELSE  BEGIN
+         LR    R4,R1               SAVE RETURN CODE
+         SEG   'UNEXPECTED SCOM SEND RETURN CODE ('
+         SEGDC (R4)
+         SEG   ')'
+         SEGWR ,
+         SET   TPATERR
+         B     CMDCLEAN
+         END   ,
+         END   ,
+         END   ,
+         CLEAR R15                 Indicate error has been recovered
+         PEND  ,
+         SPACE ,
+         LTORG ,
+         TITLE 'Wings: SCANPARM- Scan initialization parameters'
+*box
+*
+*   SCANPARM-- Routine to process parameters.
+*
+*     On entry:
+*       R1      Contains pointer to EXEC parameters
+*
+*  On exit:    TVT fields have been initialized
+*
+*
+         SPACE ,
+SCANPARM PROC  ,
+         L     R2,@R1              POINT TO EXEC PARAMETER POINTER
+         LH    R0,@R2                LOAD LENGTH OF PARAMETERS
+         LA    R1,@R2+2                POINT TO START OF PARAMETERS
+         SCINIT (R1),(R0),TVTSCNCB       INITIALIZE SCANNER
+         SCAN  PARMPRT,TVTSCNCB            SCAN EXEC PARAMETERS
+         PEND  ,
+         SPACE 2
+SCEPATH  PROC  ,
+         IF    ((R0,P),AND,(R0,LE,8)),BEGIN
+         MVC   TVTPATHN,GVTBLANK   BLANK OUT CURRENT PATH NAME
+         LR    R2,R0                 COPY LENGTH OF NEW PATH NAME
+         DEX   R2,'MVC TVTPATHN(0),@R1'      MOVE IN NEW PATH NAME
+         END   ,
+         PEND  ,
+         SPACE ,
+SCETMR   PROC  ,
+         PEND  ,
+         SPACE ,
+SCANERR  LABEL ,
+         SCRTN (R15)               RETURN TO SCANNER
+         SPACE ,
+*-
+*-       Parm file scan table.
+*-
+PARMPRT  SCKW  PATH,SCEPATH,(A,P)
+         SCKW  TIMER,SCETMR,(A,P,PI)
+         SCKW  ,SCANERR
+         EJECT ,
+         LTORG ,
+XPRTCMD  XPROC ,
+         CLEAR R15
+         PEND  ,
+         TITLE 'Wings: Disk I/O support: estae exit'
+*box
+*
+*   ESTAE EXIT
+*
+*
+         SPACE ,
+OSFESTAE LABEL ,
+         USING OSFESTAE,R15        Declare esate routine base
+         IF    (R0,EQ,12),BEGIN    Insufficient memory to get sdwa
+         CLEAR R15                 Indicate continue abending
+         BR    R14                 Return to rtm2
+         END   ,
+         SPACE 2
+         STM   R14,R12,@R13+12     Save initial registers
+         L     BRR,OSFESTC         Load initial base
+         DROP  R15                 Release initial basing
+         BASE  ,                   Declare estae addressability
+         LR    R2,R1               Set sdwa address
+         USING SDWA,R2             Declare sdwa addressability
+         L     TVTR,SDWAPARM       Load address of tvt from estae
+         L     GVTR,TVTGVTP        Load address of gvt from tvt
+         L     WAR,TVTESTAK        Set estae stack address
+         ST    R13,@WAR            Save vs save area address
+         LA    WAR,@WAR+4          Push stack pointer
+         LR    SPR,WAR             Reset to our stack
+         SET   TVTFABND            Set abending if not already
+         DROP  R2
+         S     SPR,=A(4)           Retrieve estae save area address
+         L     R13,@R13            Restore estae save area address
+         SETRP WKAREA=(R2),REGS=(14,12),RC=0
+OSFESTC  DC    A(OSFCOMMN)         Address of common routines
+         DROP  ,                   Release all addressability
+         LTORG ,
+         TITLE 'Wings: OSFILE - Prototype control blocks'
+*box
+*
+*   DEFINE PROTOTYPE CONTROL BLOCKS
+*
+         SPACE 2
+*GEN
+         ECBLIST TYPE=MODEL,CSECT=DBMAIN
+         SPACE ,
+STIMERM  STIMERM SET,MF=L
+STIMERL  EQU   STIMERM,*-STIMERM,C'C'
+         SPACE ,
+MODSETZM MODESET KEY=ZERO,MF=L
+MODSETPM MODESET KEY=NZERO,MF=L
+*NOGEN
+         SPACE 2
+DCBPS    DCB   DDNAME=DUMMY,MACRF=(GM,PM),RECFM=VBS,DSORG=PS
+DCBPSLEN EQU   *-DCBPS             DEFINE QSAM PROTOTYPE LENGTH
+         SPACE 2
+         TITLE 'WINGS: FINAL LITERALS AND SYMBOL DEFINITIONS'
+*BOX
+*
+*  DEFINE LAST LITERAL POOL AND MODULE CSECT LENGTH
+*
+         SPACE 2
+         LTORG ,
+         SPACE 2
+         DC    0D'0'               FORCE OUT TO DOUBLE-WORD
+SYMDBM   DC    CL8'DBMAIN',A(DBMAIN),A(DBMAINX-DBMAIN)
+DBMAINX  EQU   *                   DEFINE LAST ADDRESS OF DBMAIN
+         END   .

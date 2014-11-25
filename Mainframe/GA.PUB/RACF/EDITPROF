@@ -1,0 +1,351 @@
+;EXEC ID:  WYL.GA.PUB.RACF#EDITPROF
+;
+;AUTHOR:   BILL BAURIEDEL
+;
+;DATE:     03/27/87
+;
+;VERSION:  1.0
+;
+;REMARKS:  This EXEC converts profile name variations to a standard
+;          format.  A profile name may simply be a dataset name
+;          specified in any of the Wylbur allowable forms (type HELP
+;          dsname).  In addition, this routine allows RACF wildcard
+;          characters (* and %) to be imbedded in the profile name.
+;          VSAM, SYSx, CATALOG, SMPE, SMS  and IPO1 dataset names are allowed
+;          by prefixing such dataset names with a '$'.  If the profile
+;          name is either '%' or 'DEFAULT' then the user's default
+;          profile will be used.
+;
+;          This EXEC passes four parameters as follows:
+;
+;               dsnspec   - an input parameter with all profile
+;                           name variations.
+;               profname  - an output parameter with the profile
+;                           in a standard format for use in RACF
+;                           commands.
+;               usr       - either the logged on user or the user
+;                           identified as the third level qualifier
+;                           for Wylbur/VSAM dataset or profile names
+;
+;               grp       - either the logged on user's group code or
+;                           the group identified as the second level
+;                           qualifier for Wylbur/VSAM dataset or
+;                           profile names
+;
+;          This EXEC uses the following local variables:
+;
+;               dsntype   - either WYL, VSAM or OTH.  Used to determine
+;                           if the gg.uuu part of the dsn starts in
+;                           pos. 5 or 6 or isn't present.
+;
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          03/27/87  WJB    Initial Installation.
+;          11/30/87  WJB    Add IPO1, SMPE and CATALOG prefixes
+;          05/26/93  WJB    DUMP PREFIX has new format
+;          11/21/95  WJB    Add @TAPE default profile for tape protection
+;          01/23/96  WJB    Add SMS prefix
+;
+
+XPROC (dsnspec,profname,usr,grp) BEGIN
+
+;********** If debug on, then display trace info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'EDITPROF dsnspec   : '||dsnspec
+   END
+
+;********** Initialize local variables
+
+   dsntype='OTH'
+
+;********** Set default user and group
+
+   usr = USER
+   grp = GROUP
+
+;********** Remove leading and trailing blanks
+
+   dsnspec=STRIP(dsnspec)
+
+;********** See if dsname  equals '*' or starts with WYL.  If so skip other tests
+
+   IF (SUB(dsnspec,1,1) EQ '*') BEGIN
+      IF (PREFIX EQ '') BEGIN
+         errmsg="Prefix has no value (* is null) Dataset/profile name not properly formatted."
+         TRYERROR = TRUE
+         GOTO test_for_errors
+      END
+      dsnspec = PREFIX
+;********** Remove member name if any
+      IF (FIND(dsnspec,'#') GE 1) BEGIN
+         member = SUB(dsnspec,FIND(dsnspec,'#'))
+         member = STRIP(member)
+         IF (NOT ses.racf_fromset) comm Warning-Only the whole library can be protected. &(member) discarded.
+         dsnspec = SUB(dsnspec,1,FIND(dsnspec,'#')-1)
+      END
+      dsnspec=STRIP(dsnspec)
+   END
+
+   IF (ABBREV(dsnspec,'WYL.',4)) BEGIN
+      dsntype = 'WYL'
+      GOTO dsnformat
+   END
+
+;********** Bypass the DSNFORMAT test if user default in form '%'
+   IF (dsnspec EQ '%') BEGIN
+      profname = '&(GROUP)$&(USER).*'
+      XRETURN (profname,usr,grp)
+   END
+
+;********** Bypass the DSNFORMAT test if tape default in form '@TAPE'
+   IF ((dsnspec EQ '@TAPE') OR (dsnspec EQ '$@TAPE')) BEGIN
+      profname = '&(GROUP)$&(USER).@TAPE'
+      XRETURN (profname,usr,grp)
+   END
+
+;********** Handle generic default (gg$uuu.*)
+
+   IF (SIZE(dsnspec) EQ 8) BEGIN
+      IF (SUB(dsnspec,3,1)||SUB(dsnspec,8,1) EQ '$*') BEGIN
+         dsnspec = '% ACCOUNT '||SUB(dsnspec,1,2)||'.'||SUB(dsnspec,4,3)
+      END
+
+      IF (SUB(dsnspec,1,1)||SUB(dsnspec,5,1) EQ '%.') BEGIN
+         dsnspec = '% ACCOUNT '||SUB(dsnspec,3)
+      END
+
+      IF (SUB(dsnspec,1,1)||SUB(dsnspec,5,1) EQ '%$') BEGIN
+         dsnspec = '% ACCOUNT '||SUB(dsnspec,3)
+      END
+
+      IF (SUB(dsnspec,1,1)||SUB(dsnspec,6,1) EQ '%$') BEGIN
+         dsnspec = '% ACCOUNT '||SUB(dsnspec,3)
+      END
+   END
+
+;********** Handle default profiles with ACCOUNT option
+
+   IF (SUB(dsnspec,1,9) EQ '% ACCOUNT') BEGIN
+      dsnspec = 'A'||SUB(dsnspec,2)    ; alter dsnspec for DSNFORMAT
+      dsntype='ALL'
+      TRY profname = DSNFORMAT(dsnspec)
+      GOTO test_for_errors
+   END
+
+;**********  Test to see if request is for a VSAM dataset
+
+   IF ((SUB(dsnspec,1,2) EQ '$V')  \
+         OR (SUB(dsnspec,1,1)||SUB(dsnspec,5,1) EQ 'V.')) BEGIN
+      IF (SUB(dsnspec,1,1) EQ '$') vsamstem = SUB(dsnspec,1,5)
+      ELSE vsamstem = '$'||SUB(dsnspec,1,4)
+      OPEN vsamstem TEMP
+      DUMP CAT LIK &(vsamstem)
+      COUNT '&(vsamstem)' QUIET
+      CLOSE ; vsamstem
+      IF (COUNT GT 0) BEGIN
+         IF (SUB(dsnspec,1,1) NE '$') dsnspec = '$'||'&(dsnspec)'
+         dsntype = 'VSAM'
+         GOTO dsnformat
+      END
+   END
+
+;**********  Test to see if TSO type name ($gg$uuu.xxxxx or gg$uuu.xxxxx)
+
+   IF ((SUB(dsnspec,1,1)||SUB(dsnspec,4,1) EQ '$$') OR  \
+         (SUB(dsnspec,3,1) EQ '$')) BEGIN
+      IF (SUB(dsnspec,1,1) NE '$') dsnspec = '$'||dsnspec
+      dsntype = 'TSO'
+      TRY profname = DSNFORMAT(dsnspec)
+      GOTO test_for_errors
+   END
+
+;**********  Test to see if @TAPE ACCOUNT GG.UUU case
+
+   IF ((SUB(dsnspec,1,13) EQ '@TAPE ACCOUNT') OR \
+         (SUB(dsnspec,1,14) EQ '$@TAPE ACCOUNT')) BEGIN
+      IF (SUB(dsnspec,1,1) NE '$') dsnspec = '$'||dsnspec
+      IF ((SUB(dsnspec,18,1) EQ '.') OR (SUB(dsnspec,18,1) EQ '$')) BEGIN
+         dsnspec = '$' || SUB(dsnspec,16,2) || '$' || SUB(dsnspec,19,3) || '.@TAPE'
+      END
+      IF ((SUB(dsnspec,19,1) EQ '.') OR (SUB(dsnspec,19,1) EQ '$')) BEGIN
+         dsnspec = '$' || SUB(dsnspec,20,2) || '$' || SUB(dsnspec,16,3) || '.@TAPE'
+      END
+      dsntype = 'TSO'
+      TRY profname = DSNFORMAT(dsnspec)
+      GOTO test_for_errors
+   END
+
+;**********  Test to see if request is non-WYL and non-VSAM
+
+   IF ((SUB(dsnspec,1,3)||SUB(dsnspec,5,1) EQ 'SYS.')) BEGIN
+      IF (IND('0123456789',SUB(dsnspec,4,1)) NE 0) BEGIN
+         dsnspec = '$'||dsnspec ; add leading '$' to SYSx. dsnames
+      END
+   END
+
+   IF (SUB(dsnspec,1,1) EQ '$')  BEGIN
+      IF ((SUB(dsnspec,2,3)||SUB(dsnspec,6,1) EQ 'SYS.')     \
+            OR (SUB(dsnspec,2,8) EQ 'CATALOG.')              \
+            OR (SUB(dsnspec,2,5) EQ 'IPO1.')                 \
+            OR (SUB(dsnspec,2,5) EQ 'SMPE.')) BEGIN
+         dsntype = 'SYS'
+         GOTO dsnformat
+      END
+      IF (SUB(dsnspec,2,4) EQ 'SMS.') BEGIN
+         dsntype = 'SYS'
+         GOTO dsnformat
+      END
+   END
+
+;********** If there is a leading '$' then set type to 'OTH'
+
+   IF (SUB(dsnspec,1,1) EQ '$') BEGIN
+      dsntype = 'OTH'
+      GOTO dsnformat
+   END
+
+
+;********** Does user have a dataset named 'DEFAULT'?
+
+   IF (ABBREV(dsnspec,'DEFAULT',7)) BEGIN
+;     TRY checkspec = DSNVERIFY(dsnspec) ; replaced 9/11/95 wjb
+      TRY checkspec = DSNINFO(dsnspec)
+      IF (TRYERROR) GOTO test_for_errors
+;     IF ((DSNVERIFY(dsnspec) EQ 'NOT THERE') OR \
+;           (DSNVERIFY(dsnspec) EQ 'OFFLINE')) BEGIN
+      IF (DSNINFO(dsnspec) EQ '') BEGIN
+         dsntype = 'DEF'
+         TRY profname = DSNFORMAT(dsnspec)
+         GOTO test_for_errors
+      END
+      dsntype = 'WYL'
+      GOTO dsnformat
+   END
+
+;********** Not SYSx. or Vxxx.  Therefore must be WYL.
+
+   dsntype = 'WYL'
+
+dsnformat:
+
+;********** Test for wildcards in dsnspec.  If none, then bypass
+;********** wildcard substitution trick.
+
+   IF (FIND(dsnspec,'%*') LE 0) BEGIN
+      TRY profname = DSNFORMAT(dsnspec)
+      GOTO test_for_errors
+   END
+
+;********** Trick DSNFORMAT so that it will accept wildcards
+;********** Convert wildcards before executing DSNFORMAT
+
+   token=''
+   addchar = 0 ; used later to reformat expanded profile name
+   dsntoken=dsnspec ; keep dsnspec for error reporting
+   SYSCALL SCAN(token,dsntoken)
+   orig_token = token
+   IF (SUB(orig_token,1,1) EQ '$') orig_token=SUB(orig_token,2)
+   char_pos = FIND(token,'%*')
+   WHILE (char_pos GT 0) BEGIN
+      IF (char_pos EQ 1) token = 'x'||SUB(token,2)
+      ELSE token=SUB(token,1,char_pos-1)||'x'||SUB(token,char_pos+1)
+      char_pos = FIND(token,'%*')
+   END
+
+;********** See if last qualifier is 9 characters long (e.g. GDG with wildcard at end)
+
+   token = STRIP(token)
+   IF ((FIND(REVERSE(token),'.') EQ 10) AND (SUB(token,SIZE(token),1) EQ 'x')) BEGIN
+      token = SUB(token,1,SIZE(token)-1)||'.x'
+      addchar = 1 ; add an additional character for the '.'
+   END
+
+   IF ((FIND(token,'.') EQ 0) AND (SIZE(token) EQ 9) AND (SUB(token,SIZE(token),1) EQ 'x')) BEGIN
+      token = SUB(token,1,SIZE(token)-1)||'.x'
+      addchar = 1 ; add an additional character for the '.'
+   END
+
+   TRY profname = DSNFORMAT(token||dsntoken)
+   IF (profname EQ 'BAD DSN') TRYERROR=TRUE
+   IF (TRYERROR) GOTO test_for_errors
+
+;********** Now undo the damage from the DSNFORMAT trick
+
+   IF (SIZE(profname) EQ SIZE(orig_token)) profname = orig_token
+   ELSE profname = SUB(profname,1,SIZE(profname)-SIZE(orig_token)-addchar)||orig_token
+
+test_for_errors:
+
+   IF (profname EQ 'BAD DSN') TRYERROR=TRUE
+
+   IF (TRYERROR) BEGIN
+      errid    = 'RACFPROF'
+      IF ((errmsg EQ '') AND (dsntype NE 'ALL')) errmsg   = "Dataset/profile name not properly formatted."
+      IF ((errmsg EQ '') AND (dsntype EQ 'ALL')) errmsg   = "'ALL' not allowed with dataset name"
+      profname = ''
+      IF (VARTYPE('token') EQ 'UNDEFINED') token='null'
+      IF (VARTYPE('dsntoken') EQ 'UNDEFINED') dsntoken='null'
+;     TRY SEND GB.SEC Profile name not properly formatted (racf#editprof): dsnspec=&(dsnspec) token=&(token) dsntoken=&(dsntoken)
+
+      IF (ses.racf_debug) BEGIN
+         comm ERRMSG  :&(errmsg)
+         comm DSNSPEC :&(dsnspec)
+         comm PROFNAME:&(profname)
+         comm TRYMSG  :&(TRYMSG)
+         comm TRYID   :&(TRYID)
+         comm TRYINFO :&(TRYINFO)
+      END
+
+      XRETURN errid=&(errid), errmsg="&(errmsg)"
+
+   END
+
+;********** Get user and group from dsn
+
+   CASES BEGIN
+
+      CASE (dsntype EQ 'WYL') BEGIN
+         usr = SUB(profname,8,3)
+         grp = SUB(profname,5,2)
+      END
+
+      CASE (dsntype EQ 'TSO') BEGIN
+         usr = SUB(profname,4,3)
+         grp = SUB(profname,1,2)
+      END
+
+      CASE (dsntype EQ 'VSAM') BEGIN
+         usr = SUB(profname,1,4)
+         grp = ''
+         IF (SUB(profname,8,1) EQ '.') BEGIN
+            usr = SUB(profname,9,3)
+            grp = SUB(profname,6,2)
+         END
+      END
+
+      CASE (dsntype EQ 'DEF') BEGIN
+         usr = SUB(profname,8,3)
+         grp = SUB(profname,5,2)
+         profname = '&(grp)$&(usr).*'
+      END
+
+      CASE (dsntype EQ 'ALL') BEGIN
+         usr = SUB(profname,8,3)
+         grp = SUB(profname,5,2)
+         profname = '&(grp)$&(usr).*'
+      END
+
+   END
+
+   IF (ses.racf_debug) BEGIN
+      WRITE '         profname  : '||profname
+      WRITE '         usr       : '||usr
+      WRITE '         grp       : '||grp
+      WRITE '         dsntype   : '||dsntype
+   END
+
+   XRETURN (profname,usr,grp)
+
+END

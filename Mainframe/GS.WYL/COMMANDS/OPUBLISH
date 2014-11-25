@@ -1,0 +1,1462 @@
+; The specifications for this exec are stored in
+; wyl.gq.jnk.publish2.command.specs.  All proc steps with names
+; of in the form STEPn implement a tstep of the corresponding name
+; in the spec.  Other steps called by the primary steps have been
+; given names descriptive of their function.
+;
+; Last changed:   11/08/91 by JNK; added 15th category
+;                 08/05/91 by JNK; added EXPRESS options
+;
+xproc () begin
+;
+   set exec auth                    ; authorized exec, must run from GS.WYL
+   set wcharge publish              ; isolate charges
+   set exec noauth                  ; restore normal stataus
+
+; see if the user is on SYSA and if not, issue and error and quit
+   declare string text
+   if (machine eq 'SYSA') goto continue
+   wri 'PUBLISH can not be executed on &(machine)'
+   text= 'Please call the Medical Information Systems Help Desk at 415/723-9090'
+   if (machine eq 'SYSC') write '&(text)'
+   xreturn
+
+continue:
+   declare string x.category x.stepname x.suffix
+   declare boolean x.invalid x.fastpath
+   declare number x.catstart x.catend
+   declare string x.display x.forbin x.foridm x.local x.active x.sendidm x.docnum
+   declare string x.mailname x.mailaddress x.lprinter x.copies x.phone x.parms
+   x.oldactive = &(actno)
+   open publish temp
+   x.working=&(actno)
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+
+; the files below are created by the exec currently stored as
+; wyl.ga.sds.lib#abstracts which should be placed under SUBMIT
+; when this facility goes production
+
+
+   x.parms=strip("&(parm_string)")
+   use wyl.gq.doc.publish.abstract clr
+   copy to 10001 from wyl.gq.doc.publish.title.lists
+   copy to 90001 from wyl.gq.doc.publish.help
+   if (x.parms eq '') pcall step1
+   else pcall fastpath
+   pcall quit
+end
+
+proc step1() begin
+   x.stepname ='STEP1'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string info
+   wri ''                                                                      attn=prompt1
+   wri 'Welcome to PUBLISH, a program for printing Data Center documents.'     attn=prompt1
+   wri 'For help, type "?" in response to any prompt.'                         attn=prompt1
+prompt1:
+   x.stepname ='STEP1'     ;just incase we've reset it before getting here.
+   wri ''
+   try read string  info upp prompt 'Do you want general information and instructions?  (RETURN=no) '
+   cases begin
+      case (tryattn) pcall leave
+      case (info eq 'QUIT' or info eq 'Q') pcall quit
+      case (info eq '') pcall step3
+      case (info eq '?' or info eq 'H' or info eq 'HELP') begin
+         info='?'
+         pcall help
+         goto prompt1
+      end
+      case (verify(info,'YESOK') eq 0) pcall step2
+      case (verify(info,'NO') eq 0) pcall step3
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto prompt1
+   end
+end
+
+proc step2 () begin
+   x.stepname ='STEP2'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   point '*STEP2' 1 in 90000/l nol
+   w0 = *+2
+   point '*'1(1) in &(w0)+1/l nol
+   w1 = *-1
+   try list &(w0)/&(w1) unn
+   pcall step3
+end
+
+proc step3 () begin
+   x.stepname ='STEP3'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   wri ''                                                                      attn=prompt3
+   wri 'Document Categories:'                                                  attn=prompt3
+   try l '**' 1 in f/10000 col 3/82  unn ind 2
+   declare number w0
+prompt3:
+   x.stepname ='STEP3'     ;just incase we've reset it before getting here.
+   try read string  x.category  upp prompt 'Type the number of a category (RETURN=finished printing documents): '
+   x.category = strip(x.category)
+   cases begin
+      case (tryattn) pcall leave
+      case (x.category eq 'QUIT' or x.category eq 'Q') pcall quit
+      case (x.category eq '') pcall quit
+      case (x.category eq '?' or x.category eq 'H' or x.category eq 'HELP') begin
+         x.category='?'
+         pcall help
+         goto prompt3
+      end
+      case (verify(x.category,'0123456789') eq  0) pcall step4
+      case (x.category eq 'L' or x.category eq 'LIST') pcall step3
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto prompt3
+   end
+end
+
+proc step4 () begin
+   x.stepname ='STEP4'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string counter
+   declare string pointer
+   x.display= 99
+   x.forbin= 99
+   x.foridm= 99
+   x.local= 99
+   x.active= 99
+   x.sendidm= 99
+   x.category = right('&(x.category)',2)
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)'1(1) in 10001/90000 nol
+   x.catstart=*+1
+   if (x.catstart eq 0) begin
+      if (x.category ge 1 and  x.category le 16) begin
+         wri ''
+         wri 'There are currently no documents in this category'
+      end
+      else begin
+         wri ' '
+         wri 'Invalid category number'
+      end
+      pcall step3
+   end
+   poi '**'1(1) in &(x.catstart)/l nol
+   x.catend=*-1
+   try l &(x.catstart)/&(x.catend) unn col 1/72
+prompt4:
+   x.stepname ='STEP4'     ;just incase we've reset it before getting here.
+   wri ''
+   try read string counter upp prompt='Type the number of a document to print (RETURN=no more from here): '
+   counter = strip(counter)
+   cases begin
+      case (tryattn) pcall leave
+      case (counter eq 'QUIT' or counter eq 'Q') pcall quit
+      case (counter eq '') pcall step3()
+      case (counter eq '?' or counter eq 'H' or counter eq 'HELP') begin
+         counter='?'
+         pcall help
+         goto prompt4
+      end
+      case (verify(counter,'0123456789') eq  0) begin
+         counter=right('&(counter)',4)
+         poi '&(counter)'1(1) in &(x.catstart)/&(x.catend) nol
+         w0=*
+         if (w0 lt 0) begin
+            counter=strip(&(counter))
+            wri ' '
+            if (counter gt 0) wri 'There are fewer than &(counter) documents in this category.'
+            else pcall invalid
+         end
+         else pcall step5 (counter,w0)
+      end
+      case (verify(counter,'0123456789?') eq  0) pcall abstract (counter)
+      case (counter eq 'L' or counter eq 'LIST') pcall step4
+      case (counter eq 'C' or counter eq 'CATEGORIES') begin
+         poi '+'80 in &(x.catstart)/&(x.catend) nol
+         w1 = *
+         if (w1 lt 0) pcall step3
+         else begin
+            wri ''                                                             attn=prompt4
+            wri 'You cannot switch categories at this point.'                  attn=prompt4
+            wri 'To finish ordering documents from this category, pres RETURN' attn=prompt4
+            wri 'at the next prompt.'                                          attn=prompt4
+            wri 'To cancel all documents ordered from this category, type QUIT,' attn=prompt4
+            wri 'which will end the PUBLISH utility.'                          attn=prompt4
+            wri 'Alternatively, you can respond by ordering 0 copies of the'   attn=prompt4
+            wri 'documents already ordered, after which you can switch to a'   attn=prompt4
+            wri 'new category.'                                                attn=prompt4
+            wri ''                                                             attn=prompt4
+            goto prompt4
+         end
+      end
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto prompt4
+   end
+   goto prompt4
+end
+
+proc step5(counter,w0) begin
+   x.stepname ='STEP5'
+   x.suffix=''
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string pointer loopchk type action previous temp
+   declare number w1 w2 w3
+   x.display= 99
+   x.forbin= 99
+   x.foridm= 99
+   x.local= 99
+   x.active= 99
+   x.sendidm= 99
+   w2 = w0
+   temp = substr(line(w0),2,71)
+   wri " &(temp)"                                                                 attn=byebye
+   w0 = w0+1
+   if (substr(line(w0),1,2) ne '**') begin
+      while  (substr(line(w0),5,1) ne ')' and substr(line(w0),1,2) ne '**') begin
+         temp = substr(line(w0),2,71)
+         wri " &(temp)"                                                           attn=byebye
+         w0 = w0+1
+      end
+   end
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)' 1(1) in f/9999 nol
+   w0=*+1
+   counter=strip(counter)
+   pointer='#' || '&(counter)'
+
+   poi '&(pointer)' 1(1) in &(w0)/l nol
+   w0=*
+   x.docnum=substr(line(w0+1),73,4)
+   poi '>'(1) in &(w0)/l nol
+   w0=*
+   if (substr(line(w0),1,9) eq '>Contact:') begin
+      w0=w0+1
+      if (substr(line(w0),1,5) eq '>Msg:') begin
+         wri "    &(substr(line(w0),7,79))"
+         w0=w0+1
+         while (substr(line(w0),1,5) eq '     ') begin
+            wri "    &(substr(line(w0),7,79))"
+            w0=w0+1
+         end
+      end
+   end
+   else begin
+      wri ' '
+      wri " we shouldn't get here because there should always be Contact"
+   end
+   wri ' '
+   w3=w0
+actions:
+   loopchk='>'
+   previous=''
+   w0 = w3
+   w1 = 1
+   wri 'Actions you can choose for this document:'
+   wri '   &(w1) - display more information about this document'                              attn=byebye
+   x.display = w1
+   while (loopchk eq '>') begin
+      type =substr(line(w0),1,25)
+      if (type ne previous) begin
+         w1 = w1+1
+         cases begin
+            case (verify('Forsythe',type) eq 0) begin
+               wri '   &(w1) - print this document on a Forsythe printer; deliver to my output bin'  attn=byebye
+               x.forbin = w1
+               w1=w1+1
+               wri '   &(w1) - print this document on a Forsythe printer; deliver to me via ID mail' attn=byebye
+               x.foridm = w1
+            end
+            case (verify('Locally',type) eq 0) begin
+               wri '   &(w1) - print this document on a local department printer'
+               x.local = w1
+            end
+            case (verify('Active',type) eq 0) begin
+               wri '   &(w1) - place the text of this document in my WYLBUR active file'         attn=byebye
+               x.active = w1
+            end
+            case (verify('Mail to',type) eq 0) begin
+               wri '   &(w1) - send this document to me via ID mail'                              attn=byebye
+               x.sendidm = w1
+            end
+         end
+      end
+      previous=type
+      w0=w0+1
+      loopchk = substr(line(w0),1,1)
+   end
+   wri '   0 - no action for this document'                                                    attn=byebye
+   wri ' '
+prompt5:
+   x.stepname ='STEP5'
+   try read string action upp prompt 'Type the number of the action you want to take (RETURN=2): '
+   if (action eq '') action='2'
+   cases begin
+      case (tryattn) pcall leave
+      case (action eq 'QUIT' or action eq 'Q') pcall quit
+      case (action eq '?' or action eq 'H' or action eq 'HELP') begin
+         action='?'
+         pcall help
+         goto prompt5
+      end
+      case (action eq 'L' or action eq 'LIST') pcall step5(counter,w2)
+      case (action eq 'C' or action eq 'CATEGORIES') pcall step3
+      case (verify(action,'0123456789') eq  0)  begin
+         cases begin
+            case (action eq x.display) begin
+               pcall step56(counter)
+               goto actions
+            end
+            case (action eq x.forbin)  pcall step51(w2,action)
+            case (action eq x.foridm)  pcall step52(w2,action)
+            case (action eq x.local)   pcall step53(w2,action)
+            case (action eq x.active)  pcall step54(w2)
+            case (action eq x.sendidm) pcall step55(w2,action)
+            case (action eq '0')       pcall step4
+            case (true)                pcall invalid
+         end
+      end
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto prompt5
+   end
+   if (x.copies eq 0) goto prompt5
+byebye:
+   return
+end
+
+proc  verify_it (action,nogo) begin
+   x.stepname ='VERIFY_IT'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string approval
+   nogo=false
+   poi '+'80 in &(x.catstart)/&(x.catend) nol
+   w0 = *
+   if (w0 lt 0) pcall step3
+   wri ''                                                                      attn=prompt6
+   wri 'Current Order:'                                                        attn=prompt6
+   try l &(x.catstart)/&(x.catstart)+1 unn  col 1/79
+   try l '+'80 in &(x.catstart)+2/&(x.catend) unn  col 1/79
+   cases begin
+      case (action eq x.forbin) begin
+         wri 'This document will be printed on a Forsythe printer and delivered to your'     attn=prompt6
+         wri 'output bin.'                                                                   attn=prompt6
+      end
+      case (action eq x.foridm) begin
+         wri 'This document will be printed at Forsythe and delivered via ID mail to:' attn=prompt6
+         wri "&(x.mailname), &(x.mailaddress)"                                               attn=prompt6
+         wri ' '                                                                             attn=prompt6
+         wri 'To change the number of copies or ID Mail address, type NO at the next prompt.' attn=prompt6
+         wri 'To cancel this request, type CANCEL or press BREAK at the next prompt.'        attn=prompt6
+      end
+      case (action eq x.sendidm) begin
+         wri 'This document will be mailed via ID mail to: '                                 attn=prompt6
+         wri "&(x.mailname), &(x.mailaddress)"                                               attn=prompt6
+         wri "Phone: &(x.phone)"                                                             attn=prompt6
+         wri 'To change the number of copies or ID Mail address type NO at the next prompt.' attn=prompt6
+         wri 'To cancel this request, type CANCEL or press BREAK at the next prompt.'        attn=prompt6
+      end
+      case (action eq x.local) wri "This document will be printed on the &(x.lprinter) printer." attn=prompt6
+   end
+prompt6:
+   x.stepname ='VERIFY_IT'     ;just incase we've reset it before getting here.
+   wri ''
+   try read string approval upp prompt='Submit this order now? (?=help, RETURN=yes) '
+   cases begin
+      case (tryattn) pcall leave
+      case (approval eq 'C' or approval eq 'CANCEL') begin
+         ch 73/80 to '' in &(x.catstart)+2/&(x.catend) nol
+         pcall step4
+      end
+      case (approval eq 'QUIT' or approval eq 'Q') pcall quit
+      case (approval eq '') return(nogo)
+      case (approval eq '?' or approval eq 'H' or approval eq 'HELP') begin
+         approval='?'
+         pcall help
+         goto prompt6
+      end
+      case (verify(approval,'YESOK') eq 0) return(nogo)
+      case (verify(approval,'NO') eq 0) begin
+         nogo=true
+         return(nogo)
+      end
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto prompt6
+   end
+end
+
+proc abstract (counter) begin
+   x.stepname ='ABSTRACT'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare number w0
+   declare string pointer pointer2
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)' 1(1) in f/10000 nol
+   w0=*+1
+   counter = strip('&(counter)','B','?')
+   if (counter eq '') begin
+      pcall invalid
+      return
+   end
+   next = counter+1
+   pointer='#' || &(counter) || '.'
+   poi '&(pointer)' 1(1) in &(w0)/l nol
+   w0=*
+   if (w0 lt 0) begin
+      wri ' '
+      wri 'There are fewer than &(counter) documents in this category.'
+      return
+   end
+   loopchk=''
+   while (loopchk ne '>') begin
+      wri substr(line(w0),2)                                                   attn=forgetit
+      w0=w0+1
+      loopchk = substr(line(w0),1,1)
+   end
+   pointer='#' || &(counter) || '.'
+   poi '&(pointer)' or '**'1 in &(w0)/l nol
+   w1 = *
+   if (w1 lt 0) begin
+      wri 'we shouldn't ever get here as there is a ** at the end of the list'
+      return
+   end
+   poi '>Contact:' 1(1) in &(w0)/&(w1) nol
+   w1 = *
+   if (w1 lt 0) begin
+      wri 'we shouldn't get here because there should always be a contact'
+      return
+   end
+   else wri "&(substr(line(w1),2))"
+   while (substr(line(w1+1),1,5) eq '>Msg:') begin
+      w1=w1+1
+      wri "    &(substr(line(w1),7,79))"
+      w1=w1+1
+         while (substr(line(w1),1,5) eq '     ') begin
+            wri "    &(substr(line(w1),7,79))"
+            w1=w1+1
+         end
+end
+   wri ''
+forgetit:
+   return
+end
+
+proc copies(w0,action) begin
+   x.stepname ='COPIES'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string copies temp
+   declare number pages
+   prompt=false
+   wri ''
+promptc:
+   try read string temp upp prompt='Type the number of copies you want (0 for none) (RETURN=&(x.copies)): '
+   if (temp eq '') copies=x.copies
+   else copies=temp
+   cases begin
+      case (tryattn) pcall leave
+      case (copies eq 'QUIT' or copies eq 'Q') pcall quit
+      case (copies eq '0') pcall step4
+      case (verify(copies,'0123456789') eq 0) begin
+         if (copies lt 255) begin
+            if (copies eq '') copies='1'
+            copies=right('&(copies)',6)
+            w1=w0+1
+            if (substr(line(&(w1)),1,4) eq  '    ') begin
+               ch 73 to '&(copies)' in &(w1) nol
+               if (copies gt 0) begin
+                  ch 80/80 to '+' in &(w0) nol
+                  ch 80/80 to '+' in &(w1) nol
+                  pages=substr(line(w1),66,5)
+               end
+               else begin
+                  ch 80/100 to '' in &(w0) nol
+                  ch 80/100 to '' in &(w1) nol
+               end
+            end
+            else begin
+               ch 73 to '&(copies)' in &(w0) nol
+               if (copies gt 0)  begin
+                  ch 80/80 to '+' in &(w0) nol
+                  pages=substr(line(w0),66,5)
+               end
+               else  ch 80/100 to '' in &(w0) nol
+            end
+         end
+         else begin
+            wri ''
+            wri 'The number of copies ordered may not exceed 254.'
+            goto promptc
+         end
+         if (x.foridm eq action) begin
+            sheets=pages/2
+            if (pages/2 gt int(pages/2)) sheets=sheets+1
+            sheets=sheets*copies
+            if (sheets gt 500) begin
+               wri 'ID mail delivery is limited to 500 sheets of paper.'
+               wri 'Your current request is for &(sheets) sheets.'
+               wri 'Please reduce the number of copies you are requesting.'
+               goto promptc
+            end
+         end
+      end
+      case (copies eq '?' or copies eq 'H' or copies eq 'HELP') begin
+         copies='?'
+         pcall help
+         goto promptc
+      end
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto promptc
+   end
+   x.copies=strip(copies)
+   return
+end
+
+proc invalid() begin
+   x.stepname ='INVALID'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   wri 'Invalid response. Type ? for help'
+   x.invalid=true
+end
+
+
+proc error() begin
+   on attn cmd='pcall quit'
+   open errors temp
+   putend &(date)   &(account)
+   putend &(errmsg)
+   putend &(errinfo)
+   put orv.ga.sds.publish.errors.test append quiet
+   quietly send gq.jnk PUBLISH error posted to orv.ga.sds.publish.errors.test
+   wri ''                                                                      attn=bye5
+   wri 'An error has occurred in PUBLISH.  If it is not clear what the '       attn=bye5
+   wri 'problem is, please contact your Data Center consultant or use'         attn=bye5
+   wri 'the CONSULT command for further assistance.'                           attn=bye5
+bye5:
+   pic &(x.oldactive)
+   pcall quit
+end
+
+proc help () begin
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string pointer
+   pointer = '*' || '&(x.stepname)' ||  '&(x.suffix)' || ' '
+   poi '&(pointer)' 1(1) in 90001/l nol
+   w0 = *
+   if (w0 lt 1) begin
+      wri 'No help for this step'
+      return
+   end
+   poi '*'1(1) in &(w0)+1/l nol
+   w1 = *-1
+   while (w0 lt w1) begin
+      w0 = w0+1
+      wri line(w0)                                                             attn=nothanks
+   end
+nothanks:
+   return
+end
+
+proc fastpath () begin
+   x.stepname ='FASTPATH'
+   x.fastpath=true
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string pointer request bin action previous docnum
+   x.parms=strip(x.parms)
+   if (find(x.parms,';') ne 0) x.parms = substr(x.parms,1,find(x.parms,';')-1) ; discard comments
+   if (find(x.parms,' ,') eq 0) begin
+      x.docnum = right(strip(x.parms),3)
+      x.parms=''   ; set remaining parm to null if only doc number in parm
+      end
+   else begin
+      x.docnum = right(strip(substr(x.parms,1,find(x.parms,' ,'))),3)
+      x.parms = strip(substr(x.parms,find(x.parms,' ,')))
+      end
+   poi '&(x.docnum)'74(1) in f/10000 nol
+   w0 = *                  ; print line in this abstract
+   if (w0 eq -1) begin
+      wri ''                                                                   attn=byefast
+      wri '&(x.docnum) is not a valid document number or cannot be printed through PUBLISH.' attn=byefast
+      wri 'Issue the command PUBLISH by itself and ask for general information,' attn=byefast
+      wri 'if you need help.'                                                  attn=byefast
+      wri ''                                                                   attn=byefast
+byefast:
+      pcall quit
+   end
+
+   if (x.parms ne '') pcall express (w0)
+
+   poi '**'1 in f/&(w0) nol
+   w1 = *                     ; begining of abstracts for this category
+   pointer = substr(line(&(w1)),1,4)
+   x.category = substr(pointer,3,2)
+   counter = 0
+   while (w1 lt w0) begin
+      poi '#'1(1) in &(w1)/&(w0) nol
+      counter = counter +1
+      w1 = * +1
+longtitle:
+      if (substr(line(w1),2,5) ne 'Date:') begin
+         w1 = w1 +1
+         goto longtitle
+      end
+   end
+   poi '&(pointer)'1(1) in 10001/90000 nol
+   x.catstart=*            ; begin of this category in title list
+   if (x.catstart eq 0) begin
+      wri ''
+      wri 'ERROR1: this code should never be executed'
+      xreturn
+   end
+   poi '**'1(1) in &(x.catstart)+1/l nol
+   x.catend=*-1
+   try list &(x.catstart)+1/&(x.catstart)+2 unn col 1/72
+   pointer = right('&(counter)',4)
+   poi '&(pointer)'1(1) in &(x.catstart)/&(x.catend) nol
+   w2 = *
+   if (w2 eq -1) begin
+      wri ''
+      wri 'ERROR2: this code should never be executed'
+      xreturn
+   end
+   request =  right(&(x.docnum),4) || substr(line(&(w2)),6)
+   wri "&(request)"                                                            attn=promptf
+   w3 = w2 +1
+   while (substr(line(w3),1,4) eq '    ') begin
+      wri line(w3)                                                             attn=promptf
+      w3 = w3 +1
+   end
+   poi '>'(1) in &(w0)/l nol
+   w0=*
+   loopchk='>'
+   if (substr(line(w0),1,9) eq '>Contact:') begin
+      w0=w0+1
+      while (substr(line(w0),1,5) eq '>Msg:') begin
+         wri "    &(substr(line(w0),7,79))"
+         w0=w0+1
+         while (substr(line(w0),1,5) eq '     ') begin
+            wri "    &(substr(line(w0),7,79))"
+            w0=w0+1
+         end
+      end
+   end
+   else begin
+      wri ' '
+      wri " we shouldn't get here because there should always be Contact"
+   end
+   wri ' '
+   w1 = 1
+promptf:
+   wri 'Actions you can choose for this document:'
+   wri '   &(w1) - display more information about this document'                              attn=byefast
+   x.display = w1
+   while (loopchk eq '>') begin
+      type =substr(line(w0),1,25)
+      if (type ne previous) begin
+         w1 = w1+1
+         cases begin
+            case (verify('Forsythe',type) eq 0) begin
+               wri '   &(w1) - print this document on a Forsythe printer; deliver to my output bin'  attn=byefast
+               x.forbin = w1
+               w1=w1+1
+               wri '   &(w1) - print this document on a Forsythe printer; deliver to me via ID mail' attn=byefast
+               x.foridm = w1
+            end
+            case (verify('Locally',type) eq 0) begin
+               wri '   &(w1) - print this document on a local department printer'
+               x.local = w1
+            end
+            case (verify('Active',type) eq 0) begin
+               wri '   &(w1) - place the text of this document in my WYLBUR active file'         attn=byefast
+               x.active = w1
+            end
+            case (verify('Mail to',type) eq 0) begin
+               wri '   &(w1) - send this document to me via ID mail'                              attn=byefast
+               x.sendidm = w1
+            end
+         end
+      end
+      previous=type
+      w0=w0+1
+      loopchk = substr(line(w0),1,1)
+   end
+   wri '   0 - no action for this document'                                                    attn=byefast
+   wri ' '
+fastacts:
+   x.stepname ='FASTPATH'
+   try read string action upp prompt 'Type the number of the action you want to take (RETURN=2): '
+   if (action eq '') action='2'
+   cases begin
+      case (tryattn) pcall leave
+      case (action eq 'QUIT' or action eq 'Q') pcall quit
+      case (action eq '?' or action eq 'H' or action eq 'HELP') begin
+         action='?'
+         pcall help
+         goto fastacts
+      end
+      case (verify(action,'0123456789') eq  0)  begin
+         cases begin
+            case (action eq x.display) pcall step56(counter)
+            case (action eq x.forbin)  pcall step51(w2,action)
+            case (action eq x.foridm)  pcall step52(w2,action)
+            case (action eq x.local)   pcall step53(w2,action)
+            case (action eq x.active)  pcall step54(w2)
+            case (action eq x.sendidm) pcall step55(w2,action)
+            case (action eq '0')       pcall quit
+            case (true)                pcall invalid
+         end
+      end
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      goto fastacts
+   end
+   if (x.copies eq 0) goto fastacts
+end
+
+proc leave () begin
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string leave
+promptl:
+   wri ' '                                                                     attn=really
+   wri 'Press the ATTN/BREAK key again to leave PUBLISH immediately'           attn=really
+   wri 'without printing more documents.'                                      attn=really
+   wri 'Otherwise press the RETURN key to return to the previous prompt.'      attn=really
+   wri ' '                                                                     attn=really
+   try read string leave upp prompt='Your response: '
+really:
+   cases begin
+      case (tryattn) pcall quit
+      case (leave eq 'QUIT' or leave eq 'Q') pcall quit
+      case (leave eq '') begin
+         x.invalid = true
+         return
+      end
+      case (leave eq '?' or leave eq 'H' or leave eq 'HELP') goto promptl
+      case (true) goto promptl
+   end
+end
+
+proc quit () begin
+   on error cmd = 'pcall error'
+   comm Leaving PUBLISH.
+   pic &(x.working)
+   close
+   pic &(x.oldactive)
+   xreturn
+end
+
+proc step51 (w0,action) begin
+   x.stepname ='STEP51'
+   x.suffix=''
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string more copies username temp mail phone bin contact type
+   declare number counter w1
+   declare boolean nogo prompt
+   w1 = w0 +1
+   x.phone='no phone'
+   x.copies=1
+prompt51:
+   x.stepname ='STEP51'     ;just incase we've reset it before getting here.
+   pcall copies(w0,action)
+   if ((x.foridm eq action) or (x.sendidm eq action)) begin
+prompt51a:
+      x.stepname ='STEP51A'
+      if (x.mailname eq '') begin
+         temp = name
+         if (index(temp,' -') gt 0) begin
+            temp=substr(temp,1,index(temp,' -')-1)
+         end
+         syscall scan(username,temp,type,'',':;1234567890')
+      end
+      else username = x.mailname
+      wri 'Next PUBLISH will ask you for name and address information for'           attn=prompt51aa
+      wri 'the ID-mail address label.'                                               attn=prompt51aa
+      wri ' '
+prompt51aa:
+      x.stepname ='STEP51AA'
+      username=strip(username)
+      try read string temp prompt "Name (RETURN=&(username)): "
+      cases begin
+         case (tryattn) pcall leave
+         case (upper(temp) eq 'QUIT' or upper(temp) eq 'Q') pcall quit
+         case (temp eq '') temp=username
+         case (temp eq '?' or temp eq 'H' or temp eq 'HELP') begin
+            temp='?'
+            pcall help
+            temp=username
+            goto prompt51aa
+         end
+      end
+      if (x.invalid) begin
+         x.invalid=false
+         goto prompt51aa
+      end
+      x.mailname = temp
+prompt51b:
+      x.stepname ='STEP51B'
+      if (x.mailaddress ne '') begin
+         wri "Current ID mail address: &(x.mailaddress)"
+         try read string temp prompt 'ID mail address: (?=help; RETURN=same as above): '
+      end
+      else begin
+         wri ''
+         wri 'Enter the address for the ID-mail label.  Please include your 4-digit'
+         wri 'Stanford mail code for faster delivery.'
+         wri ''
+         try read string temp prompt 'ID mail address (?=help):  '
+      end
+      cases begin
+         case (tryattn) pcall leave
+         case (upper(temp) eq 'QUIT' or upper(temp) eq 'Q') pcall quit
+         case (temp eq '') begin
+            if (x.mailaddress ne '') temp=x.mailaddress
+            else goto prompt51b
+         end
+         case (temp eq '?' or temp eq 'H' or temp eq 'HELP') begin
+            temp ='?'
+            pcall help
+            goto prompt51b
+         end
+      end
+      if (x.invalid) begin
+         x.invalid=false
+         goto prompt51b
+      end
+      x.mailaddress=temp
+      if (size(x.mailname)+size(x.mailaddress) gt 126) begin
+         wri ' '                                                                    attn=prompt51aa
+         wri 'Total length of name and address may not exceed 126 characters.'      attn=prompt51aa
+         wri ' '                                                                    attn=prompt51aa
+         x.mailaddress=''
+         goto prompt51aa
+      end
+   end
+   if (x.sendidm eq action) begin
+prompt51c:
+      x.stepname ='STEP51C'     ;just incase we've reset it before getting here.
+      cases begin
+         case  (x.phone eq 'no phone') begin
+            wri 'Optionally, please type your current phone number in case we need to contact you' attn=prompt51cc
+            try read string temp prompt 'about your order: (RETURN=&(x.phone)): '
+         end
+         case (x.phone eq '') begin
+            x.phone='no phone'
+            try read string temp prompt 'Phone: (RETURN=&(x.phone)): '
+         end
+         case (true) begin
+            try read string temp prompt 'Phone: (RETURN=&(x.phone)): '
+            if (temp eq '') temp=x.phone
+         end
+      end
+prompt51cc:
+      cases begin
+         case (tryattn) pcall leave
+         case (temp eq 'QUIT' or temp eq 'Q') pcall quit
+         case (temp eq '?' or temp eq 'H' or temp eq 'HELP') begin
+            temp ='?'
+            pcall help
+            goto prompt51c
+         end
+      end
+      if (x.invalid) begin
+         x.invalid=false
+         goto prompt51c
+      end
+      x.phone=temp
+   end
+   pcall verify_it(action,nogo)
+   if (nogo) goto prompt51
+   temp="&(x.mailname)" || ', ' || "&(x.mailaddress)"
+;sho val temp
+   if (x.mailname ne '' and x.mailaddress ne '') mail = 'MAIL="' || "&(temp)" || '"'
+;sho val mail
+   counter = substr(line(&(w0)),1,4)
+   ch 74/100 to '' in &(w0) nol
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)' 1(1) in f/10000 nol
+   w0=*+1
+   pointer='#' || '&(counter)'
+   poi '&(pointer)' 1(1) in &(w0)/l nol
+   w0=*
+   if (x.sendidm ne action) begin
+      wri ''                                                                         attn=prompt51d
+      wri 'Please wait a moment while PUBLISH submits your order to the printer...' attn=prompt51d
+      wri '   (Pressing ATTN/BREAK may cancel your order.)'                          attn=prompt51d
+      wri ''                                                                         attn=prompt51d
+      poi '>At Forsythe Print From:'(1) in &(w0)/l nol
+      w0=*
+      dsname = strip(substr(line(w0),26,44))
+;comm line 867
+;sho val mail
+      try pri from &(dsname) copies=&(x.copies) &(mail) dest=forsythe
+      if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+         send gq.jnk PUBLISH error detected while attempting to print the following document: &(x.docnum)
+         wri ''
+         wri ' PUBLISH cannot print a document you have chosen.'
+         wri " This isn't your fault.  Data Center staff has been informed"
+         wri ' of the problem and will contact you when it is resolved.'
+         wri ''
+      end
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      else begin
+         if (x.forbin eq action) begin
+            pcall getbin(bin)
+            send gq.doc PUBLISH1 &(x.docnum): COPIES: &(x.copies); Forsythe - bin &(bin); Dsname: &(dsname)
+            wri ''                                                                              attn=prompt51d
+            wri 'The document you ordered has been submitted for printing. When printed, it'    attn=prompt51d
+            wri 'will be put in your Forsythe output bin, &(bin).  For information about the '  attn=prompt51d
+            wri 'printing schedule, see the online data set DOC#SCHEDULE PUBLIC.'               attn=prompt51d
+         end
+         if (x.foridm eq action) begin
+            send gq.doc PUBLISH1 &(x.docnum): COPIES: &(x.copies); Forsythe - ID mail; Dsname: &(dsname);
+            send gq.doc PUBLISH2 ID mail: &(mail)
+            wri ''
+            wri 'The document you ordered has been submitted for printing.  When printed, it' attn=prompt51d
+            wri 'will be sent to the ID mail address you typed.  Please allow a couple of' attn=prompt51d
+            wri 'days for printing and delivery.' attn=prompt51d
+         end
+      end
+   end
+   else begin
+      poi '>Mail to:'(1) in &(w0)/l nol
+      w0=*
+      dsname = strip(substr(line(w0),11,60))
+;comm line 888
+;sho val mail
+      quietly try send &(dsname) REQUEST FOR DOCUMENT &(x.docnum) COPIES: &(x.copies) to:  &(mail)
+      if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+         send gq.jnk PUBLISH error detected while attempting to print the following document: &(x.docnum)
+         wri ''
+         wri ' PUBLISH cannot print a document you have chosen.'
+         wri " This isn't your fault.  Data Center staff has been informed"
+         wri ' of the problem and will contact you when it is resolved.'
+         wri ''
+      end
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      else begin
+         send gq.doc PUBLISH1 &(x.docnum): COPIES: &(x.copies); ID mail - order sent to:  &(dsname);
+         send gq.doc PUBLISH2 ID mail: &(mail)
+      end
+      wri ''                                                                              attn=prompt51d
+      wri 'Your document request has been submitted for handling.  Please allow several'  attn=prompt51d
+      wri 'days for processing and delivery.  If you have questions, please contact:'     attn=prompt51d
+      w2 = w0-1
+      repeat begin
+         w2=w2-1
+         end
+      until (substr(line(w2),1,9) eq '>Contact:')
+      contact=substr(line(w2),10)
+      wri "   &(contact)"                                                                attn=prompt51d
+   end
+prompt51d:
+   if (x.fastpath) pcall quit
+   x.stepname ='STEP51D'     ;just incase we've reset it before getting here.
+   pcall printmore(prompt)
+   if (prompt) goto prompt51d
+   else return
+Bye_51:
+   return
+end
+proc step52 (w0,action) begin
+   x.stepname ='STEP52'
+   x.suffix=52
+; this step is included just to keep structure parallel.
+; differences between spec steps 5.1 and 5.2 are controlled by a global variable
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   pcall step51(w0,action)
+end
+proc step53 (w0,action) begin
+   x.stepname ='STEP53'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string ptype copies temp
+   declare boolean nogo prompt
+   declare number w1 w2
+   w1=w0
+   x.copies=1
+prompt53:
+   x.stepname ='STEP53'     ;just incase we've reset it before getting here.
+   pcall copies(w0,action)
+   write 'Below, enter the name of the local department printer where you want this'  attn=prompt53a
+   write 'document to be printed.  This feature works only for printers that you can' attn=prompt53a
+   write 'use with the DESTination option on a Wylbur PRINT command or with the '     attn=prompt53a
+   write 'Department Printer option in Prism PRINT commands.  The printer name must'  attn=prompt53a
+   write 'be known to the Forsythe computer.  This feature does NOT work with'        attn=prompt53a
+   write 'attached printers that you use with the LPRINT command in Wylbur or'        attn=prompt53a
+   write 'with the Attached Printer option in Prism PRINT commands. '                 attn=prompt53a
+   write ' '                                                                          attn=prompt53a
+prompt53a:
+   x.stepname ='STEP53A'     ;just incase we've reset it before getting here.
+   try read string x.lprinter upper prompt='Type the name of the local department printer (?=help): '
+   cases begin
+      case (tryattn) pcall leave
+      case (x.lprinter eq 'QUIT' or x.lprinter eq 'Q') pcall quit
+      case (x.lprinter eq '') pcall step4
+      case (x.lprinter eq '?' or x.lprinter eq 'H' or x.lprinter eq 'HELP') begin
+         x.lprinter='?'
+         pcall help
+         goto prompt53a
+      end
+   end
+   if (x.invalid) goto prompt53a
+   pcall vprinter(ptype)
+   if (ptype eq 'ERROR') goto prompt53a
+   counter = substr(line(&(w0)),1,4)
+   counter = strip(counter)
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)' 1(1) in f/10000 nol
+   w1=*+1
+   pointer='#' || '&(counter)'
+   poi '&(pointer)' 1(1) in &(w1)/l nol
+   w1=*
+   poi '**'1(1) in &(w1)/l nol
+   w2=*
+   poi '>    Locally Print From:'(1) in &(w1)/&(w2) nol
+   w1=*
+   dsname = strip(substr(line(w1),26,44))
+   options = ''
+   if ( substr(line(w1),78,2) eq 'PS') begin     ;is this a postscript file?
+      if (ptype eq 'PS')  options= 'postscript'
+      else begin
+         poi '>    Locally Print From:'(1) in &(w1+1) nol
+         w1=*
+         if (w1 gt 0) begin
+            dsname = strip(substr(line(w1),26,44))
+         end
+         else begin
+            wri 'The requested document is stored in PostScript, which cannot be' attn=prompt53a
+            wri 'printed by the named department printer.  At the next prompt,'   attn=prompt53a
+            wri 'either type the name of a printer that can print postscript, or' attn=prompt53a
+            wri 'press Return to order the document another way.'                 attn=prompt53a
+            goto prompt53a
+         end
+      end
+   end
+;comm line 1030
+;sho val mail
+   pcall verify_it(action,nogo)
+   if (nogo) goto prompt53
+   ch 74/100 to '' in &(w0) nol
+   try pri from &(dsname) copies=&(x.copies) dest=&(x.lprinter) &(options)
+   if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      send gq.jnk PUBLISH error detected while attempting to print the following document: &(x.docnum)
+      wri ''
+      wri ' PUBLISH cannot print a document you have chosen.'
+      wri " This isn't your fault.  Data Center staff has been informed"
+      wri ' of the problem and will contact you when it is resolved.'
+      wri ''
+      return
+   end
+;VERIFY ACCOUNT BELOW AFTER TESTING
+   else send gq.doc PUBLISH1 &(x.docnum): COPIES: &(x.copies); Printer: &(x.lprinter); Dsname: &(dsname)
+   wri ''                                                                      attn=prompt53c
+   wri 'The document you ordered has been submitted.  It will be printed '    attn=prompt53c
+   wri 'on your local department printer.'                                      attn=prompt53c
+prompt53c:
+   if (x.fastpath) pcall quit
+   x.stepname ='STEP53C'     ;just incase we've reset it before getting here.
+   pcall printmore(prompt)
+   if (prompt) goto prompt53c
+   else return
+Bye_53:
+   return
+end
+proc step54 (w0) begin
+   x.stepname ='STEP54'
+   declare string more temp
+   declare number actnum
+   declare boolean prompt
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   counter = substr(line(&(w0)),1,4)
+   ch 74/100 to '' in &(w0) nol
+   counter=strip(counter)
+   pointer='**' || '&(x.category)'
+   poi '&(pointer)' 1(1) in f/10000 nol
+   w0=*+1
+   pointer='#' || '&(counter)'
+   poi '&(pointer)' 1(1) in &(w0)/l nol
+   w0=*
+   poi '>  Active Printing From:'(1) in &(w0)/l nol
+   w0=*
+   dsname = strip(substr(line(w0),26,44))
+   x.working=&(actno)
+   temp=dsnverify('&(dsname)')
+   if (temp ne 'OK') begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      send gq.jnk PUBLISH error detected while attempting to verify DSN &(dsname), #&(x.docnum)
+      wri ''
+      wri ' PUBLISH cannot obtain the document you have chosen.'
+      wri " This isn't your fault.  Data Center staff has been informed"
+      wri ' of the problem and will contact you when it is resolved.'
+      wri ''
+   end
+   else   begin
+      pic &(x.oldactive)
+      w1 = end
+      pcall active(dsname,actnum,w1)
+      wri ''                                                                            attn=prompt54
+      cases begin
+         case (actnum eq '0') begin
+            pic &(x.working)
+            return
+         end
+         case (actnum eq x.oldactive)  begin
+            if (w1 eq 0) \
+               wri 'The document is in your current active file.'                       attn=prompt54
+            else wri 'The document is now in your active file beginning at line &(w1).' attn=prompt54
+         end
+         case (actnum gt x.active) \
+            wri 'The document is now in active file &(actnum).'                         attn=prompt54
+      end
+      pic &(x.working)
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      send gq.doc PUBLISH1 &(x.docnum): Active file - &(dsname)
+      if ( substr(line(w0),78,2) eq 'CC') begin
+         wri 'It may contain special control characters used for printing that'      attn=prompt54
+         wri 'sometimes cause problems when listed directly at the terminal. '       attn=prompt54
+         wri 'Using the VIEW command or the MIXED option on the LIST command'        attn=prompt54
+         wri 'when examioning the data set is recommended.'                          attn=prompt54
+      end
+   end
+prompt54:
+   if (x.fastpath) pcall quit
+   x.stepname ='STEP54'     ;just incase we've reset it before getting here.
+   pic &(x.working)
+   pcall printmore(prompt)
+   if (prompt) goto prompt54
+   else return
+end
+proc step55 (w0,action) begin
+   x.stepname ='STEP55'
+   x.suffix=55
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   pcall step51(w0,action)
+end
+proc step56 (counter) begin
+   x.stepname ='STEP56'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   pcall abstract (counter)
+   return
+end
+proc vprinter(ptype) begin
+   x.stepname ='VPRINTER'
+   declare string ntype
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   tempact=&(actno)
+   open destinfo temp
+   try $dump destinfo &(x.lprinter)
+   if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+      send gq.jnk PUBLISH error detected while attempting to verify the following printer: &(x.lprinter)
+      wri ''
+      wri ' &(x.lprinter) is not a valid local department printer name.'
+      wri ''
+      ptype='ERROR'
+   end
+   else begin
+      ntype = strip(substr(line(first),1,9))
+      if (ntype ne 'REMOTE') begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+         send gq.jnk PUBLISH error detected while attempting to verify the following printer: &(x.lprinter), ntype=&(ntype)
+         wri ''
+         wri ' &(x.lprinter) is not a valid local department printer name.'
+         wri ''
+         ptype='ERROR'
+      end
+      else begin
+         ptype=''
+         if (substr(line(first),30,1) eq 'Y') ptype='PS'
+      end
+   end
+   pic &(tempact)
+   return(ptype)
+end
+
+proc getbin(bin) begin
+   x.stepname='GETBIN'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   tempact=&(actno)
+   open showout temp
+   try sho output col clear
+   if (tryerror) begin
+      ;to be added if really needed
+   end
+   bin=substr(line(first),index(line(first),'BIN=')+4,3)
+   pic &(tempact)
+   return(bin)
+end
+
+
+
+proc active (dsname,actnum,w1) begin
+; put item text into active
+   x.stepname='ACTIVE'
+   dcl string token, act_title
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   tempact=actno
+   ; create title for new active
+   ; act_title = 'From '||strip(sub(ngroup,1,40))
+   pick &(x.oldactive)
+
+   ; if simple request, just do it
+   if (lines eq 0 and token eq '') begin
+      try use &(dsname)
+      if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+         send gq.jnk PUBLISH error detected while attempting to use &(x.docnum)- &(temp)
+         wri ''
+         wri ' PUBLISH cannot obtain the document you have chosen.'
+         wri " This isn't your fault.  Data Center staff has been informed"
+         wri ' of the problem and will contact you when it is resolved.'
+         wri ''
+         actnum=0
+      end
+      actnum=&(x.oldactive)
+      return(actnum)
+   end
+
+   ; if changes, say so
+   if (changes gt 0) begin
+      comm
+      comm Active has &(changes) changes.
+      comm
+   end
+
+   ; ask user what to do
+   while (token eq '') begin
+      response = input ('OK to clear active \
+         (yes/no/keep/append/list)? ','ATTN')
+
+      ; process response
+      if (ioresult eq 'ATTN') pcall leave
+      cmd_work_text = strip(response)
+      syscall scan_parm (token,cmd_work_text)
+      token = upper(strip(token))
+
+      cases begin
+         case (token eq 'QUIT' or token eq 'Q') pcall quit
+         case (abbrev('YES',token,1)) ;
+         case (abbrev('NO',token,1)) ;
+         case (abbrev('OK',token,2)) ;
+         case (abbrev('KEEP',token,1)) ;
+         case (abbrev('APPEND',token,1)) ;
+         case (abbrev('LIST',token,1)) begin
+            pic &(x.oldactive)
+            try &(response)
+            token = ''
+         end
+         case (true) begin
+            comm &(token): unrecognized response.
+            token = ''
+         end
+      end
+      ;     end
+   end
+
+   ; process response
+   cases begin
+      case (abbrev('YES',token,1) or token eq 'OK') begin
+         pick &(x.oldactive)
+         try use &(dsname) clr nowarn
+         if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+            send gq.jnk PUBLISH error detected while attempting to use &(x.docnum)- &(temp)
+            wri ''
+            wri ' PUBLISH cannot obtain the document you have chosen.'
+            wri " This isn't your fault.  Data Center staff has been informed"
+            wri ' of the problem and will contact you when it is resolved.'
+            wri ''
+            actnum=0
+         end
+         x.oldactive = actno
+         actnum=&(x.oldactive)
+         w1 = 0
+         return(actnum,w1)
+      end
+      case (abbrev('NO',token,1)) begin
+         actnum=0
+;        close
+         return(actnum)
+      end
+      case (abbrev('KEEP',token,1)) begin
+         open document
+         actnum=actno
+         try use &(dsname) clr nowarn
+         if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+            send gq.jnk PUBLISH error detected while attempting to use &(x.docnum)- &(temp)
+            wri ''
+            wri ' PUBLISH cannot obtain the document you have chosen.'
+            wri " This isn't your fault.  Data Center staff has been informed"
+            wri ' of the problem and will contact you when it is resolved.'
+            wri ''
+            actnum=0
+         end
+         return(actnum)
+      end
+      case (abbrev('APPEND',token,1)) begin
+         open document temp
+         try use &(dsname) clr nowarn
+         if (tryerror) begin
+;VERIFY ACCOUNT BELOW AFTER TESTING
+            send gq.jnk PUBLISH error detected while attempting to use &(x.docnum)- &(temp)
+            wri ''
+            wri ' PUBLISH cannot obtain the document you have chosen.'
+            wri " This isn't your fault.  Data Center staff has been informed"
+            wri ' of the problem and will contact you when it is resolved.'
+            wri ''
+            actnum=0
+         end
+         eval all expr (line_append(eval_text,x.oldactive))
+         close
+         actnum=x.oldactive
+         return(actnum)
+      end
+   end
+
+end
+proc printmore(prompt) begin
+   x.stepname='PRINTMORE'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+   declare string more
+   prompt=true
+   wri ''
+   try read string more upp prompt='Do you want to print more documents? (RETURN=no) '
+   cases begin
+      case (tryattn) pcall leave
+      case (more eq 'QUIT' or more eq 'Q') pcall quit
+      case (more eq '') pcall quit
+      case (more eq '?' or more eq 'H' or more eq 'HELP') begin
+         more='?'
+         pcall help
+         return (prompt)
+      end
+      case (verify(more,'YESOK') eq 0) pcall step4     ; used to be step3
+      case (verify(more,'NO') eq 0) pcall quit
+      case (true) pcall invalid
+   end
+   if (x.invalid) begin
+      x.invalid=false
+      return (prompt)
+   end
+   prompt=false
+   return (prompt)
+end
+
+proc express (w0) begin
+   x.stepname = 'EXPRESS'
+   on error cmd = 'pcall error'
+   on attn cmd='pcall quit'
+
+   point '#'1(1) in &(w0)/10000 nol ; find last line for this document
+   w1 = *
+   point '>At Forsythe Print From'1(1) in &(w0)/&(w1) nol
+   if (* eq -1) begin    ; there is no Forsythe-printable version
+     write 'This document cannot be printed on the Forsythe printer, so it'  attn=expressquit
+     write 'cannot be ordered through the EXPRESS option.'                   attn=expressquit
+     write ' '                                                               attn=expressquit
+     pcall quit
+     end
+
+expresscheck:
+   declare string x.parm1 x.bin
+   declare boolean x.expressflag
+     x.copies=1
+     x.parms=upper(x.parms)
+
+expressparmchk:
+     syscall scan(x.parm1,x.parms)
+     cases begin
+     case (x.parm1 eq '' and x.expressflag eq TRUE) goto expressprint
+     case (x.parm1 eq '' and x.expressflag eq FALSE) begin  ; happens when COPIES but not EXPRESS
+        write 'Invalid syntax on PUBLISH command. You may have omitted the EXPRESS option.'
+        pcall quit
+        end
+     case (x.parm1 eq 'X') x.expressflag='TRUE'
+     case (abbr('EXPRESS',x.parm1,3)) x.expressflag='TRUE'
+     case (abbr('COPIES',x.parm1,3)) begin
+        syscall scan(x.parm1,x.parms)
+        if (x.parm1 eq '=') syscall scan(x.parm1,x.parms)
+        if (x.parm1 eq '') begin
+          write 'Number of copies was not specified'
+          pcall quit
+          end
+        if (verify(x.parm1,'0123456789') ne 0) begin
+          write 'Error in number of copies: &(x.parm1)'
+          pcall quit
+          end
+        x.copies = x.parm1
+        if (x.copies gt 100) begin
+           write 'Cannot use EXPRESS for more than 100 copies.'
+           pcall quit
+           end
+        if (x.expressflag) goto expressprint
+        end
+     case (true) begin
+        write 'Invalid syntax on PUBLISH command. You may have omitted the EXPRESS option.'
+        pcall quit
+        end
+     end
+     goto expressparmchk
+
+expressprint:
+     dsname = strip(substr(line(*),26,44))
+      try pri from &(dsname) copies=&(x.copies) dest=forsythe
+      if (tryerror) begin
+         send gq.jnk PUBLISH error detected while attempting to print the following document: &(x.docnum)
+         wri ''                                                              attn=expressquit
+         wri ' PUBLISH cannot print the document you have chosen, #&(x.docnum).'attn=expressquit
+         wri " This isn't your fault.  Data Center staff has been informed"  attn=expressquit
+         wri ' of the problem and will contact you when it is resolved.'     attn=expressquit
+         wri ''                                                              attn=expressquit
+      end
+      else begin
+            pcall getbin(x.bin)
+            send gq.doc PUBLISH1 &(x.docnum): COPIES: &(x.copies); Forsythe - bin &(x.bin); Dsname: &(dsname)
+            point &(w0)-1 unn col 7
+            point &(w0) unn
+            wri ''                                                                               attn=expressquit
+            wri 'The document you ordered has been submitted for printing. When printed, it'     attn=expressquit
+            wri 'will be put in your Forsythe output bin, &(x.bin).  For information about the ' attn=expressquit
+            wri 'printing schedule, see the online data set DOC#SCHEDULE PUBLIC.'                attn=expressquit
+      end
+expressquit:
+   pcall quit
+end

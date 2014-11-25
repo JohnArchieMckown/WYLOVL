@@ -1,0 +1,1061 @@
+IFG019VM TITLE 'TLMS - Volume Mount Exit'                               00001000
+*box                                                                    00002000
+*                                                                       00003000
+*                                                                       00007000
+*        %%Module:    ifg019vm                                          00008000
+*        %%Language:  asm                                               00009000
+*        %%Compile:   .hibal                                            00010000
+*  rev  2001/12/17 mcl:  HSM noprofile kludge                           00011000
+*                                                                       00012000
+IFG019VM RMODE ANY                                                      00013000
+IFG019VM AMODE 31                                                       00014000
+         SPACE 2                                                        00015000
+         HIBAL ,                                                        00016000
+         SPACE 2                                                        00017000
+         REGS  ,,,,RMPARM,RVPARM,RJFC,,,,RUCB,                         *00018000
+               RDDA,RBASE,RD,RE,RF                                      00019000
+         SPACE 2                                                        00020000
+         GBLC  &QMG                TLMS queue manager SVC number        00021000
+         SPACE ,                                                        00022000
+&QMG     SETC  '238'               Set TLMS queue manager to 238        00023000
+&SP      SETC  '229'               Subpool number for storage           00024000
+         EJECT ,                                                        00025000
+*box                                                                    00026000
+*                                                                       00027000
+*   TLMS data set protection (DSPF) for SL, NL, NSL, BLP label          00028000
+*   volumes provides for both tape input and output security.           00029000
+*                                                                       00030000
+*   The TLMS DSPF function was entered when called from the RACF        00031000
+*   router, ICHRTX00, for a RACHECK TAOEVOL request.                    00032000
+*   This version is installed as the installation Tape Volume Mount     00033000
+*   exit.  Since most tape security is now handled by RACF, this exit   00034000
+*   performs fewer functions than the SVC232 version did.  ML970310     00035000
+*                                                                       00036000
+*   This exit is called from OPEN/CLOSE/EOV during volume verify.       00037000
+*                                                                       00038000
+*   The TLMS data base is interrogated and return codes either          00039000
+*   allow the mounted volume for force a dismount.  For non-specific    00040000
+*   volume requests, like scratch, the system then re-issues the        00041000
+*   mount.  For specific volume requests the task is abended by         00042000
+*   RACF with a 913 abend code.                                         00043000
+*                                                                       00044000
+*   This module also writes the TLMS backup transaction records         00045000
+*   to the SMF data base vis the SMF write macro.                       00046000
+*                                                                       00047000
+*                                                                  *    00048000
+                                                                        00049000
+*********************************************************************   00050000
+*                                                                   *   00051000
+*  EXIT INVOCATION -- VOLUME MOUNT EXIT                             *   00052000
+*                                                                   *   00053000
+*  Supervisor mode, protection key five, TCB mode, 31-bit addressing*   00054000
+*                                                                   *   00055000
+*  Main parameter list -- defined by IFGTEP below.                  *   00056000
+*  Function-specific parameter list -- see just below IFGTEP mapping*   00057000
+*                                                                   *   00058000
+*********************************************************************   00059000
+         EJECT ,                                                        00060000
+         COPY  UTYPDEFN                                                 00061000
+         EJECT                                                          00062000
+IFG019VM CSECT     ,                                                    00063000
+*                                                                       00064000
+* FORMAT OF DSPF COMMUNICATIONS CONTROL BLOCK                           00065000
+*                                                                       00066000
+         SPACE ,                                                        00067000
+DSPFDSCT RECORD BEGIN                                                   00068000
+DSPFCNTL EQU   *                                                        00069000
+         DS    H                                                        00070000
+         DS    CL1                THIS USED TO BE DSPFUPRC              00071000
+DSPFMTYP DS    CL1       DSPF MSG TYPE FOR TLMSCNTL AND TLMSUPDA (6)    00072000
+DSPFPCDE DS    F         CC FROM TLMSCNTL TO TLMSDSPF ECB               00073000
+DSPFEPNT DS    F         ECB PNTR FOR POST                              00074000
+DSPFTPNT DS    F         TCB PNTR, ECB OWNER, FOR POST                  00075000
+DSPFECB  DS    F         ECB FOR DSPF                                   00076000
+DSPFVSN  DS    CL6       VSN OF TAPE TO BE TESTED AGAINST TLMS MASTER   00077000
+DSPFJOB  DS    CL8                                                      00078000
+DSPFPD1  DS    C                                                        00079000
+DSPFDATE DS    CL5                                                      00080000
+DSPFPD2  DS    C                                                        00081000
+DSPFTIME DS    CL4                                                      00082000
+DSPFPD3  DS    C                                                        00083000
+DSPFINUC DS    C                  INPUT USE CODE                        00084000
+DSPFJNO  DS    CL28            (HASPSERV   JOBINFO   RETURNS 28 BYTES)  00085000
+         ORG   DSPFJNO+20                                               00086000
+DSPFVLSQ DS    CL3                                                      00087000
+DSPFJACT DS    CL9             (HASPSERV   JOBACCT   RETURNS  9 BYTES)  00088000
+         ORG   DSPFJACT+5                                               00089000
+DSPFESAS DS    CL1  'E' = CLOSED-SHOP USER.  'A' = OPEN-SHOP USER.      00090000
+DSPFFLSQ DS    CL3                                                      00091000
+DSPFLBLT DS    CL1  'S' = STANDARD LABEL.  'N' = NO LABEL.              00092000
+DSPFVOLT DS    CL1  'S' = SCRATCH VOLUME.  'U' = USER VOLUME.           00093000
+*                   'I' = INPUT OR INOUT TAPE VOLUME.                   00094000
+DSPDRIVE DS    CL3                                                      00095000
+DSPDSN   DS    CL44                                                     00096000
+DSPSPECL DS    C                                                        00097000
+DSPFWORK DS    D                                                        00098000
+DSPFRETC DS    F                   Return code from this exit ml312     00102000
+DSPF@PRM DS    A                   Caller's parm pointer   ml970312     00103000
+DSPFSAVE DS    18F                 Save Area               ml970312     00104000
+DSPFFLGS FLAG  ,                                                        00105000
+**-      FLAG  RACFLAG             RACF tape protection in effect       00106000
+         FLAG  NOPROFILE           Do not build new TAPEVOL profile     00107000
+DSPFDSTL EQU   256            COMM. CONTROL BLOCK IS NOW 256 BYTES      00107100
+DSPFUPRC EQU   DSPFECB+3  IEAPOPT01 INSERTS THE CODE IN THE LOCATION    00108000
+*             POINTED TO BY DSPFEPNT (WITH A LITTLE HELP FROM TLMSQMGR) 00109000
+         ORG   DSPFCNTL+256        LENGTH OF DSP COMM IS 256 BYTES      00110000
+         END   ,                                                        00111000
+         EJECT ,                                                        00112000
+********************************************************************    00113000
+*                                                                  *    00114000
+*  ENTRY POINT FOR TLMS DATA SET PROTECT                           *    00115000
+*                                                                  *    00116000
+********************************************************************    00117000
+         SPACE 2                                                        00118000
+TLMSDSPF SAVE  (14,12),,'IFG019VM/TLMSDSPF-&SYSDATC-&SYSTIME'           00119000
+         LR    RBASE,15                                                 00120000
+         USING TLMSDSPF,RBASE      ADDRESSABILITY TO ROUTINE            00121000
+         LR    RMPARM,R1           Save parm pointer                    00122000
+         USING TEPM,RMPARM         address parm list                    00123000
+         L     RVPARM,TEPMTEP      ->function-specific parmlist         00124000
+         USING TEPO,RVPARM                                              00125000
+         BC    00,DBUG1            Zappable branch                      00126000
+*dbug    qsnap 'IFG019VM entered.  Parms:'                              00127000
+*dbug    qsnap 0(RMPARM),84                                             00128000
+*dbug    QSNAP 0(RVPARM),20          dump it for debugging              00129000
+DBUG1    EQU   *                                                        00130000
+         CLEAR R15                 RC if we bail now                    00131000
+         TM    TEPOFLAG1,TEPORDWRIT+TEPOLBLED label write or anomaly    00132000
+         IF    NZ,NULLEXIT         If either, forget it                 00133000
+*  ok, now we're either in vol security or just read vol labels.        00134000
+                                                                        00135000
+*********************************************************************   00136000
+*                                                                   *   00137000
+* We are mounting a new volume during OPEN, CLOSE, or EOV.  For an  *   00138000
+* output operation, we want to verify that it's OK to write on this *   00139000
+* volume, as far as TLMS is concerned (e.g. fileseq/filecnt check). *   00140000
+* For an input operation, verify that it's OK to read the volume.   *   00141000
+*                                                                   *   00142000
+* This exit gets called after reading volume label, during volume   *   00143000
+* security checking, and just before rewriting the volume label     *   00144000
+* when writing file 1 on a volume.  During the "reading volume      *   00145000
+* label" call we check only nonspecific volume requests.  During the*   00146000
+* second, we check specific volume requests.  We do that because    *   00147000
+* rejection of a specific volume request during the first call does *   00148000
+* not abend the task, but rather reissues the original mount        *   00149000
+* request, thus looping on remove/mount until the operator cancels. *   00150000
+*                                                                   *   00151000
+* mcl 1997/03/20                                                    *   00152000
+*********************************************************************   00153000
+                                                                        00154000
+         TM    TEPOFLAG1,TEPOSAF   volume security call?                00155000
+         IF    O,VOLWRITE          if so -- for all but nonspecific     00156000
+                                                                        00157000
+*  Here if "just read volume label" call                                00158000
+                                                                        00159000
+         CLI   TEPMVOL,C' '        blank=nonspecific                    00160000
+         BE    GETWORK             do nonspecific vol now               00161000
+         B     NULLEXIT            don't bother with others here        00162000
+                                                                        00163000
+*  Here if volume security check                                        00164000
+                                                                        00165000
+VOLWRITE CLI   TEPMVOL,C' '        nonspecific?                         00166000
+         BE    NULLEXIT            been there, done that                00167000
+         B     GETWORK             let's get started...                 00168000
+                                                                        00169000
+NULLEXIT EQU   *                                                        00170000
+                                                                        00171000
+         RETURN (14,12),RC=0       and we're done...                    00172000
+                                                                        00173000
+GETWORK  GETMAIN RU,LV=DSPFDSTL,SP=&SP,LOC=(BELOW,ANY)     ML970318     00174000
+         LR    RDDA,R1             ->workarea                           00175000
+*dbug    QSNAP (RDDA)                                                   00176000
+         USING DSPFDSCT,RDDA       address it                           00177000
+         CLEAR DSPFDSCT            clear it                             00178000
+         ST    R13,DSPFSAVE+4      fwd chain                            00179000
+         LA    R1,DSPFSAVE         ->our save area                      00180000
+         ST    R1,8(R13)           back chain                           00181000
+         LR    R13,R1              your basic save area...              00182000
+         ST    RMPARM,DSPF@PRM     Save passed parm pointer             00183000
+                                                                        00184000
+         L     RUCB,TEPMUCB        ->UCB                                00185000
+         L     RJFC,TEPMJFCB       ->JFCB                               00186000
+*debug   qsnap (rucb)                                                   00187000
+*debug   qsnap 0(RJFC),176                                              00188000
+         USING JFCB,RJFC                                                00189000
+         USING UCBCB,RUCB          ADDRESSABILITY TO UCB                00190000
+         MVC   DSPFTPNT,PSAAOLD-PSA    ASCB ptr in comm area ml0397     00191000
+**-      L     R1,16               ->CVT                                00192000
+**-      WITH  (CVT,R1),BEGIN                                           00193000
+**-      L     R2,CVTUSER          ->SCIPCVT                            00194000
+**-      END   ,                      (with CVT)                        00195000
+**-      WITH  (SCIPCVT,R2),BEGIN                                       00196000
+**-      CLEAR RACFLAG                                                  00197000
+**-      TM    SVTSYSFL,SVTFTRAC   RACF in effect?                      00198000
+**-      IF    O,'SET RACFLAG'     yes, set local flag                  00199000
+**-      END   ,                      (with SCVTX)                      00200000
+         HASPSERV JOBINFO,DSPFJNO  OBTAIN JOB INFORMATION               00202000
+         HASPSERV JOBACCT,DSPFJACT OBTAIN JOB ACCOUNT AND COMMUNITY     00203000
+*dbug    QSNAP DSPFJNO,32                                               00204000
+         STC   R0,DSPFESAS         SAVE COMMUNITY INFORMATION           00205000
+         TM    DSPFESAS,$USOPEN+$USINTUS                                00206000
+         IF    NZ,'MVI DSPFESAS,C"A"'  SET OPEN SHOP USER FLAG          00207000
+         ELSE  'MVI DSPFESAS,C"E"'     SET CLOSED SHOP USER FLAG        00208000
+         SPACE                                                          00209000
+         MVI   DSPFVOLT,C'I'       Tentative "Input"                    00210000
+         TM    TEPMFLAG1,TEPMACCESS  access intent                      00211000
+         IF    NO,GOBACK           if input -- done here                00211100
+*                                  mcl 2001/12/17                       00211200
+*        Tape opened for output                                         00212000
+         CLI   TEPMVOL,C' '        scratch volume          ml970314     00213000
+         IF    EQ,'MVI DSPFVOLT,C"S"'                      ml970314     00214000
+         ELSE  'MVI DSPFVOLT,C"U"'                                      00215000
+                                                                        00221000
+*********************************************************************** 00222000
+*   The following code passes volume sequence number, label type, and   00223000
+*   file sequence number to TLMBUPDA.                                   00224000
+*********************************************************************** 00225000
+*                                                                       00226000
+         LH    R0,JFCBVLSQ    GET VOLUME SEQUENCE NO.                   00227000
+         CVD   R0,DSPFWORK                                              00228000
+         UNPK  DSPFVLSQ,DSPFWORK                                        00229000
+         OI    DSPFVLSQ+L'DSPFVLSQ-1,X'F0'                              00230000
+*                                                                       00231000
+         LH    R0,JFCBFLSQ    GET FILE SEQUENCE NO.                     00232000
+         C     R0,=F'999'          max. TLMS can comprehend             00233000
+         IF    L,BEGIN             ok, pass actual fileseq              00234000
+         CVD   R0,DSPFWORK                                              00235000
+         UNPK  DSPFFLSQ,DSPFWORK                                        00236000
+         OI    DSPFFLSQ+L'DSPFFLSQ-1,X'F0'                              00237000
+         END   ,                      (ok, actual)                      00238000
+         ELSE  BEGIN               FILESEQ => 999                       00239000
+         MVC   DSPFFLSQ,=C'999'                                         00240000
+         END   ,                      (>999)                            00241000
+                                                                        00242000
+* label type                                                            00243000
+         TM    JFCBLTYP,JFCSL                                           00244000
+         IF    O,BEGIN             SL                                   00245000
+         MVI   DSPFLBLT,C'S'       show SL                              00246000
+         B     LTDN                                                     00247000
+         END   ,                   (SL)                                 00248000
+         TM    JFCBLTYP,JFCNL      NL                                   00249000
+         IF    O,BEGIN             NL                                   00250000
+         MVI   DSPFLBLT,C'N'       show NL                              00251000
+         B     LTDN                                                     00252000
+         END   ,                   (NL)                                 00253000
+         TM    JFCBLTYP,JFCAL      AL                                   00254000
+         IF    O,BEGIN                                                  00255000
+         MVI   DSPFLBLT,C'A'       show AL                              00256000
+         B     LTDN                                                     00257000
+         END   ,                   (AL)                                 00258000
+         TM    JFCBLTYP,JFCBLP                                          00259000
+         IF    O,BEGIN                                                  00260000
+         MVI   DSPFLBLT,C'B'       show BLP                             00261000
+         B     LTDN                                                     00262000
+         END   ,                   (BLP)                                00263000
+                                                                        00264000
+* fell thru, unknown label type (NSL?)                                  00265000
+         MVI   DSPFLBLT,C'?'       Show unknown type                    00266000
+                                                                        00267000
+* we only care about label type if attempting scratch mount (we only    00268000
+* have labeled scratch tapes)                              ml970404     00269000
+                                                                        00270000
+LTDN     EQU   *                                                        00271000
+                                                                        00272000
+SETUPECB DS    0H                                                       00273000
+         LA    R3,DSPFECB     GET DSPF ECB PNTR                         00274000
+         ST    R3,DSPFEPNT    STORE IN DSPF COMM BLK                    00275000
+         MVI   DSPFMTYP,C'6'  SET MSG TYP 6                             00276000
+                                                                        00277000
+                                                                        00278000
+*********************************************************************   00279000
+*                                                                   *   00280000
+* TEPMVOL has the requested volser, blank if nonspecific request.   *   00281000
+* TEPMLABL points to the volume label of the mounted volume (actually   00282000
+* to the first block on the volume, for any label type except BLP). *   00283000
+* TEPMLLEN is the length of this block (could be zero for tapemark).*   00284000
+*                                                                   *   00285000
+* Volume Label:                                                     *   00286000
+*        cl4'VOL1'                                                  *   00287000
+*        cl6'volser'                                                *   00288000
+*                                                                   *   00289000
+* HOWEVER, if it's BLP, they lie!  We get length=80 and 80 bytes of *   00290000
+* binary zeros...or, maybe, have a volser filled in at the right    *   00291000
+* offset but the rest is zeros (2nd or subsequent file?)            *   00292000
+*                                                                   *   00293000
+*********************************************************************   00294000
+                                                                        00295000
+         L     R1,TEPMLABEL        ->volume label that was read         00296000
+         L     R0,TEPMLLEN         L'label                              00297000
+         BC    15,DBUG2                                                 00298000
+         QSNAP (R0,R1)                                                  00299000
+         QSNAP 0(R1),16                                                 00300000
+DBUG2    EQU   *                                                        00301000
+         CLEAR DSPFVSN                                                  00302000
+**no     IF    (R0,LT,80),NOTLABEL long enough for label?               00303000
+** bug:  length is 0 if AL tape...so ignore length         ml970503     00304000
+         CLC   0(4,R1),=C'VOL1'    really a label?                      00305000
+         IF    EQ,BEGIN            no shit, got a label                 00306000
+         MVC   DSPFVSN,4(R1)       volser from label                    00307000
+         B     DIDLABEL                                                 00308000
+         END   ,                      (really a label)                  00309000
+NOTLABEL EQU   *                   don't have a label                   00310000
+*dbug    QSNAP 'No label passed'                                        00311000
+**       TM    JFCBLTYP,JFCBLP     **never mind**                       00312000
+         MVC   DSPFVSN,TEPMVOL     pass requested vol                   00313000
+*                                        to TLMS for checking.          00314000
+*dbug    QSNAP TEPMVOL                                                  00315000
+                                                                        00316000
+DIDLABEL EQU   *                                                        00317000
+         MVC   DSPDSN(44),JFCBDSN  dsname                               00318000
+         MVC   DSPDRIVE(3),UCBUNIT drive address                        00319000
+                                                                        00320000
+         TM    TEPMFLAG1,TEPMACCESS  tape open for output               00321000
+         IF    ONES,BEGIN            if OUTPUT                          00322000
+         TIME  DEC            GET CURRENT DATE AND TIME                 00323000
+         ST    R0,DSPFWORK    SET TIME IN WORK AREA                     00324000
+         OI    DSPFWORK+2,X'0F'   SET VALID PK DEC SIGN                 00325000
+         UNPK  DSPFTIME(5),DSPFWORK(3)  SET DISPLAY TIME IN CTL BLK     00326000
+         ST    R1,DSPFWORK    SET DATE IN WORK AREA                     00327000
+         UNPK  DSPFDATE(5),DSPFWORK+1(3)   SET DISPLAY DATE IN CTL BLK  00328000
+         L     R1,16               ADDRESS OF CVT                       00329000
+         L     R1,@R1                POINT TO TCB DOUBLE WORDS          00330000
+         L     R1,@R1                  ADDRESS OF OUR TCB               00331000
+         L     R1,@R1+12                 GET TIOT ADDR FROM TCB         00332000
+         MVC   DSPFJOB(8),@R1       MOVE JOBNAME TO CTL BLK             00333000
+         MVI   DSPFPD1,C'.'   SET PERIOD AFTER JOB NAME                 00334000
+         MVI   DSPFPD2,C'.'   SET PERIOD AFTER DATE                     00335000
+         MVI   DSPFPD3,C'.'   SET PERIOD AFTER TIME                     00336000
+         CLC   JFCBSQTY,HEX03  BYPASS TIME CHECK FOR DOUBLE OPEN        00337000
+         IF    EQ,BEGIN        BYPASS OF SPACE=                         00338000
+         MVI   DSPSPECL,C'Y'   BYPASS WILL BE DONE                      00339000
+         END   ,                   (bypass space)                       00340000
+*                                                                       00341000
+* IF OUTPUT IS MOD TLMS MSTR                                            00342000
+* WILL SHOW NON-SCRATCH. RETURN TO CALLER AND DO NORMAL EXPIRE DATE TST 00343000
+                                                                        00344000
+         L     R1,TEPMDCB          ->User's DCB            ml970312     00345000
+         L     R1,DCBDEBAD(,R1)    ->User's DEB            ml970424     00346000
+         N     R1,=X'00FFFFFF'    make it safe for amode31 ml970312     00347000
+         LA    R1,8(R1)       POINT TO TYPE OF DEB OPEN                 00348000
+         TM    0(R1),X'C0'    IS THIS TAPE A NEW DATA SET               00349000
+         BO    NOTMOD         YES, BUMP LOCATION BY 4 AND GO DO DSP     00350000
+         TM    0(R1),X'80'    IS THIS A MOD TAPE                        00351000
+         BO    DTECHK             MOD, APPLY STANDARD OS CHECKS         00352000
+         END   ,                   (Tape opened for output)             00353000
+                                                                        00354000
+NOTMOD   DS    0H                                                       00355000
+         LA    R0,2           CODE FOR TLMSQMGR 'PUT TO QUEUE'          00356000
+         LA    R1,DSPFCNTL    POINT TO COMM. BLOCK                      00357000
+                                                                        00358000
+*dbug    qsnap 0(r1),120                                                00359000
+                                                                        00360000
+         SVC   &QMG           EXECUTE TLMSQMGR SVC                      00361000
+         LTR   R0,R0          WAS PUT SUCESSFUL                         00362000
+         BZ    PUTOK              BRANCH IF SO                          00363000
+                                                                        00364000
+*                                                                       00365000
+* TLMS NOT ACTIVE, GIVE WARNING MESSAGES AND RETURN TO EXPIRE DATE TEST 00366000
+*                                                                       00367000
+         L     R1,=a(MSGNA)                                             00368000
+         WTO   MF=(E,(1))                                               00369000
+         L     R1,=a(MSGNB)                                             00370000
+         WTO   MF=(E,(1))                                               00371000
+         L     R1,=a(MSGNC)                                             00372000
+         WTO   MF=(E,(1))                                               00373000
+         LA    R3,15              IN CASE MSG16 MUST BE SENT            00374000
+         CLI   DSPFJACT+3,C'G'                                          00375000
+         BNE   REMOUNT            BRANCH IF NOT INTERNAL ACCOUNT        00376000
+*                                                                       00377000
+         B     DTECHK             TO PERMIT READ OR WRITE OF USER'S     00378000
+*                                 TAPE IF OS DATE TEST MET.             00379000
+                                                                        00380000
+PUTOK    LA    R0,1           SET FOR WAIT ON ONE ECB                   00381000
+         LA    R1,DSPFECB     POINT TO DSPF ECB                         00382000
+         SVC   1         ISSUE WAIT FOR TLMSCNTL TO TEST TLMS MASTER    00383000
+*********************************************************************** 00384000
+*   TEST THE RETURN CODE FROM TLMSCNTL                                  00385000
+*********************************************************************** 00386000
+         SLR   R3,R3               clear                                00387000
+         IC    R3,DSPFUPRC         UPDA RETURN CODE                     00388000
+*dbug    qsnap (R3)                                                     00389000
+         LTR   R3,R3               check RC                ml970320     00390000
+         BZ    VOKFDSPF            IF OK TO USE VOLUME                  00391000
+*  check for deleted return codes                ml970311               00392000
+         CLI   DSPFUPRC,8          8: file>1,                           00393000
+         BL    CODOK               9:  closed/open, 10:AS/closed        00394000
+         CLI   DSPFUPRC,10         10 is AS tape, closed shop user      00395000
+         BNH   VOKFDSPF            ignore 9, 10                         00396000
+CODOK    EQU   *                                                        00397000
+                                                                        00398000
+         C     R3,=F'1'            RC = 1 is OK                         00399000
+         BH    REMOUNT             If tape rejected                     00400000
+                                                                        00401000
+**                                 OUTPUT USE CODE 5, OR NOT IN         00402000
+*                                 MASTER FILE.  USE OS DATE TEST.       00403000
+*                                                                       00404000
+         B     DTECHK             TO LET OS CHECK THE EXPIRATION DATE   00405000
+** this means we don't build a RACF profile for either outcode=5 or     00406000
+** non-TLMS tape.  could be a problem if we're supposed to be ignoring  00407000
+** outcodes...                                             ml970320     00408000
+** But, if we take this test out, we'll be creating profiles for        00409000
+** non-TLMS tapes.                                                      00410000
+                                                                        00411000
+         EJECT ,                                                        00412000
+*  Reject the mounted volume.                                           00413000
+                                                                        00414000
+REMOUNT  EQU   *                                                        00415000
+         GETMAIN RU,LV=MSG2AL,SP=&SP,LOC=(BELOW,ANY) msgs  ml970318     00416000
+         LR    R7,R1     SET UP BASE REG                                00417000
+         USING DWTO,R7                                                  00418000
+         BCTR  R3,0                -1 for offset                        00419000
+         AR    R3,R3              COMPUTE DISPLACEMENT IN MDSPL TABLE   00420000
+         LH    R3,MDSPL-2(R3)     MESSAGE DISPLACEMENT TO R3            00421000
+         A     R3,=A(MESSAGES)    ADDRESS OF MESSAGE TO R3              00422000
+         MVC   DWTO(MSGLNGTH),0(R3)    MOVE IN MESSAGE TEXT             00423000
+         MVC   DWTOVSN,DSPFVSN     VOL SER TO MSG ml970319              00424000
+         MVC   DWTODRV,UCBUNIT     DRIVE ADDR TO MSG                    00425000
+         LR    R1,R7     POINT TO MSG                                   00426000
+         WTO   MF=(E,(1))                                  ml           00427000
+         FREEMAIN RU,LV=MSG2AL,A=(R7),SP=&SP   message area             00428000
+                                                                        00429000
+REMNTRET LA    R15,8               RC to reject volume                  00430000
+         ST    R15,DSPFRETC                                             00431000
+         CLI   TEPMVOL,C' '        scratch vol req?                     00432000
+         BE    GOBACK              ok, ask for remount                  00433000
+* If specific, we are in the volume security call, so set a SAF         00434000
+* return code                                                           00435000
+         BC    00,GOBACK           patchable branch                     00436000
+         MVC   TEPOSAFRC,=H'08'    put bad SAF RC                       00437000
+         B     GOBACK                                                   00438000
+                                                                        00439000
+VOKFDSPF EQU   *                                                        00440000
+         cli   dspfvolt,c'I'            input tape?                     00441000
+         be    no_def                   yes - don't do anything here    00442000
+         clc   =h'1',jfcbflsq           is it file 1?                   00443000
+         bnh   define                   yes - define profile  ml970319  00444000
+*  The following checks are necessary because for subsequent volumes    00445000
+*  the fileseq won't be 1.                                              00446000
+         cli   tepmfunc,2               eov or feov                     00447000
+         be    eovcall  %%%test%%%      yes - define new profile        00448000
+*%test   be    define                   yes - define new profile        00449000
+         bne   no_def                   no - don't do any racf stuff    00450000
+eovcall  qsnap 'IFG019VM called from EOV/FEOV'   %%%test%%%             00451000
+                                                                        00452000
+define   equ   *                                                        00453000
+*dbug    qsnap 'TLMSDSPF debug: @define'                                00454000
+         getmain  RU,LV=DEFWORKL,SP=&SP,LOC=(BELOW,ANY)  for msgs       00455000
+         lr    r8,r1                    set up base reg                 00456000
+         using defwork,R8                                               00457000
+         mvc   owner(2),dspfjact+3      gg                              00458000
+         mvi   owner+2,c'$'                                             00459000
+         mvc   owner+3(3),dspfjact      uuu                             00460000
+         mvc   owner+6(2),=cl44' '                                      00461000
+*dbug   qsnap 'TLMSDSPF debug: owner:'                                  00462000
+*dbug   qsnap owner,8                                                   00463000
+*---  Find the applicable profile to model from:                        00464000
+*---  1) If the job owner and the dsn owner agree, search for a         00465000
+*---     matching profile.                                              00466000
+*---  2a) Otherwise, use the owner's @TAPE profile if it exists,        00467000
+*---  2b) If @TAPE profile doesn't exist, use owner's "*" profile.      00468000
+*---  3) If no profile is found in step 1 or step 2b, then use a        00469000
+*---     system-wide default (SYS3.NOMODEL.TAPEVOL).                    00470000
+         mvc   modelname,jfcbdsn                                        00471000
+         mvc   def_mfl(mdlextl),mdlextract                              00472000
+* qsnap def_mfl,mdlextl                                                 00473000
+* qsnap 'TLMSDSPF debug: modelname:'                                    00474000
+*!qsnap modelname,44                                                    00475000
+                                                                        00476000
+*                                                                       00476010
+* temporary kludge 2001/12/17 mcl:  no profile for HSM data backup      00476020
+* tapes.                                                                00476030
+*                                                                       00476040
+* should be replaced by some kind of test based on contents of model    00476050
+* profiles, so we aren't coding userids/dsns here.                      00476060
+*                                                                       00476070
+         CLEAR NOPROFILE                                                00476080
+         clc   owner(6),=c'GS$HSM'      belongs to HSM                  00476090
+         bne   not_hsm                                                  00476100
+         clc   jfcbdsn(4),=c'HSM.'      is data backup, not cds backup  00476110
+         bne   not_hsm                                                  00476120
+* here for special HSM handling:  don't build new profile.              00476130
+         SET   NOPROFILE                                                00476140
+         qsnap 'TLMSDSPF: HSM NOPROFILE set'                            00476150
+         b     no_mung                  skip further lookups            00476160
+not_hsm  equ   *                        end of HSM kludge #1            00476170
+                                                                        00476990
+         clc   modelname+0(4),=C'WYL.'  look like stanford WYL format?  00477000
+         be    chk_wyl                  yes - check some more           00478000
+         clc   modelname(6),owner       dsn on owner's TSO index?       00479000
+         bne   use_own                  no - use owner's profile        00480000
+         qsnap 'TLMSDSPF debug: dsn for owner'                          00481000
+         cli   modelname+6,c'.'         look like stanford TSO format?  00482000
+         bne   use_own                  no - use owner's profile        00483000
+         b     use_tdsn                                                 00484000
+                                                                        00485000
+                                                                        00486000
+                                                                        00487000
+chk_wyl  equ   *                                                        00488000
+* qsnap 'TLMSDSPF debug: chk_wyl'                                       00489000
+         clc   modelname+4(2),dspfjact+3  dsn on owner's group?         00490000
+         bne   use_own                  no - use owner's profile        00491000
+* qsnap 'TLMSDSPF debug:    group match'                                00492000
+         cli   modelname+6,c'.'         look like stanford format?      00493000
+         bne   use_own                  no - use owner's profile        00494000
+         clc   modelname+7(3),dspfjact    dsn on owner's initials?      00495000
+         bne   use_own                  no - use owner's profile        00496000
+* qsnap 'TLMSDSPF debug:    inits match'                                00497000
+         cli   modelname+10,c'.'        look like stanford format?      00498000
+         bne   use_own                  no - use owner's profile        00499000
+* qsnap 'TLMSDSPF debug: wyl fmt'                                       00500000
+                                                                        00501000
+use_tdsn equ   *                        use model from tape dsn         00502000
+*!qsnap 'TLMSDSPF debug: use_tdsn'                                      00503000
+                                                                        00504000
+         mvc   def_mfl(mdlextl),mdlextract                              00505000
+                                                                        00506000
+         racroute  request=EXTRACT,type=EXTRACT,                       $00507000
+               class=cl8dataset,                                       $00508000
+               entity=modelname,                                       $00509000
+               release=1.9,                                            $00510000
+               generic=YES,                                            $00511000
+               matchgn=YES,                                            $00512000
+               worka=rr_work,                                          $00513000
+               mf=(E,def_mfl)                                           00514000
+                                                                        00515000
+         lr    r2,r15                   set rc for "not_nf"             00516000
+         l     r1,=a(msg901)                                            00517000
+         mvc   defwto(msg901l),0(r1)    copy model message in case      00518000
+* qsnap (r15)                                                           00519000
+         c     r15,=f'4'                saf rc=4?                       00520000
+         bne   not_nf                   no - can't be "not found"       00521000
+         la    r1,def_mfl                                               00522000
+         using safp,R1                                                  00523000
+* qsnap safprret,8                                                      00524000
+         clc   =f'8',safprret           racf rc=8?                      00525000
+         bne   not_nf                   no - can't be "not found"       00526000
+         clc   =f'0',safprrea           racf reason=0?                  00527000
+         bne   not_nf                   no - can't be "not found"       00528000
+         b     no_model                 no applicable profile found     00529000
+         drop  R1                       safp                            00530000
+                                                                        00531000
+                                                                        00532000
+*--- Tape dsn doesn't belong to job owner, model from job owner's prof  00533000
+use_own  equ   *                                                        00534000
+*dbug    qsnap 'TLMSDSPF debug: use_own'                                00535000
+         l     r1,=a(msg901)                                            00536000
+         mvc   defwto(msg901l),0(r1)    copy model message in case      00537000
+         mvc   modelname,=cl44' '                                       00538000
+         mvc   modelname(6),owner                                       00539000
+         mvc   modelname+6(6),=c'.@TAPE'                                00540000
+         bal   r7,extract1              see if we have 'gg$uuu.@TAPE'   00541000
+*---  'gg$uuu.@TAPE profile doesn't exist, look for 'gg$uuu.*'          00542000
+         mvc   modelname+7(5),=c'*    ' alter search name               00543000
+         bal   r7,extract1              see if we have 'gg$uuu.*    '   00544000
+         b     no_model                 no applicable profile found     00545000
+                                                                        00546000
+*---  Subroutine to look for a specific generic profile                 00547000
+extract1 equ   *                                                        00548000
+*!qsnap 'TLMSDSPF debug: extract1'                                      00549000
+*!qsnap modelname,44                                                    00550000
+                                                                        00551000
+         mvc   def_mfl(mdlextl),mdlextract                              00552000
+                                                                        00553000
+         racroute  request=EXTRACT,type=EXTRACT,                       $00554000
+               class=cl8dataset,                                       $00555000
+               entity=modelname,                                       $00556000
+               release=1.9,                                            $00557000
+               generic=YES,                                            $00558000
+               matchgn=NO,                                             $00559000
+               worka=rr_work,                                          $00560000
+               mf=(E,def_mfl)                                           00561000
+                                                                        00562000
+         lr    r2,r15                   set rc for "not_nf"             00563000
+         c     r15,=f'4'                saf rc=4?                       00564000
+         bne   not_nf                   no - can't be "not found"       00565000
+         la    r1,def_mfl                                               00566000
+         using safp,R1                                                  00567000
+         clc   =f'8',safprret           racf rc=8?                      00568000
+         bne   not_nf                   no - can't be "not found"       00569000
+         clc   =f'0',safprrea           racf reason=0?                  00570000
+         bne   not_nf                   no - can't be "not found"       00571000
+         drop  R1                       safp                            00572000
+         br    r7                       return if not found             00573000
+                                                                        00574000
+*---  Profile found or error locating profile                           00575000
+not_nf   equ   *                                                        00576000
+         ltr   r2,r2                    did we find a profile?          00577000
+         bz    foundmdl                 yes - ok                        00578000
+         bal   r7,check_rc              no - format error codes         00579000
+                                                                        00580000
+                                                                        00581000
+no_model mvc   modelname,=cl44'SYS3.NOMODEL.TAPEVOL'  no - use special  00582000
+*                                                     default profile   00583000
+                                                                        00584000
+         l     r1,=a(msg909)            "no applicable ds prof found,   00585000
+         wto   mf=(E,(1))                system default will be used"   00586000
+                                                                        00587000
+                                                                        00588000
+                                                                        00589000
+foundmdl equ   *                                                        00590000
+*---  Now we have to program around a RACF bug:  If EXTRACT finds a     00591000
+*---  matching profile which only matches due to the naming conventions 00592000
+*---  table, it doesn't update "modelname" with the true profile name,  00593000
+*---  but leaves the un-transmogrified dsname in the area.              00594000
+         clc   =C'WYL.',modelname       do we need to mung it?          00595000
+         bne   no_mung                                                  00596000
+         mvc   modelname(6),owner       overlay 'wyl.gg' (leave dot)    00597000
+         mvc   modelname+7(3),=c'WYL.'  overlay 'uuu'                   00598000
+*---  Now have 'gg$uuu.WYL.dsn', which is actual profile name.          00599000
+                                                                        00600000
+no_mung  equ   *                                                        00601000
+         mvc   def_mfl(mdlextl),mdlextract                              00602000
+                                                                        00603000
+         racroute  request=EXTRACT,type=EXTRACT,                       $00604000
+               class=cl8tapevol,                                       $00605000
+               entity=DSPFVSN,        ml970319 (was srvolser)          $00606000
+               release=1.9,                                            $00607000
+               worka=rr_work,                                          $00608000
+               mf=(E,def_mfl)                                           00609000
+                                                                        00610000
+* qsnap 'extract tapevol rc follows'                                    00611000
+* qsnap (r15)                                                           00612000
+         ltr   r15,r15                  did we find one?                00613000
+         bnz   fresh                    no - skip deletion              00614000
+* A profile exists for this tape.                                       00615000
+         CLI   TEPMVOL,C' '             is it a request for scratch?    00616000
+         bne   skip_def                 no - keep existing profile      00617000
+                                                                        00618000
+*---  A profile for the tape already exists.  Delete it so that         00619000
+*---  we can define a new one to get access info from a model.          00620000
+                                                                        00621000
+*dbug    qsnap 'TLMSDSPF debug: delete old profile'                     00622000
+         bal   r7,del_prof              delete it                       00623000
+         l     r1,=a(msg902)                                            00624000
+         mvc   defwto(msg902l),0(r1)    copy model in case              00625000
+         bal   r7,check_rc                                              00626000
+                                                                        00627000
+fresh    equ   *                                                        00628000
+         if    NOPROFILE,skip_def       2001/12/17 mcl                  00628100
+                                                                        00628200
+*dbug    qsnap 'TLMSDSPF debug: define new profile'                     00629000
+         bal   r7,def_prof              define it                       00630000
+         c     r15,=f'4'                saf rc=4?                       00631000
+         bne   not_dup                  no - can't be "already defined" 00632000
+*!qsnap 'TLMSDSPF debug: saf rc=4... examining racf rc/reason'          00633000
+         la    r1,def_mfl                                               00634000
+         using safp,R1                                                  00635000
+         clc   =f'4',safprret           racf rc=4?                      00636000
+         bne   not_dup                  no - can't be "already defined" 00637000
+         clc   =f'0',safprrea           racf reason=0?                  00638000
+         bne   not_dup                                                  00639000
+         drop  R1                       safp                            00640000
+                                                                        00641000
+*---  Belt and suspenders:  the attempt to define the profile failed    00642000
+*---  apparently because it's already defined, so we'll delete it and   00643000
+*---  try one more time.                                                00644000
+                                                                        00645000
+         qsnap 'TLMSDSPF debug: delete old prof (#2)'                   00646000
+         bal   r7,del_prof              delete it                       00647000
+         l     r1,=a(msg902)                                            00648000
+         mvc   defwto(msg902l),0(r1)    copy model in case              00649000
+         bal   r7,check_rc                                              00650000
+*!qsnap 'TLMSDSPF debug: define new prof (#2)'                          00651000
+         bal   r7,def_prof              define it                       00652000
+                                                                        00653000
+not_dup  equ   *                                                        00654000
+         l     r1,=a(msg903)                                            00655000
+         mvc   defwto(msg903l),0(r1)    copy model in case              00656000
+         bal   r7,check_rc                                              00657000
+                                                                        00658000
+         ltr   r2,r2                    did the DEFINE work?            00659000
+         bnz   skip900                  no - skip message               00660000
+                                                                        00661000
+         l     r1,=a(msg900)                                            00662000
+         mvc   defwto(msg900l),0(r1)                                    00663000
+         mvc   defvol,DSPFVSN    volser (was from ucb ml970319)         00664000
+         mvc   defdsn,modelname         name we modeled from            00665000
+         wto   mf=(E,defwto)            show what we did                00666000
+                                                                        00667000
+skip900  equ   *                                                        00668000
+         c     r2,=f'8'                 RACF rc = 8?                    00669000
+         bne   skip910                  no - skip                       00670000
+         la    r1,def_mfl                                               00671000
+         using safp,R1                                                  00672000
+         clc   =x'00000010',safprret    return code "model not found?   00673000
+         bne   skip910                  no - skip additional diag msg   00674000
+         drop  R1                       ichsafp                         00675000
+         l     r1,=a(msg910)                                            00676000
+         wto   mf=(E,(1))               'logic error: prof not found'   00677000
+*!       qsnap modelname,44                                             00678000
+                                                                        00679000
+                                                                        00680000
+skip910  equ   *                                                        00681000
+skip_def equ   *                                                        00682000
+**-ml    l     r14,defr14               restore return address          00683000
+         freemain  RU,LV=defworkl,A=(r8),sp=&sp                         00684000
+         drop  R8                       defwork                         00685000
+                                                                        00686000
+                                                                        00687000
+no_def   equ   *                                                        00688000
+VSNOK    EQU   *                                                        00689000
+         B     GOBACK    SET RC TO ALLOW USE OF TAPE                    00690000
+NOTFND   EQU   *                                                        00691000
+* VSN WAS NOT ON TLMS MASTER                                            00692000
+DTECHK   EQU   *                                                        00693000
+**-      LA    RF,8      SET RC TO APPLY EXPIRED DATE TEST              00694000
+                                                                        00695000
+GOBACK   EQU   *                                                        00696000
+         BC    15,NDBUG9                                                00697000
+         QSNAP 'Returning, RC and parm areas follow'                    00697100
+         QSNAP DSPFRETC,4                                               00698000
+         QSNAP 0(RMPARM),84        main parm list                       00699000
+         QSNAP 0(RVPARM),20        volume mount parm list               00700000
+                                                                        00701000
+         QSNAP 'UCB:'                                                   00702000
+         QSNAP 0(RUCB),48          unit control block                   00703000
+NDBUG9   EQU   *                                                        00704000
+*  Normal exit                                                          00704100
+         L     R13,4(,R13)         restore caller's R13                 00705000
+         L     R2,DSPFRETC         save our return code                 00706000
+                                                                        00707000
+         FREEMAIN RU,LV=DSPFDSTL,A=(RDDA),SP=&SP  our dynamic storage   00708000
+         LR    R15,R2              our return code                      00709000
+         RETURN (14,12),RC=(15)                                         00710000
+                                                                        00711000
+         TITLE 'Define RACF Profile'                                    00712000
+         using defwork,R8                                               00713000
+                                                                        00714000
+def_prof mvc   def_mfl(mdldefl),mdldefine                               00715000
+         mvc   modelid(6),=C'MODEL='                                    00716000
+         la    r1,modelname                                             00717000
+         la    r0,44                    set max scan length             00718000
+         balr  r14,0                    set loop addr                   00719000
+         cli   0(r1),c' '               find end of model prof name?    00720000
+         be    end_mdl                  yes                             00721000
+         la    r1,1(,r1)                                                00722000
+         bctr  r0,r14                   keep looking                    00723000
+                                                                        00724000
+end_mdl  la    r0,modelid               -> start of appl data           00725000
+         sr    r1,r0                    compute length of model name    00726000
+         stc   r1,modelidl              set length for RACROUTE         00727000
+                                                                        00728000
+                                                                        00729000
+*!qsnap 'TLMSDSPF debug: def_prof'                                      00730000
+*!qsnap modelname,44                                                    00731000
+                                                                        00732000
+                                                                        00734000
+         racroute  request=DEFINE,type=DEFINE,                         $00735000
+               entity=DSPFVSN,                   ml970319              $00736000
+               class=al1tapevol,                                       $00737000
+               release=1.9,                                            $00738000
+               mentity=modelname,                                      $00739000
+               mgener=YES,                                             $00740000
+               owner=owner,                                            $00741000
+               data=modelidl,                                          $00742000
+               worka=rr_work,                                          $00743000
+               warning=NO,                       ml970404              *00744000
+               mf=(E,def_mfl)                                           00745000
+                                                                        00746000
+                                                                        00748000
+                                                                        00764000
+         br    r7                       return to caller                00765000
+                                                                        00766000
+                                                                        00767000
+del_prof mvc   def_mfl(mdldefl),mdldefine                               00768000
+                                                                        00769000
+         racroute  request=DEFINE,type=DELETE,                         $00770000
+               entity=DSPFVSN,                   ml970319              $00771000
+               class=al1tapevol,                                       $00772000
+               release=1.9,                                            $00773000
+               worka=rr_work,                                          $00774000
+               mf=(E,def_mfl)                                           00775000
+                                                                        00776000
+         br    r7                       return to caller                00777000
+                                                                        00778000
+                                                                        00779000
+check_rc ltr   r2,r15                                                   00780000
+         bzr   r7                                                       00781000
+         st    r15,temp                                                 00782000
+         hex   defsafrc,temp,len=4                                      00783000
+         la    r1,def_mfl                                               00784000
+         using safp,R1                                                  00785000
+         hex   defracrc,safprret,len=4                                  00786000
+         hex   defracrs,safprrea,len=4                                  00787000
+         drop  R1                       ichsafp                         00788000
+         wto   mf=(E,defwto)                                            00789000
+         l     r15,temp                 reload saf rc                   00790000
+         br    r7                                                       00791000
+                                                                        00792000
+         drop  R8                       defwork                         00793000
+         DROP  RDDA                                                     00794000
+         TITLE 'Static Data Area'                                       00795000
+*                                                                       00796000
+*        CONSTANTS                                                      00797000
+*                                                                       00798000
+ENABLE   DC    X'FF'                                                    00799000
+CHARM    EQU   C'M'                                                     00800000
+CHARU    EQU   C'U'                                                     00801000
+HEX03    DC    XL3'000003'                                              00802000
+HEX00    DC    XL3'000000'                                              00803000
+HEX05    DC    XL3'000005'                                              00804000
+LTYPE    DC    C'L0'                                                    00805000
+SCRTCHOP DC    C'SCRTCH'                                                00806000
+         TITLE 'Messages'                                               00807000
+BIGSTUFF LOCTR                                                          00808000
+MESSAGES DS    0F                                                       00809000
+MSG02    WTO   'OP008I       ,    , Tape flagged as out of service  ', X00810000
+               MF=L,ROUTCDE=3,DESC=6                                    00811000
+MSG2AL   EQU   (*-MSG02)                                   ml970320     00812000
+M2DSPL   EQU   MSG02-MESSAGES                                           00813000
+MSG03    WTO   'OP008I       ,    , Tape not in scratch status      ', X00814000
+               MF=L,ROUTCDE=3,DESC=6                                    00815000
+M3DSPL   EQU   MSG03-MESSAGES                                           00816000
+                                                                        00817000
+MSG04    WTO   'OP008I       ,    , Wrong group code (usecode 2 - 3)', X00818000
+               MF=L,ROUTCDE=3,DESC=6                                    00819000
+M4DSPL   EQU   MSG04-MESSAGES                                           00820000
+                                                                        00821000
+MSG05    WTO   'OP008I       ,    , Wrong account (usecode 2)       ', X00822000
+               MF=L,ROUTCDE=3,DESC=6                                    00823000
+M5DSPL   EQU   MSG05-MESSAGES                                           00824000
+                                                                        00825000
+MSG06    WTO   'OP008I       ,    , File protected by keep date     ', X00826000
+               MF=L,ROUTCDE=3,DESC=6                                    00827000
+M6DSPL   EQU   MSG06-MESSAGES                                           00828000
+                                                                        00829000
+MSG07    WTO   'OP008I       ,    , Invalid output use code         ', X00830000
+               MF=L,ROUTCDE=3,DESC=6                                    00831000
+M7DSPL   EQU   MSG07-MESSAGES                                           00832000
+                                                                        00833000
+*  Deleted messages:                                                    00834000
+                                                                        00835000
+*  MSG08    'OP008I       ,    , JCL ERROR. (FILE NUMBER NOT #1) ',     00836000
+*  MSG09    'OP008I       ,    , CLOSED-SHOP TAPE  OPEN-SHOP USER',     00837000
+*  MSG10    'OP008I       ,    , AS-SERIES TAPE  CLOSED-SHOP USER',     00838000
+                                                                        00839000
+MSG11    WTO   'OP008I       ,    , Tape is not a scratch pool tape ', X00840000
+               MF=L,ROUTCDE=3,DESC=6                                    00841000
+M11DSPL  EQU   MSG11-MESSAGES                                           00842000
+MSG12    WTO   'OP008I       ,    , Cancel job:  non-label scr req  ', X00843000
+               MF=L,ROUTCDE=3,DESC=6                                    00844000
+M12DSPL  EQU   MSG12-MESSAGES                                           00845000
+MSG13    WTO   'OP008I       ,    , Tape protected by output code 1.', X00846000
+               MF=L,ROUTCDE=3,DESC=6                                    00847000
+M13DSPL  EQU   MSG13-MESSAGES                                           00848000
+MSG14    WTO   'OP008I       ,    , PWE count for this tape too high', X00849000
+               MF=L,ROUTCDE=3,DESC=6                                    00850000
+M14DSPL  EQU   MSG14-MESSAGES                                           00851000
+                                                                        00852000
+*  Deleted message                                                      00853000
+                                                                        00854000
+*  MSG15    'OP008I       ,    , BLP NOT ALLOWED FOR TAPE OUTPUT ',     00855000
+                                                                        00856000
+MSG16    WTO   'OP008I       ,    , CANCEL JOB.   (TLMS NOT ACTIVE) ', X00857000
+               MF=L,ROUTCDE=3,DESC=6                                    00858000
+M16DSPL  EQU   MSG16-MESSAGES                                           00859000
+MSGLNGTH EQU   MSG03-MSG02                                              00860000
+*                                                                       00861000
+IFG019VM LOCTR                   back to main loctr                     00862000
+                                                                        00863000
+ PRINT ON,NOGEN,NODATA                                                  00864000
+MDSPL DC AL2(M2DSPL,M3DSPL,M4DSPL,M5DSPL,M6DSPL,M7DSPL,0,0) 8,9 deleted 00865000
+      DC AL2(0,M11DSPL,M12DSPL,M13DSPL,M14DSPL,0,M16DSPL) 10, 15 deltd  00866000
+ PRINT ON,NODATA                                                        00867000
+*                                                                       00868000
+BIGSTUFF LOCTR                                                          00869000
+ SPACE                                                                  00870000
+ PRINT ON,NOGEN                                                         00871000
+MSGNA    WTO   'OP009A TLMS NOT ACTIVE: TLMS DATA BASE NOT UPDATED',  ,X00872000
+               MF=L,ROUTCDE=(2,3,6),DESC=2                              00873000
+MSGNB    WTO   'OP010A TLMS NOT ACTIVE: TAPE DATA IS UNPROTECTED',    ,X00874000
+               MF=L,ROUTCDE=(2,3,6),DESC=2                              00875000
+MSGNC    WTO   'OP011A TLMS NOT ACTIVE: START TLMS IMMEDIATELY',      ,X00876000
+               MF=L,ROUTCDE=(2,3,6),DESC=2                              00877000
+                                                                        00878000
+IFG019VM LOCTR                   back to main loctr                     00879000
+ PRINT ON,GEN                                                           00880000
+         TITLE 'Data Areas for RACF Calls'                              00881000
+al1tapevol dc  al1(8)                   *** cl8tapevol is part          00882000
+cl8tapevol dc  cl8'TAPEVOL'             *** of al1tapevol               00883000
+cl8dataset dc  cl8'DATASET'                                             00884000
+                                                                        00885000
+         hextab dual=no                                                 00886000
+                                                                        00887000
+                                                                        00888000
+mdldefine racroute request=DEFINE,release=1.9,mf=L                      00889000
+mdldefl  equ   *-mdldefine                                              00890000
+                                                                        00891000
+mdlextract racroute request=EXTRACT,TYPE=EXTRACT,release=1.9,mf=L       00892000
+mdlextl  equ   *-mdlextract                                             00893000
+                                                                        00894000
+                                                                        00895000
+                                                                        00896000
+ EJECT                                                                  00897000
+* LITERALS, PATCH AREA AND DSECTS                                       00898000
+*                                                                       00899000
+         LTORG                                                          00900000
+                                                                        00901000
+                                                                        00902000
+BIGSTUFF LOCTR                                                          00903000
+                                                                        00904000
+                                                                        00908000
+msg900   wto   'OP900I TAPEVOL.volser defined, modelled on profile 1234$00909000
+               5678901234567890123456789012345678901234 ',             $00910000
+               ROUTCDE=11,MF=L                                          00911000
+                                                                        00912000
+msg900l  equ   *-msg900                                                 00913000
+                                                                        00914000
+                                                                        00915000
+msg901   wto   'OP901I SAF rc = xxxxxxxx RACF rc = xxxxxxxx Reason = xx$00916000
+               xxxxxx EXTRACTing model profile name',                  $00917000
+               ROUTCDE=(2,11),MF=L                                      00918000
+                                                                        00919000
+msg901l  equ   *-msg901                                                 00920000
+                                                                        00921000
+                                                                        00922000
+msg902   wto   'OP902I SAF rc = xxxxxxxx RACF rc = xxxxxxxx Reason = xx$00923000
+               xxxxxx DELETEing old TAPEVOL profile',                  $00924000
+               ROUTCDE=(2,11),MF=L                                      00925000
+                                                                        00926000
+msg902l  equ   *-msg902                                                 00927000
+                                                                        00928000
+                                                                        00929000
+msg903   wto   'OP903I SAF rc = xxxxxxxx RACF rc = xxxxxxxx Reason = xx$00930000
+               xxxxxx DEFINEing new TAPEVOL profile',                  $00931000
+               ROUTCDE=(2,11),MF=L                                      00932000
+                                                                        00933000
+msg903l  equ   *-msg903                                                 00934000
+                                                                        00935000
+                                                                        00936000
+msg909   wto   'OP909I No applicable dataset profile found, system defa$00937000
+               ult will be used',ROUTCDE=11,MF=L                        00938000
+                                                                        00939000
+msg910   wto   'OP910I * TLMSDSPF logic error * model profile not found$00940000
+               ',ROUTCDE=11,MF=L                                        00941000
+                                                                        00942000
+                                                                        00943000
+IFG019VM LOCTR                   back to main loctr                     00944000
+         TITLE 'Job File Control Block'                                 00945000
+* DEFINE ONLY THE JFCB AND UCB FIELDS USED IN THIS ROUTINE              00946000
+                                                                        00947000
+JFCB     DSECT ,                   ML970312:  forget IOSWA              00948000
+JFCBDSN  DS    CL44                                                     00949000
+         ORG   (JFCB+66)                                                00950000
+JFCBLTYP DS    CL1                                                      00951000
+JFCBLP   EQU   X'10'            .DEFINE THE 'BLP' BIT                   00952000
+JFCNL    EQU   X'01'            .DEFINE THE 'NL' BIT                    00953000
+JFCSL    EQU   X'02'               DEFINE SL BIT                        00954000
+JFCAL    EQU   X'40'               DEFINE AL BIT                        00955000
+         ORG   (JFCB+68)                                                00956000
+JFCBFLSQ DS    H                  FILE   SEQUENCE NUMBER                00957000
+JFCBVLSQ DS    H                  VOLUME SEQUENCE NUMBER                00958000
+         ORG   (JFCB+72)                                                00959000
+JFCBMASK DS    CL8                                                      00960000
+         ORG   (JFCB+87)                                                00961000
+JFCBIND2 DS    XL1                                                      00962000
+         ORG   (JFCB+152)                                               00963000
+JFCBPQTY DS    CL3  PRIMARY QUAN. OF DA SPACE                           00964000
+JFCBCTRI DS    CL1  CYL,TRK OR RECORD INDICATOR                         00965000
+JFCBSQTY DS    CL3  SECONDARY QUAN. OF DA SPACE                         00966000
+         ORG   (JFCB+171)                                               00967000
+JFCBDRLH DS    CL3  DATA BLOCK LENGTH                                   00968000
+JFCBNMOD EQU   X'80'     BIT FOR MOD DATA SET                           00969000
+JFCBLGTH EQU   (JFCB+176)                                               00970000
+         ORG   ,                                           ml970312     00971000
+                                                                        00972000
+         TITLE 'Misc. DSECTs and EQUs'                                  00973000
+DCBDEBAD EQU   44,4,C'A'           DEB address in DCB                   00974000
+WTOMSG   DSECT                                                          00975000
+         DS    F                                                        00976000
+         DC    C'OP0091  TAPE '                                         00977000
+WTOVOLS  DS    CL6                                                      00978000
+         DC    C' IS READ PROTECTED FROM ACC '                          00979000
+WTOJACT  DS    CL5                                                      00980000
+ SPACE                                                                  00981000
+UCBCB    DSECT                                                          00982000
+         ORG   (UCBCB+13)                                               00983000
+UCBUNIT  DS    CL3                                                      00984000
+         ORG   (UCBCB+28)                                               00985000
+SRVOLSER DS    CL6                                                      00986000
+*                                                                       00987000
+DWTO     DSECT                                                          00988000
+WTOWK    DS    F                                                        00989000
+         DS    CL7                                                      00990000
+DWTOVSN  DS    CL6                                                      00991000
+         DS    CL2                                                      00992000
+DWTODRV  DS    CL3                                                      00993000
+         DS    CL35                                                     00994000
+*                                                                       00995000
+DMLWTO   DSECT                                                          00996000
+         DS    CL4                                                      00997000
+         DS    CL7                                                      00998000
+DMLWOVSN DS    CL6                                                      00999000
+         DS    CL2                                                      01000000
+DMLWODRV DS    CL3                                                      01001000
+         ORG   DMLWTO+86                                                01002000
+DMLWODAT DS    CL5                                                      01003000
+         DS    CL3                                                      01004000
+DMLWOTIM DS    CL4                                                      01005000
+         DS    CL3                                                      01006000
+DMLWOACT DS    CL5                                                      01007000
+         DS    CL3                                                      01008000
+DMLWOJOB DS    CL8                                                      01009000
+         DS    CL63                                                     01010000
+ SPACE                                                                  01011000
+defwork  dsect                                                          01012000
+                                                                        01013000
+*---  The following area must be as long as the *longest* WTO we use.   01014000
+defwto   ds    xl4                      see msg900                      01015000
+         ds    c'OP900I '                                               01016000
+         ds    c'tapevol.'                                              01017000
+defvol   ds    cl6                                                      01018000
+         ds    c' defined, modelled on profile '                        01019000
+defdsn   ds    cl44                                                     01020000
+         ds    c                                                        01021000
+         ds    xl4                                                      01022000
+                                                                        01023000
+         org   defwto+4+7               OP901I                          01024000
+         ds    c'SAF rc = '                                             01025000
+defsafrc ds    cl8                                                      01026000
+         ds    c' RACF rc = '                                           01027000
+defracrc ds    cl8                                                      01028000
+         ds    c' Reason = '                                            01029000
+defracrs ds    cl8                                                      01030000
+defetext ds    c' EXTRACTing model profile name'  msg901                01031000
+         org   defetext                                                 01032000
+         ds    c' DELETEing old TAPEVOL profile'  msg902                01033000
+         org   defetext                                                 01034000
+         ds    c' DEFINEing new TAPEVOL profile'  msg903                01035000
+         org   ,                                                        01036000
+                                                                        01037000
+         ds    xl8                      insurance                       01038000
+                                                                        01039000
+temp     ds    f                                                        01040000
+owner    ds    cl8                                                      01041000
+reply    ds    cl80                                                     01042000
+*---  Keep following 3 fields together for APPLDATA                     01043000
+modelidl ds    al1(6+*-*)                                               01044000
+modelid  dc    c'MODEL='                                                01045000
+modelname  ds  cl44                                                     01046000
+*---  keep above 3 fields together                                      01047000
+                                                                        01048000
+def_mfl  racroute  request=DEFINE,release=1.9,mf=L                      01049000
+                                                                        01050000
+rr_work  dc    128f'0'                                                  01051000
+                                                                        01052000
+defworkl equ   *-defwork                                                01053000
+                                                                        01054000
+eovsvc   equ   x'37'                                                    01055000
+feovsvc  equ   x'1f'                                                    01056000
+                                                                        01057000
+*NOEDIT                                                                 01058000
+         TITLE 'Misc. DSECTs'                                           01059000
+         iecdsecs  PSA,TCB,RB,EXPAND=YES                                01060000
+         ichsafp                                                        01061000
+         CVT   DSECT=YES                                                01062000
+SCIPCVT  DSECT                                                          01063000
+         SCIPCVT PFX=SVT                                                01064000
+         TITLE 'DSECTs for Exit Routine Call'                           01065000
+         IFGTEP MAIN,VOLM                                               01066000
+                                                                        01067000
+         END   .                                                        01068000

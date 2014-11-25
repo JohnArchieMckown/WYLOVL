@@ -1,0 +1,518 @@
+XNPU     TITLE 'INPUT ROUTINE'
+*DATE OF LAST UPDATE 06/01/69 22:50:32
+INPUT  CSECT
+***********************************************************************
+*                                                                     *
+*                   WYLBUR/BASIC INPUT PROGRAM                        *
+*                     TIME-SHARED VERSION                             *
+*                                                                     *
+***********************************************************************
+*
+*REGISTER USAGE
+*
+R0       EQU   0                  USUALLY CONTAINS STATEMENT NUMBER
+R1       EQU   1                  ON ENTRY POINTS TO ARGUMENT LIST
+R2       EQU   2                  ADDR WHERE TO PUT ITEM FROM ARG LIST
+R3       EQU   3                  TYPE OF INFORMATION SOUGHT (ARG LIST)
+R4       EQU   4                  HOLDS ADDR OF NEXT ITEM IN BUFFER
+R5       EQU   5                  CHARS REMAINING IN BUFFER
+R6       EQU   6                  ASSOCIATED BUFFER LINE NUMBER
+R7       EQU   7                  DURING SCAN OF STRINGS A COUNTER
+R8       EQU   8                  DITTO A WORK BUFFER POINTER
+R9       EQU   9                  USED WHEN CONVERT IS CALLED
+R10      EQU   10                 BASE FOR 'CONTROL' WORK AREA
+R11      EQU   11                 BASE OF USER AREA
+R12      EQU   12                 BASE FOR INPUT
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14
+R15      EQU   15
+*
+BASER    EQU   12                 BASE FOR INPUT
+*
+* ENTRY LINKAGE
+*
+         XAVE  INPUT
+         B     GO                 BRANCH AROUND ADDRESS CONSTANTS
+*
+*ADDRESS CONSTANTS FOR EXTERNAL CONTROL SECTIONS (V TYPE IF ANY)
+*
+ACONVERT DC    V(CONVERTM)
+ARUNERR  DC    V(RUNERR)
+*
+*SET UP FOR CONTROL PROGRAMS WORK AREA
+*
+GO       EQU   *
+         LR    R3,R0
+         LR    R4,R1
+         SENSE 2
+         L     1,0(1)             DISPL. FOR LOAD TEXT
+         LR    R10,R1
+         USING TWORK,10           TELL ASSEMBLER ABOUT TWORK
+         MVI   SW7,X'01'          TELL INT HANDLER WE ARE IN INPUT
+         USING AREA,11            TELL ASSEMBLER ABOUT AREA
+*
+*TEST AND RESET TIMER IF REQUIRED SINCE WE ARE ABOUT TO DO INPUT
+*
+         L     R1,BREKTIME        GET USERS TIMER INTERVAL
+         LTR   R1,R1              TEST FOR ZERO
+         BZ    GOON               SKIP RESET IF ZERO
+         SET   4,(1)              RESTART TIMER
+*
+*REESTABLISH THE REGISTERS
+*
+GOON     LR    R0,R3
+         LR    R1,R4
+*
+*
+*
+*
+*
+*
+***********************************************************************
+*                                                                     *
+*                 THE CODE GOES HERE                                  *
+*                                                                     *
+***********************************************************************
+*
+***************SOME GENERAL COMMENTS ON INPUT**************************
+*
+*        INPUT IS CALLED BY THE EXECUTOR FOR THE PURPOSE OF OBTAINING
+*        EITHER NUMERIC OR STRING DATA IN RESPONSE TO THE EXECUTION OF
+*        A USERS 'INPUT' STATEMENT.
+*
+*        IN THE TIME SHARING MODE 'INPUT' WILL ELICIT THE DESIRED
+*        ITEMS OF DATA FROM THE TERMINAL.
+*
+*        IN THE BATCH MODE 'INPUT' WILL READ RECORDS FROM SYSIN
+*        AND SCAN THEM IN THE SAME WAY THAT IT WOULD WERE IT
+*        READING FROM THE TERMINAL.  RATHER THAN REPROMPTING
+*        HOWEVER 'INPUT' WILL RETURN TO THE CONTROL PROGRAM IF
+*        THINGS DON'T MAKE SENSE.  IN THE BATCH MODE AN EOD EXIT
+*        IS TAKEN BACK TO THE EXECUTOR ON END OF FILE.
+*
+*        'INPUT' WILL FORCE INPUT EVEN IF ITS INTERNAL BUFFER HAS
+*        ITEMS STILL PENDING IF THE LINE NUMBER FOUND IN REGISTER
+*        0 DOES NOT MATCH THE LINE NUMBER IT HAS ASSOCIATED WITH
+*        THE RECORD THAT IT HAS LAST READ.
+*
+*        AN ITEM WHEN ONCE OBTAINED FROM THE USER IS STUFFED IN THE
+*        LOCATION SPECIFIED BY THE EXECUTOR WHEN IT CALLED INPUT
+*
+***************CALL DISCIPLINE*****************************************
+*
+*        REGISTER 0 TO CONTAIN STATEMENT NUMBER OF THE INPUT STATEMENT
+*                   WHICH CAUSED THE EXECUTOR TO CALL 'INPUT'
+*
+*        REGISTER 1 WILL POINT TO A TWO WORK ARGUMENT LIST WHICH IS
+*                   FORMED AS FOLLOWS.
+*
+*                   WORD 1 ADDRESS OF WHERE TO PUT THE ITEM AFTER WE
+*                          GET IT FROM THE USER.
+*
+*                   WORD 2 TYPE OF INFORMATION SOUGHT CODED AS FOLLOWS:
+*
+*                         0 = NUMERIC DATA IS SOUGHT
+*                         1 = STRING DATA IS SOUGHT
+*
+***************RETURN DISCIPLINE***************************************
+*
+*        RETURN IS VIA REGISTER 14 WHEN THERE IS AN EOD (BATCH VERSION)
+*
+*        RETURN IS VIA REGISTER 14 PLUS 4 WHEN AN ITEM HAS BEEN
+*        OBTAINED FROM THE USER.
+*
+*        ALL OF THE EXECUTORS REGISTERS ARE RESTORED
+*
+*        IN THE BATCH VERSION AN ERROR ON INPUT WILL CAUSE TERMINATION
+*        OF THE USERS RUN.  THIS IS ACCOMPLISHED BY LOCATING THE SAVE
+*        AREA OF THE CONTROL PROGRAM AND RETURNING ON ITS REGISTER 14
+*
+***********************************************************************
+*
+*
+***************INPUT BUFFER CONTROL BLOCK******************************
+*
+*
+*   INPUTPTR  ADDR OF NEXT ITEM IN BUFFER
+*   INPUTCTR  CHARACTERS REMAINING IN BUFFER
+*   INPUTLNE  BASIC SOURCE LINE (INPUT) ASSOCIATED WITH THIS BUFFER
+*   INPUTREQ  LINE NUMBER OF INPUT STATEMENT WHICH REQUESTED THE ITEM
+*
+*
+*****************SET UP ARGUMENTS**************************************
+*
+         L     R2,0(R0,R1)        ADDR OF WHERE TO PUT ITEM
+         L     R3,4(R0,R1)        TYPE OF INFORMATION SOUGHT
+         L     R4,INPUTPTR        ADDR OF NEXT ITEM IN BUFFER
+         L     R5,INPUTCTR        CHARACTERS REMAINING IN BUFFER
+         L     R6,INPUTLNE        ASSOCIATED BUFFER LINE NUMBER
+         ST    R0,INPUTREQ        PUT LINE NUMBER IN SAVE PLACE
+*
+****************TEST AND BRANCH IF INPUT IS REQUIRED*******************
+*
+         CR    R0,R6              LINE NUM IN REQ SAME AS ONE WE HAVE ?
+         BNE   RINPUT             IF NOT GO TRY TO DO INPUT
+         LTR   R5,R5              ANY CHARS REMAINING IN PRESSED BUFFER
+         BE    RINPUT             IF NONE GO TRY TO DO INPUT
+*
+*******INPUT NOT REQUIRED BRANCH ON BASIS OF ITEM REQUESTED************
+*
+INPUT1   L     R14,APBUF          GET DISPL TO PRINT BUFFER
+         SR    R0,R0              GET A CLEAR REG
+         ST    R0,0(R14,R11)      RESET PRINT BUFFER
+         LTR   R3,R3              TEST TYPE OF ITEM 0=NUMBER
+         BE    GETNUM             OFF TO TRY FOR A NUMBER
+*
+****ITEM WANTED IS A STRING SET UP TO PROCESS FOR A STRING*************
+*
+         SR    R7,R7              TO KEEP TRACK OF STRING LENGTH
+         LA    R8,WRKSTG          ADDR OF STRING WORK BUFFER
+         MVI   WRKSTG,X'40'       SET TO CLEAR STRING WORK BUFFER
+         MVC   WRKSTG+1(133),WRKSTG  CLEAR STRING WORK BUFFER
+*
+*******WE MUST POINT AT START OF STRING IF WE ARE BRANCH ON TYPE*******
+*
+         LA    R0,1
+         CLI   0(R4),X'7D'        MUST START WITH A SINGLE QUOTE
+         BE    SQ                   IF SO GO PROCESS STRING BOUNDED BY
+         CLI   0(R4),X'7F'        OR A DOUBLE QUOTE
+         BE    DQ                   IF SO GO PROCESS STRING BOUNDED BY
+IP1      CLI   0(R4),C','
+         BE    SQ3A
+         MVC   0(1,R8),0(R4)      STRINGS WITHOUT QUOTE
+         OI    0(R8),X'40'
+         AR    R7,R0
+         AR    R8,R0
+         AR    R4,R0
+         BCT   R5,IP1
+         BCTR  R7,R0
+         B     SQ3A
+*
+*********ABORT USER HERE FOR THE BATCH, REPROMPT IN TS*****************
+*
+ABORTU   A     R1,=F'6000'        COMPLETE ERROR CODE
+         L     R0,INPUTREQ        PUT LINE NUMBER IN 0
+         L     R15,ARUNERR        ADDRESS OF ERROR MSG PROCESSOR
+         BALR  14,15              GO OUTPUT MSG
+         B     RINPUT             BACK AND PROMPT USER FOR MORE
+*
+********TRY TO GE A STRING BOUNDED BY A SINGLE QUOTE*******************
+*
+SQ       LA    R4,1(R0,R4)        SPACE OVER CHARACTER
+         BCT    R5,SQX            LOWER CHAR COUNT
+         AR    R5,R0
+         BCTR  R7,R0
+         B     SQ3
+SQX      CLI   0(R4),X'7D'        LOOK FOR ANOTHER SINGLE QUOTE
+         BE    SQ2                GO TRY AND CHECK FOR IMBEDDED QUOTES
+*
+***********WE HAVE SOMETHING TO MOVE TO WORK AREA**********************
+*
+SQ1      MVC   0(1,R8),0(R4)      MOVE CHARACTER INTO WORK BUFFER
+         OI    0(R8),X'40'
+         AR    R7,R0              KICK STRING LENGTH COUNTER
+         AR    R8,R0              KICK UP WORK BUFFER
+         B     SQ
+*
+********IF ROOM LOOK FOR IMBEDDED QUOTES*******************************
+*
+SQ2      CL    R5,=F'2'           MAY WE LOOK AHEAD
+         BL    SQ3                IF NOT END STRING
+         CLI   1(R4),X'7D'        DO WE HAVE TWO IN A ROW
+         BE    SQ4                IF SO GO MAKE VALID CHAR OUT OF THEM
+         B     SQ3
+*
+***********END OF STRING FOUND PROCESS TO TARGET***********************
+*
+SQ3A     BCTR  R4,0
+         AR    R5,R0
+SQ3      LR    R1,R2              DO STANDARD WORK OF MOVING IN STRING
+IP3      LR    R14,R7
+         L     R15,ASTR1PTR
+         AR    R14,R15
+         C     R14,ASTR2PTR
+         BNH   IP3A
+         LR    R8,R14             SAVE R14 & R15
+         LR    R9,R15
+         LR    R6,R1              SAVE R1
+         LR    R1,R7              AMOUNT NEEDED TO COLLECT
+         L     R15,=V(GCOL)
+         BALR  R14,R15
+         B     FULL               ERROR EXIT FROM GARB. COLL.
+         LR    R14,R8             RESTORE R14 & R15
+         LR    R15,R9
+         LR    R1,R6              RESTORE R1
+         B     IP3                BACK AGAIN
+IP3A     ST    R14,ASTR1PTR
+         A     R15,ASTRGBEG
+         AR    R15,R11
+         ST    R15,0(R1)
+         STC   R7,0(R1)
+         BCTR  R7,0
+         LTR   R7,R7
+         BM    SQ3B
+         EX    R7,IPMOV
+SQ3B     LA    R4,1(R0,R4)        SKIP OVER THE QUOTE
+         BCT   R5,CLEANUP         GO CLEAN UP FOR NORMAL EXIT
+         B     CLEANUP1           THAT COULD HAVE BEEN LAST CHARACTER
+IPMOV    MVC   0(0,R15),WRKSTG
+*
+***********HANDLE IMBEDDED SINGLE QUOTES HERE**************************
+*
+SQ4      AR    R4,R0              MOVE OVER ONE SINGLE QUOTE
+         BCT   R5,SQ1             LOWER CHAR COUNT
+         SR    R1,R1              SHOULD NEVER COME OUT HERE
+         B     ABORTS             GO ABORT THE SYSTEM
+*
+********TRY TO GE A STRING BOUNDED BY A DOUBLE QUOTE*******************
+*
+DQ       AR    R4,R0              SPACE OVER CHARACTER
+         BCT   R5,DQX             LOWER CHAR COUNT
+         AR    R5,R0
+         BCTR  R7,R0
+         B     SQ3
+DQX      CLI   0(R4),X'7F'        LOOK FOR ANOTHER DOUBLE QUOTE
+         BE    DQ2                GO TRY AND CHECK FOR IMBEDDED QUOTES
+*
+***********WE HAVE SOMETHING TO MOVE TO WORK AREA**********************
+*
+         OI    0(R8),X'40'
+DQ1      MVC   0(1,R8),0(R4)      MOVE CHARACTER INTO WORK BUFFER
+         AR    R7,R0              KICK STRING LENGTH COUNTER
+         AR    R8,R0              KICK UP WORK BUFFER
+         B     DQ
+*
+********IF ROOM LOOK FOR IMBEDDED QUOTES*******************************
+*
+DQ2      CL    R5,=F'2'           MAY WE LOOK AHEAD
+         BL    SQ3                IF NOT END STRING
+         CLI   1(R4),X'7F'        DO WE HAVE TWO IN A ROW
+         BNE   SQ3                IF SO GO MAKE VALID CHAR OUT OF THEM
+         BNE   SQ3
+*
+***********HANDLE IMBEDDED DOUBLE QUOTES HERE**************************
+*
+DQ4      LA    R4,1(R0,R4)        MOVE OVER ONE DOUBLE QUOTE
+         BCT   R5,DQ1             LOWER CHAR COUNT
+         SR    R1,R1              SHOULD NEVER COME OUT HERE
+         B     ABORTS             GO ABORT THE SYSTEM
+*
+***********FORCE POINTER TO NEXT ITEM IF ANY***************************
+*
+CLEANUP  CLI   0(R4),C' '
+         BE    CLEANUPX
+         CLI   0(R4),X'6B'        FORCE TO A COMMA IF YOU CAN
+         BE    CLEANUP2           OUT ON A COMMA
+CLEANUPX LA    R4,1(R0,R4)        FORCE POINTER OVER
+         BCT   R5,CLEANUP         KEEP FORCING UNTIL OUT OR COMMA
+*
+****************NO MORE ITEMS IN PRESS BUFFER**************************
+*
+CLEANUP1 LA    R0,1(R0,R0)        FOR DUMMY LINE NUMBER
+         LCR   R0,R0              *
+         ST    R0,INPUTLNE        RESET SO WE WILL FORCE READ
+         B     HOME
+*
+*************MORE ITEMS IN PRESS BUFFER********************************
+*
+CLEANUP2 LA    R4,1(R0,R4)        MOVE OVER THE COMMA
+         ST    R4,INPUTPTR        SET BACK IN BLOCK
+         BCT   R5,CLEANUP3        BACK DOWN CHARACTERS REMAINING
+         B     CLEANUP1           A COMMA WITH NOTHING FOLLOWING
+CLEANUP3 ST    R5,INPUTCTR        SET BACK IN BLOCK
+*
+********NORMAL RETURN TO EXECUTOR**************************************
+*
+HOME     MVI   SW7,X'00'          LEAVING INPUT
+         L     13,4(0,13)         ADDR OF EXECUTORS SAVE AREA
+         LM    14,12,12(13)       RESTORE EXECUTORS REGISTERS
+         BC    15,4(R0,R14)       RETURN TO THE GOOD RETURN IN EXECUTOR
+*
+************TEST IF INPUT FILE IS STILL OPEN**(ATTENTION)**************
+*
+RINPUT   CLI   SW1,X'00'          00 MEANS IT IS OPEN
+         BE    NEODS              IF OPEN GO TRY FOR A RECORD
+*
+**********FILE CLOSED TAKE EOD RETURN TO EXECUTOR**********************
+*
+EOD      LA    R0,1(R0,R0)        FOR DUMMY LINE NUMBER
+         LCR   R0,R0              *
+         ST    R0,INPUTLNE        RESET SO WE WILL FORCE READ
+         OI    AFLAGS,ASYNTAX     POST ATTENTION FOR EXECUTOR
+         MVI   SW1,X'01'          POST ATTENTION FOR CONTROL
+         MVI   SW7,X'00'          LEAVING INPUT
+         L     13,4(0,13)         ADDR OF EXECUTORS SAVE AREA
+         LM    14,12,12(13)       RESTORE EXECUTORS REGISTERS
+         BCR   15,14              RETURN TO EOD RETURN IN EXECUTOR
+*
+**********WE PAST ALL OF THE TESTS SO READ A RECORD********************
+*
+NEODS    L     R14,APBUF
+         LA    R14,0(R14,R11)     GET ADDRESS OF PRINT BUFFER
+         L     R0,0(R0,R14)       GET COUNT
+         LTR   R0,R0              TEST FOR ANYTHING TO PRINT
+         BP    NEOD2              SKIP LOCAL PROMPT IF ANYTHING
+NEOD     LTR   R3,R3              TEST FOR TYPE OF ITEM
+         BZ    NEOD1              WANTS NUMBER SET NUMBER PROMPT
+         LA    R14,PROMPT2        SET FOR STRING PROMPT $
+         B     NEOD2              GO ON
+NEOD1    LA    R14,PROMPT1        SET FOR NUMBER PROMPT #
+NEOD2    READ  TI,LINEIN,133,(14)  GET UNPREST LINE AFTER PROMPT
+         BZ    NEODA              GO ON IF STARTED
+         PANIC 8                  OTHERWISE PANIC
+NEODA    WAIT  TI                 FOR FOR USER
+         BM    NEODB              I/O ERROR OR TAB TROUBLE
+         BZ    PRESS              A OK LENGTH IN REG 1
+         LTR   R1,R1              LINE ENDED WITH ATTN CHECK LENGTH
+         BNZ   NEOD               LET HIM TRY AGAIN
+         B     EOD      BLANK LINE ATTENTION MEANS QUIT
+NEODB    LCR   R15,R15            WHICH IS IT
+         BC    15,*(R15)          BRANCH TO RIGHT ONE
+         B     NEODD              I/O ERROR
+         SYSQS 1,14,'TERMINAL READ ERROR, PLEASE RETYPE'
+NEODC    WRITE TI,(1),(14)
+         BZ    NEODCA             SKIP PANIC IF STARTED
+         PANIC 9
+NEODCA   WAIT  TI                 WAIT FOR COMPLETE
+         BM    NEODC              LOOP ON ERROR
+         B     RINPUT             LET HIM TRY AGAIN
+NEODD    SYSQS 1,14,'ILLEGAL USE OF TABS, PLEASE RETYPE'
+NEODE    WRITE TI,(1),(14)
+         BZ    NEODEA             SKIP PANIC IF STARTED
+         PANIC 10
+NEODEA   WAIT  TI                 FOR FOR IT TO COMPLETE
+         BM    NEODE              LOOP ON ERROR
+         B     RINPUT             LET HIM TRY AGAIN
+*
+*******************PROMPTS FOR TYPE OF INPUT***********************
+*
+         DS    0H
+PROMPT1  DC    H'0'
+         DC    H'2'
+         DC    CL2'# '
+         DS    0H
+PROMPT2  DC    H'0'
+         DC    H'2'
+         DC    CL2'$ '
+*
+*************GO PRESS THE INPUT INTO INPUT BUFFER**********************
+*
+PRESS    LTR   R1,R1              CHECK ANYTHING TO PRESS
+         BP    PRESS1             GO BACK IF EMPTY (CR)
+         LTR   R3,R3
+         BZ    NEOD1
+         MVI   LINEIN,X'7D'       DUMMY A QUOTE-QUOTE INPUT
+         MVI   LINEIN+1,X'7D'
+         LA    R1,2
+PRESS1   LA    R5,1(,R1)
+         BCTR  R1,0               VPRESS NO LONGER CALLED
+         EX    R1,PRMOV           JUST MOVE INPUT LINE
+         LA    R4,INPUTP
+         LA    R1,1(R4,R1)
+         MVI   0(R1),X'40'
+         MVC   INPUTLNE(4),INPUTREQ
+         B     INPUT1
+PRMOV    MVC   INPUTP(0),LINEIN
+*
+**********SET UP FACT THAT THERE IS A BAD STRING***********************
+*
+INPUT2   LA    R1,1(R0,R0)        ERROR BAD STRING IN INPUT
+         B     ABORTU             GO KICK HIM OFF (PROMPT IN TS)
+*
+**********SET UP FACT THAT THERE IS A BLANK RECORD*********************
+*
+INPUT3   LA    R1,2(R0,R0)        ERROR INPUT RECORD IS A BLANK RECORD
+         B     ABORTU             BLOW THE USER OFF
+*
+*****A NUMBER HAS BEEN REQUESTED SET UP TO TRY FOR A NUMBER************
+*
+GETNUM   LA    R0,1
+         CLI   0(R4),X'7D'        IS IT A STRING
+         BE    GETNUM1            GO INDICATE AN ERROR
+         CLI   0(R4),X'7F'        DITTO FOR DOUBLE
+         BE    GETNUM1            DITTO
+GETNUMA  CLI   0(R4),C' '
+         BNE   GETNUMX
+         AR    R4,R0
+         BCT   R5,GETNUMA
+         B     NEODS
+GETNUMX  LR    R15,R5
+         LR    R14,R4
+         LR    R9,R4
+         B     F1
+BACK     AR    R4,R0
+         AR    R9,R0
+         BCT   R15,F1
+         B     DOIT
+F1       CLI   0(R9),C','
+         BE    DOIT
+BACK2    CLI   0(R9),C' '
+         BNE   SHOV
+         AR    R9,R0
+         BCT   R15,BACK2
+         B     DOIT
+SHOV     CR    R4,R9
+         BE    BACK
+         MVC   0(1,R4),0(R9)
+         MVI   0(R9),C' '
+         B     BACK
+DOIT     LR    R4,R14
+         LR    R1,R4              ADDR OF FIELD TO BE CONVERTED
+         LA    R9,CONWORKA        ADDR OF WORK AREA
+         L     R15,ACONVERT       ADDRESS OF CONVERT ROUTINE
+         BALR  14,15              GO ATTEMPT CONVERSION
+         B     GETNUM2            STRING CAN NOT BE CONVERTED
+         STE   R0,0(R0,R2)        BUT NUMBER ON TARGET
+         B     CLEANUP            GO MOVE THE POINTER AND OUT NORMAL
+*
+************ERROR FOUND A STRING WHEN WANTED A NUMBER******************
+*
+GETNUM1  LA    R1,5(R0,R0)        ERROR STRING WHEN NEEDED NUMBER
+         B     ABORTU             GO KICK HIM OFF
+*
+FULL     LA    R1,1
+         L     R0,INPUTREQ
+         L     R15,ARUNERR
+         BALR  R14,R15
+         L     R13,4(0,R13)
+         LM    R14,R12,12(R13)
+         BR    R14
+**************ERROR RETURN FROM CONVERT********************************
+*
+GETNUM2  LA    R1,6(R0,R0)        NUMBER COULD NOT BE CONVERTED
+         B     ABORTU             BYE BYE BABY
+*
+***WE EITHER HAVE A FREDRICKSON CODING ERROR OR A MACHINE ERROR********
+*
+ABORTS   PANIC 1                  ERROR IN THE STRING SCAN
+*
+*************HERE ARE THE ERROR MESSAGES SENT BY INPUT*****************
+*
+* 6001         C'INCORRECTLY SPECIFIED STRING ON THE RECORD READ BY THI
+*              S INPUT STATEMENT'
+*
+* 6002         C'NO INPUT COULD BE FOUND ON THE RECORD READ BY THIS INP
+*              UT STATEMENT'
+*
+* 6003         C'STRING INCORRECTLY POSITIONED OR NOT PRESENT ON THE RE
+*              CORD READ BY THIS INPUT STATEMENT'
+*
+* 6004         C'STRING ON THE RECORD READ BY THIS INPUT STATEMENT LONG
+*              ER THAN 15 CHARACTERS'
+*
+* 6005         C'NUMERIC DATA INCORRECTLY POSITIONED ON THE RECORD READ
+*               BY THIS INPUT STATEMENT'
+*
+* 6006         C'NUMERIC DATA ON A RECORD READ BY THIS INPUT STATMENT W
+*              AS FOUND TO BE INCORRECTLY SPECIFIED'
+*
+*
+         LTORG
+*
+         EJECT
+TWORK    DSECT
+         COPY TWORK
+         EJECT
+AREA     DSECT
+         COPY  AREA
+         END

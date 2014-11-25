@@ -1,0 +1,2266 @@
+JES      TITLE 'WYLBUR''s JES Interface'                                        
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+         SPACE                                                                  
+WYLJES   CSECT                                                                  
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+*                                                                               
+*  Modification history:                                                        
+*                                                                               
+*     8-July-1997 - M. Durket                                                   
+*       Changes to support 5 digit job numbers up to 65535                      
+*                                                                               
+JES      IDENT 2010                10:26:04 01/10/02  (SLP)                     
+         SPACE 2                                                                
+         SYSDEFN                                                                
+         GBLB  &JOBAUTH            (See SYSDEFN)                                
+*                                                                               
+         PUSH  DSECTS                                                           
+         COPY  CONTROL             Copy cv/cp                                   
+         TITLE 'DSECTS'                                                         
+         COPY  RSCGROUP                                                         
+         EJECT                                                                  
+         COPY  UTYPDEFN            (local--scip security sys equ's)             
+         EJECT                                                                  
+KWR      RECORD 'KWR'                                                           
+         EJECT                                                                  
+         DCBD  DSORG=PS                                                         
+*                                                                               
+DCB      EQU   IHADCB                                                           
+         EJECT                                                                  
+         CVT   DSECT=YES                                                        
+         EJECT                                                                  
+USERCVT  RECORD 'USERCVT'                                                       
+         EJECT                                                                  
+         IEFJSSIB                                                               
+         EJECT                                                                  
+         IEFJESCT                                                               
+         EJECT                                                                  
+*        IEFJSCVT                                                               
+*        EJECT                                                                  
+         IFGACB                                                                 
+ACB      EQU   IFGACB,*-IFGACB,C'X'                                             
+         EJECT                                                                  
+         IFGRPL                                                                 
+RPL      EQU   IFGRPL,*-IFGRPL,C'X'                                             
+         EJECT                                                                  
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+*PUSH,GEN                                                                       
+        $LRC   ,                   -- JES fetch buffer format --                
+*POP                                                                            
+         TITLE 'DSECTS'                                                         
+         HCMRSC                                                                 
+         EJECT                                                                  
+         SUBRSC ,                                                               
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+         EJECT                                                                  
+RDWD     RECORD 'RDW'                                                           
+         EJECT                                                                  
+HRBDSECT RECORD BEGIN                                                           
+         HRB                                                                    
+         END                                                                    
+         EJECT                                                                  
+JWA      RECORD BEGIN                                                           
+         XSA   R2,R8                                                            
+*                                                                               
+JWASTRT  DS    0X                                                               
+JWAFLG   DS    X                   JWA flags                                    
+JWAATTN  EQU   X'80'               Processing break flag                        
+* the following flags are set by "buffer" routine, and examined                 
+*  by the "typebufr" routine:                                                   
+JWAFTRNC EQU   X'40'               Truncated response                           
+JWAFNMPG EQU   X'20'               Out of pages                                 
+*                                                                               
+JWAFLG2  DS    X                   Second JWA flag                              
+* See HRBFLAGS definitions for JWAFLG2                                          
+*                                                                               
+JWAFLG3  DS    X                   Third JWA flag                               
+JWA3CPAS EQU   X'40'                                                            
+*                                  command (i.e., passed)                       
+JWAF3MC  EQU   X'20'               MC option given on fetch                     
+JWAF3CC  EQU   X'04'               CC option on fetch                           
+JWA3ACTF EQU   X'02'               Cmd can clear active (fetch)                 
+*                                                                               
+JWAFLG4  FLAG  ,                   Fourth flag byte                             
+         FLAG  JWAFSCAN            - Scan cmd for wyl options                   
+         FLAG  JWAFDISP            - Fetch display option                       
+         FLAG  JWAFSQSH            - Squash multiple blanks                     
+         FLAG  JWAFCCTL            - File has CC chars (mvs only)               
+         FLAG  JWAFTAPP            - Append to end of active file               
+         FLAG  JWAFNUM             - Number (on fetch display)                  
+         FLAG  JWAFTRUN            - TRUNCATE FETCHED LINES                     
+         FLAG  JWAFLPR             - Local printer data received                
+*                                                                               
+JWAHRBF2 DS    X                   Copy of HRBFLAG2                             
+*                                                                               
+JWACC    DS    C                   CC (or MC) char                              
+JWAOLDMC DS    X                   Prev MC char (for CC conversion)             
+*                                                                               
+JWAPATHP DS    F                   JES path ptr                                 
+JWANBYTE DS    F                   No. of pressed bytes                         
+JWANRPL  DS    F                   No. of lines read                            
+JWASKPC  DS    F                   No. of lines to skip                         
+JWATO    DS    F                   Starting line-number for fetch               
+JWABY    DS    F                   Delta for fetch                              
+JWACMD   DS    F                   Command pointer                              
+JWACMDL  DS    F                   Command length                               
+JWAFTLEN DS    H                   Length of fetch truncation                   
+JWAFTNUM DS    F                   Fet display line# start                      
+         SPACE 2                                                                
+JWAFTPFX DS    F,3X                Reserved for fetch                           
+*                                  be-blocking space                            
+*                                                                               
+         DS    0F                                                               
+JWABLKB  DS    XL(&PRESSZ)         Shadow buffer, options to blank              
+JWABUF   DS    0F                  Start of work buffer                         
+         DS    XL(&PRESSZ)         Must be able to hold pressed line            
+         ORG   JWABUF                                                           
+* the HCB is built in the JWA work buffer, the following                        
+* fields are defined so that they can be used when the HCB                      
+* has been built.                                                               
+HRDWSTRT DS    0F                  Start of suzan rdw                           
+HRDWLEN  DS    H'0'                Length of transaction                        
+         DS    2X'0'               Rdw flags                                    
+         HCB   ,                                                                
+         SPACE 2                                                                
+JWAWL    EQU   HCBTEXT-JWA         Fixed portion of JWA                         
+JWATEXT  DS    XL168               Command/response buffer                      
+         ORG                                                                    
+JWABUFL  EQU   *-JWABUF            Length of work buffer                        
+JWADATA  EQU   JWASTRT,*-JWASTRT,C'X'                                           
+*                                                                               
+         ORG   JWAFTPFX                                                         
+FTSTART  DS    0F                                                               
+         DS    F,3X                Reserved for others                          
+FTHMC    DS    X                   MC/CC char                                   
+FTHCNT   DS    X                   Count byte                                   
+FTHWA    DS    0X                  Edit text (if any)                           
+         ORG   FTSTART                                                          
+         SPACE                                                                  
+*  Modified for MC/CC.                                                          
+FTMCLNO  DS    F                   Lineno                                       
+FTMCCNT  DS    X                   Count byte                                   
+FTMCCTL  DS    X                   Control byte (for dummy MC/CC char)          
+FTMCMC   DS    X                   MC/CC char                                   
+FTMCWA   DS    0X                  Edit text (if any)                           
+         ORG   FTSTART                                                          
+         SPACE                                                                  
+* modified for standard wylbur edit format (no MC/CC char)...                   
+         DS    F                   Reserved for others                          
+FTWLNO   DS    F                   Lineno                                       
+FTWCNT   DS    X                   Count byte                                   
+FTWWA    DS    0X                  Edit text (if any)                           
+         ORG                                                                    
+         END                                                                    
+         TITLE 'JES Initialization Routine'                                     
+*box                                                                            
+*                                                                               
+*  JESINIT -- This routine is called at WYLBUR initialization to                
+*       perform various JES initialization tasks.  Currently,                   
+*       the INTRDR (for job submission) and the command path(s)                 
+*       (for fetch,locate,etc.) are initialized here.                           
+*                                                                               
+JESINIT  XPROC                                                                  
+         HASPSERV JOBACCT,@R13     Get WYLBUR's account                         
+         IF    (R15,Z),'MVC CVWYLACC,@R13'                                      
+         HASPSERV JOBINFO,@R13     Get WYLBUR's jobno                           
+         IF    (R15,Z),'MVC CVWYLJBN,@R13'                                      
+*                                                                               
+         L     R6,CVTCBP                                                        
+         L     R6,@R6+180          TCBJSCBP                                     
+         L     R6,@R6+316          JSCBSSIB  (our SSIB)                         
+         WITH  (SSIB,R6),BEGIN                                                  
+         MVC   CVWYLJBN,SSIBJBID+4  Job number                                  
+         MVC   CVJES,CVBLANKS                                                   
+         MVC   CVJES(4),SSIBSSNM   Save JES "subsys" name                       
+         END                                                                    
+*                                                                               
+         IF    CVFNOR,JINEXIT      Don't bother init'ing JES                    
+*-                                                                              
+*-       Allocate fewer JES command paths for test systems.                     
+*-         The HCM resource control blocks are pre-allocated;                   
+*-         so we take a few of them off the free queue before                   
+*-         opening the pathes.  It could be a lot more dynamic.                 
+*-                                                                              
+         IF    CVFTEST,BEGIN       Test system...                               
+         IF    (CVWYLSSN,EQ,'WYLBUR'),EXIT                                      
+         IF    (CVWYLSSN,EQ,'TESTWYL'),EXIT                                     
+         IF    (CVWYLSSN,EQ,'SERVWYL'),EXIT                                     
+         IF    (CVWYLSSN,EQ,'DEVWYL'),EXIT                                      
+         L     R3,CVCURJCB         Get "current" JCB field (zeros)              
+         MVC   CVCURJCB,CVFJCB     First JCB (placate GETRSC)                   
+*                                                                               
+         LA    R2,12               Test systems have 12 less paths              
+         WHILE (R2,POS),BEGIN      Go through paths...                          
+         GETRSC HCM,WAIT=NO        Get HCMRSC                                   
+         DECR  R2                  One less                                     
+         END                                                                    
+*                                                                               
+         ST    R3,CVCURJCB         Restore original CVCURJCB                    
+         END                                                                    
+*-                                                                              
+*-       Now open all JES command paths.                                        
+*-                                                                              
+         L     R6,=V(HCMRSG)       JES path resource groups                     
+         WITH  (RSCGROUP,R6),'LA R4,RSGQFRFW-(RSC@NEXT-RESOURCE)'               
+         LR    R2,R4               Dummy first link                             
+         USING RESOURCE,R2                                                      
+         WHILE ('L R2,RSC@NEXT; CR R4,R2',NE),BEGIN                             
+         WITH  (HCMRSC,R2)                                                      
+         MVC   HCMPYOU(4),CVJES    Yourtag=<JES2>CONS                           
+         MVC   HCMPMY,CVWYLSSN     Mytag=subsys  (WYLBUR)                       
+         MVC   HCMPBUF,=F'8192'    Buffer size                                  
+         LA    R1,HCMPATH          Path ptr                                     
+         ST    R1,@R13             Build param list                             
+         SET   @R13.X'80'          End of list                                  
+         SCOM  OPEN,(R13)          Open path                                    
+         FAIL  (R15,NZ),JESPERR,'JES path open error.'                          
+         SET   HCMFPND             Open in pending                              
+         END                                                                    
+         DROP  RESOURCE                                                         
+*-                                                                              
+*-       Attach job submission subtask.                                         
+*-                                                                              
+         L     R1,=A(SUBMIT)       Identify submit EP                           
+         IDENTIFY EP=SUBMIT,ENTRY=(1)                                           
+         L     R6,=V(SUBRSG)       Submit resource group                        
+         WITH  (RSCGROUP,R6),BEGIN                                              
+         LA    R4,RSGQFRFW-(RSC@NEXT-RESOURCE)                                  
+         WITH  (RESOURCE,R4),'L R3,RSC@NEXT'                                    
+         CLEAR RSG#FREE            Init may change free count                   
+SUBRSCLP WHILE (R3,NE,R4),BEGIN                                                 
+         LR    R2,R3               Base for resource                            
+         WITH  (SUBRSC,R2)                                                      
+         INCR  R0,RSG#FREE         Bump free count                              
+         L     R3,SUB@NEXT         Next resource pointer                        
+*                                                                               
+         LA    R5,SUBACB           -->ACB                                       
+         OPEN  ((R5))              Open submit path                             
+         TM    ACBOFLGS-IFGACB(R5),ACBOPEN   ACB open?                          
+*  If it can't be opened, drop the resource.                                    
+         IF    Z,BEGIN                                                          
+         DQRSC SUB                 Delete resource                              
+         DECR  R0,RSG#FREE                                                      
+         NEXT  SUBRSCLP                                                         
+         END                                                                    
+         LA    R5,SUBTECB                                                       
+*  NOTE:  The address of the resource is stored in the resource.                
+*  This prevents synch problems between main task and subtask.                  
+         ATTACH EP=SUBMIT,ECB=(R5),MF=(E,SUBRADDR)  Fire up subtask             
+         ST    R1,SUBTCB                                                        
+         END   SUBRSCLP                                                         
+         END                                                                    
+JINEXIT  PEND  ,                                                                
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESSTOP -- Routine to shutdown JES communications normally.                  
+*                                                                               
+JESSTOP  XPROC ,                                                                
+         L     R6,=V(SUBRSG)       Submit resource group                        
+         WITH  (RSCGROUP,R6),BEGIN                                              
+         LA    R4,RSGQFRFW-(RSC@NEXT-RESOURCE)                                  
+         WITH  (RESOURCE,R4),'L R3,RSC@NEXT'                                    
+         WHILE (R3,NE,R4),BEGIN                                                 
+         LR    R2,R3               Base for resource                            
+         WITH  (SUBRSC,R2)                                                      
+         L     R3,SUB@NEXT         Next resource pointer                        
+         IF    (SUBTCB,NZ),BEGIN   Shutdown the submission subtask...           
+         DETACH SUBTCB                                                          
+         WAIT  ECB=SUBTECB         Wait for subtask to go away                  
+         CLEAR SUBTCB,SUBTECB                                                   
+         END                                                                    
+         END                                                                    
+         END                                                                    
+         PEND  ,                                                                
+         TITLE 'JES Health Check Routine'                                       
+*box                                                                            
+*                                                                               
+*  JESOK -- Routine to check JES health and only return if                      
+*    everything is ok.                                                          
+*                                                                               
+JESOK    PROC  ,                                                                
+         ACALL JESCHK              Well?                                        
+         IF    NZ,BEGIN            No JES...                                    
+         TSEG  'Command can not be executed because',,B                         
+         SETMSG CVJES                                                           
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),B                                                      
+         ABORT 'is not active.',,NOJES                                          
+         END                                                                    
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESCHK -- Routine to check to see if JES2 is alive and well.                 
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      0 - ok                                                                   
+*      4 - JES2 is not active                                                   
+*                                                                               
+JESCHK   PROC  ,                                                                
+         CLEAR R15                 Assume healthy                               
+*                                                                               
+         L     R6,CVTPTR                                                        
+         WITH  (CVT,R6),'L R5,CVTUSER'  SCIP CVT ptr                            
+         IF    (R5,NZ),BEGIN                                                    
+         WITH  (USERCVT,R5)                                                     
+         IF    (USERCVT,NE,'SCIP'),EXIT                                         
+         IF    ^USESYSFL.USEFJES2,EXIT  Not Stanford JES2, assume OK            
+         IF    ^USEHSPFL.HSPFJES,'LA R15,4'  JES2 is down                       
+         END                                                                    
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'FETCH Command'                                                  
+*box                                                                            
+*                                                                               
+*  FETCH -- FETCH command.                                                      
+*                                                                               
+FETCH    XPROC JWA                                                              
+         LA    R6,JWA                                                           
+         USING JWA,R6              Set JWA ptr                                  
+         ST    R6,CPJWA                                                         
+*                                                                               
+         ACALL JESOK               Make sure JES is healthy                     
+*                                                                               
+         SETMSG CPCMD,LH:CPCMDLEN                                               
+         ACALL JWAINIT             Set up JES work area                         
+         MVC   CPCMDLEN,HCBLEN     Cmd len could have been adjusted             
+         MVC   JWATO,=F'-1'                                                     
+         MVC   JWABY,CPDELTA                                                    
+         ACALL ZEROBLKB                                                         
+         SCINIT L:JWACMD,L:JWACMDL                                              
+         SCAN  ,                   (fetch)                                      
+         SCANCHK                                                                
+         ACALL MARKBLKB                                                         
+         SCAN  ,                   (jobname)                                    
+         SCANCHK                                                                
+         IF    (R0,Z),CVABSENT                                                  
+         ACALL MARKBLKB                                                         
+         SCAN  FETPRT              Fetch options                                
+         SCANCHK                                                                
+         ACALL DOBLKB              Blank out non-JES options                    
+         LT    R1,JWATO            Start here                                   
+         IF    NEG,BEGIN           Figure it out...                             
+         IF    JWAFTAPP,BEGIN      Append to end ...                            
+         L     R0,CPALLNO          R0 holds last line number                    
+         L     R1,JWABY            R1 holds delta                               
+         VCALL ADDER               Compute next line number                     
+         IF    ('LTR R0,R0',NM),'LR R1,R0; CLEAR R0'                            
+         END                                                                    
+         ELSE  BEGIN                                                            
+         L     R1,JWASKPC          Use skip count                               
+         AH    R1,=H'1'            ... plus one                                 
+         M     R0,JWABY            Times delta                                  
+         END                                                                    
+         IF    ((R0,NZ),OR,(R1,LGT,CVMAXLNO)),BEGIN                             
+         TSEG  'No lines fetched, '                                             
+         ERROR 'line-number too big (specify BY).'                              
+         END                                                                    
+         END   ELSE,BEGIN                                                       
+         IF    JWAFTAPP,BEGIN                                                   
+         TSEG  'No lines fetched,',,B                                           
+         ERROR '"APPEND" and "TO" operands conflict.'                           
+         END                                                                    
+         END                                                                    
+         ST    R1,CPWKPS           Save starting line-number                    
+         ACALL CHKKEY              Do any kw checking                           
+*                                                                               
+         IF    (^JWAFDISP,AND,^JWAFTAPP),BEGIN                                  
+         VCALL CLRTEXT             Clear/Keep                                   
+         MVC   CPANAME,=CL8'FETCHED'  Set Active name                           
+         MVC   CPATITL,=CL(L'CPATITL)'Fetched job output'                       
+         SET   CPLFLG5.CPFNLST     (In case LSLNMSGA abort)                     
+         END                                                                    
+*                                                                               
+         ACALL JESIOPN             Open command path                            
+         ACALL JESCOM              Send command to JES                          
+         IF    NZ,BEGIN                                                         
+         TSEG  'Unable to process FETCH command,',,B                            
+         ABORT 'path not active.',,JESDOWN                                      
+         END                                                                    
+*                                                                               
+MFETLP   L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'IF JCBFATTN,MFETABRT'  User hit BREAK                 
+         ACALL JESRD               Get a response line                          
+         BP    MFETEOF             Normal end of file                           
+         BM    MFETABRT            Terminated by BREAK                          
+*                                                                               
+         IF    ^JWAFLG2.HRBBUF,BEGIN  Text response...                          
+         TSEG  (R1),(R0),CR                                                     
+         BNZ   MFETABRT                                                         
+         PFREE PAR                 (Avoids STOW interactions)                   
+         B     MFETLP                                                           
+         END                                                                    
+*                                                                               
+         LA    R2,JWABUF                                                        
+         CEIL  R0,&LINESZ          Not too much                                 
+         LR    R3,R0                                                            
+*                                                                               
+         IF    JWAFLG3.JWAF3CC+JWAF3MC,BEGIN  CC or MC...                       
+         MVC   @R2(1),JWACC           Add CC char                               
+         CEIL  R0,&LINESZ-1        Max text length (excl CC/MC)                 
+         LR    R3,R0                                                            
+*                                                                               
+         IF    (JWAFLG3.JWAF3CC,AND,^JWAFCCTL),BEGIN  Convert...                
+         IF    JWACC.X'02',BEGIN   Immediate operation...                       
+         IF    (JWAOLDMC,EQ,X'09'),BEGIN  Clean-up after QSAM...                
+         IF    (JWACC,EQ,X'0B'),EXIT  Can't forward merge                       
+         IF    (JWACC,EQ,X'13'),EXIT                                            
+         IF    (JWACC,EQ,X'1B'),EXIT                                            
+         CLEAR JWAOLDMC                                                         
+         END                                                                    
+         IF    (JWAOLDMC,Z),BEGIN                                               
+         MVC   JWAOLDMC,JWACC      Save MC char                                 
+         B     MFETLP                                                           
+         END                                                                    
+         CLEAR R0,R3               No data for immediate MC                     
+         END                                                                    
+         CLEAR JWAOLDMC.X'02'      Clear immediate bit                          
+         LC    R15,JWAOLDMC        Previous MC char                             
+         MVC   JWAOLDMC,JWACC      Save this MC char for next time              
+         IF    ((R0,Z),AND,(R15,EQ,X'01')),MFETLP  Write no space               
+         LA    R15,MCTOCC(R15)                                                  
+         MVC   @R2(1),@R15            CC char                                   
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               No conversion...                             
+         IF    JWAFLG3.JWAF3CC,BEGIN  Check out CC char...                      
+         IF    (@R2,EQ,X'00'),'MVI @R2,C" "'  Change X'00' to blank             
+         END                                                                    
+         MVI   JWAOLDMC,X'09'                                                   
+         END                                                                    
+*                                                                               
+         LA    R2,@R2+1            Skip past CC char                            
+         AH    R0,=H'1'            Kick line length                             
+         END                                                                    
+*                                                                               
+         IF    JWAHRBF2.HRBFOPTJ,BEGIN  Data has TRC characters...              
+         IF    JWAFLG3.JWAF3CC+JWAF3MC,EXIT  Keep TRC char if CC/MC             
+         LA    R1,@R1+1            Skip past TRC char                           
+         DECR  R0                  ...adjust len                                
+         DECR  R3                  (ditto)                                      
+         END                                                                    
+*                                                                               
+         MOVE  R3,@R2,@R1          Save text                                    
+         SETMSG JWABUF,(R0)        Response line                                
+         IF    JWAFSQSH,'VCALL SQSHRTN'  Squash multiple blanks                 
+         IF    (JWAFTRUN,AND,(R0,GT,JWAFTLEN)),'LH R0,JWAFTLEN'                 
+*                                                                               
+         IF    JWAFDISP,BEGIN      Fetch display ...                            
+         IF    JWAFNUM,BEGIN       Numbered fetch display                       
+         XPUSH R0,R1,*             Save R0,R1                                   
+         L     R0,CPWKPS           Load line number                             
+         VCALL CVEXNO              Convert it                                   
+         L     R0,CPWKPS           Load old line number                         
+         L     R1,JWABY            Load increment                               
+         VCALL ADDER               Get next line                                
+         BM    MFETBIG             (too high)                                   
+         ST    R0,CPWKPS           Save it                                      
+         XPOP  R0,R1,*             Restore R0,R1                                
+         MVC   JWAFTNUM(9),CPDOUB  Move in                                      
+         MVC   JWAFTNUM+9(2),CVBLANKS Line number                               
+         LA    R1,JWAFTNUM         R1 -> Line#/text                             
+         A     R0,=F'11'           Add in length of line#                       
+         END                                                                    
+         TSEG  (R1),(R0),CR        Display line                                 
+         BNZ   MFETEOF             (abort)                                      
+         END   ELSE,BEGIN                                                       
+         L     R15,CPWKPS          Line-number to use                           
+         VCALL PUTLINE             Add line to Active file                      
+         L     R0,CPWKPS           Get                                          
+         L     R1,JWABY              next lineno                                
+         VCALL ADDER                   to use                                   
+         BM    MFETBIG             Lineno too high                              
+         ST    R0,CPWKPS           Save it                                      
+         END                                                                    
+         B     MFETLP              Go back for more                             
+*                                                                               
+MFETBIG  SETMSG 'Line-number too big (specify BY).'                             
+MFETMSG  TSEG  (R1),(R0),CR                                                     
+MFETABRT IF    JWAFDISP,MFETEOF                                                 
+         ACALL JESICLS             Close path                                   
+*                                                                               
+         TCCR                                                                   
+         TSEG  'FETCH aborted.',,CR                                             
+         VCALL LASTLINE            Write last line stowed                       
+         B     CVABORT                                                          
+*                                                                               
+MFETEOF  ACALL JESICLS             Close path                                   
+*                                                                               
+         IF    JWAFLG2.HRBERSYN+HRBERSEM,CVERROR                                
+         B     CVNEXT                                                           
+*                                                                               
+         PEND  ,                                                                
+         EJECT ,                                                                
+*                                                                               
+* ** DEBUG ** FOR ASSEMBLY                  ** FIX **                           
+*                                                                               
+BASE     BASE                                                                   
+         BOMB                                                                   
+         DROP  BR                                                               
+* ** DEBUG **                                                                   
+         EJECT                                                                  
+FETPRT   SCKW  MC,FETMC                                                         
+         SCKW  CC,FETCC                                                         
+         SCKW  ASA,FETCC                                                        
+         SCKW  CONTROL,FETCNTL,A                                                
+         SCKW  DISPLAY,FETDISP,A                                                
+         SCKW  SQUASH,FETSQU,A                                                  
+         SCKW  COUNT,FETCNT,A                                                   
+         SCKW  SKIP,FETSKIP,A                                                   
+         SCKW  TO,FETTO,(P,LN)                                                  
+         SCKW  BY,FETBY,(P,LN)                                                  
+         SCKW  APPEND,FETAPP,A                                                  
+         SCKW  NUMBERED,FETNUM,A                                                
+         SCKW  TRUNCATE,FETTRUNC,(A,P,PI),32767                                 
+         SCKW  ACCOUNT,JACCTINFO,A                                              
+         SCKW  ACCT,JACCTINFO                                                   
+         SCKW  USER,JACCTINFO,A                                                 
+         SCKW  USR,JACCTINFO                                                    
+         SCKW  GROUP,JACCTINFO,A                                                
+         SCKW  GRP,JACCTINFO                                                    
+         SCKW  ,V(CLRPSH),PUSH                                                  
+         SCKW  ,NOTRKW                                                          
+*                                                                               
+FETPRT2  SCKW  COUNT,FETCNT2,(A,P,PI),16777215                                  
+         SCKW  SKIP,FETSKIP2,(A,P,PI),16777215                                  
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+FETCNTL  PROC  ,                                                                
+         ERROR 'Use CC or MC option instead of CONTROL.'                        
+         PEND                                                                   
+*                                                                               
+FETMC    PROC  ,                                                                
+         SET   JWAFLG3.JWAF3MC     Set MC specified                             
+         PEND                                                                   
+*                                                                               
+FETCC    PROC  ,                                                                
+         SET   JWAFLG3.JWAF3CC+JWAF3MC  set CC specified                        
+         PEND                                                                   
+*                                                                               
+FETSKIP  PROC  ,                                                                
+*                                                                               
+         COMMENT                   CALC R1,R0 - LOC LEN OF                      
+         COMMENT ,                 'SKIP=nnn' STRING                            
+         LR    R2,R1                                                            
+         SCAN  ,                                                                
+         SCANCHK ,                                                              
+         AR    R0,R1                                                            
+         LR    R1,R2                                                            
+         SR    R0,R1                                                            
+*                                                                               
+         COMMENT                   PASS 'SKIP=nnn' TO JES TOO                   
+         ACALL MARKBLKB            (IE. DON'T BLANK)                            
+*                                                                               
+         COMMENT                   SCAN IT                                      
+         SCPUSH                                                                 
+         SCINIT (R1),(R0)                                                       
+         SCAN  FETPRT2                                                          
+         SCANCHK                                                                
+         SCPOP                                                                  
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+FETSKIP2 PROC  ,                                                                
+         ST    R0,JWASKPC          Save binary skip count                       
+         PEND  ,                                                                
+*                                                                               
+FETTO    PROC  ,                                                                
+         ST    R0,JWATO                                                         
+         PEND                                                                   
+*                                                                               
+FETBY    PROC  ,                                                                
+         ST    R0,JWABY                                                         
+         PEND                                                                   
+*                                                                               
+FETAPP   PROC  ,                                                                
+         SET   JWAFTAPP            Set "append" flag                            
+         PEND                                                                   
+*                                                                               
+FETNUM   PROC                                                                   
+         SET   JWAFNUM                                                          
+         PEND                                                                   
+*                                                                               
+FETTRUNC PROC                                                                   
+         SET   JWAFTRUN            Set "truncate" flag                          
+         STH   R0,JWAFTLEN         Save the desired length                      
+         PEND                                                                   
+*                                                                               
+FETDISP  PROC                                                                   
+         SET   JWAFDISP            Fetch display                                
+         PEND                                                                   
+*                                                                               
+FETSQU   SET   JWAFSQSH            Squash multiple blanks                       
+         BR    RAR                                                              
+*                                                                               
+FETCNT   PROC  ,                   Pass count to JES                            
+         ACALL FETSKIP             (same logic as SKIP)                         
+         PEND                                                                   
+*                                                                               
+FETCNT2  PROC  ,                                                                
+         COMMENT                   JES does count, we ignore for now            
+         PEND                                                                   
+*                                                                               
+         DROP  R6                                                               
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*-                                                                              
+*-       MC to CC conversion table...                                           
+*-                                                                              
+MCTOCC   DC    256C' '                                                          
+         ORG   MCTOCC+X'01'                                                     
+         DC    C'+'                                                             
+         ORG   MCTOCC+X'11'                                                     
+         DC    C'0'                                                             
+         ORG   MCTOCC+X'19'                                                     
+         DC    C'-'                                                             
+         ORG   MCTOCC+X'89'                                                     
+         DC    C'1'                                                             
+         ORG   MCTOCC+X'91'                                                     
+         DC    C'2'                                                             
+         ORG   MCTOCC+X'99'                                                     
+         DC    C'3'                                                             
+         ORG   MCTOCC+X'A1'                                                     
+         DC    C'4'                                                             
+         ORG   MCTOCC+X'A9'                                                     
+         DC    C'5'                                                             
+         ORG   MCTOCC+X'B1'                                                     
+         DC    C'6'                                                             
+         ORG   MCTOCC+X'B9'                                                     
+         DC    C'7'                                                             
+         ORG   MCTOCC+X'C1'                                                     
+         DC    C'8'                                                             
+         ORG   MCTOCC+X'C9'                                                     
+         DC    C'9'                                                             
+         ORG   MCTOCC+X'D1'                                                     
+         DC    C'A'                                                             
+         ORG   MCTOCC+X'D9'                                                     
+         DC    C'B'                                                             
+         ORG   MCTOCC+X'E1'                                                     
+         DC    C'C'                                                             
+         ORG                                                                    
+         TITLE 'Option blanking routines'                                       
+*box                                                                            
+*-                                                                              
+*-  Routines to process blanking of WYLBUR options in                           
+*-  JES command buffer.                                                         
+*-                                                                              
+*-  ZEROBLKB - initialize blank shadow buffer to zeros                          
+*-  MARKBLKB - mark blank buffer to non-zeros                                   
+*-             we will not blank marked words                                   
+*-  DOBLKB - use blank shadow buffer to blank out wylbur                        
+*-           options in JES buffer.                                             
+*-                                                                              
+*-                                                                              
+         SPACE 3                                                                
+*                                                                               
+*  ZEROBLKB - ZERO SHADOW BUFFER                                                
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R6 - JWA                                                                   
+*                                                                               
+*                                                                               
+ZEROBLKB PROC                                                                   
+         USING JWA,R6                                                           
+         CLEAR JWABLKB                                                          
+         PEND  ,                                                                
+         DROP  R6                                                               
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*  MARKBLKB - MARK SHADOW BUFFER                                                
+*                                                                               
+*  ON ENTRY:                                                                    
+*    R1,R0 - LOC LEN (IN JES BUFFER) OF THING NOT TO BLANK                      
+*    R6 - JWA                                                                   
+*    JWACMD - JES BUFFER ADDRESS                                                
+*    JWABLKB - JES BLANK SHADOW BUFFER                                          
+*                                                                               
+*  MARK SHADOW BUFFER WITH 'FF' IN CORRESPONDING LOCATION.                      
+*                                                                               
+MARKBLKB PROC  ,                                                                
+         USING JWA,R6                                                           
+*                                                                               
+         LA    R2,JWABLKB          R2 - CALC PLACE TO MARK                      
+         S     R1,JWACMD                                                        
+         AR    R2,R1                                                            
+         LR    R3,R0                                                            
+         L     R5,=X'FF000000'                                                  
+         MVCL  R2,R4                                                            
+*                                                                               
+         PEND  ,                                                                
+         DROP  R6                                                               
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*  DOBLKB - PROCESS BLANK SHADOW BUFFER                                         
+*                                                                               
+*  ON ENTRY                                                                     
+*    R6 - JWA                                                                   
+*    JWACMD,JWACMDL - COMMAND BUFFER                                            
+*    JWABLKB - BLANK SHADOW BUFFER                                              
+*                                                                               
+DOBLKB   PROC  ,                                                                
+         USING JWA,R6                                                           
+*                                                                               
+         COMMENT                   ZERO OUT NON MARKED STUFF                    
+         L     R2,JWACMD                                                        
+         L     R3,JWACMDL                                                       
+         LA    R4,JWABLKB                                                       
+         DEX   R3,' NC @R2(0),@R4 '                                             
+*                                                                               
+         COMMENT                   BLANK ZEROS                                  
+         L     R2,JWACMD                                                        
+         L     R3,JWACMDL                                                       
+         AR    R3,R2                                                            
+         WHILE (R2,LT,R3),BEGIN                                                 
+         IF    (@R2,EQ,0),BEGIN                                                 
+         MVI   @R2,C' '                                                         
+         END                                                                    
+         INCR  R2                                                               
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'JES Interface Commands'                                         
+*box                                                                            
+*                                                                               
+*  JESCMD -- Ship the current command to JES.                                   
+*                                                                               
+*  JESSND -- Ship the command pointed to by R1, with len in R0,                 
+*            and if R15 is not zero the command will be scanned.                
+*                                                                               
+*  JESRTN -- Same as "JESSND", but return to caller is made.                    
+*                                                                               
+JESCMD   XPROC ,                                                                
+         ACALL JESOK               Make sure JES is ok                          
+*-                                                                              
+*-       For JPRINT only:  add printer type.                                    
+*-                                                                              
+         IF    (CPCMNM,EQ,'JPR'),BEGIN  JPRINT...                               
+         IF    (CPCMDLEN,GE,=Y(L'CPCMD-20)),EXIT  Too long already              
+         XPUSH ,,L'CPCMD,PTR=R4                                                 
+         MVC   @R4(L'CPCMD),CVBLANKS  Pre-blank new command area                
+*                                                                               
+         XPUSH ,,L'SEGCB,PTR=R3                                                 
+         WITH  (SEGCB,R3),BEGIN                                                 
+         SEGINIT (R4),L'CPCMD,(R3)  Set up seg buffer                           
+         SEGTB CPCMD,LH:CPCMDLEN   Add old command                              
+         SEG   'PRINTER='          Printer=                                     
+         XPUSH ,,&LINESZ,PTR=R1                                                 
+         LA    R0,&LINESZ                                                       
+         LA    R2,=CL16'SYS.LPRINTER'                                           
+         VCALL GETDATA             Get lprinter info                            
+         IF    (Z,AND,(R0,POS)),BEGIN  We have something...                     
+         SEG   (R1),(R0)           Lprinter name & info                         
+         MVC   CPCMDLEN,SEGCBLENF+2  Set cmd length                             
+         MVC   CPCMD,@R4           Move in modified command                     
+         END                                                                    
+         XPOP  ,,&LINESZ                                                        
+         END                                                                    
+         XPOP  ,,L'SEGCB                                                        
+         SEGDEF  DUMMY             (Safety)                                     
+         XPOP  ,,L'CPCMD                                                        
+         END                                                                    
+*                                                                               
+*                                                                               
+         SETMSG CPCMD,LH:CPCMDLEN  Current command                              
+         CEIL  R0,HCBTEXTL         Not too long for JES                         
+         STH   R0,CPCMDLEN         Save len                                     
+         LA    R15,8               Flag command to be scanned                   
+*                                                                               
+         ACALL JESRTN                                                           
+*                                                                               
+         BZ    CVNEXT              Normal                                       
+         BP    CVERROR             Error                                        
+*-                                                                              
+*-       Negative return code means JES died.                                   
+*-                                                                              
+         BASE                                                                   
+         BASE  BASE                                                             
+         TSEG  'Unable to send '                                                
+         TSEG  CVJES,,T                                                         
+         ABORT ' command, path not active.',,JESDOWN                            
+         PEND  ,                                                                
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESCMD -- Ship the current command to JES.                                   
+*                                                                               
+*  JESSND -- Ship the command pointed to by R1, with len in R0,                 
+*            and if R15 is not zero the command will be scanned.                
+*                                                                               
+*  JESRTN -- Same as "JESSND", but return to caller is made.                    
+*                                                                               
+*                                                                               
+*                                                                               
+JESSND   XPROC ,                                                                
+*                                                                               
+         ACALL JESRTN                                                           
+*                                                                               
+         BZ    CVNEXT              Normal                                       
+         BP    CVERROR             Error                                        
+*-                                                                              
+*-       Negative return code means JES died.                                   
+*-                                                                              
+         BASE                                                                   
+         BASE  BASE                                                             
+         TSEG  'Unable to send '                                                
+         TSEG  CVJES,,T                                                         
+         ABORT ' command, path not active.',,JESDOWN                            
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESCMD -- Ship the current command to JES.                                   
+*                                                                               
+*  JESSND -- Ship the command pointed to by R1, with len in R0,                 
+*            and if R15 is not zero the command will be scanned.                
+*                                                                               
+*  JESRTN -- Same as "JESSND", but return to caller is made.                    
+*                                                                               
+*                                                                               
+JESRTN   XPROC JWA                                                              
+         LR    R2,R15              Save flag reg                                
+         LA    R6,JWA                                                           
+         USING JWA,R6                                                           
+         ST    R6,CPJWA                                                         
+*                                                                               
+         ACALL JWAINIT             Set up JES work area                         
+         IF    (R2,NZ),'SET JWAFSCAN'  command should be scanned                
+         IF    JWAFSCAN,BEGIN      Scan cmd for wyl options...                  
+         SCINIT L:JWACMD,L:JWACMDL                                              
+         SCAN  ,                   (command)                                    
+         SCANCHK                                                                
+         ACALL MARKBLKB                                                         
+         SCAN  ,                   (jobname)                                    
+         SCANCHK                                                                
+         ACALL MARKBLKB                                                         
+         SCAN  WYLPRT              Command options                              
+         SCANCHK                                                                
+         ACALL DOBLKB              Blank out non-JES options                    
+         END                                                                    
+*                                                                               
+         ACALL CHKKEY                                                           
+*                                                                               
+         ACALL JESIOPN             Open JES path                                
+         ACALL JESCOM              Send command to JES                          
+         IF    NZ,'LH R15,=H"-4"; B JESEXIT'  Trouble                           
+*-                                                                              
+*-       Main command response loop.                                            
+*-                                                                              
+JESLOOP  TSTAT                                                                  
+         BNZ   JESDONE             Attn, scram                                  
+*                                                                               
+         ACALL JESRD               Get a response line                          
+         BNZ   JESDONE             All done, scram                              
+         IF    JWAFSQSH,'VCALL SQSHRTN'  Remove mult blanks                     
+*                                                                               
+         IF    JWAFLG2.HRBBUF,BEGIN  Edit buffer...                             
+         ABORT 'Command may not change the ACTIVE file.'                        
+         END                                                                    
+*                                                                               
+         IF    JWAFLG2.HRBPRINT,BEGIN  Local print line...                      
+         SET   CPFNMOD,CPFNPAU,CPFCLEAN   First time only                       
+*                                                                               
+         CLEAR R2                  Assume not QUIET                             
+         IF    CPFQUIET,'LA R2,1; CLEAR CPFQUIET'  Reset temporarily            
+*                                                                               
+         IF    ^JWAFLPR,BEGIN      First time...                                
+         IF    CPSFSAM,BEGIN       Only for Samson...                           
+         XPUSH R0,R1                                                            
+         TSEG  DOCSTART            Start of document                            
+         XPOP  R0,R1                                                            
+         END                                                                    
+*                                                                               
+         SET   JWAFLPR             We have local printer data                   
+         END                                                                    
+*                                                                               
+         XPUSH R0,R1                                                            
+         TSEG  PRON                Turn printer on                              
+         XPOP  R0,R1                                                            
+         TSEG  (R1),(R0)           Print line text                              
+         TSEG  PROFF               Turn printer off                             
+         TMARK                                                                  
+*                                                                               
+         IF    (R2,NZ),'SET CPFQUIET'  Restore QUIET                            
+         B     JESLOOP                                                          
+         END                                                                    
+*-                                                                              
+*-       Write line of output to the terminal.                                  
+*-                                                                              
+         IF    CPFQUIET,JESLOOP    Don't seg text if QUIET                      
+*                                                                               
+         LR    R2,R1                                                            
+         AR    R2,R0                                                            
+         DECR  R2                                                               
+         IF    (R0,POS),BEGIN      Check last character for X'0D'...            
+         IF    (@R2,NE,X'0D'),EXIT                                              
+         TSEG  (R1),(R0)                                                        
+         TMARK                                                                  
+         B     JESLOOP                                                          
+         END                                                                    
+*                                                                               
+         TSEG  (R1),(R0),CR        Go buffer line                               
+         B     JESLOOP                                                          
+*                                                                               
+*                                                                               
+JESDONE  CLEAR R15                                                              
+         IF    JWAFLG2.HRBERSYN,'LA R15,4; B JESEXIT'  Syntax error             
+         IF    JWAFLG2.HRBERSEM,BEGIN  Semantic error...                        
+         IF    (CPCMNM,EQ,'LOC'),EXIT  No error if LOCATE                       
+         IF    (CPCMNM,EQ,'SHO'),EXIT  No error if SHOW STATUS, etc.            
+         LA    R15,4               Return error code                            
+         END                                                                    
+*                                                                               
+JESEXIT  XPUSH R15                                                              
+*-                                                                              
+*-       If the printer was ever turned on, then turn it off at the             
+*-         end of the command.  Even if it has already been turned              
+*-         off; a BREAK/ATTN may have stopped the output before the             
+*-         printer off sequence was actually written.                           
+*-                                                                              
+         IF    JWAFLPR,BEGIN       Printer may still be on...                   
+         L     R5,CVCURJCB                                                      
+         WITH  (JCB,R5)                                                         
+*                                                                               
+         CLEAR R2                  Assume not QUIET                             
+         IF    CPFQUIET,'LA R2,1; CLEAR CPFQUIET'  Reset temporarily            
+*                                                                               
+         TWRITE                                                                 
+*                                                                               
+         CLEAR R3                  Assume no ATTN                               
+         IF    JCBFATTN,'LA R3,1'  Reset temporarily                            
+*                                                                               
+         LA    R4,5                Try five times then give up                  
+         WHILE (R4,POS),BEGIN                                                   
+         CLEAR JCBFATTN            Reset temporarily                            
+         TSEG  PROFF               Turn printer off                             
+*                                                                               
+         IF    CPSFSAM,BEGIN       Only for Samson...                           
+         XPUSH R0,R1                                                            
+         TSEG  DOCEND              End of document                              
+         XPOP  R0,R1                                                            
+         END                                                                    
+*                                                                               
+         TMARK                                                                  
+         TWRITE                                                                 
+         IF    Z,EXIT              Fine, scram                                  
+         DECR  R4                                                               
+         END                                                                    
+*                                                                               
+         IF    (R3,NZ),'SET JCBFATTN'  Reset ATTN setting                       
+*                                                                               
+         IF    (R2,NZ),'SET CPFQUIET'  Restore QUIET setting                    
+*                                                                               
+         CLEAR CPFNMOD,CPFNPAU,CPFCLEAN  Reset LPRINT flags                     
+         END                                                                    
+*                                                                               
+         L     R5,CVCURJCB                                                      
+         WITH  (JCB,R5),'IF JCBRHSPI,"ACALL JESICLS"'                           
+*                                                                               
+         XPOP  R15                                                              
+         PEND  ,                                                                
+*                                                                               
+DOCSTART DC    X'27AD4CF589'       ESC [ < 5 i                                  
+DOCEND   DC    X'27AD4CF48911'     ESC [ < 4 i XON                              
+PRON     DC    X'27ADF589'         ESC [ 5 i                                    
+PROFF    DC    X'27ADF48911'       ESC [ 4 i XON                                
+*                                                                               
+WYLPRT   SCKW  ,V(COLLPSH),PUSH                                                 
+         SCKW  ,V(QUIETPSH),PUSH                                                
+         SCKW  ACCOUNT,JACCTINFO,A                                              
+         SCKW  ACCT,JACCTINFO                                                   
+         SCKW  USER,JACCTINFO,A                                                 
+         SCKW  USR,JACCTINFO                                                    
+         SCKW  GROUP,JACCTINFO,A                                                
+         SCKW  GRP,JACCTINFO                                                    
+         SCKW  ,NOTRKW                                                          
+*                                                                               
+JACCTPRT SCKW  ACCOUNT,JACCT,(A,P)                                              
+         SCKW  ACCT,JACCT,P                                                     
+         SCKW  USER,JUSER,(A,P)                                                 
+         SCKW  USR,JUSER,P                                                      
+         SCKW  GROUP,JGROUP,(A,P)                                               
+         SCKW  GRP,JGROUP,P                                                     
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+NOTRKW   PROC  ,                   Not our keyword, send to JES                 
+         ACALL MARKBLKB            (ie. dont blank)                             
+         PEND  ,                                                                
+*                                                                               
+JACCTINFO PROC  ,                                                               
+*                                                                               
+         COMMENT                   CALC R1,R0 - LOC LEN OF                      
+         COMMENT ,                 'XXX=nnn' STRING                             
+         LR    R2,R1                                                            
+         SCAN  ,                                                                
+         SCANCHK ,                                                              
+         AR    R0,R1                                                            
+         LR    R1,R2                                                            
+         SR    R0,R1                                                            
+*                                                                               
+         COMMENT                   PASS 'XXX=nnn' TO JES TOO                    
+         ACALL MARKBLKB            (IE. DON'T BLANK)                            
+*                                                                               
+         COMMENT                   SCAN ACCOUNT STUFF                           
+         SCPUSH                                                                 
+         SCINIT (R1),(R0)                                                       
+         SCAN  JACCTPRT                                                         
+         SCANCHK                                                                
+         SCPOP                                                                  
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+JACCT    PROC  ,                                                                
+         ACALL MARKBLKB            Dont blank, send to JES                      
+         SCUPTOK (R1)                                                           
+         IF    (R0,NE,6),'VCALL NOTVALID'                                       
+         IF    ((@R1+2,EQ,'.'),OR,(@R1+2,EQ,'$')),BEGIN                         
+         MVC   HCBUSER3+3(2),@R1   "gg"                                         
+         MVC   HCBUSER3(3),@R1+3   "uuu"                                        
+         B     JACCDONE                                                         
+         END                                                                    
+         IF    (@R1+3,EQ,'$'),BEGIN  Old uuu$gg format...                       
+         MVC   HCBUSER3(3),@R1                                                  
+         MVC   HCBUSER3+3(2),@R1+4                                              
+         B     JACCDONE                                                         
+         END                                                                    
+         VCALL NOTVALID                                                         
+JACCDONE LABEL ,                                                                
+         PEND  ,                                                                
+*                                                                               
+JUSER    PROC  ,                                                                
+         ACALL MARKBLKB            Dont blank, send to JES                      
+         SCUPTOK (R1)                                                           
+         MVC   HCBUSER3(3),CPSUSER                                              
+         IF    (@R1,EQ,'&&'),BEGIN                                              
+         LA    R1,@R1+1                                                         
+         BCT   R0,JUSER2                                                        
+         B     JUSRDONE                                                         
+         END                                                                    
+JUSER2   IF    (R0,NE,3),'VCALL NOTVALID'                                       
+         MVC   HCBUSER3(3),@R1                                                  
+JUSRDONE LABEL ,                                                                
+         PEND  ,                                                                
+*                                                                               
+JGROUP   PROC  ,                                                                
+         ACALL MARKBLKB            Dont blank, send to JES                      
+         SCUPTOK (R1)                                                           
+         MVC   HCBUSER3+3(2),CPSGRP                                             
+         IF    (@R1,EQ,'@'),BEGIN                                               
+         LA    R1,@R1+1                                                         
+         BCT   R0,JGROUP2                                                       
+         B     JGRPDONE                                                         
+         END                                                                    
+JGROUP2  IF    (R0,NE,2),'VCALL NOTVALID'                                       
+         MVC   HCBUSER3+3(2),@R1                                                
+JGRPDONE LABEL ,                                                                
+         PEND                                                                   
+         SPACE 3                                                                
+*                                                                               
+* ??                                                                            
+*                                                                               
+CHKKEY   PROC  ,                  Hcbuser3 needs kw check                       
+         IF    (HCBUSER3,NZ),BEGIN                                              
+         OC    HCBUSER3(3),HCBUSER3                                             
+         IF    Z,'MVC HCBUSER3(3),CPUSERSV'                                     
+         OC    HCBUSER3+3(2),HCBUSER3+3                                         
+         IF    Z,'MVC HCBUSER3+3(2),CPGRPSV'                                    
+         IF    (CPCMNM,EQ,'LOC'),EXIT  no kw check for locate                   
+         XPUSH ,,L'KWR,PTR=R1                                                   
+         WITH  (KWR,R1),BEGIN                                                   
+         CLEAR KWR                                                              
+         MVC   KWRUSER(5),HCBUSER3                                              
+         IF    ('CLC KWRUSER(5),CPSUSER',NE),BEGIN                              
+         CLEAR R0                  Normal options                               
+         ACALL JOBKWCHK            Check keyword                                
+         END                                                                    
+         XPOP  ,,L'KWR                                                          
+         END                                                                    
+         END                                                                    
+         PEND  ,                                                                
+         DROP  R6                                                               
+         SPACE 2                                                                
+         QLTORG                                                                 
+         TITLE 'JES Work Area Initialization Routine'                           
+*                                                                               
+*  Set up account and scanner fields.                                           
+*                                                                               
+*  We set up to scan from a buffer different from                               
+*  WYLBURS command buffer.  We blank out certain WYLBUR                         
+*  options so that they are not passed to JES.  For                             
+*  example all the 'collect options' are blanked so                             
+*  that JES does not have to ignore options that it knows                       
+*  nothing about.  The options are blanked in the JES buffer                    
+*  and not in the WYLBUR buffer.                                                
+*                                                                               
+*  ON ENTRY:                                                                    
+*        R1,R0 - Command loc, len                                               
+*        R6 = JWA pointer                                                       
+*                                                                               
+*                                                                               
+JWAINIT  PROC                                                                   
+*                                                                               
+         FAIL  (R6,Z),NOJWA,'FETCH/LOCATE INTERFACE ERROR'                      
+         USING JWA,R6                                                           
+         CLEAR JWADATA                                                          
+*                                                                               
+         XPUSH R0,R1                                                            
+*                                                                               
+         MVC   HCBIFLGS,CPSKIFL    Copy initial flags                           
+         MVC   HCBAFLGS,CPSKAFL    Copy account flags                           
+         L     R5,CVCURJCB         Get current (my) JCB                         
+         WITH  (JCB,R5),'MVC HCBID,JCBSEQ'  use seq as id in HCB                
+         MVC   HCBFGBL,CPJESHFL    Move in default JES mode flgs                
+         MVC   HCBUSER1(5),CPSACCT  Move in signon user & group                 
+         IF    (CPSACCT,Z),'MVC HCBUSER1(5),=C"*****"'  Dummy userid            
+         IF    CPGFLG3.CPFKWENT,BEGIN  Password on saved acct...                
+         MVC   HCBUSER2(5),CPUSERSV  Move in saved usr & grp                    
+         END                                                                    
+         IF    (CPCMNM,EQ,'LPR'),'MVC HCBUSER2(5),CVWYLACC'  LPRINT             
+*                                                                               
+         MVC   HCBJOBNM,CPJOBS     Move in jobno's                              
+         OI    HCBFLAGS,HCBJOBNO     and indicate that to JES                   
+*                                                                               
+         COMMENT                   SET UP CMD SCAN BUFFER                       
+         XPOP  R0,R1                                                            
+         CEIL  R0,HCBTEXTL         Not too long                                 
+         STH   R0,HCBLEN           Store length of HCBTEXT                      
+         LTR   R4,R0               Has the scan completed?                      
+         BNP   HCBMVCSK            Yes - skip command move                      
+         DEX   R4,'MVC HCBTEXT(0),@R1'  move in command                         
+HCBMVCSK ST    R0,JWACMDL          Save length                                  
+         AH    R0,=AL2(HCBTEXT-HRDWSTRT)  bump for fixed stuff                  
+         STH   R0,HRDWLEN          Save xact len in rdw                         
+         LA    R1,HCBTEXT          Start of text                                
+         ST    R1,JWACMD           Save that also                               
+JWAINITX LABEL ,                   Return                                       
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'SET/SHOW JES Commands'                                          
+JESWA    RECORD BEGIN                                                           
+JESOFLG  FLAG                                                                   
+         FLAG  JESFOP              - at least one option specified              
+         FLAG  JESFSYS             - system request                             
+*-                                                                              
+*-       JESINF is a copy of CPJESINF in the control page.                      
+*-                                                                              
+         DS    0F                                                               
+JESHFL   FLAG                                                                   
+         FLAG  JESTER              - JES terse mode                             
+         FLAG  JESFPRIV            - Privd jes use allowed                      
+*                                                                               
+JESFLGX  FLAG                                                                   
+         FLAG  JESFNRUN            - Norun                                      
+         FLAG  JESFHOLD            - Hold                                       
+         FLAG  JESFXHLD            - Xhold                                      
+         FLAG  JESFNTFY            - Notify                                     
+         FLAG  JESFFRCE            - Force                                      
+         FLAG  JESFNOPT            - Numbering options explicit                 
+         FLAG  JESFUNN             - Unnumbered                                 
+         FLAG  JESFDBUG            - Debug                                      
+*                                                                               
+JESJSYS  DS    CL8                 Sysaff                                       
+JESJDEST DS    CL8                 Destination                                  
+JESJBIN  DS    CL3                 Bin                                          
+JESJFORM DS    CL8                 Forms                                        
+*                                                                               
+JESFLGY  FLAG  ,                                                                
+         FLAG  JESFNTFX            - Notify option explict                      
+         FLAG  JESFHOLX            - Hold print option explicit                 
+         FLAG  JESFXHOX            - Hold execution option explicit             
+*                                                                               
+         DS    XL3                 Reserved                                     
+JESJPFX  DS    CL8                 Job prefix                                   
+JESJNO   DS    H                   User job count                               
+JESNACCT DS    CL5                 Notify account                               
+JESINF   EQU   JESHFL,*-JESHFL,C'X'                                             
+*                                                                               
+         DS    0SL2(L'JESINF-L'CPJESINF,L'CPJESINF-L'JESINF)  Verify            
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  SETJES -- SET JES command.                                                   
+*                                                                               
+SETJES   XPROC JESWA                                                            
+         LA    R6,JESWA                                                         
+         USING JESWA,R6                                                         
+         CLEAR JESWA                                                            
+*                                                                               
+         MVC   JESINF,CPJESINF     Copy of JES options                          
+         SCAN  JESPRT                                                           
+         SCANCHK                                                                
+         IF    JESFSYS,BEGIN       System option...                             
+         TSEG  'Job submission has been',,B                                     
+         SETMSG 'enabled.'                                                      
+         IF    JESFNRUN,'SETMSG "disabled."'                                    
+         TSEG  (R1),(R0),WR                                                     
+*                                                                               
+         SEG   'Job submission',,L:CVWTOSGP                                     
+         SETMSG 'enabled'                                                       
+         IF    JESFNRUN,'SETMSG "disabled"'                                     
+         SEG   (R1),(R0)                                                        
+         SEG   ' by '                                                           
+         SEG   CPSGRP                                                           
+         SEG   '.'                                                              
+         SEG   CPSUSER                                                          
+         XWTO                                                                   
+*                                                                               
+         CLEAR CPJFNRUN            Make sure user run is set                    
+         CLEAR CVJFNRUN                                                         
+         IF    JESFNRUN,'SET CVJFNRUN'                                          
+         B     CVNEXT                                                           
+         END                                                                    
+*                                                                               
+         IF    CPLFLG5.CPFFOPT,BEGIN                                            
+         SET   JESFOP,JESFNOPT                                                  
+         CLEAR JESFUNN                                                          
+         IF    CPLFLG5.CPFUNUM,'SET JESFUNN'                                    
+         END                                                                    
+*                                                                               
+         IF    ^JESFOP,'CLEAR JESINF; SET JESFFRCE; MVC JESJNO,=H"-1"'          
+*                                                                               
+         MVC   CPJESINF,JESINF     Set new JES stuff                            
+         B     CVNEXT                                                           
+         PEND                                                                   
+         EJECT                                                                  
+JESPRT   SCKW  TERSE,JESTERSE,A                                                 
+         SCKW  VERBOSE,JESVERB,A                                                
+         SCKW  RUN,JESRUN                                                       
+         SCKW  NORUN,JESNRUN,A                                                  
+         SCKW  HOLD,JESHOLD,A                                                   
+         SCKW  NOHOLD,JESNHOLD,A                                                
+         SCKW  XHOLD,JESXHOLD,A                                                 
+         SCKW  NOXHOLD,JESNXHLD,A                                               
+         SCKW  NOTIFY,JESNTFY,A                                                 
+         SCKW  NONOTIFY,JESNONT,A                                               
+         SCKW  SYSAFF,JESSYS,(A,P)                                              
+         SCKW  DESTINATION,JESDEST,(A,P)                                        
+         SCKW  BIN,JESBIN,(A,P)                                                 
+         SCKW  FORMS,JESFORMS,(A,P)                                             
+         SCKW  PREFIX,JESPFX,(A,P)                                              
+         SCKW  NOPREFIX,JESNOPRE,A                                              
+         SCKW  COUNT,JESCOUNT,(A,P,I),32767                                     
+         SCKW  DEBUG,JESDEBUG,A                                                 
+         SCKW  NODEBUG,JESNOBUG,A                                               
+         SCKW  SUBMIT,JESSKIP,A    Ignored -- compatability                     
+         SCKW  CHECK,JESSKIP,A     Ignored -- compatability                     
+         SCKW  CHK,JESSKIP,A       Ignored -- compatability                     
+         SCKW  NOCHECK,JESSKIP,A   Ignored -- compatability                     
+         SCKW  NOCHK,JESSKIP       Ignored -- compatability                     
+         SCKW  OUTPUT,JESSKIP,A    Ignored -- compatability                     
+         SCKW  JOBNAME,JESJOBNM    Compatability                                
+         SCKW  ANY,JESJANY         Compatability                                
+         SCKW  JOBNUMBER,JESJOB,(A,P,I),32767                                   
+         SCKW  SYSTEM,JESSYST,A                                                 
+         SCKW  PRIVILEGE,JESPRIV,A                                              
+         SCKW  NOPRIVILEGE,JESNPRIV,A                                           
+         SCKW  ,V(NUMPSH),PUSH                                                  
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+JESSKIP  PROC  ,                                                                
+         SET   JESFOP                                                           
+         PEND                                                                   
+*                                                                               
+JESTERSE PROC  ,                                                                
+         SET   JESFOP,JESTER                                                    
+         PEND                                                                   
+*                                                                               
+JESVERB  PROC  ,                                                                
+         SET   JESFOP,(JESTER,OFF)                                              
+         PEND                                                                   
+*                                                                               
+JESRUN   PROC  ,                                                                
+         SET   JESFOP,(JESFNRUN,OFF)                                            
+         PEND                                                                   
+*                                                                               
+JESNRUN  PROC  ,                                                                
+         SET   JESFOP,JESFNRUN                                                  
+         PEND                                                                   
+*                                                                               
+JESHOLD  PROC  ,                                                                
+         SET   JESFOP,JESFHOLD,JESFHOLX                                         
+         PEND                                                                   
+*                                                                               
+JESNHOLD PROC  ,                                                                
+         SET   JESFOP,(JESFHOLD,OFF),JESFHOLX                                   
+         PEND                                                                   
+*                                                                               
+JESXHOLD PROC  ,                                                                
+         SET   JESFOP,JESFXHLD,JESFXHOX                                         
+         PEND                                                                   
+*                                                                               
+JESNXHLD PROC  ,                                                                
+         SET   JESFOP,(JESFXHLD,OFF),JESFXHOX                                   
+         PEND                                                                   
+*                                                                               
+JESNTFY  PROC  ,                                                                
+         SET   JESFOP,JESFNTFY,JESFNTFX                                         
+         ACALL JESNCOM                                                          
+         PEND  ,                                                                
+*                                                                               
+JESNONT  PROC  ,                                                                
+         SET   JESFOP,(JESFNTFY,OFF),JESFNTFX                                   
+         ACALL JESNCOM                                                          
+         PEND  ,                                                                
+*                                                                               
+JESNCOM  PROC  ,                                                                
+         CLEAR JESNACCT                                                         
+         SCAN                                                                   
+         SCANCHK                                                                
+         IF    (R0,NZ),BEGIN                                                    
+         IF    (R0,NE,6),EXIT                                                   
+         IF    (@R1+2,EQ,'.'),BEGIN  gg.uuu...                                  
+         MVC   JESNACCT(3),@R1+3                                                
+         MVC   JESNACCT+3(2),@R1                                                
+         B     JCOMDONE                                                         
+         END                                                                    
+         IF    (@R1+3,EQ,'$'),BEGIN  uuu$gg...                                  
+         MVC   JESNACCT(3),@R1                                                  
+         MVC   JESNACCT+3(2),@R1+4                                              
+         B     JCOMDONE                                                         
+         END                                                                    
+         END                                                                    
+         SCBKUP                                                                 
+JCOMDONE LABEL ,                                                                
+         CLEAR R15                                                              
+         PEND                                                                   
+*                                                                               
+JESSYS   PROC  ,                                                                
+         SET   JESFOP                                                           
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),'VCALL NOTVALID'                 
+         IF    (@R1,EQ,'('),'VCALL NOTVALID'                                    
+         IF    (R0,GT,L'JESJSYS),'VCALL NOTVALID'                               
+*                                                                               
+         SCUPTOK (R1)                                                           
+         MVC   JESJSYS,@R1                                                      
+         CLEAR R15                                                              
+         PEND  ,                                                                
+*                                                                               
+JESDEST  PROC  ,                                                                
+         SET   JESFOP                                                           
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),'VCALL NOTVALID'                 
+         IF    (@R1,EQ,'('),'VCALL NOTVALID'                                    
+         IF    (R0,GT,L'JESJDEST),'VCALL NOTVALID'                              
+         SCUPTOK (R1)                                                           
+         MVC   JESJDEST,@R1                                                     
+         LA    R1,JESJDEST                                                      
+         ACALL DESTVER             Check dest                                   
+         CLEAR  R15                                                             
+         PEND                                                                   
+*                                                                               
+JESBIN   PROC  ,                                                                
+         SET   JESFOP                                                           
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),'VCALL NOTVALID'                 
+         IF    (@R1,EQ,'('),'VCALL NOTVALID'                                    
+         IF    (R0,GT,L'JESJBIN),'VCALL NOTVALID'                               
+         SCUPTOK (R1)                                                           
+         MVC    JESJBIN,@R1                                                     
+         CLEAR  R15                                                             
+         PEND                                                                   
+*                                                                               
+JESFORMS PROC  ,                                                                
+         SET   JESFOP                                                           
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),'VCALL NOTVALID'                 
+         IF    (@R1,EQ,'('),'VCALL NOTVALID'                                    
+         IF    (R0,GT,L'JESJFORM),'VCALL NOTVALID'                              
+         SCUPTOK (R1)                                                           
+         MVC   JESJFORM,@R1                                                     
+         IF    (JESJFORM,EQ,'SEL'),BEGIN                                        
+         TSEG  'SELF is not a forms code.  '                                    
+         ERROR 'Use DEST=SELF for the self-service printer.'                    
+         END                                                                    
+         CLEAR  R15                                                             
+         PEND                                                                   
+*                                                                               
+JESPFX   PROC  ,                                                                
+         SET   JESFOP                                                           
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),'VCALL NOTVALID'                 
+         IF    (@R1,EQ,'('),'VCALL NOTVALID'                                    
+         IF    (R0,GT,L'JESJPFX),'VCALL NOTVALID'                               
+         SCUPTOK (R1)                                                           
+         MVC   JESJPFX,@R1                                                      
+         VCALL CHARCHKA                                                         
+         IF    POS,BEGIN           Bad chars in prefix...                       
+         TSEG  (R1),(R0)                                                        
+         ERROR ': invalid characters in prefix.',,INVCHARS                      
+         END                                                                    
+         CLEAR  R15                                                             
+         PEND  ,                                                                
+*                                                                               
+JESNOPRE PROC  ,                                                                
+         SET   JESFOP                                                           
+         CLEAR JESJPFX             Clear the jobname prefix                     
+         PEND                                                                   
+*                                                                               
+JESCOUNT PROC  ,                                                                
+         SET   JESFOP                                                           
+         STH   R0,JESJNO                                                        
+         PEND                                                                   
+*                                                                               
+JESDEBUG PROC  ,                                                                
+         SET   JESFOP,JESFDBUG                                                  
+         PEND                                                                   
+*                                                                               
+JESNOBUG PROC  ,                                                                
+         SET   JESFOP,(JESFDBUG,OFF)                                            
+         PEND                                                                   
+*                                                                               
+JESJOBNM PROC  ,                                                                
+         SET   JESFOP,JESFFRCE                                                  
+         PEND                                                                   
+*                                                                               
+JESJANY  PROC  ,                                                                
+         SET   JESFOP,(JESFFRCE,OFF)                                            
+         PEND                                                                   
+*                                                                               
+JESJOB   PROC  ,                                                                
+         SET   JESFOP                                                           
+         CLEAR CPJOBS              Clear the stack                              
+         ST2   R0,CPJOBS          Stack the job number                          
+         PEND                                                                   
+*                                                                               
+JESSYST  PROC  ,                                                                
+         IF    ^CPSFOPR,'VCALL NOTVALID'                                        
+         SET   JESFSYS                                                          
+         PEND                                                                   
+*                                                                               
+JESPRIV  PROC  ,                                                                
+         IF    ^CPSFSPR,'VCALL NOTVALID'                                        
+         SET   JESFOP,JESFPRIV     Allow JES function if priv'd                 
+         PEND                                                                   
+*                                                                               
+JESNPRIV PROC  ,                                                                
+         IF    ^CPSFSPR,'VCALL NOTVALID'                                        
+         SET   JESFOP,(JESFPRIV,OFF)  Disallow priv'd JES function              
+         PEND                                                                   
+*                                                                               
+         DROP  R6                                                               
+         TITLE 'SHOW JES Command'                                               
+*box                                                                            
+*                                                                               
+*  SHOWJES -- SHOW JES command.                                                 
+*  JESDISP - Subroutine (called by SHOW OPTIONS).                               
+*                                                                               
+SHOWJES  XPROC                                                                  
+         VCALL COLLOPTS            Allow collect options                        
+         ACALL JESDISP                                                          
+         ACALL JESDISP2            Display any job numbers                      
+         B     CVNEXT                                                           
+         PEND  ,                                                                
+         SPACE 2                                                                
+JESDISP  XPROC                                                                  
+         IF    CPJFDBUG,'TSEG "DEBUG "'                                         
+         IF    CPJFPRIV,'TSEG "PRIVILEGED "'                                    
+         SETMSG 'VERBOSE '                                                      
+         IF    CPJFTER,'SETMSG "TERSE "'                                        
+         TSEG  (R1),(R0)                                                        
+*                                                                               
+         IF    CPJFNRUN,'TSEG "NO"'                                             
+         TSEG  'RUN '                                                           
+*                                                                               
+         IF    CPJFNTFX,BEGIN                                                   
+         IF    ^CPJFNTFY,'TSEG "NO"'                                            
+         TSEG  'NOTIFY'                                                         
+         IF    (CPJNACCT,NZ),BEGIN                                              
+         TSEG  '='                                                              
+         TSEG  CPJNACCT+3,2        Gg                                           
+         TSEG  '.'                                                              
+         TSEG  CPJNACCT,3          Uuu                                          
+         END                                                                    
+         TSEG  CVBLANKS,1                                                       
+         END                                                                    
+*                                                                               
+         IF    CPJFHOLX,BEGIN                                                   
+         IF    ^CPJFHOLD,'TSEG "NO"'                                            
+         TSEG  'HOLD',,B                                                        
+         END                                                                    
+*                                                                               
+         IF    CPJFXHOX,BEGIN                                                   
+         IF    ^CPJFXHLD,'TSEG "NO"'                                            
+         TSEG  'XHOLD',,B                                                       
+         END                                                                    
+*                                                                               
+         IF    ^CPJFFRCE,'TSEG "JOBNAME=ANY",,B'                                
+*                                                                               
+         IF    CPJFNOPT,BEGIN                                                   
+         IF    CPJFUNN,'TSEG "UN"'                                              
+         TSEG  'NUMBERED',,B                                                    
+         END                                                                    
+*                                                                               
+         IF    (CPJPFX,NZ),BEGIN                                                
+         TSEG  'PREFIX='                                                        
+         SETMSG CPJPFX                                                          
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),B                                                      
+         END                                                                    
+*                                                                               
+         IF    (CPJNO,NE,-1),BEGIN                                              
+         TSEG  'COUNT='                                                         
+         BTD   CPDOUB,0,LH:CPJNO                                                
+         TSEG  (R1),(R0),B                                                      
+         END                                                                    
+*                                                                               
+         IF    (CPSYSAFF,NZ),'TSEG "SYSAFF="; TSEG CPSYSAFF,,TB'                
+*                                                                               
+         IF    (CPDEST,NZ),'TSEG "DEST="; TSEG CPDEST,,TB'                      
+*                                                                               
+         IF    (CPBIN,NZ),'TSEG "BIN="; TSEG CPBIN,,TB'                         
+*                                                                               
+         IF    (CPFORMS,NZ),'TSEG "FORMS="; TSEG CPFORMS,,TB'                   
+*                                                                               
+         TSEG  '- JES options ('                                                
+         SETMSG CVJES                                                           
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),B                                                      
+         ACALL JESCHK              what's up?                                   
+         SETMSG 'is available.)'                                                
+         IF    CVJFNRUN,'SETMSG "job submission disabled.)"'                    
+         IF    (R15,NZ),'SETMSG "is not active.)"'                              
+         TSEG  (R1),(R0),CR                                                     
+         PEND                                                                   
+         SPACE 4                                                                
+JESDISP2 XPROC                                                                  
+         IF    (CPJOBS,NZ),BEGIN                                                
+         TSEG  'Known JES2 jobnumbers:',,B                                      
+         CLEAR R0,R2,R3            Clear work regs                              
+         UNTIL (R2,GE,4),BEGIN                                                  
+         LA    R15,CPJOBS(R3)      Point to job number                          
+         L2    R4,0(R15)           Load job number                              
+         IF    (R4,Z),EXIT         All done                                     
+         IF    (R0,NZ),'TSEG (R1),(R0),B'  Put out comma                        
+         TSEG  '"*'                Make it "*"                                  
+         IF    (R2,NZ),BEGIN       On all but first ...                         
+         TSEG  '-'                 Make it "*-n"                                
+         BTD   CPDOUB,0,(R2)                                                    
+         TSEG  (R1),(R0)                                                        
+         END                                                                    
+         TSEG  '"='                Make it "*-n="                               
+         BTD   CPDOUB,0,(R4)                                                    
+         TSEG  (R1),(R0)           Make it "*-n=nnnn"                           
+         SETMSG ','                Stage a comma                                
+         INCR  R2                  Skip to next "n"                             
+         LA    R3,2(R3)            Up the stack index                           
+         END                                                                    
+         TWRITE ,                  Put out result                               
+         END                                                                    
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DESTVER -- Routine to verify the validity of the JES destination             
+*    name.                                                                      
+*                                                                               
+*    On entry:                                                                  
+*      R1 - destination name ptr (8 chars)                                      
+*                                                                               
+*    Only returns to caller if ok.                                              
+*                                                                               
+DESTVER  XPROC                                                                  
+         LR    R2,R1                                                            
+         ACALL DESTCHK             Is it ok?                                    
+         IF    NZ,BEGIN            No...                                        
+         TSEG  (R2),8,T                                                         
+         ERROR ' is an unknown destination.',,INVDEST                           
+         END                                                                    
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DESTCHK -- Routine to check validity of JES destination                      
+*    name.                                                                      
+*                                                                               
+*    On entry:                                                                  
+*      R1 - destination name ptr (8 chars), R0 - len (!)                        
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - destination name is known                                            
+*      4 - unknown destination name                                             
+*                                                                               
+DESTCHK  XPROC                                                                  
+         IF    (@R1,EQ,'ENCINA  '),'MVC @R1(8),=CL8"LOCAL"'                     
+         IF    (@R1,EQ,'PINE '),'MVC @R1(8),=CL8"LOCAL"'                        
+*                                                                               
+         MVC   SSOBDEST,CVBLANKS                                                
+         LR    R15,R0                                                           
+         CEIL  R15,8                                                            
+         MOVE  R15,SSOBDEST,@R1    Set DEST in SSOB                             
+         MODESET MODE=SUP          ********                                     
+         VCALL AMODE24             ********                                     
+         LA    R1,SSOBPTR                                                       
+         IEFSSREQ ,                Ask JES if DEST is known                     
+         VCALL AMODE31             ********                                     
+         MODESET MODE=PROB         ********                                     
+         IF    (R15,Z),'L R15,SSOBRET'  Get real return code                    
+         PEND                                                                   
+         SPACE 2                                                                
+         DS    0F                                                               
+SSOBPTR  DC    X'80',AL3(SSOB)                                                  
+*                                                                               
+SSOB     DC    C'SSOB'             SSOB id                                      
+         DC    Y(20)               Header length                                
+         DC    Y(11)               Function id (dest verify)                    
+         DC    A(0)                SSIB address                                 
+SSOBRET  DC    A(*-*)              Return code from subsystem                   
+         DC    A(SSOBEXT)                                                       
+SSOBEXT  DC    Y(16,0,0,0)         SSOB EXTENSION                               
+SSOBDEST DC    CL8' '                                                           
+*                                                                               
+         DROP  BR                                                               
+         TITLE 'Job Access/Password Check Routine'                              
+*box                                                                            
+*                                                                               
+*  JOBKWCHK -- Routine to check job access and verify that the user             
+*     knows the password of the account in the KWR.                             
+*                                                                               
+*     On entry:                                                                 
+*       R0 - options:                                                           
+*              0 = normal                                                       
+*              1 = don't prompt for password ("special")                        
+*       R1 - KWR (complimented if job submission)                               
+*                                                                               
+*     On exit:                                                                  
+*       KWR has been read                                                       
+*                                                                               
+JOBKWCHK XENTER                                                                 
+         LR    R4,R0               Save options                                 
+         LR    R6,R1               Kwr ptr                                      
+         IF    ('LTR R5,R6',NEG),'LCR R6,R6'  Job submission entry              
+         USING KWR,R6                                                           
+         KREAD KWR                                                              
+         IF    ^KWRHFL.KWRHFCK,JOBKW  No kw file, let CHKKW handle              
+         IF    ^KWRIFL.KWRIFVAL,BEGIN                                           
+         TSEG  'Account '                                                       
+         TSEG  KWRGRP                                                           
+         TSEG  '.'                                                              
+         TSEG  KWRUSER                                                          
+         SETMSG ' is not valid.'                                                
+         B     CVABTMSG                                                         
+         END                                                                    
+*                                                                               
+         IF    (R4,NZ),JOBKWX      Don't check account (SPECIAL)                
+*                                                                               
+         IF    ('CLC KWRUSER(5),CPSUSER',EQ),JOBKWX  Access allowed             
+*                                                                               
+         AIF   (NOT &JOBAUTH).AUTH1A                                            
+         IF    (KWRJFL.KWRJFATH,Z),JNOACC  Only user access is allowed          
+.AUTH1A  ANOP                                                                   
+*                                                                               
+         IF    (KWRGRP,EQ,CPSGRP),BEGIN  Check out group access...              
+         IF    CPSFPC,JOBKWX      Don't ask for kw                              
+         B     JOBKW                                                            
+         END                                                                    
+*                                                                               
+         AIF   (NOT &JOBAUTH).AUTH2A                                            
+         IF    KWRJFL.KWRJFCOM,BEGIN  Check communities...                      
+         HASPSERV USERTYPE,CPSACCT  Our community                               
+         IF    (R15,NZ),JOBKW      (No JES)                                     
+         LR    R2,R0               Save usertype                                
+         HASPSERV USERTYPE,KWRUSER Community of acct                            
+         IF    (R15,NZ),JOBKW      (No JES)                                     
+         IF    (R0,EQ,R2),JOBKW    Communities match, fine                      
+         STC   R2,CPDOUB                                                        
+         IF    (CPDOUB.$USINTAL,NZ),BEGIN  Internal user...                     
+         STC   R0,CPDOUB                                                        
+         IF    (CPDOUB.$USINTAL,NZ),JOBKW  Both are internal, fine              
+         END                                                                    
+         B     JNOACC              No access allowed                            
+         END                                                                    
+*                                                                               
+         IF    ^KWRJFL.KWRJFPUB,JNOACC  (Grp access but not his grp)            
+.AUTH2A  ANOP                                                                   
+*                                                                               
+JOBKW  IF (('CLC KWRUSER(5),CPUSERSV',EQ),AND,CPGFLG3.CPFKWENT),JOBKWX          
+*                                                                               
+         IF    (R5,NEG),BEGIN      Write not yours msg...                       
+         TSEG  'Account '                                                       
+         TSEG  KWRGRP                                                           
+         TSEG  '.'                                                              
+         TSEG  KWRUSER                                                          
+         TSEG  ' is not yours.',,CR                                             
+         END                                                                    
+         CLEAR R0                  Standard options                             
+         LA    R1,KWR                                                           
+         LCR   R1,R1               (Flag: KREAD already done)                   
+         VCALL CHKKW               Verify kw, etc.                              
+JOBKWX   XEXIT                                                                  
+*                                                                               
+JNOACC   TSEG  'Job access not permitted for account '                          
+         TSEG  KWRGRP                                                           
+         TSEG  '.'                                                              
+         ABORT KWRUSER,,NOJOBACS                                                
+         DROP  KWR,BR                                                           
+         TITLE 'JES Open Interface Routines'                                    
+*box                                                                            
+*                                                                               
+*  JESOOPN -- Routine to get job submission path.                               
+*                                                                               
+JESOOPN  XPROC                                                                  
+         LA    R1,CVRSUB           Job submission path                          
+         ACALL RSC                                                              
+         ST    R1,CPWK8            Save subrsc ptr                              
+         LR    R6,R1               Subrsc ptr                                   
+         USING SUBRSC,R6                                                        
+         CLEAR SUBBLEN,SUBFEOJ     (Safety)                                     
+*                                                                               
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'SET JCBRHSPS'  We own a sumbit path                   
+         SET   CPRFSUB             Submit path owned                            
+*                                                                               
+         LA    R5,SUBACB                                                        
+         IF    ('ACALL JESCHK',NZ),BEGIN  JES is down...                        
+         CLOSE ((R5))              Shutdown run path                            
+         SETMSG CVJES                                                           
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),B                                                      
+         TSEG  'is not active. ',,B                                             
+         ABORT 'Job submission is not available.',,NORUN                        
+         END                                                                    
+         TM    ACBOFLGS-IFGACB(R5),ACBOPEN   ACB open?                          
+         IF    Z,BEGIN             Time to open run path...                     
+         OPEN  ((R5))                                                           
+         TM    ACBOFLGS-IFGACB(R5),ACBOPEN   ACB open?                          
+         IF    Z,BEGIN                                                          
+         TSEG  'Can''t open submit path.  '                                     
+         ABORT 'Job submission not available.',,NORUN                           
+         END                                                                    
+         SETMSG '/*EOF'            (tidy)                                       
+         ACALL JESWR                                                            
+         END                                                                    
+*                                                                               
+         IF    CVJFNRUN,BEGIN                                                   
+         ABORT 'Job submission has been disabled.',,NOSYSRUN                    
+         END                                                                    
+*                                                                               
+         IF    CPJFNRUN,BEGIN                                                   
+         IF    CPJFPRIV,EXIT                                                    
+         ABORT 'Job submission blocked by user.',,NOUSRRUN                      
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  SUBRSC                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESIOPN - Routine to get a JES command path.                                 
+*                                                                               
+JESIOPN  XPROC                                                                  
+         LT    R6,CPJWA            Get JWA ptr                                  
+         FAIL  Z,NOJWA,'FETCH/LOCATE INTERFACE ERROR'                           
+         USING JWA,R6                                                           
+         LA    R1,CVRHCM           Want a JES command path                      
+         ACALL RSC                 Get it                                       
+         L     R15,CVCURJCB        Our JCB                                      
+         WITH  (JCB,R15),'SET JCBRHSPI'  we own a JES path                      
+         SET   CPRFJES            we own JES resource                           
+         LR    R5,R1                                                            
+         ST    R5,JWAPATHP         Save hcm ptr                                 
+         USING HCMRSC,R5                                                        
+         CLEAR HCMFSENT,HCMWA                                                   
+         ACALL PATHSTAT            Check path                                   
+*TEMP    FAIL  Z,JESERR,'FETCH/LOCATE INTERFACE ERROR'  HMMM                    
+         IF    (R15,EQ,4),BEGIN    Path just closed...                          
+*-                                                                              
+*-       PATHSTAT just re-opened path, wait a sec and check again               
+*-         and the path will most likely have been opened by JES                
+*-         (if not, the user will get a message later on).                      
+*-                                                                              
+         LA    R15,100             Wait 1.00 seconds                            
+         VCALL WAITER              Wait this user                               
+*                                                                               
+         LA    R1,HCMRSC                                                        
+         ACALL PATHSTAT            Process open, we hope                        
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  HCMRSC,JWA                                                       
+         TITLE 'JES Close Interface Routines'                                   
+*box                                                                            
+*                                                                               
+*  JESODEL -- Routine to delete job just submitted and free up                  
+*     the submission path.                                                      
+*                                                                               
+JESODEL  XPROC                                                                  
+         SETMSG '/*PURGE'          (Better than /*DEL???)                       
+         ACALL JESWR               Send it                                      
+         ACALL JESOCLS             Close path                                   
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESOCLS -- Routine to submit job and free up the submission                  
+*     path.                                                                     
+*                                                                               
+*     On exit:                                                                  
+*       R15 - jobno of job just submitted (or zero)                             
+*                                                                               
+JESOCLS  XPROC                                                                  
+         CLEAR R5                  Assume no jobno available                    
+*                                                                               
+         L     R15,CVCURJCB                                                     
+         IF    JCBRHSPS-JCB(R15).JCBRHSPS,BEGIN  We have path...                
+         L     R6,CPWK8            Subrsc ptr                                   
+         WITH  (SUBRSC,R6)                                                      
+*                                                                               
+         LA    R4,SUBACB                                                        
+         TM    ACBOFLGS-IFGACB(R4),ACBOPEN   ACB open?                          
+         IF    O,BEGIN             Yes, tidy up and get jobno...                
+         SET   SUBFEOJ             End of job                                   
+         ACALL SUBWORK             Finish up job                                
+         CLEAR R5                                                               
+         L2    R5,SUBJBNO          Get jobno                                    
+         END                                                                    
+*                                                                               
+         FREERSC SUB               Release submission path                      
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'CLEAR JCBRHSPS'  Reset ownership flag                 
+         CLEAR CPWK8               Zot subrsc ptr                               
+         CLEAR CPRFSUB             We don't own submission path                 
+         END                                                                    
+*                                                                               
+         LR    R15,R5              Jobno                                        
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  JESICLS - Routine to release resource needed for JES commands.               
+*                                                                               
+JESICLS  XPROC                                                                  
+         LT    R6,CPJWA            Get JWA ptr                                  
+         FAIL  Z,NOJWA,'FETCH/LOCATE INTERFACE ERROR'                           
+         USING JWA,R6                                                           
+         LT    R5,JWAPATHP         Pick up path ptr                             
+         FAIL  Z,NOPATH,'FETCH/LOCATE interface error.'                         
+         USING HCMRSC,R5                                                        
+*-                                                                              
+*-       Send disc. post to JES to tell it to stop.                             
+*-                                                                              
+         IF    HCMFSENT,BEGIN      Expecting a reply...                         
+         IF    JWAFLG2.HRBLAST,EXIT  All done, scram                            
+         SCOM  POST,0,HCMPMGC      Discretionary post                           
+         LOOP  'ACALL JESRD; UNTIL NZ'  Keep going till eof                     
+*-                                                                              
+*-       We finally got eof from JES, now continue clean-up.                    
+*-                                                                              
+         CLEAR HCMFSENT            Reset svc issued flag                        
+         END                                                                    
+         LA    R1,HCMRSC                                                        
+         ACALL PATHSTAT            (Clears any new info)                        
+         DROP  HCMRSC                                                           
+         FREERSC HCM               Release JES command path                     
+         L     R15,CVCURJCB        Our JCB                                      
+         WITH  (JCB,R15),'CLEAR JCBRHSPI'  Reset rsc flag                       
+         CLEAR CPRFJES             Don't own JES path any more                  
+         CLEAR JWAPATHP            Clear ptr to path(hcmrsc)                    
+         PEND                                                                   
+         DROP  JWA,BR                                                           
+         TITLE 'Resource Obtain and Wait Routine'                               
+*box                                                                            
+*                                                                               
+*  RSC - Routine to get a RESOURCE (IOWA, HCMPATH, etc).                        
+*                                                                               
+*    On entry:                                                                  
+*      R1 - resource id                                                         
+*                                                                               
+*    On exit:                                                                   
+*      R1 - resource ptr                                                        
+*                                                                               
+RSC      PROC                                                                   
+         XPUSH R1                  Save resource id                             
+         GETRSC (R1),WAIT=NO                                                    
+         IF    NZ,BEGIN            Not immediately avail...                     
+         IF    ^CPFDUMP,BEGIN                                                   
+         XPOP  R1                                                               
+         XPUSH R1                                                               
+         CLEAR R0                                                               
+         IF    (R1,EQ,CVRSUB),'SETMSG "SUBMIT "'                                
+         ELSEIF (R1,EQ,CVRHCM),'SETMSG "JES "'                                  
+         TSEG  (R1),(R0)                                                        
+         TSEG  'queued.',,WR                                                    
+         BNZ   CVERROR                                                          
+         END                                                                    
+         XPOP  R1                                                               
+         GETRSC (R1)               We'll wait                                   
+         BNZ   CVNOACTN            Abort command                                
+         END                                                                    
+         PRETURN (R1)                                                           
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'JES Write (for job submission) Routine'                         
+*box                                                                            
+*                                                                               
+*  JESWR -- Routine to write a line to the JES INTRDR.                          
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc,len                                                     
+*                                                                               
+JESWR    XPROC                                                                  
+*-                                                                              
+*-       In debugging mode simply display the line at the terminal.             
+*-                                                                              
+         IF    CPJFDBUG,BEGIN      Debugging mode...                            
+         CLEAR R2                  Flag: not quiet                              
+         IF    CPFQUIET,'CLEAR CPFQUIET; LA R2,1'  Temporarily clear            
+         TSEG  (R1),(R0),WR        Write line at terminal                       
+         BNZ   CVABORT                                                          
+         IF    (R2,NZ),'SET CPFQUIET'  Restore QUIET                            
+         EXIT  JESWR               Scram                                        
+         END                                                                    
+*-                                                                              
+*-       Send line to JES.                                                      
+*-                                                                              
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),BEGIN                                                  
+         IF    ^JCBRHSPS,BEGIN     Get submit path...                           
+         XPUSH R0,R1                                                            
+         ACALL JESOOPN             Returns only if path obtained                
+         XPOP  R0,R1                                                            
+         END                                                                    
+         END                                                                    
+*                                                                               
+         L     R6,CPWK8            Subrsc ptr                                   
+         WITH  (SUBRSC,R6)                                                      
+*                                                                               
+         LR    R3,R1                                                            
+         LR    R2,R0                                                            
+         CEIL  R2,255              Not too much                                 
+*                                                                               
+         LA    R15,@R2+1                                                        
+         AH    R15,SUBBLEN                                                      
+         IF    (R15,GT,L'SUBBUFR),BEGIN  Buffer overflow...                     
+         ACALL SUBWORK             Submit buffer from subtask                   
+         END                                                                    
+*                                                                               
+         LH    R15,SUBBLEN         Current length                               
+         LA    R1,SUBBUFR(R15)                                                  
+         LA    R15,@R2+1(R15)      New length                                   
+         STH   R15,SUBBLEN                                                      
+         STC   R2,@R1              Line length                                  
+         MOVE  R2,@R1+1,@R3        Line text                                    
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SUBWORK -- Routine to post job submission subtask and wait                   
+*    for it to complete it's work.                                              
+*                                                                               
+SUBWORK  PROC                                                                   
+         L     R6,CPWK8                                                         
+         USING SUBRSC,R6                                                        
+*                                                                               
+         POST  SUBWECB             Subtask will do the work                     
+*                                                                               
+         IF    (SUB$ECB.X'40',Z),BEGIN  Not posted...                           
+         SET   SUB1ACTV                                                         
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'PAUSE JCBWFD'  Waiting for JES                        
+         END                                                                    
+         CLEAR SUB$ECB                                                          
+*                                                                               
+         PEND                                                                   
+         DROP  SUBRSC                                                           
+         TITLE 'JESRD - Routine to Deblock JES FETCH/LOCATE Responses'          
+*box                                                                            
+*                                                                               
+*  JESRD -- Routine to get a reply line from JES2 (from SUZAN buf).             
+*                                                                               
+*    On exit:                                                                   
+*      R1,R0 - reply loc, len                                                   
+*      R15 (and cc):                                                            
+*         -4 - aborted (attn, logging off, etc.)                                
+*          0 - response line returned                                           
+*          4 - eof                                                              
+*                                                                               
+JESRD    XENTER R2,R8,,LOCAL                                                    
+         LT    R6,CPJWA                                                         
+         FAIL  Z,NOJWA,'FETCH/LOCATE INTERFACE ERROR'                           
+         USING JWA,R6                                                           
+         LT    R5,JWAPATHP         Hcmrsc ptr                                   
+         FAIL  Z,NOHCM,'FETCH/LOCATE INTERFACE ERROR'                           
+         USING HCMRSC,R5                                                        
+         B     JESRDLP             Join common                                  
+*                                                                               
+JESRDNXT CLEAR HCMPTRS             Clear Suzan buffer ptrs                      
+         CLEAR HCMINDEX            Reset any fetch buffer index                 
+*                                                                               
+JESRDLP  LA    R1,HCMRSC                                                        
+         IF    ('ACALL PATHSTAT',POS),JESERR  JES died, scram                   
+*-                                                                              
+*-       Read another buffer from JES if nothing left in this one.              
+*-                                                                              
+         IF    (HCMLEN,Z),BEGIN    Read a buffer...                             
+         SCOM  FREELOC,HCMPTRS,HCMPMGC  Read HRB from JES                       
+         IF    (R15,NZ),JESERR     JES died, if path error                      
+         CLEAR HCMINDEX                                                         
+         END                                                                    
+*                                                                               
+         LM    R3,R4,HCMPTRS       R3 = rdw loc, r4 = rdw len                   
+         IF    (R4,Z),BEGIN        No data left...                              
+         IF    JWAFLG2.HRBLAST,BEGIN  last HRB already read...                  
+         FAIL  (R4,NZ),BADDATA,'FETCH/LOCATE INTERFACE ERROR'                   
+         LA    R15,4               Set "eof" return code                        
+         CLEAR R0,R1                                                            
+         B     JESREXIT                                                         
+         END                                                                    
+*                                                                               
+         WITH  (RESOURCE,R5)                                                    
+         IF    (RSC$ECB.X'40',Z),BEGIN  Not posted...                           
+         SET   RSC1ACTV                                                         
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'PAUSE JCBWFD'  Waiting for JES                        
+         END                                                                    
+*TEMP    L     R15,CVCURJCB                                                     
+*TEMP    IF    JCBAFL-JCB(R15).JCBFATTN,BEGIN  Attn abort...                    
+*TEMP    LA    R15,8               8 = ATTN ABORT                               
+*TEMP    B     JESERR              GO CLOSE PATH, ETC.                          
+*TEMP    END                                                                    
+         CLEAR RSC$ECB                                                          
+         B     JESRDLP                                                          
+         END                                                                    
+*                                                                               
+         USING HRB,R3                                                           
+         L     R15,CVCURJCB                                                     
+         CLC   HRBID,JCBSEQ-JCB(R15)  Double check...                           
+         BNE   JESERR              Interface error                              
+*                                                                               
+         NI    JWAFLG2,HRBERVRB+HRBERSYN+HRBERSEM                               
+         OC    JWAFLG2,HRBFLAGS                                                 
+         MVC   JWAHRBF2,HRBFLAG2                                                
+         IF    (HRBERRID,NE,0),'MVC CPERRID,HRBERRID'                           
+*                                                                               
+         IF    (HRBFLAGS.HRBLAST,AND,(HRBLEN,EQ,0)),BEGIN  Done...              
+         LA    R15,4               Eof                                          
+         B     JESRUPD                                                          
+         END                                                                    
+*                                                                               
+         IF    ^HRBFLAGS.HRBBUF,BEGIN  Single response line...                  
+         SETMSG HRBTEXT,LH:HRBLEN                                               
+         CLEAR R15                                                              
+         B     JESRUPD             Done with this HRB, scram                    
+         END                                                                    
+*-                                                                              
+*-       De-block fetch buffer and return individual lines.                     
+*-                                                                              
+JESRNXTL IF    (HCMINDEX,GE,HRBLEN),JESRDNXT  All done with this buf            
+         LA    R3,HRBTEXT                                                       
+         DROP  HRB                                                              
+         AH    R3,HCMINDEX         Get correct line                             
+*                                                                               
+         USING LRCDSECT,R3                                                      
+         IF    (LRCTLENG,EQ,X'FF'),JESRDNXT  Go get next HRB                    
+         MVI   JWACC,C' '                                                       
+         SET   JWAFCCTL            Has CC carriage control                      
+         IF    LRCFLAG1.LRC1SPAN,BEGIN  spanned...                              
+         LH    R0,LRCSEGL          Text length                                  
+         LA    R1,LRCSTEXT         Text loc                                     
+         IF    LRCFLAG1.LRC1SBGN,BEGIN   If first segment...                    
+         LA    R1,LRCSFTXT               Text loc if first                      
+         IF    LRCFLAG1.LRC1CCTL,BEGIN   If CC/MC,                              
+         MVC   JWACC,@R1                 Save CC/MC char                        
+         INCR  R1                        Incr text pointer                      
+         IF    LRCFLAG1.LRC1TMCH,'CLEAR JWAFCCTL'  Not CC                       
+         END                                                                    
+         END                                                                    
+         END                                                                    
+         ELSE  BEGIN               Non-spanned (normal)...                      
+         SETMSG LRCTEXT,LC:LRCTLENG  Line of text                               
+         IF    LRCFLAG1.LRC1CCTL,BEGIN  has CC/mc...                            
+         MVC   JWACC,LRCCCTL       Save CC/MC char                              
+         LA    R1,LRCSOUT          Point past CC char                           
+         IF    LRCFLAG1.LRC1TMCH,'CLEAR JWAFCCTL'  Not CC                       
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LR    R2,R1                                                            
+         SR    R2,R3               l'header = offset into lrc                   
+         AR    R2,R0               Add in text length                           
+         AH    R2,HCMINDEX         Add in current offset                        
+         STH   R2,HCMINDEX         Save new HRB index (next LRC ptr)            
+*                                                                               
+         IF    (LRCFLAG1.LRC1SPAN,AND,  If spanned record, and not     *        
+               ^LRCFLAG1.LRC1SBGN),JESRNXTL  first segment, next LRC            
+         CLEAR R15                 Rc                                           
+         DROP  LRCDSECT                                                         
+         L     R3,HCMLOC                                                        
+         WITH  (HRB,R3),'LH R3,HRBLEN'  Total buffer len                        
+         IF    (R2,LT,R3),JESREXIT  Don't go on to next buffer                  
+*                                                                               
+JESRUPD  CLEAR HCMPTRS             Clear Suzan buffer ptrs                      
+*                                                                               
+JESREXIT XEXIT ,,LTR                                                            
+JESERR   SET   HCMSFLG.HCMPFCLS    Close path...                                
+         LR    R1,R5               Hcmrsc ptr                                   
+         ACALL PATHSTAT            ... & re-open                                
+*                                                                               
+         TSEG  CVJES,,TB                                                        
+         TSEG  'is not available, command aborted.',,CR                         
+*                                                                               
+         CLEAR R0,R1               (tidy)                                       
+         LH    R15,=H'-4'          Error rc                                     
+         B     JESREXIT                                                         
+*                                                                               
+         DROP  BR,HCMRSC,JWA                                                    
+         TITLE 'Routine to Issue JES Commands'                                  
+*box                                                                            
+*                                                                               
+*  The JESCOM routine builds a pcw in the JWA and then issues                   
+*  an suzan call to send whatever is in the HCB to JES.                         
+*  This routine also waits for JES if necessary.                                
+*                                                                               
+*  On exit:                                                                     
+*      r15 and condition code is zero if there is data waiting                  
+*      to be processed in the suzan buffer and non-zero if                      
+*      something went wrong (e.g., JES closing the path).                       
+*                                                                               
+JESCOM   XPROC                                                                  
+         LT    R6,CPJWA            Get JWA ptr                                  
+         FAIL  Z,NOJWA,'FETCH/LOCATE INTERFACE ERROR'  Shucks                   
+         USING JWA,R6                                                           
+         LT    R5,JWAPATHP         Get path address                             
+         FAIL  Z,NOHCM,'FETCH/LOCATE INTERFACE ERROR'                           
+         USING HCMRSC,R5                                                        
+         LR    R1,R5               Hcmrsc ptr                                   
+         ACALL PATHSTAT            Check things out (maybe re-open)             
+*                                                                               
+         CLEAR (@R13,8)            8 byte Suzan parm list                       
+         LA    R15,HRDWSTRT                                                     
+         ST    R15,@R13            Transaction starting with RDW                
+         SET   @R13.X'80'                                                       
+         SCOM  SEND,(R13),HCMPMGC     Send HCB to JES                           
+         IF    (R15,Z),'SET HCMFSENT'  Command sent                             
+         ELSE  BEGIN               Trouble...                                   
+         LR    R2,R15              Save suzan rc                                
+         LA    R1,HCMRSC                                                        
+         ACALL PATHSTAT            Maybe re-open path                           
+         LR    R15,R2              Restore rc                                   
+         END                                                                    
+         PEND                                                                   
+         DROP  HCMRSC,JWA                                                       
+         TITLE 'PATHSTAT - Routine to Check JES Path Status'                    
+*box                                                                            
+*                                                                               
+*  PATHSTAT -- Routine to check the status of JES suzan path.                   
+*                                                                               
+*    On entry:                                                                  
+*      R1 - HCMRSC ptr                                                          
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*     -4 - no data in buffer                                                    
+*      0 - data in buffer                                                       
+*      4 - path just closed (and has been re-opened)                            
+*      8 - path is closed (waiting for it to be opened)                         
+*                                                                               
+PATHSTAT PROC  ,                                                                
+         LR    R6,R1                                                            
+         USING HCMRSC,R6                                                        
+         MVC   HCMFLG(2),HCMSFLG   Copy & clear suzan flags                     
+*                                                                               
+         LH    R15,=H'-4'          Assume no data                               
+         IF    HCMFLG.HCMPFOPN,BEGIN  Opened...                                 
+         FAIL  (HCMFOPN,OR,^HCMFPND),PATHERR1,'JES PATH ERROR'                  
+         CLEAR HCMFPND             Set not-pending                              
+         SET   HCMFOPN             Set opened                                   
+         END                                                                    
+*                                                                               
+         IF    HCMFLG.HCMPFNI,BEGIN  New-info...                                
+         FAIL  (HCMFPND,OR,^HCMFOPN),PATHERR2,'Jes path error.'                 
+         CLEAR R15                 Set rc                                       
+         END                                                                    
+*                                                                               
+         IF    ^HCMFOPN,'LA R15,8'  Path not active                             
+*                                                                               
+         IF    HCMFLG.HCMPFCLS,BEGIN  Closing...                                
+         SCOM  CLOSE,0,HCMPMGC     Close path                                   
+*                                                                               
+         LA    R1,HCMPATH                                                       
+         ST    R1,@R13             Addr of path                                 
+         SET   @R13.X'80'                                                       
+         SCOM  OPEN,(R13)          Re-open path                                 
+         FAIL  (R15,NZ),PATHERR4,'JES path error.'                              
+         CLEAR HCMFSENT            No longer waiting for reply                  
+         CLEAR HCMFOPN             Path no longer open                          
+         SET   HCMFPND             Path open pending                            
+         LA    R15,4               Path just closed (& was re-opened)           
+         END                                                                    
+         PEND                                                                   
+         DROP  HCMRSC                                                           
+         SPACE 2                                                                
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SUBMIT -- Job submission subtask.                                            
+*                                                                               
+         DROP  CP                  No user addressability                       
+*                                                                               
+SUBMIT   BASE                                                                   
+         L     CVR,=V(CV)                                                       
+         L     R6,@R1              R1-->A(SUBRSC)                               
+         USING SUBRSC,R6                                                        
+*                                                                               
+         CHAP  +1                  Subtask runs above maintask                  
+*                                                                               
+SUBWLOOP WAIT  ECB=SUBWECB         Wait for work                                
+*                                                                               
+         CLEAR R5                                                               
+         WHILE (R5,LT,SUBBLEN),BEGIN  Write lines to JES...                     
+         LA    R2,SUBBUFR(R5)                                                   
+         LC    R3,@R2              Line length                                  
+         LA    R2,@R2+1            Line location                                
+         LA    R5,@R3+1(R5)                                                     
+         LA    R4,SUBRPL                                                        
+         MODCB AREA=(R2),RECLEN=(R3),MF=(E,SUBMDCBL)   Set RPL                  
+         IF    (R15,NZ),'ABEND 11,DUMP,STEP'                                    
+         PUT   RPL=(R4)            this one's for you, JES                      
+         IF    (R15,NZ),'ABEND 12,DUMP,STEP'                                    
+         END                                                                    
+         CLEAR SUBBLEN             All done                                     
+*                                                                               
+         IF    SUBFEOJ,BEGIN       End of job...                                
+         LA    R4,SUBRPL                                                        
+         ENDREQ RPL=(R4)           Finish up                                    
+         MVC   SUBTEMP(5),SUBRPL+(RPLRBAR-RPL)+3  jobno placed here             
+         OC    SUBTEMP(5),=C'00000'                                             
+         DTB   SUBTEMP,5           Convert to binary                            
+         IF    NZ,'CLEAR R15'      Zero if problems                             
+         STH   R15,SUBJBNO         Save the jobno                               
+         CLEAR SUBFEOJ                                                          
+         END                                                                    
+*                                                                               
+         CLEAR SUBWECB             Reset our ECB                                
+         POST  SUB$ECB             Post mother task                             
+         B     SUBWLOOP                                                         
+*                                                                               
+         DROP  BR                                                               
+*                                                                               
+         VLTORG                                                                 
+         END   .                                                                

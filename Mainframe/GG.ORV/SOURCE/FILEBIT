@@ -1,0 +1,1602 @@
+FILEBIT  TITLE 'ORVYL''S File Block Manager'
+         COPY  HEADER
+FILEBIT  MODULE TRCNUM=20,ID=BI
+         EJECT ,
+         COPY  PZERO
+         USING PZERO,R0
+         EJECT ,
+         COPY  MAT
+         EJECT
+         COPY  GRPARM
+         EJECT ,
+         COPY  FILEPARM
+         EJECT ,
+         COPY  SIGPARM
+         EJECT ,
+         COPY  DISPPARM
+         EJECT ,
+         COPY  SBPARM
+         EJECT ,
+         COPY  SLISTMAC
+         EJECT ,
+         COPY  VMPARM
+         EJECT ,
+         COPY  FSB
+         EJECT ,
+* Available block number list
+ABNL    RECORD BEGIN
+
+ABNLBID  DC    C'ABNL'
+
+ABNLGRID DS    A                   Resource ID
+
+ABNLFLAG FLAG  ,
+         FLAG  ABNLFCLO            Bitmap processing is closed
+         FLAG  ABNLFCLR            Clear bitmap buffer
+
+         DS    CL3                 Spare
+ABNLBCNT DS    F                   Count of bit count passes
+
+ABNLW    SHEAD ,                   Tasks waiting for maintenance
+
+ABNLTOKN DS    0D                  PLO lock token
+ABNLCNT  DS    F                   Count of avail blk nos
+ABNLSEQ  DS    F                   PLO sequence number
+
+ABNLAVAL DS    A                   Available block number buffer
+ABNLMCNT DS    F                   Maximum count that will fit
+ABNLMIN  DS    F                   Min count in block number buffer
+ABNLMED  DS    F                   Med count in block number buffer
+ABNLMAX  DS    F                   Max count in block number buffer
+ABNLACNT DS    F                   Blocks available in bitmaps
+* Note: The above count does not include the count available in
+* the block number buffer, just what is in the bitmap file.
+
+ABNLRBUF DS    A                   Read buffer for bitmaps
+ABNLBWK  DS    A                   Work area for bitmap maintenance
+ABNLBWKC DS    F                   Work area slot count
+* Bitmap that contains the lowest unused block in file
+ABNLLMAP DS    F                   Used by get some more blocks
+ABNLMMAP DS    F                   Last bitmap
+
+ABNLXMIN EQU   64                  Default minimum median
+ABNLXMAX EQU   512                 Default maximum median
+
+* When the count of buffered blocks reaches this value, fill
+* the block number buffer to the median count.
+ABNLXREF EQU   48                  When to get more blocks
+* When the count of buffered blocks reaches median amount plus
+* this value, release the extra blocks back to the bitmaps.
+ABNLXEMP EQU   64                  When to put some blocks back
+
+ABNLXOVR EQU   256                 Overflow
+
+ABNLMREL DS    F                   Count of release extra maints
+ABNLMGET DS    F                   Count of get more maints
+ABNLTREL DS    F                   Total blocks released to this list
+ABNLTGET DS    F                   Total blocks dispensed from list
+
+         END   ,
+FILEBIT  CSECT ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITINIT - Initialize bitmap control
+*
+*   Inputs - @FMFSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITINIT PROC  @FMFSB,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+         L     RB,@FMFSBP          Point to the FSB
+         VMGET L'ABNL,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RA,RVR',Z),'ABORT NOABNLMEM'
+         ST    RVR,FSBABNL         Set avail block num list
+         CLEAR ABNL                Clear
+         MVC   ABNLBID,=C'ABNL'
+         GRCRE CID=(RA)            Create a general resource
+         ST    RVR,ABNLGRID
+
+         LH    RS,FSBBMCNO         Get specified buffer amount
+         FLOOR RS,ABNLXMIN         Minimum amount to buffer
+         CEIL  RS,ABNLXMAX         Maximum amount to buffer
+         ST    RS,ABNLMED          Set median amount
+         AH    RS,=Y(ABNLXEMP)     Calc maximum amount
+         ST    RS,ABNLMAX
+         MVC   ABNLMIN,=A(ABNLXREF) Refill count
+         A     RS,=A(ABNLXOVR)     Allow some overflow
+         ST    RS,ABNLMCNT         Set maximum count
+         SLL   RS,2                Each is four bytes long
+         VMGET (RS),LOC=GLOBHI,FIX=YES
+         IF    (RVR,Z),'ABORT NOBITMAPAVAILMEM'
+         ST    RVR,ABNLAVAL        Avail block number buffer
+         CLEAR R15
+         MVCL  RVR,R14
+         L     RS,=A(4096)
+         VMGET (RS),LOC=GLOBHI,FIX=YES,PAGE=YES
+         IF    (RVR,Z),'ABORT NOBITMAPBUFFMEM'
+         ST    RVR,ABNLRBUF        Read buffer
+         CLEAR R15
+         MVCL  RVR,R14
+
+         L     RS,ABNLMCNT         This should be enough
+         ST    RS,ABNLBWKC         Save wk area slot count
+         SLL   RS,2                Four bytes long
+         VMGET (RS),LOC=GLOBHI,FIX=YES Get a work area
+         IF    (RVR,Z),'ABORT NOBITMAPWORKMEM'
+         ST    RVR,ABNLBWK         Save
+         CLEAR R15
+         MVCL  RVR,R14
+
+         LA    RVR,FSB             Point to the FSB
+         ACALL FBITCNT             Count the available blocks
+
+         CLEAR RVR
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITCNT - Count available blocks in file system
+*
+*   Inputs - RVR contains FSB address
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITCNT  PROC  ,
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+         LR    RB,RVR              Point to the FSB
+         L     RA,FSBABNL          Point to ABNL
+         INCR  R15,ABNLBCNT        Count this iteration
+
+         CLEAR RX                  First relative bitmap block number
+         L     RY,FSBTBLK          Total count of blocks
+         LA    RY,@RY+7            Need a byte for extra bits
+* Note: We will count all the bits in any extra byte and subtract
+* any overcount at the end.
+         SRL   RY,3                Calc total bytes of bits
+         LR    R15,RY              Get total bytes of bits
+         CLEAR R14
+         LH    R0,FSBDSZ           Size of a block
+         DR    R14,R0              Calc number of blocks
+         LR    R0,R15
+         IF    (R14,Z),'DECR R0'   Even amount!
+         ST    R0,ABNLMMAP         Save maximum bitmap
+         IF    (R14,NZ),'INCR R15' Need a block for any extras too
+         IF    (R15,GT,FSBBITBC),'ABORT MOREBITSTHANMAPS'
+         L     RJ,=A(BITCNT)       Bit counting table
+         CLEAR RN                  Avail block count
+         OI    ABNLLMAP,X'80'      Indicate not set
+         PSET  @FDOIODO            Common IO parm area
+         SET   @FDOFR              Read bitmap
+         SET   @FDODISK            Don't read from cache
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+
+* Read all bitmaps and count avail blocks
+         WHILE (RY,NZ),BEGIN       While more bytes to examine
+         LR    R15,RX              Get relative bitmap block number
+         A     R15,FSBBITSB        Calc real file sys block number
+         PMOV  @FDOBLK,(R15)       Set block number
+         VCALL FDOIODO             Get the bitmap block
+         L     R14,@FDODATA        Point to the bitmap
+         LH    R15,@FDODATL        Length of bitmap
+         IF    (R15,GT,RY),BEGIN   Almost done?
+         LR    R15,RY              Only this many bytes
+         CLEAR RY                  None left to count after this
+         END   ,
+         ELSE  'SR RY,R15'         Decrement bytes to examine
+         L     R1,=X'FF000000'     Compare with not available
+         IF    ('CLCL R14,R0',NZ),BEGIN Find the first avail bits
+         IF    ('TM ABNLLMAP,X"80"',O),'ST RX,ABNLLMAP' Clue for maint
+         LOOP  BEGIN
+         LC    RM,@R14             Get the byte
+         IC    RM,@RJ(RM)          Get count avail this byte from tab
+         AR    RN,RM               Add to the total
+         LA    R14,@R14+1          Point to the next byte
+         UNTIL (BCT,R15),END
+         END   ,                   End if
+         INCR  RX                  Check next block
+         END   ,                   End while more bytes
+
+         LA    R0,8                Count of bits per byte
+         CLEAR R14
+         L     R15,FSBTBLK         Total count of blocks
+         DR    R14,R0              Remainder is count in last byte
+         IF    (R14,NZ),BEGIN      If there are any
+         SR    R0,R14              Calculate overcount
+         SR    RN,R0               Don't count them
+         END   ,
+
+         ST    RN,FSBABLK          Set available count
+         ST    RN,ABNLACNT         Set this one also
+
+         CLEAR RVR
+         PEND  ,
+         LTORG ,
+         EJECT ,
+#FBITPLO RECORD BEGIN
+         DS    XL(4*36)            PLO parm list
+         END   ,
+
+*---------------------------------------------------------------------*
+*  FBITGET - Get an available block number
+*
+*   Inputs - @FMFSB
+*
+*   Output - Block number in RVR (RVR is zero if none left to get)
+*
+*---------------------------------------------------------------------*
+FBITGET  PROC  @FMFSB,#FBITPLO,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+
+         CLEAR #FBITPLO            Clear PLO parameter list
+
+         LOOP  BEGIN
+* If the process is closed, don't refresh the buffer, just give
+* out all that are remaining.
+         L     R15,ABNLCNT         Get current buffered block count
+         IF    ABNLFCLO,BEGIN      Process closed
+         CLEAR RVR                 Init return block number
+         IF    (R15,Z),'EXIT FBITGET' No blocks left
+         END   ,
+         ELSE  BEGIN               Process not closed
+         IF    (^@FMFSBO,AND,(R15,LT,ABNLMIN)),BEGIN
+         ACALL FBITMANG            Maintenance time
+         END   ,
+         END   ,                   Process not closed
+         CLEAR RVR                 Init return block number
+         IF    ('LT R15,FSBABLK',Z),'EXIT FBITGET'
+         LA    R0,16               Compare and Swap and Double store
+         LA    R1,ABNLTOKN         PLO lock token
+         L     RX,ABNLSEQ          Get the sequence
+         LA    RY,@RX+1            Increment sequence
+         LA    R15,ABNLCNT         Point to count
+         ST    R15,#FBITPLO+(4*19) Set address
+         IF    ('LT R15,ABNLCNT',Z),NEXT
+         DECR  R15                 Decrement
+         ST    R15,#FBITPLO+(4*15) Set new count
+         SLL   R15,2               Calc disp to last avail block num
+         L     R14,ABNLAVAL        Point to block number buffer
+         LA    R15,@R14(R15)       Point to last avail block num
+         ST    R15,#FBITPLO+(4*27) Set address (replace value is zero)
+         L     RN,@R15             Get the block number
+         PLO   RX,ABNLSEQ,0,#FBITPLO Just do it!
+         UNTIL Z,END
+
+         IF    (RN,Z),'ABORT FBITGET_NO_BLOCK'
+
+         IF    ^@FMFSBO,BEGIN
+         DECRS FSBABLK             One less available block
+         INCRS ABNLTGET            Increment
+         END   ,
+         LR    RVR,RN              Return block number
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FBITREL - Release a block number to the available pool
+*
+*   Inputs - @FMFSB
+*            Block number in RVR
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITREL  PROC  @FMFSB,#FBITPLO,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+
+         IF    ((RVR,Z),OR,(RVR,GE,FSBTBLK)),BEGIN
+         ABORT FBITREL_INV_BLK
+         END   ,
+
+         CLEAR #FBITPLO            Clear PLO parameter list
+         ST    RVR,#FBITPLO+(4*23) Set block number
+
+         CLEAR RVR
+         IF    ABNLFCLO,'EXIT FBITREL' Process closed
+
+         LOOP  BEGIN
+         L     R15,ABNLCNT
+         IF    (R15,GE,ABNLMAX),BEGIN
+         IF    ^@FMFSBO,'ACALL FBITMANR' Maintenance time
+         END   ,
+         LA    R0,16               Compare and Swap and Double store
+         LA    R1,ABNLTOKN         PLO lock token
+         L     RX,ABNLSEQ          Get the sequence
+         LA    RY,@RX+1            Increment sequence
+         L     R15,ABNLCNT         Get the count
+         INCR  R15                 Increment
+         IF    (R15,GT,ABNLMCNT),NEXT
+         ST    R15,#FBITPLO+(4*15) Set new count
+         LA    R15,ABNLCNT         Point to count
+         ST    R15,#FBITPLO+(4*19) Set address
+         L     R15,ABNLCNT         Get the count
+         SLL   R15,2               Calc disp to first empty slot
+         L     R14,ABNLAVAL        Point to block number buffer
+         LA    R15,@R14(R15)       Point to first free slot
+         ST    R15,#FBITPLO+(4*27) Set address
+         PLO   RX,ABNLSEQ,0,#FBITPLO Just do it!
+         UNTIL Z,END
+
+         IF    ^@FMFSBO,BEGIN
+         INCRS FSBABLK             One more available block
+         INCRS ABNLTREL            Increment
+         END   ,
+         CLEAR RVR
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITGCON - Get a contiguous range of block numbers (Status 6)
+*
+*   Inputs - RVR = Count of block numbers requested
+*
+*   Output - RVR = First block number - or - Zero for not possible
+*
+*---------------------------------------------------------------------*
+#FBGCON  RECORD BEGIN
+#FBGCNT  DS    F                   Count of blocks requested
+#FBGFBLK DS    F                   First block number in range
+#FBGBEND DS    A                   Bitmap buffer end
+#FBGCMAP DS    F                   Current bitmap being checked
+#FBGLMAP DS    F                   Last possible first bitmap
+#FBGLBYT DS    F                   Last possible first byte
+#FBGLBLK DS    F                   Last possible first bit
+#FBGFBYT DS    F                   First full byte
+#FBGCBYT DS    F                   Count of full bytes needed
+#FBGLEFT DS    H                   Number of bits in left byte
+#FBGRITE DS    H                   Number of bits in right byte
+         END   ,
+
+FBITGCON PROC  @FMFSB,#FBGCON,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         L     RB,@FMFSBP          Point to the FSB
+         WITH  (ABNL,RA)
+         L     RA,FSBABNL          Point to the ABNL
+
+         LR    RS,RVR              Save count requested
+         CLEAR RVR                 Init to not possible
+         IF    ABNLFCLO,'EXIT FBITGCON' Process closed
+         IF    (RS,GT,FSBABLK),'EXIT FBITGCON' Not more than max
+         IF    (RS,M),'EXIT FBITGCON' Don't get negitive
+         IF    (RS,Z),'EXIT FBITGCON' Don't get nothing
+         IF    (RS,EQ,1),BEGIN     Only one
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         ACALL FBITGET             Get one
+         EXIT  FBITGCON
+         END   ,
+
+         CLEAR #FBGCON             Clear work area
+         ST    RS,#FBGCNT          Save count requested
+         L     R15,FSBTBLK         Get total number of bits
+         SR    R15,RS              Calc max possible first block
+         IF    NP,FBITGCOE         More than max not possible
+         ST    R15,#FBGLBLK        Save
+         SRL   R15,3               Calc last possible byte number
+         ST    R15,#FBGLBYT        Save
+         CLEAR R14
+         LH    RS,FSBDSZ           Get file block size
+         DR    R14,RS              Calc last possible bitmap block
+         ST    R15,#FBGLMAP        Save
+         L     R15,ABNLRBUF        Bitmap buffer address
+         AH    R15,FSBDSZ          Calc end
+         ST    R15,#FBGBEND        Save
+         GRGET RID=ABNLGRID,EXCL=YES Get bitmap resource
+         MVC   #FBGCMAP,ABNLLMAP   Set current bitmap to process
+         PSET  @FDOIODO            Setup IO interface
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+
+FBITGCO2 LABEL ,
+         IF    (#FBGCMAP,GT,#FBGLMAP),FBITGCOE Beyond last possible
+         BAS   RS,FBITGGET         Get the bitmap
+
+FBITGCO4 LABEL ,
+         L     RN,#FBGBEND         Point to end of map
+         SR    RN,RM               Calc len of compare
+         IF    Z,BEGIN
+         INCR  R15,#FBGCMAP        Check next map
+         B     FBITGCO2
+         END   ,
+         L     R15,=X'FF000000'    Compare with not available
+         IF    ('CLCL RM,R14',Z),BEGIN None available
+         INCR  R15,#FBGCMAP        Check next map
+         B     FBITGCO2
+         END   ,
+         LR    RJ,RM               Get pointer
+         S     RJ,ABNLRBUF         Calc byte this bitmap
+         L     R15,#FBGCMAP        Get bitmap
+         MH    R15,FSBDSZ          Calc bytes in previous bitmaps
+         AR    RJ,R15              Calc byte in all bitmaps
+         IF    (RJ,GT,#FBGLBYT),FBITGCOE Can't do it
+         SLL   RJ,3                Calc block number
+* Might be enough consecutive bits in first byte
+         IF    (#FBGCNT,LE,8),BEGIN Maybe in one byte
+         L     R15,#FBGCNT         Get count
+         DECR  R15                 Calc mask table displacement
+         LA    R14,8               Bits per byte
+         SR    R14,R15             Calc loop count
+         IC    R15,FBITGRM(R15)    Get initial mask
+         LR    RVR,RJ              Get inital block number
+         LOOP  BEGIN
+         IF    (RVR,GT,#FBGLBLK),FBITGCOE Can't do it
+         EX    R15,'TM @RM,0'      Got enough?
+         IF    Z,BEGIN             Yes!
+         ST    RVR,#FBGFBLK        Set block number
+         EX    R15,'OI @RM,0'      Get the blocks
+         BAS   RS,FBITGPUT         Put the bitmap back
+         B     FBITGCOX            Exit
+         END   ,                   Yes!
+         SRL   R15,1               Get next mask
+         INCR  RVR                 Next block number
+         UNTIL (BCT,R14),END
+         END   ,                   Maybe in one byte
+* See if any consecutive bits in this byte
+         LA    RVR,8               Count of bits in byte
+         LM    R14,R15,FBITGLM
+         LOOP  BEGIN               See if some here
+         IF    (RJ,GT,#FBGLBLK),FBITGCOE Can't do it
+         EX    R15,'TM @RM,0'      Are these blocks available?
+         BZ    FBITGCO5            Yes!
+         SRDL  R14,8               Get next mask
+         INCR  RJ                  Increment first block number
+         UNTIL (BCT,RVR),END       See if some here
+         INCR  RM                  Start from next byte
+         B     FBITGCO4            Continue
+FBITGCO5 LABEL ,
+         STH   RVR,#FBGLEFT        Save count of bits avail on left
+         ST    RJ,#FBGFBLK         Set block number
+         L     RN,#FBGCNT          Get count of blocks requested
+         SR    RN,RVR              Calc remaining bits needed
+         CLEAR RJ
+         LR    RK,RN               Get count bits needed
+         D     RJ,=F'8'            Calc number of bytes needed
+         STH   RJ,#FBGRITE         Set count of bits on right
+         ST    RK,#FBGCBYT         Count of full bytes needed
+         INCR  RM                  Point to first byte in range
+         IF    (RM,EQ,#FBGBEND),BEGIN Ran off the bitmap
+         INCR  R15,#FBGCMAP        Check next map
+         BAS   RS,FBITGGET         Get next map bitmap
+         END   ,
+         ST    RM,#FBGFBYT         Set first full byte in range
+* Note: RK might be zero!
+         IF    (RK,NZ),BEGIN       Full bytes needed
+FBITGCO6 LOOP  BEGIN               Forever
+         L     RN,#FBGBEND         Point to end of map
+         SR    RN,RM               Calc bytes to end
+         IF    (RK,GT,RN),BEGIN    Not enough this map
+         SR    RK,RN               Calc remaining needed
+         END   ,                   Not enough this map
+         ELSE  BEGIN               Enough this map
+         LR    RN,RK               Get count
+         CLEAR RK                  Set remaining needed
+         END   ,                   Enough this map
+         CLEAR R15                 Compare with available
+         IF    ('CLCL RM,R14',NZ),FBITGCO4 Start all over
+         IF    (RK,NZ),BEGIN       More needed
+         INCR  R15,#FBGCMAP        Check next map
+         BAS   RS,FBITGGET         Get next map bitmap
+         END   ,                   More needed
+         ELSE  'EXIT FBITGCO6'     Done
+         END   ,                   Forever
+         END   ,                   Full bytes needed
+         LH    RJ,#FBGRITE         Get count of bits on right
+         IF    (RJ,NZ),BEGIN       If some needed on right
+         IF    (RM,EQ,#FBGBEND),BEGIN Ran off the bitmap
+         INCR  R15,#FBGCMAP        Check next map
+         BAS   RS,FBITGGET         Get next map bitmap
+         END   ,                   Ran off the bitmap
+         DECR  RJ                  Calc mask table displacement
+         IC    RJ,FBITGRM(RJ)      Don't get the wrong mask
+         EX    RJ,'TM @RM,0'       Are they available
+         IF    NZ,FBITGCO4         Wow that was close!
+         EX    RJ,'OI @RM,0'       While we're at it
+         IF    (RM,EQ,ABNLRBUF),BEGIN At first byte
+         BAS   RS,FBITGPUT         File away
+         END   ,                   At first byte
+         END   ,                   If some needed on right
+         L     RK,#FBGCBYT         Count of full bytes needed
+         IF    (RK,NZ),BEGIN       Full bytes needed
+         IF    (RM,EQ,ABNLRBUF),BEGIN At first byte
+         DECR  R15,#FBGCMAP        Backup
+         BAS   RS,FBITGGET         Get it
+         L     RM,#FBGBEND         Point pass the end
+         END   ,                   At first byte
+FBITGCO8 LOOP  BEGIN               Forever
+         LR    RN,RM               Get pointer
+         S     RN,ABNLRBUF         Calc number of bytes from start
+         IF    (RK,GT,RN),BEGIN    Not enough this map
+         SR    RK,RN               Calc remaining needed
+         L     RM,ABNLRBUF         Point to beginning
+         END   ,                   Not enough this map
+         ELSE  BEGIN               Enough this map
+         LR    RN,RK               Get count
+         L     RM,#FBGFBYT         Point to first byte
+         IF    (RM,NE,ABNLRBUF),BEGIN Left byte on this map
+         LH    RJ,#FBGLEFT         Get count needed on left
+         DECR  RJ                  Calc mask table displacement
+         IC    RJ,FBITGLM(RJ)      Don't get the right mask
+         LR    R14,RM
+         DECR  R14                 Point to left byte
+         EX    RJ,'OI @R14,0'      Set to unavailable
+         CLEAR #FBGLEFT            Don't do it again
+         END   ,                   Left byte on this map
+         CLEAR RK                  Set remaining needed
+         END   ,                   Enough this map
+         L     R15,=X'FF000000'    Set to not available
+         MVCL  RM,R14
+         BAS   RS,FBITGPUT         File away
+         IF    (RK,Z),'EXIT FBITGCO8' Almost done
+         ELSE  BEGIN               More needed
+         DECR  R15,#FBGCMAP        Backup
+         BAS   RS,FBITGGET         Get it
+         L     RM,#FBGBEND         Point pass the end
+         END   ,                   More needed
+         END   ,                   Forever
+         END   ,                   Full bytes needed
+         LH    RJ,#FBGLEFT         Get count needed on left
+         IF    (RJ,NZ),BEGIN       Some needed on left
+* Left byte is the last byte in a bitmap
+         IF    (#FBGFBYT,EQ,ABNLRBUF),BEGIN On previous bitmap
+         DECR  R15,#FBGCMAP        Backup
+         BAS   RS,FBITGGET         Get it
+         L     R14,#FBGBEND        Point pass end
+         END   ,                   On previous bitmap
+         ELSE  'L R14,#FBGFBYT'    Point to first byte
+         DECR  R14                 Point to left byte
+         DECR  RJ                  Calc mask table displacement
+         IC    RJ,FBITGLM(RJ)      Don't get the right mask
+         EX    RJ,'OI @R14,0'      Set to unavailable
+         BAS   RS,FBITGPUT         File away
+         END   ,                   Some needed on left
+         B     FBITGCOX            Done
+
+         DS    0A
+* Masks of bits need on the left
+FBITGLM  DC    B'00000001',B'00000011',B'00000111',B'00001111'
+         DC    B'00011111',B'00111111',B'01111111',B'11111111'
+
+* Masks of bits need on the right
+FBITGRM  DC    B'10000000',B'11000000',B'11100000',B'11110000'
+         DC    B'11111000',B'11111100',B'11111110',B'11111111'
+
+FBITGGET LABEL ,
+         L     R15,#FBGCMAP        Get current bitmap to process
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFR              Read
+         VCALL FDOIODO             Get the bitmap block
+         CLEAR @FDOFR
+         L     RM,ABNLRBUF         Point to the bitmap
+         BR    RS
+
+FBITGPUT LABEL ,
+         L     R15,#FBGCMAP        Get current bitmap to process
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFW              Write
+         VCALL FDOIODO             Put the bitmap block back
+         CLEAR @FDOFW
+         BR    RS
+
+FBITGCOE LABEL ,                   Not able to fulfil request
+         CLEAR #FBGFBLK
+FBITGCOX LABEL ,                   Exit
+         IF    (#FBGFBLK,NZ),BEGIN Success
+         L     R14,#FBGFBLK        First block
+         A     R14,#FBGCNT         Count of blocks
+         IF    (R14,GT,FSBTBLK),'ABORT FBITGBADCODE'
+         L     R14,FSBABLK         Update avail block count
+         LOOP  BEGIN
+         LR    R15,R14
+         S     R15,#FBGCNT         Subtract count obtained
+         CS    R14,R15,FSBABLK
+         UNTIL Z,END
+         L     R14,ABNLTGET        Update the total blks dispensed
+         LOOP  BEGIN
+         LR    R15,R14
+         A     R15,#FBGCNT         Add count obtained
+         CS    R14,R15,ABNLTGET
+         UNTIL Z,END
+         L     R15,ABNLACNT        Update count in bitmap also
+         S     R15,#FBGCNT
+         ST    R15,ABNLACNT
+         END   ,                   Success
+
+         GRREL RID=ABNLGRID        Release resource hold
+         ACALL FBITCLR             Wake anyone waiting
+         L     RVR,#FBGFBLK        Get first block in range
+
+         PEND  ,
+         LTORG ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITEXTN - Get a contiguous range of block numbers from a starting
+*             block number (to extend a non-IXR file).
+*
+*   Inputs - RVR = Count of block numbers requested
+*                  If zero, the total possible will be determined
+*            RS  = Starting block number
+*
+*   Output - RVR = Zero for good or -1 for none possible or
+*                  the count that would be possible
+*
+*---------------------------------------------------------------------*
+#FBEXTN  RECORD BEGIN
+#FBERCNT DS    F                   Requested count
+#FBEPCNT DS    F                   Possible count
+#FBEBEND DS    A                   Bitmap buffer end
+#FBECMAP DS    F                   Current bitmap being checked
+#FBEFBYT DS    F                   Count of full bytes needed
+#FBELEFT DS    H                   Number of bits in left byte
+#FBERITE DS    H                   Number of bits in right byte
+#FBELMSK DS    X                   Left mask
+#FBEFLAG FLAG  ,
+         FLAG  #FBETEST            Get possible but don't reserve
+         END   ,
+FBITEXTN PROC  @FMFSB,#FBEXTN,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         L     RB,@FMFSBP          Point to the FSB
+         WITH  (ABNL,RA)
+         L     RA,FSBABNL          Point to the ABNL
+
+         CLEAR #FBEXTN             Clear work area
+         LR    RN,RVR              Save
+         L     RVR,=F'-1'          Set to not possible
+         IF    ABNLFCLO,'EXIT FBITEXTN' Process closed
+         IF    (RS,GE,FSBTBLK),'EXIT FBITEXTN' Can't start beyond end
+         LR    RVR,RN              Restore
+
+         IF    (RVR,Z),'SET #FBETEST' Determine how many possible
+         ELSE  BEGIN
+         LR    R14,RVR             Get count
+         AR    R14,RS              Calc last block + 1
+         IF    (R14,GT,FSBTBLK),'SET #FBETEST' Not more than max
+         END   ,
+
+         IF    #FBETEST,BEGIN      Just determine what is possible
+         L     RVR,FSBTBLK         Get last block number + 1
+         SR    RVR,RS              Calc count of blocks to EOF
+         END   ,
+
+         ST    RVR,#FBERCNT        Save requested count
+         CLEAR RM
+         LR    RN,RS               Get first block number
+         D     RM,=F'8'            Calc first byte
+         IF    ((RM,NZ),OR,(#FBERCNT,LE,8)),BEGIN
+         LA    R14,8               Count of bits in byte
+         SR    R14,RM              Calc count bits on left
+         STH   R14,#FBELEFT        Save
+         END   ,                   Not a full byte on left
+         CLEAR RM
+         LH    RVR,FSBDSZ          Get bitmap block size
+         DR    RM,RVR              Calc first bitmap
+         ST    RN,#FBECMAP         Save first bitmap
+         LR    RN,RM               Save first byte in bitmap
+         L     R15,#FBERCNT        Get count of blocks requested
+         SH    R15,#FBELEFT        Subtract count on left
+         IF    POS,BEGIN           More needed than in left byte
+         CLEAR R14
+         D     R14,=F'8'           Number of bits per byte
+         ST    R15,#FBEFBYT        Count of full bytes needed
+         STH   R14,#FBERITE        Count of bits on right
+         END   ,                   More needed than in left byte
+
+         L     R15,ABNLRBUF        Bitmap buffer addre
+         AH    R15,FSBDSZ          Calc end
+         ST    R15,#FBEBEND        Save
+
+         IF    ^@FMFSBO,BEGIN      Not internal call
+         GRGET RID=ABNLGRID,EXCL=YES Get bitmap resource
+         END   ,
+
+         PSET  @FDOIODO            Common IO parm area
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+         BAS   RS,FBITEGET         Get the bitmap
+         AR    RM,RN               Point to first byte on left
+
+         LH    R14,#FBELEFT        Bits needed on left
+         IF    (R14,NZ),BEGIN      Some needed on the left
+         LA    R15,FBITELM-1(R14)
+         MVC   #FBELMSK,@R15       Get mask for left bits
+         IF    (R14,GT,#FBERCNT),BEGIN Not all bits from the left
+         S     R14,#FBERCNT        Calc number not needed on left
+         LA    R15,8
+         SR    R15,R14             Calc AND mask
+         LA    R15,FBITERM(R15)
+         NC    #FBELMSK,@R15       Turn off extras
+         L     R14,#FBERCNT        Number really needed on left
+         END   ,                   Not all bits from the left
+         IC    R15,#FBELMSK        Get left mask
+         EX    R15,'TM @RM,0'      Are the blocks available
+         IF    Z,'ST R14,#FBEPCNT' Add to count possible
+         ELSE  BEGIN               Calc count possible
+         LH    R14,#FBELEFT        Bits needed on left
+         IC    R15,FBITEFM-1(R14)  Get start bit mask
+         CLEAR R14
+         LOOP  BEGIN
+         EX    R15,'TM @RM,0'      Block available?
+         IF    NZ,EXIT             No
+         SRL   R15,1               Test next bit
+         INCR  R14                 Increment count
+         END   ,
+         ST    R14,#FBEPCNT        Set possible count
+         B     FBITEXTE            Exit
+         END   ,                   Calc count possible
+         LA    RM,@RM+1            Point to first full byte
+         END   ,                   Some needed on the left
+
+         IF    ('LT RX,#FBEFBYT',NZ),BEGIN Full bytes needed
+         IF    (RM,EQ,#FBEBEND),BEGIN Left byte last in bitmap
+         INCR  R15,#FBECMAP        Check next map
+         BAS   RS,FBITEGET         Get next map bitmap
+         END   ,                   Left byte last in bitmap
+         LOOP  BEGIN               Check all of the full bytes
+         L     RN,#FBEBEND         Get end of bitmap pointer
+         SR    RN,RM               Calc bytes to end
+         IF    (RN,GE,RX),BEGIN    Enough to check here
+         LR    RN,RX               Check the remainder needed
+         CLEAR RX                  No more needed after this
+         END   ,
+         ELSE  BEGIN
+         SR    RX,RN               Calc amount still to check
+         END   ,
+         CLEAR R15                 Check for available
+         LR    RY,RN               Remember how many being checked
+         IF    ('CLCL RM,R14',NZ),BEGIN Not available
+         LA    R15,X'80'           Get mask
+         CLEAR RS
+         LOOP  BEGIN               Loop forever
+         EX    R15,'TM @RM,0'      Is the block available
+         IF    NZ,EXIT             No
+         INCR  RS                  Increment possible count
+         SRL   R15,1               Test next bit
+         END   ,                   Loop forever
+         SR    RY,RN               Calc bytes that were available
+         SLL   RY,3                Calc bits that were available
+         AR    RY,RS               Add bits on right
+         A     RY,#FBEPCNT         Add to possible count
+         ST    RY,#FBEPCNT         Save
+         B     FBITEXTE            Exit
+         END   ,                   Not available
+         SLL   RY,3                Calc bits
+         A     RY,#FBEPCNT         Add to possible count
+         ST    RY,#FBEPCNT         Save
+         IF    (RX,Z),EXIT         Done
+         INCR  R15,#FBECMAP        Check next map
+         BAS   RS,FBITEGET         Get next map bitmap
+         END   ,                   Check all of the full bytes
+         END   ,                   Full bytes needed
+
+         IF    (#FBERITE,NZ),BEGIN Some needed on the right
+         IF    (RM,EQ,#FBEBEND),BEGIN Last full byte last in bitmap
+         INCR  R15,#FBECMAP        Check next map
+         BAS   RS,FBITEGET         Get next map bitmap
+         END   ,                   Last full byte last in bitmap
+         LH    R14,#FBERITE        Count on right
+         IC    R15,FBITERM(R14)    Get right mask
+         EX    R15,'TM @RM,0'      Are the right bits available?
+         IF    NZ,BEGIN            So close!
+         LA    R15,X'80'           Get mask
+         CLEAR RS
+         LOOP  BEGIN               Loop forever
+         EX    R15,'TM @RM,0'      Is the block available
+         IF    NZ,EXIT             No
+         INCR  RS                  Increment possible count
+         SRL   R15,1               Test next bit
+         END   ,                   Loop forever
+         A     RS,#FBEPCNT         Add to possible count
+         ST    RS,#FBEPCNT         Save
+         B     FBITEXTE            Exit
+         END   ,                   So close!
+         A     R14,#FBEPCNT        Add to possible count
+         ST    R14,#FBEPCNT        Save
+         END   ,                   Some needed on the right
+
+         IF    #FBETEST,FBITEXTE   Done if just checking
+
+         IF    (#FBERITE,NZ),BEGIN Some needed on the right
+         EX    R15,'OI @RM,0'      Get the ones on the right
+         IF    (RM,EQ,ABNLRBUF),BEGIN Right byte first in bitmap
+         BAS   RS,FBITEPUT         Put bitmap away
+         END   ,                   Right byte first in bitmap
+         END   ,                   Some needed on the right
+
+         IF    ('LT RX,#FBEFBYT',NZ),BEGIN Full bytes needed
+         IF    (RM,EQ,ABNLRBUF),BEGIN Right byte first in bitmap
+         DECR  R15,#FBECMAP        Back to last map
+         BAS   RS,FBITEGET         Get next map bitmap
+         L     RM,#FBEBEND         Point past the end
+         END   ,                   Right byte first in bitmap
+         LOOP  BEGIN               Loop forever 3
+         LR    RN,RM               End pointer
+         S     RN,ABNLRBUF         Count of bytes
+         IF    (RN,GE,RX),BEGIN    All in this block
+         LR    RN,RX               Get count to get
+         CLEAR RX                  No more remaining to get
+         END   ,                   All in this block
+         ELSE  BEGIN               Not all in this block
+         SR    RX,RN               Calc count remaining
+         END   ,
+         SR    RM,RN               Point to start of get
+         IF    ((RX,Z),AND,(RM,NE,ABNLRBUF)),BEGIN Get left bits now
+         LR    R15,RM              Point to first full byte
+         DECR  R15                 Back up one
+         OC    @R15(1),#FBELMSK    Get left bits now
+         CLEAR #FBELEFT            Don't do it again
+         END   ,                   Get left bits now
+         L     R15,=X'FF000000'    Set to not available
+         LR    RY,RM               Save start of move
+         MVCL  RM,R14
+         BAS   RS,FBITEPUT         File away
+         LR    RM,RY               Restore start of move
+         IF    (RX,Z),EXIT         Got all the full bytes
+         DECR  R15,#FBECMAP        Back to last map
+         BAS   RS,FBITEGET         Get next map bitmap
+         L     RM,#FBEBEND         Point past the end
+         END   ,                   Loop forever 3
+         END   ,                   Full bytes needed
+
+         IF    (#FBELEFT,NZ),BEGIN Some needed on the left
+         IF    (RM,EQ,ABNLRBUF),BEGIN First full byte first in bitmap
+         DECR  R15,#FBECMAP        Back to last map
+         BAS   RS,FBITEGET         Get next map bitmap
+         L     RM,#FBEBEND         Point past the end
+         END   ,                   First full byte first in bitmap
+         DECR  RM                  Point to left bits
+         OC    @RM(1),#FBELMSK     Get left bits
+         BAS   RS,FBITEPUT         File away
+         END   ,                   Some needed on the left
+
+         B     FBITEXTG            Done
+
+* Masks of first bit need on the left
+FBITEFM  DC    B'00000001',B'00000010',B'00000100',B'00001000'
+         DC    B'00010000',B'00100000',B'01000000',B'10000000'
+
+* Masks of bits need on the left
+FBITELM  DC    B'00000001',B'00000011',B'00000111',B'00001111'
+         DC    B'00011111',B'00111111',B'01111111',B'11111111'
+
+* Masks of bits need on the right
+FBITERM  DC    B'00000000',B'10000000',B'11000000',B'11100000'
+         DC    B'11110000',B'11111000',B'11111100',B'11111110'
+
+FBITEGET LABEL ,
+         L     R15,#FBECMAP        Get current bitmap to process
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFR              Read
+         VCALL FDOIODO             Get the bitmap block
+         CLEAR @FDOFR
+         L     RM,ABNLRBUF         Point to the bitmap
+         BR    RS
+
+FBITEPUT LABEL ,
+         L     R15,#FBECMAP        Get current bitmap to process
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFW              Write
+         VCALL FDOIODO             Put the bitmap block back
+         CLEAR @FDOFW
+         BR    RS
+
+FBITEXTE LABEL ,                   Not able to fulfil request
+         IF    ('LT RVR,#FBEPCNT',Z),'BCTR RVR,0' None possible
+         B     FBITEXTX
+
+FBITEXTG LABEL ,                   Extend successful, good
+         L     R14,FSBABLK         Update avail block count
+         LOOP  BEGIN
+         LR    R15,R14
+         S     R15,#FBERCNT        Subtract count requested
+         CS    R14,R15,FSBABLK
+         UNTIL Z,END
+         L     R14,ABNLTGET        Update the total blks dispensed
+         LOOP  BEGIN
+         LR    R15,R14
+         A     R15,#FBERCNT        Add count obtained
+         CS    R14,R15,ABNLTGET
+         UNTIL Z,END
+         L     R15,ABNLACNT        Update count in bitmap also
+         S     R15,#FBERCNT
+         ST    R15,ABNLACNT
+         CLEAR RVR                 Set return
+
+FBITEXTX LABEL ,                   Exit
+         IF    ^@FMFSBO,BEGIN      Not internal call
+         LR    RN,RVR              Save return code
+         GRREL RID=ABNLGRID        Release resource hold
+         ACALL FBITCLR             Wake anyone waiting
+         LR    RVR,RN              Restore return code
+         END   ,
+
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITRCON - Release a contiguous range of block numbers from a
+*             starting block number.
+*
+*   Inputs - RVR = Count of block numbers to release
+*            RS  = Starting block number
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+#FBRCON  RECORD BEGIN
+#FBRRCNT DS    F                   Count to release
+#FBRBEND DS    A                   Bitmap buffer end
+#FBRCMAP DS    F                   Current bitmap being checked
+#FBRFBYT DS    F                   Count of full bytes to release
+#FBRLEFT DS    H                   Number of bits in left byte
+#FBRRITE DS    H                   Number of bits in right byte
+#FBRLMSK DS    X                   Left mask
+         END   ,
+FBITRCON PROC  @FMFSB,#FBRCON,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         L     RB,@FMFSBP          Point to the FSB
+         WITH  (ABNL,RA)
+         L     RA,FSBABNL          Point to the ABNL
+
+         CLEAR #FBRCON             Clear work area
+         IF    ABNLFCLO,'EXIT FBITRCON' Process closed
+         IF    (RS,GE,FSBTBLK),'ABORT FBITRCON1' Beyond end
+
+         LR    R14,RVR             Get count
+         AR    R14,RS              Calc last block + 1
+         IF    (R14,GT,FSBTBLK),'ABORT FBITRCON2' More than max
+
+         ST    RVR,#FBRRCNT        Save count
+         CLEAR RM
+         LR    RN,RS               Get first block number
+         D     RM,=F'8'            Calc first byte
+         IF    (RM,NZ),BEGIN       Not a full byte on left
+         LA    R14,8               Count of bits in byte
+         SR    R14,RM              Calc count bits on left
+         STH   R14,#FBRLEFT        Save
+         END   ,                   Not a full byte on left
+         CLEAR RM
+         LH    RVR,FSBDSZ          Get bitmap block size
+         DR    RM,RVR              Calc first bitmap
+         ST    RN,#FBRCMAP         Save first bitmap
+         LR    RN,RM               Save first byte in bitmap
+         L     R15,#FBRRCNT        Get count of blocks requested
+         SH    R15,#FBRLEFT        Subtract count on left
+         IF    POS,BEGIN           More needed than in left byte
+         CLEAR R14
+         D     R14,=F'8'           Number of bits per byte
+         ST    R15,#FBRFBYT        Count of full bytes needed
+         STH   R14,#FBRRITE        Count of bits on right
+         END   ,                   More needed than in left byte
+
+         L     R15,ABNLRBUF        Bitmap buffer addre
+         AH    R15,FSBDSZ          Calc end
+         ST    R15,#FBRBEND        Save
+
+         GRGET RID=ABNLGRID,EXCL=YES Get bitmap resource
+         PSET  @FDOIODO            Common IO parm area
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+         BAS   RS,FBITRGET         Get the bitmap
+         AR    RM,RN               Point to first byte on left
+
+         LH    R14,#FBRLEFT        Bits to release on left
+         IF    (R14,NZ),BEGIN      Some to release on the left
+         LA    R15,FBITRLM(R14)
+         MVC   #FBRLMSK,@R15       Get mask for left bits
+         IF    (R14,GT,#FBRRCNT),BEGIN Not all bits from the left
+         S     R14,#FBRRCNT        Calc number not needed on left
+         LA    R15,8
+         SR    R15,R14             Calc AND mask
+         LA    R15,FBITRRM(R15)
+         NC    #FBRLMSK,@R15       Turn off extras
+         END   ,                   Not all bits from the left
+         IC    R15,#FBRLMSK        Get left mask
+         EX    R15,'TM @RM,0'      Are the blocks available
+         IF    NO,'ABORT FBITRCON3' Error
+         LA    R14,255
+         SR    R14,R15             Calc AND mask
+         EX    R14,'NI @RM,0'      Free the blocks
+         LA    RM,@RM+1            Point to first full byte
+         END   ,                   Some on the left
+
+         IF    ('LT RX,#FBRFBYT',NZ),BEGIN Full bytes to release
+         IF    (RM,EQ,#FBRBEND),BEGIN Left byte last in bitmap
+         BAS   RS,FBITRPUT         File away
+         INCR  R15,#FBRCMAP        Check next map
+         BAS   RS,FBITRGET         Get next map bitmap
+         END   ,                   Left byte last in bitmap
+         LOOP  BEGIN               Check all of the full bytes
+         L     RN,#FBRBEND         Get end of bitmap pointer
+         SR    RN,RM               Calc bytes to end
+         IF    (RN,GE,RX),BEGIN    Enough to check here
+         LR    RN,RX               Check the remainder needed
+         CLEAR RX                  No more needed after this
+         END   ,
+         ELSE  BEGIN
+         SR    RX,RN               Calc amount still to check
+         END   ,
+
+         L     R15,=X'FF000000'    Check for not available
+         LR    RVR,RM              Get start
+         LR    RS,RN               Get count
+         IF    ('CLCL R0,R14',NZ),'ABORT FBITRCON4'
+         CLEAR R15                 Set to available
+         MVCL  RM,R14
+         BAS   RS,FBITRPUT         File away
+         IF    (RX,Z),EXIT         Done
+         INCR  R15,#FBRCMAP        Check next map
+         BAS   RS,FBITRGET         Get next map bitmap
+         END   ,                   Check all of the full bytes
+         END   ,                   Full bytes needed
+
+         IF    (#FBRRITE,NZ),BEGIN Some on the right
+         IF    (RM,EQ,#FBRBEND),BEGIN Last full byte last in bitmap
+         BAS   RS,FBITRPUT         File away
+         INCR  R15,#FBRCMAP        Check next map
+         BAS   RS,FBITRGET         Get next map bitmap
+         END   ,                   Last full byte last in bitmap
+         LH    R14,#FBRRITE        Count on right
+         IC    R15,FBITRRM(R14)    Get right mask
+         EX    R15,'TM @RM,0'      Are the right bits unavailable?
+         IF    NO,'ABORT FBITRCON5' So close!
+         LA    R14,255
+         SR    R14,R15             Calc AND mask
+         EX    R14,'NI @RM,0'      Free the blocks
+         BAS   RS,FBITRPUT         File away
+         END   ,                   Some needed on the right
+
+         B     FBITRCOX            Done
+
+* Masks of bits need on the left
+FBITRLM  DC    B'00000000',B'00000001',B'00000011',B'00000111'
+         DC    B'00001111',B'00011111',B'00111111',B'01111111'
+
+* Masks of bits need on the right
+FBITRRM  DC    B'00000000',B'10000000',B'11000000',B'11100000'
+         DC    B'11110000',B'11111000',B'11111100',B'11111110'
+
+FBITRGET LABEL ,
+         L     R15,#FBRCMAP        Get current bitmap to process
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFR              Read
+         VCALL FDOIODO             Get the bitmap block
+         CLEAR @FDOFR
+         L     RM,ABNLRBUF         Point to the bitmap
+         BR    RS
+
+FBITRPUT LABEL ,
+         L     R15,#FBRCMAP        Get current bitmap to process
+         IF    (R15,LT,ABNLLMAP),'ST R15,ABNLLMAP' New lowest
+         A     R15,FSBBITSB        Calc real file sys block number
+         ST    R15,@FDOBLK         Set block number
+         SET   @FDOFW              Write
+         VCALL FDOIODO             Put the bitmap block back
+         CLEAR @FDOFW
+         BR    RS
+
+FBITRCOX LABEL ,                   Release successful, good
+         L     R14,FSBABLK         Update avail block count
+         LOOP  BEGIN
+         LR    R15,R14
+         A     R15,#FBRRCNT        Add count released
+         CS    R14,R15,FSBABLK
+         UNTIL Z,END
+         L     R14,ABNLTREL        Update the total blks released
+         LOOP  BEGIN
+         LR    R15,R14
+         A     R15,#FBRRCNT        Add count released
+         CS    R14,R15,ABNLTREL
+         UNTIL Z,END
+         L     R15,ABNLACNT        Update count in bitmap also
+         A     R15,#FBRRCNT
+         ST    R15,ABNLACNT
+         CLEAR RVR                 Set return
+
+         GRREL RID=ABNLGRID        Release resource hold
+         ACALL FBITCLR             Wake anyone waiting
+         CLEAR RVR
+
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITMAN - Start the maintenance of the avail block no list (ABNL)
+*
+*   Inputs - RA points to ABNL and RB points to FSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITMANG PROC  ,
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         GRGET RID=ABNLGRID,EXCL=YES,WAIT=NO
+         IF    (RVR,NZ),BEGIN      Resource is ours
+         ACALL FBITMGET            Get some
+         GRREL RID=ABNLGRID        Release resource hold
+         ACALL FBITCLR             Wake anyone waiting
+         END   ,
+
+* If none to get, wait for maintenace to finish
+         ELSE  BEGIN
+         L     R15,ABNLCNT
+         IF    (R15,Z),BEGIN
+         L     RVR,=C'MGET'
+         ACALL FBITWAIT
+         END   ,
+         END   ,
+         PEND  ,
+FBITMANR PROC  ,
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         GRGET RID=ABNLGRID,EXCL=YES,WAIT=NO
+         IF    (RVR,NZ),BEGIN      Resource is ours
+         ACALL FBITMREL            Put some back
+         GRREL RID=ABNLGRID        Release resource hold
+         ACALL FBITCLR             Wake anyone waiting
+         END   ,
+
+* If no room to put back, wait for maintenace to finish
+         ELSE  BEGIN
+         L     R15,ABNLCNT
+         IF    (R15,GE,ABNLMCNT),BEGIN
+         L     RVR,=C'MREL'
+         ACALL FBITWAIT
+         END   ,
+         END   ,
+         PEND  ,
+         LTORG ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITMREL - Put some block numbers back into the bitmap file
+*
+*   Inputs - RA points to ABNL and RB points to FSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITMREL PROC  ,
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         INCRS ABNLMREL            Number of times this routine
+
+         L     RS,ABNLBWK          Get the work block
+         CLEAR RN                  Clear count of blocks to return
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         SET   @FMFSBO             Set maintenance flag on
+         IF    ABNLFCLR,'CLEAR RM' Clear buffer
+         ELSE  'L RM,ABNLMED'      Count of block numbers to buffer
+* While the blocks buffered is higher than desired
+         L     R15,ABNLCNT
+         WHILE ((RM,LT,R15),AND,(RN,LT,ABNLBWKC)),BEGIN
+         ACALL FBITGET             Get a number
+         IF    (RVR,Z),EXIT        Exit loop
+         ST    RVR,@RS             Save in work
+         LA    RS,@RS+4            Point to next slot
+         INCR  RN                  Count it
+         L     R15,ABNLCNT
+         END   ,
+         IF    ^ABNLFCLR,'ACALL FBITCLR' Wake anyone waiting
+         WHILE (RN,NZ),BEGIN       Release blocks back to the system
+         PSET  @FDOIODO            Common IO parm area
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+
+         L     RS,ABNLBWK          Point to the beginning of the block
+         CLEAR R14
+         L     R15,@RS             Get block number
+         LH    RJ,FSBDSZ
+         SLL   RJ,3                Calc number of bits per block
+         DR    R14,RJ              Calc bitmap number
+         LR    RY,R15              Save bitmap block number
+         A     R15,FSBBITSB        Calc real file sys block number
+         PMOV  @FDOBLK,(R15)       Set block number
+         SET   @FDOFR              Read
+         VCALL FDOIODO             Get the bitmap block
+         CLEAR @FDOFR
+         LR    RM,RN               Get count to give back
+         LR    RK,RN               And again
+         DECR  RK
+         SLL   RK,2                Calc disp to last one
+         LA    RK,@RS(RK)          Point to the last one
+         IF    (RY,LT,ABNLLMAP),'ST RY,ABNLLMAP' Use this one
+         LOOP  BEGIN
+         CLEAR R14
+         L     R15,@RS             Get block number
+         DR    R14,RJ              Calc bitmap number
+         IF    (R15,EQ,RY),BEGIN   In this block?
+         SRDL  R14,3               Calc disp to byte
+         SRL   R15,32-3            Calc bit number
+         A     R14,@FDODATA        Point to the byte
+         IC    RX,BITTABT(R15)     Get bit mask
+         EX    RX,'TM @R14,0'      It should be not available
+         IF    Z,'ABORT BADFBITMRELCODE' Oooooppps!!!??!
+         LA    R15,BITTABN(R15)    Get bit mask
+         NC    0(1,R14),@R15       Give this block back
+         INCR  R15,ABNLACNT        Increment count in bitmaps
+         MVC   0(4,RS),@RK         Replace with last one
+         XC    0(4,RK),@RK         Clear last one
+         SH    RK,=H'4'            Point to new last one
+         DECR  RN                  One more put back
+         END   ,                   End in this block
+         ELSE  'LA RS,@RS+4'       Increment the pointer
+         UNTIL (BCT,RM),END        Make a pass through block nos
+
+         SET   @FDOFW              Write
+         VCALL FDOIODO             Put the bitmap block back
+         CLEAR @FDOFW
+         IF    (RN,Z),'EXIT FBITMREL' If done, then done
+
+         IF    ^ABNLFCLR,BEGIN     Not clear buffer
+         L     RM,ABNLMED          Count of block numbers to buffer
+         L     R15,ABNLCNT
+         SR    RM,R15              Calc count under init value
+         IF    P,BEGIN             Lots used while we were busy
+         IF    (RM,GT,RN),BEGIN
+         LR    RM,RN               Get count left
+         CLEAR RN                  Set this right
+         END   ,
+         ELSE  'SR RN,RM'          Remove amount given back
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         SET   @FMFSBO             Set maintenance flag on
+         LOOP  BEGIN
+         L     RVR,@RK             Get block number
+         ACALL FBITREL             'Release' back to pool
+         XC    0(4,RK),@RK
+         SH    RK,=H'4'            Back up
+         UNTIL (BCT,RM),END
+         END   ,                   Lots used while we were busy
+         END   ,                   Not clear buffer
+
+         END   ,                   Release blocks back to the system
+         PEND
+BITTABN  DC    AL1(255-X'80',255-X'40',255-X'20',255-X'10')
+         DC    AL1(255-X'08',255-X'04',255-X'02',255-X'01')
+BITTABT  DC    AL1(X'80',X'40',X'20',X'10',X'08',X'04',X'02',X'01')
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITMGET - Get some more blocks numbers from the file
+*
+*   Inputs - RA points to ABNL and RB points to FSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITMGET PROC  ,
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         INCRS ABNLMGET            Number of times this routine
+
+         CLEAR RVR
+         IF    (ABNLACNT,Z),'EXIT FBITMGET' None left to get!
+
+         L     RN,ABNLBWK          Get the work block
+         L     R15,ABNLCNT
+         WHILE ((R15,LT,ABNLMED),AND,(ABNLACNT,NZ)),BEGIN While
+         IF    (ABNLLMAP,GT,ABNLMMAP),EXIT
+         L     RX,ABNLMED          Get median count of avail blocks
+         SR    RX,R15              Calc how many more we need
+         CEIL  RX,ABNLACNT         Not more than left in bitmaps
+         CLEAR RY                  Init count obtained
+         L     R15,ABNLLMAP        Get next to read
+         A     R15,FSBBITSB        Calc real file sys block number
+         PSET  @FDOIODO            Common IO parm area
+         PMOV  @FDODATA,ABNLRBUF   Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         PMOV  @FDOFSB,LA:FSB      FSB pointer
+         PMOV  @FDOBLK,(R15)       Set block number
+         SET   @FDOFR              Read
+         VCALL FDOIODO             Get the bitmap block
+         CLEAR @FDOFR
+         L     R14,@FDODATA        Point to the bitmap
+         LH    R15,@FDODATL        Length of bitmap
+         L     R1,=X'FF000000'     Compare with not available
+         IF    ('CLCL R14,R0',Z),BEGIN No available blocks
+         INCR  R15,ABNLLMAP        Check the next bitmap
+         END   ,                   No available blocks
+         ELSE  BEGIN               Get some from this bitmap
+         LR    RM,R15              Get bytes to check
+FBITMGE6 LOOP  BEGIN               Check rest of bytes
+         IF    ('CLI @R14,X"FF"',NE),BEGIN
+         LA    RK,8                Eight bits to the byte
+         LA    R1,X'80'            First bit
+         LOOP  BEGIN               Check all the bits
+         EX    R1,'TM @R14,0'      This block available?
+         IF    Z,BEGIN             Yes!
+         L     R0,ABNLLMAP         Get relative block number
+         MH    R0,FSBDSZ           Block number of first bit this map
+         LA    R15,@R14            Point to this byte
+         S     R15,@FDODATA        Calc byte number this map
+         AR    R0,R15              Total bytes
+         SLL   R0,3                Eight bits to the byte
+         LC    R15,=AL1(0,7,6,5,4,3,2,1,0)(RK)
+         AR    R0,R15              Calc block number this bit
+         IF    (R0,GE,FSBTBLK),'EXIT FBITMGE6' Oops, don't continue
+         EX    R1,'OI @R14,0'      Set block to unavailable
+         DECR  R15,ABNLACNT        Decrement count in bitmaps
+         ST    R0,@RN              Save in work block
+         LA    RN,@RN+4            Point to next work slot
+         INCR  RY                  Increment count obtained
+         IF    (RY,GE,RX),'EXIT FBITMGE6' enough
+         END   ,                   End if this bit avail
+         SRL   R1,1                Next mask
+         UNTIL (BCT,RK),END        Check all the bits
+         END   ,                   End if bits in byte
+         LA    R14,@R14+1          Point to the next byte
+         UNTIL (BCT,RM),END        Check rest of bytes
+         IF    (RM,Z),'INCR R15,ABNLLMAP' None left this block
+         IF    (RY,NZ),BEGIN       We got some
+         SET   @FDOFW              Write
+         VCALL FDOIODO             Put the bitmap block
+         CLEAR @FDOFW
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         SET   @FMFSBO             Set maintenance flag on
+         LOOP  BEGIN               Put blocks obtained into buffer
+         SH    RN,=H'4'            Back up
+         L     RVR,@RN             Get block number
+         ACALL FBITREL             'Release' back to pool
+         XC    0(4,RN),@RN         Clear work buffer slot
+         UNTIL (BCT,RY),END        Put blocks obtained into buffer
+         ACALL FBITCLR             Wake anyone waiting
+         END   ,                   We got some
+         END   ,                   End if bits in block
+         L     R15,ABNLCNT
+         END   ,                   While
+
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FBITADDV - Add some more blocks to the file system
+*
+*   Inputs - @FMFSB, RVR = count of blocks to add
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITADDV PROC  @FMFSB,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         LR    RN,RVR              Get number of blocks
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+         GRGET RID=ABNLGRID,EXCL=YES
+         LR    RS,RN               Get count
+         A     RS,FSBTBLK
+         ST    RS,FSBTBLK          Total blocks in system
+         L     R14,FSBABLK         Update avail block count
+         LOOP  BEGIN
+         LR    R15,R14
+         AR    R15,RN              Add count
+         CS    R14,R15,FSBABLK
+         UNTIL Z,END
+         L     R15,ABNLACNT        Update count in bitmap also
+         AR    R15,RN
+         ST    R15,ABNLACNT
+         L     R15,FSBTBLK         Total count of blocks
+         LA    R15,@R15+7          Need a byte for extra bits
+         SRL   R15,3               Calc total bytes of bits
+         CLEAR R14
+         LH    RS,FSBDSZ           Size of a block
+         DR    R14,RS              Calc number of bitmaps
+         IF    (R14,Z),'DECR RS'   Even amount!
+         ST    RS,ABNLMMAP         Save maximum bitmap
+         GRREL RID=ABNLGRID
+         ACALL FBITCLR             Wake anyone waiting
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FBITREMV - Remove blocks from the file system
+*
+*   Inputs - @FMFSB, RVR = count of blocks to remove
+*
+*   Output - RVR = 0   Success
+*            RVR = 1   Some blocks in use in range
+*
+*---------------------------------------------------------------------*
+FBITREMV PROC  @FMFSB,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         LR    RN,RVR              Get number of blocks
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+         GRGET RID=ABNLGRID,EXCL=YES
+         SET   ABNLFCLR            Indicate clear buffer
+         ACALL FBITMREL            Clear the avail block buffer
+         CLEAR ABNLFCLR
+         L     RS,FSBTBLK          Total blocks
+         SR    RS,RN               Calc first block of remove
+         CLEAR RVR                 Check if all blocks avail
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         SET   @FMFSBO
+         ACALL FBITEXTN            Check if all blocks available
+         IF    (RVR,NE,RN),BEGIN
+         LA    RN,1                Not possible
+         B     FBITREMX            Exit
+         END   ,
+
+         L     RS,FSBTBLK          Get total
+         SR    RS,RN               Calc new total
+         ST    RS,FSBTBLK          Total blocks in system
+         L     R14,FSBABLK         Update avail block count
+         LOOP  BEGIN
+         LR    R15,R14
+         SR    R15,RN              Remove count
+         CS    R14,R15,FSBABLK
+         UNTIL Z,END
+         L     R15,ABNLACNT        Update count in bitmap also
+         SR    R15,RN
+         ST    R15,ABNLACNT
+         L     R15,FSBTBLK         Total count of blocks
+         LA    R15,@R15+7          Need a byte for extra bits
+         SRL   R15,3               Calc total bytes of bits
+         CLEAR R14
+         LH    RS,FSBDSZ           Size of a block
+         DR    R14,RS              Calc number of bitmaps
+         IF    (R14,Z),'DECR RS'   Even amount!
+         ST    RS,ABNLMMAP         Save maximum bitmap
+         CLEAR RN
+
+FBITREMX LABEL ,
+         GRREL RID=ABNLGRID
+         ACALL FBITCLR             Wake anyone waiting
+         LR    RVR,RN              Set return code
+         PEND  ,
+
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FBITACT - Activate bitmap processing
+*
+*   Inputs - @FMFSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITACT  PROC  @FMFSB,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+         GRGET RID=ABNLGRID,EXCL=YES
+         LA    RVR,FSB             Point to the FSB
+         ACALL FBITCNT             Count available blocks
+         CLEAR ABNLFCLO            Clear process closed
+         GRREL RID=ABNLGRID
+         ACALL FBITCLR             Wake anyone waiting
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FBITDEA - Deativate bitmap processing
+*
+*   Inputs - @FMFSB
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITDEA  PROC  @FMFSB,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (ABNL,RA)
+
+         L     RB,@FMFSBP          Point to the FSB
+         L     RA,FSBABNL          Point to the ABNL
+         GRGET RID=ABNLGRID,EXCL=YES
+         SET   ABNLFCLO            Close the bitmap process
+         SET   ABNLFCLR
+         ACALL FBITMREL            Clear the buffer
+         CLEAR ABNLFCLR
+         GRREL RID=ABNLGRID
+         ACALL FBITCLR             Wake anyone waiting
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FBITWAIT - Wait for maintenance to be done
+*
+*   Inputs - RA points to ABNL
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITWAIT PROC  ,
+         WITH  (ABNL,RA)
+         WITH  (SBWAIT,RX)
+         WITH  (SLDUM,RY)
+
+         LR    RN,RVR              Save input
+         L     RS,MATPTR
+         WITH  (MAT,RS),'L RY,MATSBWB'
+         SAVAIL HEAD=SLDUM,LEN=L'SBWAIT Get a wait block
+         LR    RX,RVR              Get pointer
+         CLEAR SBWAIT
+         MVC   SBWBID,=CL4'BITM'
+         MVC   SBWASB,PZCURASB     Set address space pointer
+         ST    RN,SBWORD1          Save marker
+         SPUSH HEAD=ABNLW,ITEM=SBWAIT Put on the wait queue
+         AWAIT SBWECB              Wait for bitmap maintenance
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,(RVR)
+         VCALL SYSRDEL
+         CLEAR SBWAIT
+         MVC   SBWBID,=C'sBWB'
+         SPUSH HEAD=SLDUM,ITEM=SBWAIT Put away the wait block
+
+         PEND  ,
+
+*---------------------------------------------------------------------*
+*  FBITCLR - Clear maintenace wait queue
+*
+*   Inputs - RA points to ABNL
+*
+*   Output - None
+*
+*---------------------------------------------------------------------*
+FBITCLR  PROC  ,
+         WITH  (ABNL,RA)
+         WITH  (SBWAIT,RX)
+         LOOP  BEGIN
+         SPOP  HEAD=ABNLW          Clear any waiting list
+         IF    ('LTR RX,RVR',Z),EXIT
+         PSET  @SYSRNEW            Get system routine ID
+         VCALL SYSRNEW
+         LR    R15,RVR
+         SIGNL SBWECB,(R15),SBWASB,(R15) Been waiting long?
+         END   ,
+         PEND  ,
+         EJECT ,
+*
+* GENERATE TABLE TO AID IN COUNTING AVAILABLE FILE BLOCKS
+*
+         MACRO ,
+&L       BITCNT
+         LCLA  &BITVAL(4)
+         LCLA  &A,&B,&C,&D
+&BITVAL(1) SETA 2
+&BITVAL(2) SETA 1
+&BITVAL(3) SETA 1
+&BITVAL(4) SETA 0
+&A       SETA  1
+&L       EQU   *
+.LOOP1   ANOP
+&B       SETA  1
+.LOOP2   ANOP
+&C       SETA  1
+.LOOP3   ANOP
+&D       SETA  &BITVAL(&A)+&BITVAL(&B)+&BITVAL(&C)
+         DC    AL1(&D+2,&D+1,&D+1,&D)
+&C       SETA  &C+1
+         AIF   (&C LE 4).LOOP3
+&B       SETA  &B+1
+         AIF   (&B LE 4).LOOP2
+&A       SETA  &A+1
+         AIF   (&A LE 4).LOOP1
+         MEND
+
+BITCNT   BITCNT
+         LTORG ,
+         END   .

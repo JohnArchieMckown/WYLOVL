@@ -1,0 +1,1273 @@
+TASKSERV TITLE 'ORVYL''S Task Services'
+         COPY  HEADER
+TASKSERV MODULE
+         EJECT
+*GEN
+         IHAPSA
+         EJECT
+CVT      DSECT
+         CVT   DSECT=YES
+         EJECT
+         IKJTCB
+         EJECT
+         IHARB
+         EJECT
+         IHASDWA
+TASKSERV CSECT
+*NOGEN
+         EJECT
+         COPY  RTCB
+         USING RTCB,RTCBR
+         EJECT
+         COPY  CBAT
+         EJECT ,
+         COPY  TMCB
+         EJECT
+         COPY  CPTPARM
+         SPACE 3
+         COPY  LOCKPARM
+         EJECT
+         COPY  WAITPARM
+         SPACE 3
+         COPY  POSTPARM
+         EJECT ,
+         COPY  POOLPARM
+         SPACE 3
+         COPY  FIXPARM
+         EJECT ,
+         COPY  TASKPARM
+         EJECT ,
+         COPY  MEMPARM
+         EJECT
+         COPY  SEGPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*      TASKCT -- Task Services Control Table                      *
+*                                                                 *
+*******************************************************************
+         SPACE
+TASKCT   RECORD BEGIN
+         DC    CL4'TCT'
+TCTRTCB  DS    A                       RTCB Chain
+TCTRLOCK DS    A                       RTCB Chain Lock ID
+TCTMTTCB DS    A                       TCB address of the main task
+         END   ,
+         SPACE 3
+         COPY  FUNCPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*    TASKDUMP  --  Dump the Task Services                         *
+*                                                                 *
+*                                                                 *
+*     Input - @DUMPPRM                                            *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TASKDUMP PROC  @DUMPPRM,SCOPE=GLOBAL
+*
+* Put out a section header
+*
+         SEGEOR '**** T A S K   I N F O R M A T I O N ****',,@DUMPSCB
+         SEGEOR ,
+         SEGEOR ,
+*
+* Dump the CBAT
+*
+         SEG   'CBAT at '
+         SEGHEX RTCBCBAT
+         SEGEOR
+         L     RY,RTCBCBAT             Get the CBAT address
+         WITH  (CBAT,RY),BEGIN
+         SEGCORE CBAT,ID=CBAT,REPEAT=YES
+         LA    RY,CBATTASK             Get addr of TCT address
+         END   ,
+         SEGEOR ,
+         SEGEOR ,
+*
+* Dump the TASK services CT
+*
+         SEG   'TASKCT at '
+         SEGHEX (RY),4
+         SEGEOR ,
+         L     RY,@RY                  Get address of the TCT
+         WITH  (TASKCT,RY),BEGIN
+         IF    (TASKCT,NE,'TCT '),BEGIN
+         SEGEOR '*** ID Check failed.  This may be garbage ***'
+         END   ,
+         SEGHEX TCTRTCB
+         SEGEOR ' TCTRTCB  (Chain of all RTCBs in the system)'
+         SEGHEX TCTRLOCK
+         SEGEOR ' TCTRLOCK (Lock ID for RTCB chain)'
+         SEGEOR ,
+         SEGEOR ,
+         SEGEOB ,                      Cause a page break
+         LA    RY,TCTRTCB              Address of head of chain
+         END   ,
+*
+* Dump each task in turn
+*
+         WHILE (@RY,NE,0),BEGIN
+         L     RX,@RY                  Get the RTCB address
+         WITH  (RTCB,RX)
+         SEG   '** Dump of '
+         SEGTB RTCBNAME
+         SEG   'Task **'
+         SEGEOR
+         SEGEOR
+         SEG   'RTCB at '
+         SEGHEX @RY,4                  Seg the RTCB address
+         SEGEOR ,
+         SEGCORE RTCB,ID=RTCB,REPEAT=YES
+         SEGEOR
+         SEGEOB
+         SEG   'Stack for '
+         SEGEOR RTCBNAME
+         PSET  @SEGSTK
+         SEGLD PARM=@SEGSCB
+         MVC   @SEGSST,RTCBSTK         Move in the stack pointer
+         VCALL SEGSTK
+         SEG   'End of stack for '
+         SEGEOR RTCBNAME
+         EJECT  ,
+*
+* Dump task completion status
+*
+         BEGIN
+         L     RK,RTCBESTA             Get the ESTAE data area
+         WITH  (ESTADATA,RK)
+         WITH  (ESTAINFO,EDINFO)       Address the information area
+         TM    EDFABEND,L'EDFABEND     Test the abend flag
+         IF    OFF,EXIT                Don't bother if no abend
+         SEGEOR ,
+         SEGEOR '*** Task Abended ***'
+         SEGEOR
+         SEG   'Completion Code '
+         SEGHEX EDEABND,4
+         SEG   '  Reason '
+         SEGHEX EDERSN,4
+         SEG   '  INTC '
+         SEGHEX EDEINTC+1,1            Interrupt code
+         SEG   ' '
+         SEGHEX EDEPEA,4               Page exception address
+         SEGEOR
+         SEG   'PSW at time of ABEND '
+         SEGHEX EDEPSW,4
+         SEG   ' '
+         SEGHEX EDEPSW+4,4
+         SEG   '  ILC '
+         SEGHEX EDEILC+1,1
+         SEGEOR ,
+         SEGEOR 'Registers at time of ABEND'
+         SEGCORE EDEREGS,64,,ID=REGS,ALPHA=OFF,REPEAT=YES
+         END   ,
+         SEGEOB ,
+*
+* Go to the next task
+*
+         LA    RY,RTCBNEXT             Address of the next pointer
+         END   ,
+         PEND  ,
+         LTORG
+         EJECT
+*******************************************************************
+*                                                                 *
+*    TASKINIT  --  Initialize Task Services                       *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - RVR contains RTCB pointer                           *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TASKINIT PROC  @TASKINI,SCOPE=GLOBAL
+         POOLGET L'RTCB                GET MASTER TASK RTCB
+         L     RTCBR,@MEMLOC
+         MVC   RTCB(4),=CL4'RTCB'      CONTROL BLOCK ID
+         MVC   RTCBNAME,=CL8'MASTER'   IDENTIFY MASTER TASK RTCB
+         MVC   RTCBSTK,@TASKIST        SAVE THE START OF STACK
+         L     RS,CVTPTR               CVT
+         WITH  (CVT,RS),'L  RS,CVTTCBP'   GET NEW/OLD TCB POINTER
+         L     RS,@RS+4                GET CURRENT TCB (US)
+         ST    RS,RTCBTCB              MASTER TASK TCB
+         PSET  @TRCINT,CLEAR=NO
+         MVC   @TRCINM,=A(50)          NUMBER OF TRACE ENTRIES
+         ACALL TRCEINIT                TRACE TABLE
+         ACALL CPTSTART                INITIALIZE CPU TIMER
+         EJECT
+         POOLGET L'CBAT                CREATE CBAT
+         ST    RVR,RTCBCBAT
+         LR    RY,RVR
+         USING CBAT,RY
+         MVC   CBAT(4),=CL4'CBAT'      SET ID
+         VCALL LOCKINIT                INITIALIZE LOCK MANAGER
+         VCALL MSGINIT                 INITIALIZE MESSAGE MANAGER
+         MEMINIT TYPE=GLOBAL           Initialize global memory
+         MEMINIT ,                     | and local
+         POOLGET L'TASKCT              CREATE THE TASKCT
+         ST    RVR,CBATTASK            SET CT POINTER
+         LR    RY,RVR
+         USING TASKCT,RY
+         MVC   TASKCT(4),=CL4'TCT'     SET NAME FIELD
+         ST    RTCBR,TCTRTCB           HEAD OF RTCB CHAIN
+         MVC   TCTMTTCB,RTCBTCB        Save the main task TCB addr
+         PSET  @LOCKCRE
+         MVC   @LOCKNAM,=CL16'RTCB CHAIN'   LOCK NAME
+         VCALL LOCKCRE                 CREATE IT
+         ST    RVR,TCTRLOCK            SAVE LOCK ID
+         ST    RY,CPTTCT               SET TCT ANCHOR FOR TIMER
+         EJECT
+*
+*  INITIALIZE ESTAE
+*
+         MEMGET L'ESTADATA
+         LR    RB,RVR
+         ST    RB,RTCBESTA             ESTAE WORK AREA
+         WITH  (ESTADATA,RB),BEGIN
+         MVC   EDRUBMSK,=X'FFFF'       SET MASK
+         MVC   EDESTAE,MODESTAE        MOVE IN PARM LIST
+         LA    RA,ESTAEXIT             RECOVERY ROUTINE
+*GEN
+         ESTAE (RA),PARAM=(RTCBR),MF=(E,EDESTAE)   SET ESTAE
+*NOGEN
+         END   ,
+         LR    RVR,RTCBR               RETURN RTCB POINTER
+         PEND
+         DROP  RY
+         EJECT
+*******************************************************************
+*                                                                 *
+*   CPTSTART - Start CPU timing for a task                        *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+CPTSTART PROC  SCOPE=GLOBAL
+         STIMER TASK,CPTEXIT,MICVL=CLOCKVAL
+         LM    RA,RB,CLOCKVAL          Get time set
+         ADL   RA,RTCBCPU              CURRENT TOTAL CPU
+         STM   RA,RB,RTCBTIMR
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   CPTREAD - Obtain CPU time used by a task                      *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - @CPTIME                                             *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+CPTWA    RECORD BEGIN
+CPTWAF0  DS    D                       Save area for FPR 0
+CPTWAF2  DS    D                       Save area for FPR 2
+         END   ,
+         SPACE 2
+CPTREAD  PROC  @CPTIME,CPTWA,SCOPE=GLOBAL
+         STD   0,CPTWAF0               Save the FPRs We use
+         STD   2,CPTWAF2
+*         STPT  RTCBCPT                 Current CPU timer in XA
+*push,noedit
+         CPUTIMER MIC,RTCBCPT          Current CPU timer
+*pop
+         LD    R0,RTCBTIMR             Logical timer
+         SW    R0,RTCBCPT              Subtract current timer
+         STD   R0,@CPTTOT              Current total CPU
+         LD    R2,RTCBCPU              Previous value
+         STD   R0,RTCBCPU              Save new current total
+         SWR   R0,R2                   CPU time used this interval
+         STD   R0,@CPTINT              Set interval
+         IF    (RTCBCPT,LT,MINCLKVL),BEGIN   Time to reset timer
+         STIMER TASK,CPTEXIT,MICVL=CLOCKVAL
+         LD    R2,CLOCKVAL             Get time set
+         AW    R2,RTCBCPU              Current total CPU used
+         STD   R2,RTCBTIMR             new logical interval
+         END   ,
+         LD    0,CPTWAF0               Restore the FPR's
+         LD    2,CPTWAF2
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   CPTEXIT - System asynchronous timer exit                      *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - RTCBTIMR updated                                    *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+CPTEXIT  LABEL ,
+         STM   R14,R12,@R13+12
+         LR    BR,R15
+         USING CPTEXIT,BR
+         STIMER TASK,(R15),MICVL=CLOCKVAL
+         L     RA,CPTTCT               TCT POINTER
+         WITH  (TASKCT,RA),'L  RTCBR,TCTRTCB'  RTCB CHAIN
+         L     RA,CVTPTR               CVT
+         WITH  (CVT,RA),'L  RA,CVTTCBP'  CURRENT TCB POINTER
+         L     RA,@RA+4                TCB OF CURRENT TASK
+         WHILE (RTCBR,NZ),BEGIN
+         IF    (RA,EQ,RTCBTCB),EXIT    FOUND THIS TASK'S RTCB
+         L     RTCBR,RTCBNEXT          CHAIN ON
+         END   ,
+         IF    (RTCBR,NZ),BEGIN        RTCB FOUND
+         LM    RA,RB,RTCBTIMR          TOTAL TIME SET
+         ADL   RA,CLOCKVAL             INCLUDE THIS INCREMENT
+         STM   RA,RB,RTCBTIMR
+         END   ,
+         LM    R14,R12,@R13+12
+         BR    R14
+         DROP  BR
+         EJECT
+*******************************************************************
+*                                                                 *
+*   CPTCAN - Cancel CPU timer for a task                          *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - CPU time clocks updated                             *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+CPTCAN   PROC  SCOPE=GLOBAL
+         PSET  @CPTIME
+         ACALL CPTREAD                 FIRST UPDATE
+         TTIMER CANCEL                  THEN CANCEL
+         PEND
+         SPACE 2
+CLOCKVAL DC    0D'0',A(22*60*60,0)     APPROXIMATELY 23 HOURS
+MINCLKVL DC    0D'0',A(10*60*60,0)     APPROXIMATELY 10.2 HOURS
+CPTTCT   DC    A(0)                    TCT POINTER
+         EJECT
+*******************************************************************
+*                                                                 *
+*    POOLGET -- Obtain memory from MVS                            *
+*                                                                 *
+*                                                                 *
+*     Input - @MEMORY                                             *
+*                                                                 *
+*    Output - @MEMORY                                             *
+*             Memory area is cleared                              *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+POOLGET  PROC  @MEMORY,SCOPE=GLOBAL
+         CLEAR @MEMDATA
+         CLEAR @MEMKEY
+         SET   (MEMCUNC,EQ)            UNCONDITIONAL REQUEST TYPE
+         IF    ^MEMTSYS,BEGIN          ORVYL SUBPOOL
+         IF    MEMTFIX+MEMTPAGE,'SET  MEMCPGB'  SET PAGE BOUNDARY
+         IF    MEMTA16M,'SET  MEMCANYV*MEMCANYR'   LOC=ANY,ANY
+         ELSE  'SET  MEMCBLOV'         SET LOC=BELOW
+         IF    (@MEMPOOL,Z),'SET  MEMTDEF'   DEFAULT POOL
+         END   ,
+         LM    R15,R0,@MEMDATA         REQUEST FLAGS AND LENGTH
+         CLEAR R1
+         SVC   120                     * GETMAIN RU,LV=(0),SP=(15)
+         ST    R1,@MEMLOC              SAVE LOCATION
+         IF    ^MEMTSYS,BEGIN          ORVYL SUBPOOL
+         IF    ^MEMTFIX,EXIT           NO PAGE FIXING
+         L     R1,@MEMLOC              LOCATION
+         L     R15,@MEMLEN              LENGTH
+         AR    R15,R1                    END ADDRESS (PLUS 1)
+         DECR  R15
+         PGSER R,FIX,A=(1),EA=(15),ECB=0
+         END   ,
+         L     R0,@MEMLOC              CLEAR
+         L     R1,@MEMLEN                THE
+         CLEAR RB                        AREA
+         MVCL  R0,RA
+         L     RVR,@MEMLOC             RETURN LOC
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    POOLFREE -- Return memory to MVS                             *
+*                                                                 *
+*                                                                 *
+*     Input - @MEMORY                                             *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+POOLFREE PROC  @MEMORY,SCOPE=GLOBAL
+         IF    ^MEMTSYS,BEGIN          NON-SYSTEM SUBPOOL
+         IF    ^MEMTFIX,EXIT           NO PAGE UN-FIXING
+         L     R1,@MEMLOC              LOCATION
+         L     R15,@MEMLEN              LENGTH
+         AR    R15,R1                    END ADDRESS (PLUS 1)
+         DECR  R15
+         PGSER R,FREE,A=(1),EA=(15)
+         END   ,
+         IF    (@MEMPOOL,Z),'SET  MEMTDEF'   DEFAULT POOL
+         SET   (MEMCUNC+MEMCFREE,EQ)   UNCONDITIONAL FREEMAIN
+         CLEAR @MEMDATA
+         CLEAR @MEMKEY
+         LM    R15,R1,@MEMDATA         PARMS, LENGTH AND LOCATION
+         SVC   120                     FREEMAIN RU,...
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    POOLDEF -- Obtain list of shared MVS subpools                *
+*                                                                 *
+*                                                                 *
+*     Input - NONE                                                *
+*                                                                 *
+*    Output - Pointer to subpool list in RVR                      *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+POOLDEF  PROC  SCOPE=GLOBAL
+         LA    RVR,PDPOOLS
+         PEND
+         SPACE 2
+PDPOOLS  DC    AL1(8),AL1(8,10,12,14,24,26,28,30)
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    PAGEFIX -- Page fix MVS memory                               *
+*                                                                 *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+PAGEFIX  PROC  @FIXPARM,SCOPE=GLOBAL
+         L     RX,RTCBCBAT             Get the CBAT pointer
+         WITH  (CBAT,RX),'L RX,CBATTASK'   Get the TCT pointer
+         WITH  (TASKCT,RX)                 Address the TCT
+         MODESET EXTKEY=ZERO,SAVEKEY=(2) Get us to key zero
+         LR    RY,R2                   Copy the current key
+         L     R4,TCTMTTCB             Address of the master TCB
+         L     R1,@FIXLOC
+         L     R2,@FIXLEN
+         AR    R2,R1                   ENDING ADDRESS
+         DECR  R2
+         N     R1,=X'7FFFFFFF'         Clear the high bit
+         N     R2,=X'7FFFFFFF'         And here too
+         PGSER R,FIX,A=(1),EA=(2),ECB=0,TCB=(4),BRANCH=Y
+         LR    R2,RY                   Restore the register
+         MODESET KEYREG=(2)            Restore the key
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    PAGEFREE -- Page free MVS memory                             *
+*                                                                 *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+PAGEFREE PROC  @FIXPARM,SCOPE=GLOBAL
+         L     RX,RTCBCBAT             Get the CBAT pointer
+         WITH  (CBAT,RX),'L RX,CBATTASK'   Get the TCT pointer
+         WITH  (TASKCT,RX)                 Address the TCT
+         MODESET EXTKEY=ZERO,SAVEKEY=(2) Get us to key zero
+         LR    RY,R2                   Copy the current key
+         L     R4,TCTMTTCB             Address of the master TCB
+         L     R1,@FIXLOC
+         L     R2,@FIXLEN
+         AR    R2,R1                   ENDING ADDRESS
+         DECR  R2
+         N     R1,=X'7FFFFFFF'         Clear the high bit
+         N     R2,=X'7FFFFFFF'         And here too
+         IF    ^@FIXFREL,BEGIN
+         PGSER R,FREE,A=(1),EA=(2),TCB=(4),BRANCH=Y
+         END   ELSE,BEGIN
+         PGSER R,FREE,A=(1),EA=(2),TCB=(4),BRANCH=Y,RELEASE=Y
+         END   ,
+         LR    R2,RY                   Restore the register
+         MODESET KEYREG=(2)            Restore the key
+         PEND
+         EJECT
+         COPY  TRCEPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*    ORVYL Trace Table Entry                                      *
+*                                                                 *
+*******************************************************************
+         SPACE
+TRCENTRY RECORD BEGIN
+TRCELEN  DS    H                       Length of this entry
+TRCENAME DS    CL8                     Name
+TRCETYPE DS    X                       Type of entry
+         DS    X
+TRCECPID DS    H                       CPU ID
+TRCEIC   DS    H                       Interrupt code
+TRCETS   DS    XL8                     Time stamp (stck)
+TRCEPSW  DS    XL8                     Psw for trace
+TRCEREGS DS    0X                      Registers and/or data
+         END    ,
+         SPACE 2
+         COPY  TRCIPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*   TRACE - Add an entry to the trace table                       *
+*                                                                 *
+*                                                                 *
+*     Input - @TRACE                                              *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TRCE     PROC  @TRACE,SCOPE=GLOBAL
+         L     RB,RTCBTRTC
+         USING TRCENTRY,RB
+         MVC   TRCETYPE,@TRTYPE        TYPE
+         MVC   TRCENAME,@TRNAME        NAME
+         IF    (TRCETYPE.TRCFTRA,OR,TRCETYPE.TRCFTRA),BEGIN
+         STAP  TRCECPID                USE CURRENT CPU
+         CLEAR TRCEIC
+         STOSM TRCEPSW,0               PSW MASK
+         IPK   ,                       PSW KEY
+         STC   R2,TRCEPSW+1
+         CLEAR (TRCEPSW+2,2)
+         ST    RAR,TRCEPSW+4           POINTER TO TRACE LOCATION
+         END   ELSE,BEGIN
+         MVC   TRCEPSW,@TRPSW
+         MVC   TRCEIC,@TRIC            INTERRUPT CODE
+         MVC   TRCECPID,@TRCPID        CPU ID
+         END
+         STCK  TRCETS                  SET TIME
+         LC    RS,@TRDLEN              DATA LENGTH
+         EX    RS,'MVC  TRCEREGS(0),@TRREGS'    ADD TRACE DATA
+         LA    RS,@RS+L'TRCENTRY+1     ENTRY SIZE
+         STH   RS,TRCELEN              SET LENGTH
+         LA    RB,TRCENTRY(RS)         NEXT ENTRY
+         IF    (RB,NL,RTCBTRTL),BEGIN
+         L     RB,RTCBTRTF             START BACK AT TOP
+         SET   RTCBTRTF.X'80'          NOTE WRAP
+         END   ,
+         ST    RB,RTCBTRTC             RESET TRACE POINTER
+         DROP  RB
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   TRCEINIT - Initialize trace table                             *
+*                                                                 *
+*                                                                 *
+*     Input - @TRCINT                                             *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TRCEINIT PROC  @TRCINT,SCOPE=GLOBAL
+         L     RB,@TRCINM              NUMBER OF ENTRIES
+         IF    (RB,Z),'LA  RB,50'
+         M     RA,=A(L'TRCENTRY+24)    TABLE SIZE
+         POOLGET (RB)
+         ST    RVR,RTCBTRTF            START OF TABLE
+         ST    RVR,RTCBTRTC            POINTER TO NEXT ENTRY
+         AR    RVR,RB                  END OF TABLE
+         ST    RVR,RTCBTRTL
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   TRCEPRNT - Print trace table                                  *
+*                                                                 *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TRCEPRNT PROC  SCOPE=GLOBAL
+         IF    RTCBTRTF.X'80',BEGIN    TABLE HAS WRAPPED
+         L     RA,RTCBTRTC             PRINT 2ND HALF (OLDEST)
+         L     RB,RTCBTRTL              UP TO PHYSICAL END
+         LCALL PRTRACE                 GO PRINT THE TRACE TABLE
+         END   ,
+         L     RA,RTCBTRTF             PRINT OTHER HALF
+         L     RB,RTCBTRTC              UP TO NEXT AVAILABLE
+         LCALL PRTRACE                 GO PRINT THE TRACE TABLE
+         PEND
+         EJECT
+*
+* PRINT TRACE TABLE PORTION
+*
+PRTRACE  LABEL ,
+         BR    RAR
+         EJECT
+*******************************************************************
+*                                                                 *
+*    FPOST Work area                                              *
+*                                                                 *
+*******************************************************************
+         SPACE
+POSTAREA RECORD BEGIN
+POSTREGS DS    2A                      Register save area
+POSTFL   FLAG  ,
+         FLAG  POSTLOCK                Post obtained the local lock
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*     FPOST - Fast post an ECB                                    *
+*                                                                 *
+*                                                                 *
+*     Input - @FPOST                                              *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FPOST    PROC  @FPOST,POSTAREA,SCOPE=GLOBAL
+         CLEAR POSTFL                  Clear flags
+*
+*  FIRST TRY A "FAST POST"
+*
+         L     RA,@FPSTECB             Get the ECB address
+         LOOP  BEGIN
+         L     RB,@RA                  Current ECB contents
+         IF    (RB,M),GOPOST           WAIT bit on
+         L     RS,=A(X'40000000')      Check if already posted
+         IF    ('NR  RS,RB',NZ),EXIT   ECB already POST'ed
+         L     RS,=A(X'40000000')      Post code
+         OR    RS,RB                   POST'ed ECB
+         CS    RB,RS,@RA               Post the ECB
+         UNTIL Z,END   ,
+         CLEAR RVR                     Set return code
+         B     POSTEXIT                Successful
+         EJECT
+*
+*  GET INTO KEY 0 AND GET THE LOCAL LOCK
+*
+GOPOST   LABEL ,
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)   GET INTO KEY ZERO
+         SETLOCK TEST,TYPE=LOCAL,BRANCH=(HELD,GOTLOCK)
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=SAVE,              *
+               RELATED=PSTLOCK
+         SET   POSTLOCK
+GOTLOCK  LABEL ,
+*
+*  FAST POST FAILED, BRANCH ENTER POST ROUTINE
+*
+         STM   R10,R11,POSTREGS        Save work regs
+         L     R11,@FPSTECB            ECB address
+         CLEAR R10
+         L     R15,CVTPTR              CVT address
+         WITH  (CVT,R15),'ACALL  CVT0PT02'   POST routine
+         LM    R10,R11,POSTREGS
+*
+*  RELEASE THE LOCAL LOCK AND RETURN TO PROPER KEY
+*
+         IF    POSTLOCK,BEGIN
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=SAVE,RELATED=PSTLOCK
+         END
+         MODESET KEYADDR=(2)           Back to our key
+         LA    RVR,4                   Set return code
+POSTEXIT PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*     FWAIT - Fast wait on an ECB                                 *
+*                                                                 *
+*                                                                 *
+*     Input - @FWAIT                                              *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FWAIT    PROC  @FWAIT,SCOPE=GLOBAL
+         L     RB,@FWTECB
+         IF    ^@RB.X'40',BEGIN
+         WAIT  ECB=(RB)                WAIT
+         EXIT
+*
+*  GET INTO KEY 0 AND GET THE LOCAL LOCK
+*
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)   GET INTO KEY ZERO
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=SAVE,              *
+               RELATED=WAITLOCK
+         EJECT
+*
+*  SET UP RESTART ENVIRONMENT
+*
+         L     RX,RTCBTCB              TCB ADDRESS
+         WITH  (TCB,RX),BEGIN
+         STM   R0,R15,TCBGRS           SAVE REGISTERS
+         L     RY,TCBRBP               CURRENT RB
+         END   ,
+         S     RX,=A(TCBPXLEN)         POINT AT PREFIX
+         WITH  (TCBFIX,RX),BEGIN
+         STD   R0,TCBFRS0              SAVE
+         STD   R2,TCBFRS2               FLOATING
+         STD   R4,TCBFRS4                POINT
+         STD   R6,TCBFRS6                 REGISTERS
+         END   ,
+         LA    RS,WAITDONE             RESTART ADDRESS
+         BSM   RS,0                    INCLUDE ADDRESSING MODE
+         WITH  (RBBASIC,RY),'ST  RS,RBOPSWA'    SET RESTART ADDRESS
+*
+*  BRANCH ENTER WAIT ROUTINE
+*
+         LR    R1,RB                   ECB address
+         LA    R0,1                    WAIT event count
+         L     R15,CVTPTR              CVT address
+         WITH  (CVT,R15),'ACALL  CVTVWAIT'   WAIT ROUTINE
+WAITDONE LABEL ,
+         MODESET KEYADDR=(2)           BACK TO OUR KEY
+         END   ,
+         CLEAR @RB.X'40'               Clear post bit
+         PEND
+         EJECT
+         COPY  ESTAPARM
+*******************************************************************
+*                                                                 *
+*    ESTAE Data                                                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+         DATA  BEGIN
+*GEN
+MESTAE   ESTAE ,TERM=YES,MF=L
+*NOGEN
+MODESTAE EQU   MESTAE,*-MESTAE,C'X'
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    ESTADATA - ESTAE data area                                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+ESTADATA RECORD BEGIN
+EDRETRY  DS    A                       RETRY ADDRESS
+EDFLAG   FLAG  ,
+         FLAG  EDFACTIV                ESTAE EXIT ACTIVE
+         FLAG  EDFABEND                Status indicates abend
+         DS    X
+EDRUBMSK DS    H                       RUB MASK
+EDREGS   DS    16A                     CALLERS EXIT REGISTERS
+EDRUB    EQU   EDRUBMSK,*-EDRUBMSK,C'X'   RETRY REGISTER UPDATE BLOCK
+*
+EDESTAE  DS    XL(L'MODESTAE)'00'      ESTAE PARAMETER LIST
+*
+&EDINFOL SETA  (L'ESTAINFO+3)/4
+EDINFO   DS    (&EDINFOL)A             RETURN INFO AREA
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ESTAEON - Enable ABEND intercept                              *
+*                                                                 *
+*                                                                 *
+*     Input - @ESTAE                                              *
+*                                                                 *
+*    Output - ESTAE activated                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ESTAEON  PROC  @ESTAE,SCOPE=GLOBAL
+         L     R14,RTCBESTA            ESTAE DATA AREA
+         WITH  (ESTADATA,R14)
+         MVC   EDREGS(16*4),@ESTREGS   CALLERS EXIT REGISTERS
+         MVC   EDRETRY,@ESTRTRY        DESIRED RETRY EXIT
+         SET   EDFACTIV                MARK ACTIVE
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ESTAEOFF - Disable ABEND intercept                            *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ESTAEOFF PROC  SCOPE=GLOBAL
+         L     RA,RTCBESTA             ESTAE DATA AREA
+         WITH  (ESTADATA,RA)
+         CLEAR EDFACTIV                MARK INACTIVE
+         PEND
+         EJECT
+*GEN
+         IEZATTCH
+*NOGEN
+TASKSERV CSECT
+         EJECT
+         COPY  SPNPARM
+         SPACE 2
+SPNDATA  RECORD BEGIN
+SPNATT   DS    0D,XL(ATLSTSIZ)
+         END   ,
+         SPACE 2
+SPNEXTR  RECORD BEGIN
+SPNEXAR  EXTRACT MF=L
+SPNEXA   DS    A                       EXTRACT ANSWER AREA
+         END   ,
+         SPACE 2
+TASKPARM RECORD BEGIN
+TPLRTCB  DS    A                       RTCB
+TPLTSTK  DS    A                       Temporary stack
+TPLEP    DS    A                       Sub-task entry point
+TPLPARM  DS    A                       Task parameter
+TPLNTRC  DS    A                       Number of trace table entries
+TPLNSTK  DS    A                       Stack size
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*   SPAWN - Create a sub-task                                     *
+*                                                                 *
+*                                                                 *
+*     Input - @SPAWN                                              *
+*                                                                 *
+*    Output - RVR contains a task id                              *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+SPAWN    PROC  @SPAWN,SPNDATA,SCOPE=GLOBAL
+         CLEAR SPNDATA
+         POOLGET L'RTCB
+         LR    RK,RVR                  POINTER TO SUBTASK RTCB
+         L     RY,RTCBCBAT             CBAT POINTER
+         WITH  (CBAT,RY),'L  RY,CBATTASK'
+         USING TASKCT,RY
+         LOCKOB TCTRLOCK               GET THE RTCB CHAIN LOCK
+         LOOP  BEGIN                           ADD NEW
+         L     RA,TCTRTCB                      RTCB
+         WITH  (RTCB,RA)                       TO
+         WHILE (RTCBNEXT,NZ),'L  RA,RTCBNEXT'
+         ST    RK,RTCBNEXT                     OF
+         UNTIL Z,END                           CHAIN
+         LOCKRL TCTRLOCK               FREE THE CHAIN LOCK
+         DROP  RY
+         L     RS,RTCBCBAT             CBAT POINTER
+         WITH  (RTCB,RK),BEGIN
+         MVC   RTCB(4),=CL4'RTCB'      CONTROL BLOCK ID
+         MVC   RTCBNAME,@SPNNAME       TASK ID
+         ST    RS,RTCBCBAT             SET CBAT POINTER
+         MEMGET L'TASKPARM,TYPE=GLOBAL GET PARAMETER AREA
+         LR    RY,RVR                  SUB TASK PARAMETERS
+         WITH  (TASKPARM,RY)
+         ST    RK,TPLRTCB              SET RTCB POINTER
+         MEMGET 48*4,TYPE=GLOBAL       TEMPORARY STACK
+         ST    RVR,TPLTSTK
+         MVC   TPLPARM,@SPNPARM        TASK PARAMETER
+         MVC   TPLNTRC,@SPNTRC         TRACE COUNT
+         MVC   TPLNSTK,@SPNSTK         STACK SIZE
+         MVC   TPLEP,@SPNEP            ENTRY POINT
+*
+         LA    RX,SPNATT               ATTACH PARAMETER LIST
+         WITH  (ATTCHLST,RX)
+         ACALL POOLDEF
+         ST    RVR,ATSHFLDA            SET SHARED SUBPOOL LIST
+         SET   ATFLAGS2.ATNSHSP
+         MEMGET L'SPNEXTR,TYPE=BELOW16M
+         LR    RB,RVR                  AREA FOR EXTRACT
+         WITH  (SPNEXTR,RB),BEGIN
+         EXTRACT SPNEXA,'S',FIELDS=(PRI),MF=(E,SPNEXAR)
+         LC    RS,SPNEXA+3             CURRENT TASK PRIORITY
+         L     RA,@SPNDPRI             DESIRED PRIORITY
+         IF    (RA,Z),'LA  RA,128'     USE DEFAULT
+         SR    RA,RS                   COMPUTE DIFFERENTIAL
+         STH   RA,ATDPMOD
+         END   ,
+         MEMFREE L'SPNEXTR,A=(RB),TYPE=BELOW16M
+         LA    R0,@SPNNAME             TASK NAME
+         ST    R0,ATPGNADA             TO ATTACH LIST
+*        MVC   ATETXRA,=A(TASKABND)    End of task exit routine
+         IDENTIFY EPLOC=(0),ENTRY=TASKSTRT   IDENTIFY SUBTASK
+         IF    (R15,NZ),'KAPUT SPNIDNT'      IF ERROR, BAD NEWS
+         SET   ATINDS.ATSZERO          SUB0OOL ZERO NOT SHARED
+         SET   ATINDS.ATMODE           SUPERVISOR STATE
+         LA    RS,RTCBTECB             TASK ECB
+         ST    RS,ATECBADR              TO PARAMETER LIST
+         ATTACH SF=(E,(RX)),MF=(E,(RY))
+         ST    R1,RTCBTCB               SAVE SUBTASK TCB ADDRESS
+*-
+*-       Temporary code to set CPU affinity.  Added as a
+*-         bypass for a hardware problem on the ES/9000.
+*-             1/27/92, Niz
+*-
+*TEMPAFF IF    (RTCBNAME,EQ,'GSTCPU'),BEGIN  CPU process...
+*TEMPAFF L     R3,RTCBTCB
+*TEMPAFF WITH  (TCB,R3)
+*TEMPAFF
+*TEMPAFF IF    (TCBAFFN,EQ,X'FFFF'),BEGIN  No affinity yet...
+*TEMPAFF IC    R0,RTCBNAME+6       Pick up GSTCPU number
+*TEMPAFF N     R0,=A(X'F')         Convert to binary
+*TEMPAFF IF    (R0,GT,5),EXIT      Something is wrong, scram
+*TEMPAFF
+*TEMPAFF QSNAP RTCBNAME,8,MODE=WTO
+*TEMPAFF QSNAP (R0)
+*TEMPAFF
+*TEMPAFF MODESET EXTKEY=ZERO,SAVEKEY=(2)  Get us to key zero
+*TEMPAFF LA    R1,AFFMASKS
+*TEMPAFF IC    R0,RTCBNAME+6       Pick up GSTCPU number
+*TEMPAFF N     R0,=A(X'F')         Convert to binary
+*TEMPAFF AR    R1,R0
+*TEMPAFF AR    R1,R0
+*TEMPAFF QSNAP @R1,2
+*TEMPAFF MVC   TCBAFFN(2),@R1      Set appropriate affinity
+*TEMPAFF MODESET KEYREG=(2)        Restore key
+*TEMPAFF END
+*TEMPAFF END
+*TEMPAFF
+*TEMPAFF          DATA  BEGIN
+*TEMPAFF * This assigns CPU5, CPU4, CPU3, CPU2, CPU1, CPU0...
+*TEMPAFF AFFMASKS DC    X'0400',X'0800',X'1000'
+*TEMPAFF          DC    X'2000',X'4000',X'8000'
+*TEMPAFF          END
+*-
+*-       End of temporary code.
+*-
+         LR    RVR,RK                  RETURN TASK ID
+         END   ,
+         PEND
+*
+TASKABND ABEND 2,DUMP
+         EJECT
+*******************************************************************
+*                                                                 *
+*    CANTASK  --  Remove a task                                   *
+*                                                                 *
+*                                                                 *
+*     Input - TASKID (RTCB pointer) in @FUNCPRM                   *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+CANTASK  PROC  @FUNCPRM,SCOPE=GLOBAL
+         MEMGET 4,TYPE=BELOW16M
+         LR    RB,RVR                  AREA ADDRESS
+         L     RA,@FUNCDTA             TASK ID
+         WITH  (RTCB,RA),BEGIN
+         L  RS,RTCBTCB                 TCB address
+         END   ,
+         ST    RS,@RB                  SET DETACH PARAMETER
+         DETACH (RB),STAE=YES          Say goodnight Gracie
+         MEMFREE 4,A=(RB),TYPE=BELOW16M
+         PEND  ,
+         EJECT
+         COPY  SBTPARM
+         EJECT
+*******************************************************************
+*                                                                 *
+*    TASKSTRT - Initialize and start up a sub-task                *
+*                                                                 *
+*                                                                 *
+*     Input -  TASKPARM                                           *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+TASKSTRT LABEL ,
+         STM   R14,R12,@R13+12         SAVE ENTRY REGS
+         LR    BR,R15
+         USING TASKSTRT,BR
+         LR    RY,R1                   PARAMETER LIST
+         USING TASKPARM,RY
+*
+*  SWITCH TO AMODE 31
+*
+         LA    RS,GOAMOD31
+         O     RS,=X'80000000'
+         BSM   0,RS                    SET AMODE 31
+GOAMOD31 LABEL ,
+         L     RTCBR,TPLRTCB           GET RTCB POINTER
+         ST    R13,RTCBMSV             MVS SAVE AREA
+*
+*  SET UP STACK
+*
+         L     WAR,TPLTSTK             STACK BACK-POINTER
+         LA    SPR,@WAR+8              TEMPORARY STACK
+         L     RB,TPLNSTK              PERMANENT STACK SIZE
+         IF    (RB,Z),'L  RB,=A(512*4)'   DEFAULT IS 512 WORDS
+         POOLGET (RB),TYPE=GLOBAL      Get the stack memory
+         LR    SPR,RVR                 Stack pointer
+         ST    RB,4(,SPR)              Save the stack length
+         LA    SPR,8(SPR)              then point to next doubleword
+         ST    SPR,RTCBSTK             Save the stack pointer
+         PSET  TSKPRM
+         ST    RY,TSKPRVAL             Save the task parm pointer
+         LCALL TSKSTART                Initial task procedure
+*
+*  TASK HAS COMPLETED - RETURN TO MVS
+*
+         L     R13,RTCBMSV             SAVE AREA POINTER
+         LM    R14,R12,12(R13)         RESTORE REGS
+         CLEAR R15
+         BR    R14                     RETURN TO MVS
+         DROP  BR,RY
+         EJECT
+*******************************************************************
+*                                                                 *
+*    TSKSTART - Initial procedure of a sub-task.                  *
+*                                                                 *
+*                                                                 *
+*     Input -  TSKPRM                                             *
+*                                                                 *
+*    Output -                                                     *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+TSKPRM   RECORD BEGIN
+TSKPRVAL DS    A                       Address of the TASKPARM
+         END   ,
+         SPACE 2
+TSKSTART PROC  TSKPRM,SCOPE=LOCAL,BCH=NO
+         L     RY,TSKPRVAL             Get the TASKPARM  pointer
+         WITH  (TASKPARM,RY)           Address it
+         MEMFREE 48*4,A=TPLTSTK,TYPE=GLOBAL     FREE TEMPORARY STACK
+*
+*  INITIALIZE TRACE TABLE
+*
+         PSET  @TRCINT,CLEAR=NO
+         MVC   @TRCINM,TPLNTRC         NUMBER OF TRACE ENTRIES
+         ACALL TRCEINIT                TRACE TABLE
+         MEMINIT ,                     Initialize local pool
+         ACALL CPTSTART                INITIALIZE CPU TIMER
+*
+*  INITIALIZE ESTAE
+*
+         MEMGET L'ESTADATA
+         LR    RB,RVR
+         ST    RB,RTCBESTA             ESTAE WORK AREA
+         WITH  (ESTADATA,RB),BEGIN
+         MVC   EDRUBMSK,=X'FFFF'       SET MASK
+         MVC   EDESTAE,MODESTAE        MOVE IN PARM LIST
+         LA    RA,ESTAEXIT             RECOVERY ROUTINE
+*GEN
+         ESTAE (RA),PARAM=(RTCBR),MF=(E,EDESTAE)   SET ESTAE
+*NOGEN
+         END
+         L     RA,TPLEP                ENTRY POINT
+         L     RB,TPLPARM              USER PARAMETER
+         MEMFREE L'TASKPARM,A=(RY),TYPE=GLOBAL  FREE PARM MEMORY
+         PSET  SBTPARM,CLEAR=NO        SUBTASK PARMS
+         ST    RB,SBTDATA              SET PARM
+         ACALL (RA)                    BRANCH TO SUBTASK
+*
+*  The task is done
+*
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ESTAE Exit                                                    *
+*                                                                 *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+         USING *,R15                   ##
+ESTAEXIT LABEL ,
+         IF    ('CH  R0,=H"12"',EQ),BEGIN     NOT ENOUGH CORE
+         CLEAR R15                     TELL RTM TO BAG IT
+         BR    R14                     RETURN TO RTM
+         END   ,
+         DROP  R15
+         STM   R14,R12,@R13+12         SAVE RTM'S REGISTERS
+         LR    BR,R15
+         USING ESTAEXIT,BR
+         LR    RK,R1
+         WITH  (SDWA,RK),BEGIN
+         L     RTCBR,SDWAPARM          RTCB pointer
+         L     RA,RTCBESTA             ESTAE Data area
+         WITH  (ESTADATA,RA)
+*
+*  COPY IMPORTANT DATA TO INFO AREA
+*
+         LA    RB,EDINFO               RETURN INFO AREA
+         WITH  (ESTAINFO,RB),BEGIN
+         MVC   EDEPSW,SDWAEC2          PSW AT ABEND
+         MVC   EDEPCHK,SDWAAEC2        ILC, INT CODE, EXCEP ADDR
+         MVC   EDEABND,SDWAABCC        ABEND CODE
+         MVC   EDERSN,SDWAGR15         REASON CODE
+         MVC   EDEREGS(4*16),SDWASRSV  MOVE ABEND GPRS
+         END   ,
+*
+*  SEE IF A RETRY IS POSSIBLE
+*
+         TM    SDWAERRD,SDWACLUP       Is retry possible
+         IF    ON,'CLEAR EDFACTIV'     Nope, don't even try
+*
+*  CHECK FOR ACTIVE RETRY
+*
+         IF    EDFACTIV,BEGIN
+         CLEAR EDFACTIV
+         ST    RB,EDREGS               ERROR INFO POINTER TO RVR
+         LA    RB,EDRUB                REGISTER UPDATE BLOCK
+         L     RA,EDRETRY              RETRY ADDRESS
+*
+*  CANCEL DUMP, RESET REGISTERS, THEN BRANCH TO A RETRY ROUTINE
+*
+*GEN
+         SETRP RC=4,RETADDR=(RA),RETREGS=YES,RUB=(RB),                 *
+               FRESDWA=YES,DUMP=NO,REGS=(14,12),WKAREA=(RK)
+*NOGEN
+         END   ELSE,BEGIN
+*
+* Take care of whatever needs to be done here
+*
+         SET   EDFABEND                Set the abending flag
+         L     RB,RTCBCBAT             Get the CBAT address
+         WITH  (CBAT,RB),'L RB,CBATTMCB'  Get the TMCB address
+         WITH  (TMCB,RB)
+         IF    (RTCBNAME,EQ,'GSTCPU'),'SET TMFGDONE'
+         IF    (RTCBNAME,NE,'MASTER'),BEGIN      Not master, POST
+         SET   TMFDUMP+TMFABEND
+         POST  TMCBECB                 Wake up the master
+         END   ELSE,BEGIN
+*
+* If it is the master task abending, we have to do the dump here
+*
+         LR    RY,R13                  Copy R13 for later
+         L     WAR,TMCBSTK
+         LA    SPR,@WAR+8              Setup a stack
+         VCALL STOPBAT                 Stop the batch jobs
+         VCALL DODUMP                  Take the formatted dump
+         LR    R13,RY                  Restore R13
+         END   ,
+*
+* Continue the ABEND Process
+*
+*GEN
+         SETRP RC=0,REGS=(14,12),WKAREA=(RK)
+*NOGEN
+         END   ,
+         END   ,
+         DROP  BR
+         EJECT
+         LTORG
+         END   .

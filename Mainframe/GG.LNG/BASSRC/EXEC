@@ -1,0 +1,3548 @@
+EXEC     TITLE 'BASIC COMPILER  -  EXECUTION PHASE    7/05/72'
+         MACRO
+&NAME    FIX   &FLOAT,&FIXED
+&NAME    AU    &FLOAT,UNZERO
+         STE   &FLOAT,AEXWORK
+         L     &FIXED,AEXWORK
+         LA    &FIXED,0(&FIXED)
+         MEND
+ SPACE 2
+         MACRO
+&Q       BIFEC &Q1            BRANCH IF EXECUTABLE CODE (MAY BE) SET UP
+&Q       LTR   RCODE,RCODE
+         BNM   &Q1
+         MEND
+ SPACE 2
+         MACRO
+&Q       BINEC &Q1        BRANCH IF NO EXECUTABLE CODE (MAY BE) SET UP
+&Q       LTR   RCODE,RCODE
+         BM    &Q1
+         MEND
+ SPACE 2
+         MACRO
+&Q       MVLA  &Q1
+&Q       BINEC A&SYSNDX           BRANCH IF NO EXECUTABLE CODE
+         STM   R14,R3,8(R13)      SAVE REGS.
+         BAL   R14,MVLA
+         DC    H'&Q1'
+         LM    R14,R3,8(R13)      RESTORE REGS.
+A&SYSNDX DS    0H
+         MEND
+ SPACE 2
+         MACRO
+&Q       SMLB  &Q1
+&Q       BINEC A&SYSNDX           BRANCH IF NO EXECUTABLE CODE
+         STM   R14,R3,8(R13)      SAVE REGS.
+         BAL   R14,SMLB
+         DC    H'&Q1'
+         LM    R14,R3,8(R13)      RESTORE REGS.
+A&SYSNDX DS    0H
+         MEND
+ SPACE 2
+         MACRO
+&Q       DEC
+&Q       BINEC A&SYSNDX           BRANCH IF NO EXECUTABLE CODE
+         STM   R14,R0,8(R13)
+         BAL   R14,DLTR           DELETE IN-LINE CODE FOR THIS STATMNT.
+         LM    R14,R0,8(R13)
+A&SYSNDX DS    0H
+         MEND
+ SPACE 2
+         MACRO
+&Q       IMO
+&Q       BINEC A&SYSNDX           BRANCH IF NO EXECUTABLE CODE
+         STM   R14,R0,8(R13)
+         BAL   R14,DLTR           TO DELETE ANY IN-LINE CODE
+         BAL   R14,SETIMO         TO SET INTERPRETIVE MODE ONLY
+         LM    R14,R0,8(R13)
+A&SYSNDX DS    0H
+         MEND
+ SPACE 2
+         MACRO
+&Q       OPER  &Q1
+&Q       SMLB  10
+         LE    F0,0(,RX)
+         LE    F2,0(,RY)
+         &Q1   F0,F2
+         B     TYPE03TL
+         MEND
+ SPACE 2
+*PRINT OFF
+ PRINT ON,NOGEN
+         TITLE 'BASIC COMPILER  -  COMMENTS'
+EXEC     CSECT
+*************** RETURN MESSAGES ***************************************
+*
+*
+NSTOP    EQU   4000    -STOP EXECUTED
+NPAUSE   EQU   4001    -PAUSE EXECUTED
+NEND     EQU   4002    -END OF EXECUTION
+NRETFULL EQU   4003    -TOO MANY NESTED GOSUBS
+NTEMPFUL EQU   4004    -TOO MANY NESTED DEFINED FUNCTIONS
+NFORRFUL EQU   4005    -TOO MANY NESTED FOR LOOPS
+NFORERR  EQU   4006    -NO CORRESPONDING FOR STATEMENT
+NNEXTERR EQU   4007    -NO CORRESPONDING NEXT STATEMENT
+NDEFNERR EQU   4008    -DEF FN MISSING
+NMATDERR EQU   4009    -MATRIX RE-DEFINITION EXCEEDS ALLOCATED STORAGE
+NINCONER EQU   4010    -INCONSISTENT USE OF SUBSCRIPTS
+NLINEERR EQU   4011    -STATEMENT MISSING
+NMATERR  EQU   4012    -INCOMPATIBLE DIMENSIONS IN A MATRIX COMPUT.
+NSUBSERR EQU   4013    -SUBSCRIPT OUT OF RANGE
+NSYNTERR EQU   4014    -EXECUTING A SYNTACTICALLY INCORRECT STMT
+NDATANUL EQU   4015    -NO MORE DATA
+NPRINTER EQU   4016    -PRINT ERROR
+NWRITERR EQU   4018    -WRITE ERROR
+NSIMPLE  EQU   4019    -VARIABLE MAY NOT BE BOTH SIMPLE &SUBSCRIPTED
+NRETERR  EQU   4020    -NO CORRESPONDING GOSUB STATEMENT
+NCOREFUL EQU   4021    -NO MORE CORE TO ALLOCATE ARRAYS
+NENDERR  EQU   4022    -NOTHING TO EXECUTE
+NRNDERR  EQU   4023    -ARGUMENT TO RND NOT A SIMPLE VARIABLE
+NDATAERR EQU   4024    -INVALID STRING DATA IN A DATA STATEMENT
+NATTENT  EQU   4025    -INTERRUPT
+*
+*
+*************** EXITS TO CONTROL PROGRAM ******************************
+*
+*
+MSTOP    EQU   0       -NORMAL RETURN (END OR STOP)
+MPAUSE   EQU   4       -PAUSE RETURN
+MUSERERR EQU   8       -USER ERROR
+MSYSTERR EQU   12      -SYSTEM ERROR
+*                       (CURRENTLY UNUSED)
+MATTENT  EQU   16      -ATTENTION (TIME-SHARE), OR
+*                       END-FILE ON INPUT (BATCH).
+*
+***********************************************************************
+      EJECT
+**************** PROGRAM DESCRIPTION **********************************
+*
+*
+*              THE BASIC PROGRAM EXISTS IN THE FORM OF A
+*              NUMBER OF TABLES WHICH WILL BE EXECUTED
+*              INTERPRETIVELY.
+*
+*              EACH ENTRY IN THE LINES TABLE REPRESENTS A
+*              BASIC STATEMENT.  THE EXECUTOR CAN
+*              GIVE UP CONTROL AFTER ANY ONE
+*              BASIC STATEMENT IS EXECUTED.
+*
+*              THE EXECUTOR MAY BE CALLED IN THE
+*              FOLLOWING WAYS:
+*
+*              1) TO BEGIN EXECUTING A BASIC PROGRAM
+*              AT THE FIRST STATEMENT.
+*
+*              2) TO BEGIN EXECUTING A BASIC PROGRAM
+*              AT A PARTICULAR STATEMENT.
+*
+*              3) TO CONTINUE EXECUTING A BASIC PROGRAM
+*              FROM WHENCE WE WERE INTERRUPTED.
+*
+*              4) TO EXECUTE STATEMENT 10000, WHICH IS
+*              IMMEDIATE MODE FROM THE CONTROL PROGRAM IN
+*              THE TIME-SHARING VERSION.
+*
+*              AFTER EACH BASIC STATEMENT IS COMPLETED, THE EXECUTOR
+*              WILL CHECK THE ATTENTION BIT.  IF IT IS ON, IT
+*              RETURNS TO THE CONTROL PROGRAM.
+*
+*              THE CONTROL PROGRAM CALLING THE INTERPRETER
+*              WILL SET REGISTER 'USER' TO THE BASE OF THE
+*              USER AREA.
+*
+*        INPUTS REQUIRED:
+*
+*              IF R0 IS ZERO, EXECUTION WILL BEGIN AT
+*              THE FIRST STATEMENT.
+*
+*              IF R0 IS POSITIVE, EXECUTION WILL BEGIN
+*              AT THE STATEMENT NUMBER IN R0.
+*
+*              IF R0 IS NEGATIVE, EXECUTION WILL BEGIN AT THE
+*              STATEMENT FOLLOWING THIS ONE (AFTER COMPLEMENTING
+*              IT).
+*
+*
+*        THE BATCH CONTROL PROGRAM CALLS THE EXECUTOR IN THE FOLLOWING
+*        WAY:
+*
+*              L    R11,VAREA            -BASE OF AREA
+*              SR   R0,R0                -TO EXECUTE AT THE BEGINNING
+*              L    R15,VEXEC            -ADDRESSIBILITY TO EXEC
+*   CALLEXEC   EQU  *
+*              BALR R14,R15              -CALL
+*
+*              B    NORMAL               -STOP OR END EXECUTED
+*              B    PAUSE                -PAUSE EXECUTED
+*              B    USERERR              -USER ERROR
+*              B    SYSTERR              -SYSTEM ERROR
+*              B    ATTENTION            -USER HIT ATTENTION
+*
+*   PAUSE      EQU  *
+*              LCR  R0,R0                -COMPLEMENT THE STMT. #
+*              B    CALLEXEC             -RESUME EXECUTION
+*
+*   VEXEC      DC   V(EXEC)
+*   VAREA      DC   V(AREA)
+*
+*
+*        THE EXECUTOR WILL SAVE AND RESTORE ALL REGISTERS EXCEPT
+*        R0 AND R1.
+*
+************** ROUTINES CALLED ***************************************
+*
+*        REGISTER 0 IS THE CURRENT STATEMENT NUMBER
+*        REGISTER 1 POINTS TO THE ARGUMENT LIST ON INPUT
+*                   AND IS THE ERROR NUMBER ON OUTPUT.
+*        REGISTER 14 IS THE ERROR RETURN POINT
+*        REGISTER 14+4 IS THE NORMAL RETURN
+*        REGISTER 15 IS THE ENTRY POINT
+*
+* (A)  INV     -     MAT A=INV(B)
+*             OR     MAT A=INV(B,D1),
+*             WHERE D1 IS THE DETERMINANT RETURNED IN F6.
+*
+*      1.   address of b
+*      2.   address of a
+*      3.    rows of a (=cols of a=rows   NOof b=cols of b)
+*
+* (B)  TRN     -     MAT A=TRN(B)
+*
+*      1.   address of b
+*      2.   address of a
+*      3.    rows of b (=cols of a)
+*      4.    cols of b (=rows of a)
+*
+* (C)  MATM    -     MAT C=A*B
+*
+*      1.   address of b
+*      2.   address of a
+*      3.   address of c
+*      4.    cols of b (=rows of a)
+*      5.    cols of c (=cols of a)
+*      6.    rows of c (=rows of b)
+*
+* (D)  LODR1   - TO DYNAMICALLY ALLOCATE AN ARRAY (IN R1)
+*
+* (E)  BINR    - TO FIND A STATEMENT NUMBER
+*
+* (F)  POWER   - TO EXPONENTIATE (F0**F2) INTO (F0)
+*
+* (G)  SIN
+*
+* (H)  COS
+*
+* (I)  TAN
+*
+* (J)  ATN
+*
+* (K)  LOG
+*
+* (L)  EXP
+*
+* (M)  SQR
+*
+* (N)  RND
+*
+* (0)  PRINT
+*
+* (P)  INPUT
+*
+* (Q)  DUMP
+*
+* (R)  RUNERR  - MESSAGE DISPATCHER
+*
+* (S)  READ (N,I,EOF)
+*
+* (T)  WRITE (N,I)
+*
+* (U)  NRM (A)  - TO DO A COLUMN NORMALIZATION OF MATRIX A.
+*
+* (V)  PAT     PLOT ATTACH
+*
+* (W)  PDT     PLOT DETACH
+*
+* (X)  PSX     PLOT SET X
+*
+* (Y)  PSY     PLOT SET Y
+*
+* (Z)  PCH     PLOT CHARACTER
+*
+* (AA) PLT     GENERAL PLOT MECHANISM
+*
+* (AB) EIG    -   MAT A=EIG(B)
+*
+*      1.  ADDRESS OF B
+*      2.  ADDRESS OF A
+*      3.  ROWS OF A (=COLS OF A=ROWS OF B=COLS OF B)
+*
+*
+*      When an error occurs in any of these routines,
+*  the return is made to the executor with general reg.
+*  one containing the error code so the executor can call
+*  the error handling routine.   For a normal exit return
+*  is made to 4 bytes past the statement on the executor
+*  which called it.
+*
+*  ! CALLING THE ERROR ROUTINE
+*
+*          LA   R1,NUMBER OF ERROR MESSAGE
+*          L    15,=V(RUNERR)
+*          BALR 14,15
+*
+*
+*
+*        LANGUAGE CONSIDERATIONS BASED ON IMPLEMENTATION:
+*
+*              1.  VARIABLES A-Z MUST BE USED CONSISTENTLY.
+*                  (EITHER AS A SIMPLE VARIABLE, A SINGLY-
+*                  DIMED VARIABLE, OR A DOUBLY DIMED VARIABLE).
+*
+*
+*              2.  FOR STATEMENT:
+*                  THE TEST IS MADE AT THE TOP OF THE LOOP.
+*
+*              3.  THE RIGHT SUBSCRIPT VARIES THE FASTEST.
+*
+*              4.  BRANCHING OUT OF A FOR-LOOP DE-ACTIVATES IT.
+*                  (UNLESS VIA A GOSUB).
+*
+*              5.  ALL OPERATIONS ON 2-DIMENSIONAL ARRAYS MAY BE DONE
+*                  ON SINGLY-DIMENSIONED ARRAYS EXCEPT
+*                  TRN, IDN, AND INV.
+*                  MATRIX MULTIPLY OF A VECTOR BY A MATRIX WILL WORK IF
+*                  THE VECTOR IS THE SECOND ARRAY.
+*                  EG.
+*                    A = B(5,5) * C(5) WILL WORK.
+*
+*              6.  ARRAYS ARE ALLOCATED DYNAMICALLY WHEN NECESSARY AND
+*                  REDEFINED TO FIT THE DIMENSIONS ON THE RIGHT.
+*
+*              7.  SUBSCRIPTS MUST BE POSITIVE, NON-ZERO AND LESS THAN
+*                  THE ALLOCATED AMOUNT.
+*
+*
+***********************************************************************
+         EJECT
+**************** OPERAND CODES ****************************************
+*
+*                 CODES           OPERANDS
+*                 -----           --------
+*
+*              1000 - 1019         A - Z
+*              2000 - 2103         A0- Z9
+*              3000 - 3019         A$- Z$
+*              4000 - 4XXX         TEMP ADDRESSES (FOR EVAL A-Z)
+*              5000 - 5XXX         TEMP VALUES
+*              6000 - 6XXX         NUMBER CONSTANTS
+*              7000 - 7XXX         STRING CONSTANTS
+*              8000 - 8XXX         TEMP ADDRESSES (FOR EVAL A$-Z$)
+*                 9000             ZER
+*                 9001             CON
+*                 9002             IDN
+*                 9003             TRN
+*                 9004             INV
+*                 9005             NRM
+*                 9006             EIG
+*                 A000             SIN
+*                 A001             COS
+*                 A002             TAN
+*                 A003             ATN
+*                 A004             LOG
+*                 A005             EXP
+*                 A006             SQR
+*                 A007             RND
+*                 A008             ABS
+*                 A009             SGN
+*                 A00A             INT
+*                 A00B             PAT
+*                 A00C             PDT
+*                 A00D             PSX
+*                 A00E             PSY
+*                 A00F             PCH
+*                 A010             PLT
+*              B000 - B019         FNA - FNZ
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+*             OP CODE                            OPERAND1   OPERAND 2
+*             -------                            --------   ---------
+*              0100                STACK FOR      -         -
+*              0101                MAX            V         -
+*              0102                STEP           V         -
+*              0103                TEST           V         -
+*              0104                NEXT           V         -
+*              0200                GO TO          LINE#     -
+*              0201                BRANCH         LINE#     -
+*              0202                GO SUB         LINE#     -
+*              0203                RESTORE        -         -
+*              0204                END            -         -
+*              0205                STOP           -         -
+*              0206                PAUSE          -         -
+*              0207                RETURN         -         -
+*              0208                DUMP           -         -
+*              0209                STACK FN       -         X
+*              020A                UNSTACK FN     V         X
+*              020B                COMP GOTO (ON) V         N
+*              020C                CLEAR DATA     -         -
+*              0300                COMP <         V         V
+*              0301                COMP >         V         V
+*              0302                COMP <=        V         V
+*              0303                COMP >=        V         V
+*              0304                COMP <>        V         V
+*              0305                COMP =         V         V
+*              0306                 =             V         V
+*              0307                 +             V         V
+*              0308                 -             V         V
+*              0309                 *             V         V
+*              030A                 /             V         V
+*              030B                 **            V         V
+*              030C                SUBS           V         -
+*              030D                EVAL           V         1 OR  2
+*              0400                READ           V         -
+*              0401                PRINT          V         DELIMITER
+*              0402                READ(N,I)INIT  N         I
+*              0403                READ(N,I,EOF)  V         EOF
+*              0404                WRITE(N,I)INIT N         I
+*              0405                WRITE(N,I)     V         -
+*              0406                INPUT          V         -
+*              0407                MAT READ       V         -
+*              0408                MAT PRINT      V         DELIMITER
+*              0409                MAT INPUT      V         -
+*              040A                MAT READ-I     V         EOF
+*              040B                MAT WRITE-I    V         DELIMITER
+*              0506                MAT =          V         V
+*              0507                MAT +          V         V
+*              0508                MAT -          V         V
+*              0509                MAT *          V         V
+*              050A                MAT SCALAR*    V         V
+*              050D                DEFINE MAT     V         1 OR 2
+***********************************************************************
+ PRINT ON,NOGEN
+         EJECT
+**************** REGISTER USAGE ***************************************
+*
+R0       EQU   0                       -STATEMENT NUMBER
+*                                      -LEFT SUBSCRIPT OF ARRAYS
+*
+FIX1     EQU   1                       -RIGHT SUBSCRIPT OF ARRAYS
+R1       EQU   1                       -ARGUMENT LIST POINTER
+*
+R2       EQU   2                  USED IN BXLOOP ON ENTRY
+RL       EQU   2                       -ALINEBEG+USER
+*
+R3       EQU   3                  USED IN BXLOOP ON ENTRY
+RLI      EQU   3                       -CURRENT INDEX TO LINES
+*                                       (SAVED IN ALINERUN)
+*
+R4       EQU   4                  USED IN BXLOOP ON ENTRY
+RCODE    EQU   4                  POINTS TO NEXT FREE CORE FOR CODE
+RZ       EQU   4                  BASE REG. DURING CODE EXECUTION
+*
+R5       EQU   5                  USED IN BXLOOP ON ENTRY
+RCI      EQU   5                       -ACODEBEG+USER+INDEX
+*
+R6       EQU   6                  USED IN BXLOOP ON ENTRY
+RTI      EQU   6                       -ATEMPBEG+USER+INDEX
+*
+R45      EQU   7  USED IN TYPE04 AND TYPE05 SECTS. AS WORK REGISTER
+R31      EQU   7  USED IN TYPE03 AND TYPE01 SECTS. AS LINK REGISTER
+*
+RX       EQU   8                       -WORK
+R8       EQU   8                       -EVEN REGISTER FOR MULTIPLY
+*
+RY       EQU   9                       -WORK
+R9       EQU   9                       -ODD REGISTER FOR MULIPLY
+*
+RBASE2   EQU   10                 SECOND BASE REGISTER FOR EXEC
+*
+USER     EQU   11                      -BASE OF AREA
+*
+RBASE    EQU   12                      -BASE OF PROGRAM
+R12      EQU   12
+*
+R13      EQU   13                      -SAVE AREA POINTER
+*
+FIX2     EQU   14                      -RIGHT SUBSCRIPT OF ARRAYS
+RET      EQU   14                      -LOCAL RETURN REGISTER
+R14      EQU   14                      -GLOBAL RETURN
+*
+R15      EQU   15                      -INITIAL ENTRY REGISTER
+SW       EQU   15                      -USING ATOZDSCT
+*                                       USING ASTGDSCT
+*
+F0       EQU   0                       -WORK
+F2       EQU   2                       -WORK
+F4       EQU   4                       -RETURN SWITCH FROM INV.
+F6       EQU   6                       -DETERMINANT FROM INV.
+*
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  INITIALIZATION'
+*************** INITIALIZATION ****************************************
+*
+         SAVE  (14,12),,*              -OS ENTRY
+         USING EXEC,R15
+         USING AREA,USER               -USER  POINTS TO BEGINNING
+*                                       OF USER AREA
+*
+         ST    R0,ASAVE                -LINE #
+*
+         LA    RX,72(,R13)             -LA  RX,SAVE
+         ST    R13,4(,RX)              -ST  R13,SAVE+4
+         ST    RX,8(R13)
+         LR    R13,RX
+*
+         BAL   RBASE,SETREGS
+BASE     B     8(,RZ)      EVERY EXECUTABLE STATEMENT ESTABLISHES
+*                          ADDRESSABILITY BY EXECUTING  BALR  RZ,RBASE
+*                                              OR    BAL  RZ,0(,RBASE)
+ SPACE
+         DROP  R15
+         USING ALINE,RL
+         USING CODE,RCODE
+         USING CODEDSCT,RCI
+         USING BASE,RBASE,RBASE2
+ SPACE
+SETREGS  LR    RBASE2,RBASE
+         A     RBASE2,=F'4096'    2ND BASE REG. FOR THIS PROGRAM
+*
+         L     RCODE,AXXXXBEG          SET CODE BASE REGISTER TO THE
+         LA    RCODE,0(RCODE,USER)     BEGINNING OF THE EXECUTABLE CODE
+         ST    RCODE,AXXXXPTR  INITIALIZE CODE POINTER VARIABLE
+*
+         L     RL,ALINEBEG             -RL - POINTS TO THE REAL
+         LA    RL,0(RL,USER)            BEGINNING OF THE LINES TABLE.
+*
+         L     RTI,AFORRBEG            -RTI - POINTS TO THE BEGINNING
+         LA    RTI,0(RTI,USER)           OF THE FORR STACK
+         SH    RTI,TWENTY         FNINIT ALWAYS STARTS BY ADDING TWENTY
+         ST    RTI,AFORRORG            INITIALIZE THE CONSTANT
+         A     RTI,AFORRSIZ       COMPUTE LIMIT FOR FORR
+         ST    RTI,AFORREND       INITIALIZE THE CONSTANT
+*
+         L     RTI,ATEMPBEG            -RTI - POINTS TO THE BEGINNING
+         LA    RTI,0(RTI,USER)           OF THE TEMP STACK
+         ST    RTI,ATEMPORG            INITIALIZE THE CONSTANT
+         A     RTI,ATEMPSIZ       COMPUTE LIMIT FOR TEMP
+         ST    RTI,ATEMPEND       INITIALIZE THE CONSTANT
+*
+         L     RX,ACODEBEG             -RX - POINTS TO THE BEGINNING
+         LA    RX,0(RX,USER)            OF PSEUDO-CODE  (ACTUAL)
+         ST    RX,ACODEORG             SAVE THE BEGINNING ADDRESS
+*
+         SR    RX,RX                   -FOR FINDLINE
+         ST    RX,ADEFNPTR             -IN CASE OF RESTART
+*
+*
+* IF ENTRY INTO 'EXEC' IS MADE WITH ZERO IN R0 (PROGRAM IS TO
+* BE EXECUTED FROM THE TOP) THEN CODE WILL BE COMPILED WHEREVER
+* IT IS POSSIBLE TO DO SO.
+*
+* IF THIS IS AN ENTRY TO EXECUTE AN 'IMMEDIATE' STATEMENT, OR THE
+* USERS PROGRAM IS BEING ENTERED OR RE-ENTERED OTHER THAN AT THE
+* TOP, THEN THE STATEMENT(S) WILL BE EXECUTED INTERPRETIVELY.
+*
+         C     R0,HIGHLINE
+         BE    FINDLINE           BRANCH IF 'IMMEDIATE' STATEMENT
+*
+         STM   R14,R6,12(R13)     TEMP. SAVE AREA FOR REGISTERS
+         LM    R3,R5,BXLINIT      INITIALIZE REGISTERS
+         LA    R14,X'3F'          MASK FOR BXLE LOOP
+         SR    R6,R6
+         LTR   R15,R0             LINE NUMBER
+         BZ    BXLOOP             BRANCH IF EXECUTING FIRST STATEMENT
+*
+         LA    R15,X'FF'          SET 'INTERPRET ONLY' FLAGS
+         LA    R6,X'40'           SET 'OLD STATEMENT' FLAG BIT
+*
+BXLOOP   IC    R0,2(RLI,RL)       FLAG BITS BYTE OF AN ENTRY IN
+*                                 THE 'ALINE' TABLE.
+         NR    R0,R14             REMOVE BITS SET BY PREVIOUS ENTRY
+         OR    R0,R6              OR IN POSSIBLE FLAG BIT
+         STC   R0,2(RLI,RL)       RESET FOR THIS ENTRY.
+         STC   R15,ACPTR(RLI)     SET FLAG BITS IN 'ACPTR' TABLE
+         BXLE  R3,R4,BXLOOP
+         LM    R14,R6,12(R13)     TEMP. SAVE AREA FOR REGISTERS
+*
+         SR    RLI,RLI            INDEX TO LINES               10/21/71
+         LTR   R0,R0              TEST TYPE OF CALL            10/21/71
+         BZ    SETPTR             BRANCH IF STARTING AT TOP    10/21/71
+         CLC   AFORRPTR,AFORRORG                               10/21/71
+         BL    SETPTR             BRANCH IF POINTER NEVER SET  10/21/71
+         CLC   AFORRPTR,AFORREND                               10/21/71
+         BNL   SETPTR             BRANCH IF POINTER NEVER SET  10/21/71
+         TM    AFORRPTR+3,3                                    10/21/71
+         BZ    PTRSET             BRANCH IF GOOD 'FORR' POINTER
+SETPTR   MVC   AFORRPTR,AFORRORG  INITIALIZE THE POINTER       10/21/71
+PTRSET   LTR   R0,R0              TEST TYPE OF CALL            10/21/71
+         BZ    REORGRTI           BRANCH IF STARTING AT TOP    10/21/71
+         BP    FINDLINE           BRANCH TO EXECUTE STATEMENT IN R0
+         B     CONTINUE           BRANCH TO EXECUTE THE ONE BEYOND
+ SPACE
+BXLINIT  DC    A(0,4,ALINEMAX)
+         LTORG
+         TITLE 'BASIC COMPILER  -  COMPILER'
+         DS    0F
+MASK2    DC    X'00004000'
+MASK1    DC    X'00003FFF'
+LRX      L     RX,0(,RZ)
+LMRXRY   LM    RX,RY,0(RZ)
+HWBRADD  DC    A(HWBR,2,0)
+FWBRADD  DC    A(FWBR,4,0)
+HWLAADD  DC    A(HWLA,6,6)
+FWLAADD  DC    A(FWLA,8,6)
+FWLA     LA    RTI,4(,RTI)
+FWBR     BAL   RZ,0(,RBASE)
+HWLA     LA    RTI,4(,RTI)
+HWBR     BALR  RZ,RBASE
+SMLBMVC  MVC   CODE(0),6(R14)
+         MVC   CODE(0),10(R14)
+ SPACE
+*
+*** ENTER HERE TO SET UP EXECUTABLE CODE THAT DOES NOT NEED A BASE REG.
+*
+MVLA     OI    AFLAGS,ASMLBSWI    SET FLAG BIT
+*
+*
+*** ENTER HERE TO SET UP EXECUTABLE CODE THAT DOES NEED A BASE REG.
+*
+SMLB     LA    R0,4               CONSTANT FOR 'AR AND SR' INSTRUCTIONS
+         LH    R3,0(,R14)          NUMBER OF BYTES OF EXECUTABLE CODE
+*
+         SR    R1,R1
+         TM    AFLAGS,ASMLBSWI
+         BO    SMLBEX             BRANCH IF RX/RY ALREADY LOADED
+*
+         LR    R15,RCODE          A(NEXT REGION AVAILABLE FOR CODE)
+         SR    RCODE,R0           A(LAST INSTRUCTION IN EXECUTION CODE)
+         SR    RCODE,R0           A(LAST BUT ONE MACHINE INSTRUCTION)
+*
+         CLC   CODE(8),STEF0LA
+         BNE   SMLBLR             BRANCH IF NOT .. STE  F0,0(,RTI)
+*                                               .. LA   RTI,4(,RTI)
+*
+         LA    R1,0(,RTI)
+         SR    R1,R0              A(LAST TEMP SLOT USED BY F0)
+*
+         CR    R1,RX
+         BNE   SMLBCRY            BRANCH IF RX NOT POINTING TO IT
+*
+         CLC   6(4,R14),LEF0RX
+         BNE   SMLBLR             BRANCH IF F0 NOT LOADED FROM IT
+         B     SMLBSR
+ SPACE
+SMLBCRY  CR    R1,RY
+         BNE   SMLBLR             BRANCH IF RY NOT POINTING TO TEMP
+*
+         CLC   6(4,R14),LEF0RY
+         BNE   SMLBLR             BRANCH IF F0 NOT LOADED FROM IT
+*
+SMLBSR   SR    R3,R0              TO MOVE IN 4 LESS BYTES OF CODE
+*
+         LM    R15,R1,HWLAADD
+         TM    AXXXXPTR+3,2
+         BO    *+8                BRANCH IF GOING TO HALF-WORD BOUNDRY
+         LM    R15,R1,FWLAADD
+         B     SMLBCOM
+ SPACE
+SMLBLR   LR    RCODE,R15          RESET THE EXECUTABLE CODE POINTER
+*
+         LM    R15,R1,HWBRADD
+         TM    AXXXXPTR+3,2
+         BO    *+8                BRANCH IF GOING TO HALF-WORD BOUNDRY
+         LM    R15,R1,FWBRADD
+*
+SMLBCOM  MVC   CODE(8),0(R15)     MOVE IN EXECUTABLE CODE
+         AR    RCODE,R0
+         STM   RX,RY,CODE         MOVE IN REGISTER CONTENTS
+         MVC   CODE+8(4),LMRXRY   MOVE IN REGISTER LOADING CODE
+         LA    RCODE,12(,RCODE)
+*
+SMLBEX   EX    R3,SMLBMVC(R1)     MOVE IN EXECUTABLE CODE
+         AR    RCODE,R3
+         ST    RCODE,AXXXXPTR     NEXT REGION AVAILABLE FOR CODE
+*
+SMLBRET  NI    AFLAGS,255-ASMLBSWI     RESET THE FLAG BIT
+         B     2(,R14)             RETURN
+ SPACE 2
+*
+*** SETS UP IN-LINE CODE THAT CAUSES A SAVED VALUE TO BE RESTORED TO RX
+*** BUT DOES NOT DISTURB THE CURRENT CONTENTS OF RY.  ALSO MOVES IN
+*** EIGHT BYTES OF EXECUTABLE CODE.
+*
+SMLX     MVC   CODE(4),FWBR
+         ST    RX,CODE+4
+         MVC   CODE+12(4),LRX
+         MVC   CODE+16(8),0(R31)
+         LA    RCODE,24(,RCODE)
+         ST    RCODE,AXXXXPTR
+         BR    R31
+ SPACE 2
+*
+*** DELETE ANY IN-LINE CODE FOR THIS STATEMENT AND INSERT A BRANCH BACK
+*** TO THE INTERPRETIVE PART OF 'EXEC'.  RESET THE POINTER FOR THE LINE
+*** AND THE POINTER TO THE NEXT FREE CORE AVAILABLE FOR IN-LINE CODE.
+*
+DLTR     LH    R0,2(RLI,RL)
+         N     R0,MASK1           REMOVE CODE-SET-UP FLAG BIT
+         O     R0,MASK2           INSERT STATEMENT-ENCOUNTERED FLAG
+         STH   R0,2(RLI,RL)       SAVE ORIGINAL VALUE AND FLAG BIT
+         L     RCODE,ACPTRSVR     RESET POINTER FOR THIS LINE BACK TO
+         ST    RCODE,ACPTR(RLI)   THE CORE ORIGINALLY ASSIGNED TO THE
+         MVC   CODE(4),GOTOSTMT   STATEMENT AND INSERT A BRANCH INSTR.
+         OI    AXXXXSVR,X'80'     INHIBIT COMPILER FOR REST OF THIS
+*                                 STATEMENT AT THIS ENCOUNTER.
+         L     RCODE,AXXXXSVR     GIVE UP THE REST OF THE SPACE FOR
+         ST    RCODE,AXXXXPTR     THIS STATEMENT AND RESET THE POINTER.
+         NI    AXXXXPTR,X'7F'     KEEP IT CLEAN
+DLTRET   BR    R14
+ SPACE 2
+*
+*** INHIBIT ATTEMPTS TO SET UP IN-LINE CODE FOR THIS STATEMENT IF IT
+*** ENCOUNTERED AGAIN DURING THIS RUN.
+*
+SETIMO   LA    R0,X'80'
+         STC   R0,ACPTRSVR
+         STC   R0,ACPTR(RLI)
+         BR    RET
+ SPACE 2
+*
+*** COME HERE AT END OF INTERPRETING A STATEMENT.
+*** IF NO IN-LINE CODE SET UP GO TO NEXTSTMT TO BUMP RLI
+*** IF TEMP. STORAGE NOT USED GO TO REMOVE UNNEEDED REFERENCES TO IT
+*** OTHERWISE, JUST CHECK INTERFACE BETWEEN THIS STATEMENT AND THE NEXT
+*
+NDOFSTMT BINEC NEXTSTMT           BRANCH IF STATEMENT TO BE EXECUTED
+*                                 IN INTERPRETIVE MODE ONLY.
+         TM    AFLAGS,ATFLESWI
+         BO    TSTNXTST           BRANCH IF TEMP. STORAGE USED
+*
+*
+********* TEST FOR THIS STATEMENT LOADING FROM TEMPORARY STORAGE ****
+*
+TFLE     L     RCODE,ACPTR(RLI)   RCODE <= A(EXEC. CODE FOR STATEMENT)
+         LR    RX,RCODE
+         N     RX,=F'3'           SAVE THE LAST TWO BITS
+         LA    RCODE,0(RX,RCODE)  ZAP FIRST BYTE, ROUND TO FULL WORD
+*
+TFLELOOP CLI   CODE+8,X'98'
+         BNE   TFLELEND           BRANCH IF NOT 'LOAD MULTIPLE'
+         CLC   LMRXRY,CODE+8
+         BNE   TFLELEND           BRANCH IF NOT 'LM   RX,RY,0(RZ)'
+*
+         CLI   CODE+12,X'78'
+         BNE   TFLETR16           BRANCH IF NOT LOADING FL. PT. REG.
+*
+         CLI   CODE+14,X'80'
+         BE    TFLETRYX           BRANCH IF USING RX TO LOAD THE REG.
+*
+         CLC   CODE+4(4),ATEMPORG
+         BL    TFLETR16           BRANCH IF NOT LOADING FROM TEMP.
+         CLC   CODE+4(4),ATEMPEND
+         BL    TSTNXTST           BRANCH IF TEMP. STORAGE IS USED
+         B     TFLETR16
+ SPACE
+TFLETRYX CLC   CODE(4),ATEMPORG
+         BL    TFLETR16           BRANCH IF NOT LOADING FROM TEMP
+         CLC   CODE(4),ATEMPEND
+         BL    TSTNXTST           BRANCH IF TEMP. STORAGE IS USED
+*
+TFLETR16 CLI   CODE+16,X'78'
+         BNE   TFLELEND           BRANCH IF NOT LOADING FL. PT. REG.
+*
+         CLI   CODE+18,X'90'
+         BE    TFLETRYY           BRANCH IF USING RY TO LOAD THE REG.
+*
+         CLC   CODE(4),ATEMPORG
+         BL    TFLELEND           BRANCH IF NOT LOADING FROM TEMP
+         CLC   CODE(4),ATEMPEND
+         BL    TSTNXTST           BRANCH IF TEMP. STORAGE IS USED
+         B     TFLELEND
+ SPACE
+TFLETRYY CLC   CODE+4(4),ATEMPORG
+         BL    TFLELEND           BRANCH IF NOT LOADING FROM TEMP.
+         CLC   CODE+4(4),ATEMPEND
+         BL    TSTNXTST           BRANCH IF TEMP. STORAGE IS USED
+*
+TFLELEND LA    RCODE,4(,RCODE)
+         C     RCODE,AXXXXPTR
+         BL    TFLELOOP           LOOP BACK UNTIL END OF STATEMENT
+*
+********* DELETE TEMPORARY STORAGE REFERENCES **********************
+*
+         LA    R0,2
+         L     RCODE,ACPTR(RLI)   RCODE <= A(EXEC. CODE FOR STATEMENT)
+         L     RX,AXXXXPTR        RX    <= A(NEXT FREE AREA FOR CODE)
+         SR    RX,RCODE                 <= BYTES OF EXECUTABLE CODE
+         CR    RX,R0
+         BNH   NEXTSTMT
+*
+DLTTLOOP CLI   CODE,X'70'
+         BNE   DLTTL1             BRANCH IF NOT STORING FL. PT. REG.
+         CLC   CODE(4),STEF0LA
+         BE    DLTTREF            BRANCH IF STORING INTO TEMP.
+*
+DLTTL1   CLI   CODE,X'50'
+         BNE   DLTTL2             BRANCH IF NOT STORING GENERAL REG.
+         CLC   CODE(4),STRXTMP
+         BE    DLTTREF            BRANCH IF STORING INTO TEMP.
+*
+DLTTL2   CLI   CODE,X'41'
+         BNE   DLTTL3             BRANCH IF NOT LOADING AN ADDRESS
+         CLC   CODE(4),LARTI
+         BE    DLTTREF            BRANCH IF BUMPING RTI
+*
+DLTTL3   CLI   CODE,X'58'
+         BNE   DLTTLEND           BRANCH IF NOT LOADING A REGISTER
+         CLC   CODE(4),REORGRTI
+         BNE   DLTTLEND           BRANCH IF NOT SETTING RTI TO TEMP ORG
+*
+DLTTREF  EX    RX,DLTTMVC         DELETE THE REFERENCE TO TEMP
+         SR    RX,R0              REDUCE COUNT OF BYTES REMAINING
+         SR    RX,R0              REDUCE COUNT OF BYTES REMAINING
+         BP    DLTTLOOP           LOOP BACK IF ANY CODE LEFT
+         B     DLTTEND
+ SPACE
+DLTTMVC  MVC   CODE(0),CODE+4     MOVES CODE OVER ONE FULL WORD
+ SPACE
+DLTTLEND AR    RCODE,R0           POINT TO NEXT HALF-WORD
+         SR    RX,R0              REDUCE COUNT OF BYTES REMAINING
+         BP    DLTTLOOP           LOOP BACK IN ANY CODE LEFT
+*
+DLTTEND  ST    RCODE,AXXXXPTR     RESET THE POINTER
+*
+TSTNXTST L     RCODE,AXXXXPTR     POINT TO END OF COMPILED CODE
+*                                                              10/26/71
+         LA    RX,6(RLI,RL)       POINT TO 'ALINE' FLAGS FOR NEXT LINE
+*                                                              10/26/71
+         TM    0(RX),X'C0'                                     10/26/71
+         BZ    NEXTSTMT           BRANCH IF NEXT STATEMENT IS A NEW ONE
+*                                                              10/26/71
+         LR    RTI,RCODE               END OF COMPILED CODE    10/26/71
+         S     RTI,=F'4'               MINUS 4                 11/04/71
+         CLC   BUMPRLI,0(RTI)                                  10/26/71
+         BE    BUMPRLI            BRANCH IF ALL SET TO EXECUTE THE
+*                                 NEXT STATEMENT.              10/26/71
+         MVLA  4                                               10/26/71
+         B     NEXTSTMT           TO EXAMINE THE NEXT STATEMENT
+ SPACE
+BUMPRLI  LA    RLI,4(,RLI)        LINE NUMBER FOR THE NEXT STATEMENT
+*                                                              10/26/71
+         TM    0(RX),X'80'                                     10/26/71
+         BO    GBTCC              BRANCH IF NEXT STATEMENT COMPILED O.K
+*                                                              10/26/71
+         MVLA  4                                               10/26/71
+         B     REORGRTI           TO INTERPRET THE NEXT STATEMENT
+ SPACE
+GBTCC    L     RTI,ATEMPORG                                    10/26/71
+         MVLA  4                                               10/26/71
+         B     OLDSTMT            TO EXECUTE COMPILED CODE     10/26/71
+ EJECT
+WONTCOMP IMO _                    SET UP FOR INTERPRETIVE MODE ONLY
+         B     LEF0RY
+ SPACE
+FNTSTOP  DC    X'8103'
+ SPACE
+FORSTART BINEC LEF0RY             A 'FOR' STATEMENT HAS TO BE EXECUTED
+*
+         CLC   FNTSTOP,OPCODE5
+         BNE   WONTCOMP          BRANCH IF NOT A SIMPLE 'FOR' STATEMENT
+*
+         CLC   OPERAND1,OPERAND9
+         BNE   WONTCOMP          BRANCH IF NOT INITIALIZING THE INDEX
+*
+         SMLB  20
+         LE    F0,0(,RY)          PICK UP INITIAL VALUE FOR INDEX
+         STE   F0,0(,RX)          STORE INTO THE INDEX
+         LR    RTI,RX             O.K. TO USE RTI NOW
+         BAL   R31,FNINIT         SET UP A SLOT, SAVE 'FORSTNO' AND
+         USING FORRDSCT,RY        'NEXTSTNO' IN IT.  COME BACK WITH
+         LR    RX,RTI             RY POINTING TO THE SLOT, AND SAVE
+         ST    RX,FORINDEX        THE ADDRESS OF THE LOOP INDEX.
+*
+         LH    RX,OPERAND5
+         BAL   RET,FETCH          RX <= A(SOURCE FOR MAX)
+*
+         BAL   R31,SMLX
+         LE    F0,0(,RX)
+         STE   F0,MAX             MAX VALUE TO SLOT
+*
+         LH    RX,OPERAND7
+         BAL   RET,FETCH          RX <= A(SOURCE FOR STEP)
+*
+         BAL   R31,SMLX
+         LE    F0,0(,RX)
+         STE   F0,STEP            STEP VALUE TO SLOT
+*
+         MVLA  4
+         B     *+4
+*
+         LTER  F0,F0
+         BP    FNTSTMAX           BRANCH IF INCREMENTING INDEX
+*
+         L     RX,FORINDEX
+         LE    F0,0(,RX)
+         CE    F0,MAX
+         MVC   FORBRNCH(1),*+7    'BRANCH IF LOW' CODE TO SLOT
+         BL    FNTSTEND           BRANCH IF LOOP IS NOT TO BE ENTERED
+         B     FNTSTBEG           OTHERWISE, READY TO ENTER LOOP
+ SPACE
+FNTSTMAX L     RX,FORINDEX
+         LE    F0,0(,RX)
+         CE    F0,MAX
+         MVC   FORBRNCH(1),*+7    'BRANCH IF HIGH' CODE TO SLOT
+         BH    FNTSTEND           BRANCH IF LOOP IS NOT TO BE ENTERED
+*
+FNTSTBEG LA    RLI,4(,RLI)        LINE NUMB. OF FIRST STATEMENT IN LOOP
+         STH   RLI,FORLINE        SAVE IT IN THE FOR/NEXT SLOT
+GOTOSTMT B     REORGRTI
+ SPACE
+FNTSTEND LH    R0,NEXTSTNO        STATEMENT NO. OF ASSOCIATED 'NEXT'
+         L     RX,AFORRPTR
+         SH    RX,TWENTY
+         ST    RX,AFORRPTR
+         B     FINDNEXT
+ SPACE
+NXTSTART BINEC FORSOOTH           A 'NEXT' STATEMENT HAS TO BE EXECUTED
+*
+         L     RY,AFORRPTR
+         CLI   FORBRNCH,0
+         BNE   FNNXT              BRANCH IF 'FOR' SET UP A SLOT FOR IT
+*
+         DEC                 STATEMENT MUST BE EXECUTED INTERPRETIVELY
+         B     FORSOOTH
+ SPACE
+FNNXT    MVLA  4
+         B     *+4
+*
+         L     RY,AFORRPTR
+         C     RY,AFORRORG             -IS THERE A CORRESPONDING FOR?
+         BNH   FORERR                   NO.  ERROR (NEXT WITHOUT FOR)
+*
+         LH    R0,0(RLI,RL)
+         CH    R0,NEXTSTNO
+         BNE   FORERR             BRANCH IF NOT THE RIGHT FOR/NEXT SLOT
+*
+         L     RX,FORINDEX
+         LE    F0,0(,RX)          F0 <= INDEX FOR LOOP
+         AE    F0,STEP                  BUMP IT
+         STE   F0,0(,RX)
+*
+         IC    R1,FORBRNCH
+         CE    F0,MAX
+         EX    R1,FNBRANCH
+*
+         LH    RLI,FORLINE        LINE NO. OF 1ST. STATEMENT IN LOOP
+         L     RZ,ACPTR(RLI)      ADDRESS OF STATEMENT
+         BR    RZ                 GO TO STATEMENT
+ SPACE
+FNNXTEND L     RX,AFORRPTR
+         SH    RX,TWENTY
+         ST    RX,AFORRPTR
+         B     NEXTSTMT
+ SPACE
+FNBRANCH NOP   FNNXTEND           EXECUTED AS A CONDITIONAL BRANCH
+ EJECT
+*
+*** IN-LINE CODE IS BEING COMPILED FOR A GOTO STATEMENT.
+*** IF THE DESTINATION STATEMENT HAS ALREADY BEEN ENCOUNTERED THEN
+*** THE GOTO STATEMENT CAN BRANCH DIRECTLY TO IT.
+*** IF THE DESTINATION STATEMENT HAS NOT BEEN ENCOUNTERED YET THEN
+*** ITS LOCATION MUST BE SET UP AND SOME PROVISIONAL IN-LINE CODE
+*** PLANTED IN USER CORE.
+*
+TESTDEST LR    RX,R1              RX <= LINE NO. OF DEST. STATE.
+         L     RY,ACPTR(RX)       RY <= ADDRESS OF DESTINATION (MAYBE)
+*
+         SMLB  2 _                CREATE SPACE FOR THE BRANCH
+         NOPR  0
+*
+         LA    R1,2(RX,RL)
+         TM    0(R1),X'C0'        TEST AND BRANCH IF DEST. STATE.
+         BNZ   LETSGO             ENCOUNTERED BEFORE THIS ONE.
+*
+         LR    RY,RCODE           RY <= LOCATION THAT WILL BE USED
+         MVC   CODE(4),GOTOSTMT   PUT SOME PROVISIONAL CODE THERE
+*
+LETSGO   S     RCODE,=F'14'       FORCE RCODE BACK TO RZ
+         ST    RY,CODE+4          ADDRESS OF DESTINATION
+         MVC   CODE+8(6),INLICD   FIX UP THE IN-LINE BRANCH CODE
+*
+INLICD   LM    RLI,RZ,0(RZ)
+         BR    RZ                 GO TO DESTINATION STATEMENT
+ EJECT
+*
+*** AN 'IF' STATEMENT IS BEING COMPILED.
+*** IF THE CONDITION WAS TRUE THEN IT IS O.K. TO CONTINUE COMPILING THE
+*** THE STATEMENT, BUT IF THE CONDITION WAS FALSE THEN PROVISION MUST
+*** BE MADE FOR BRANCHING TO THE REMAINDER OF THE STATEMENT WHEN IT IS
+*** RE-ENCOUNTERED AND THE CONDITION IS NO LONGER FALSE.
+*
+ITSTRUE  BINEC BUMPCODE           BRANCH IF IN INTERPRETIVE MODE
+*
+         BAL   RET,SETUPIF        SET UP THE IN-LINE CODE
+*
+         B     BUMPCODE           TO COMPLETE THE STATEMENT
+ SPACE
+ITSFALSE BINEC NEXTSTMT           BRANCH IF IN INTERPRETIVE MODE
+*
+         BAL   RET,SETUPIF        SET UP IN-LINE CODE
+*
+SETFIXUP LA    RX,NOTFALSE        RX <= A(FIXUP ROUTINE)
+         LR    RY,RCI             NEEDED AT FIXUP TIME
+*
+         SMLB  4 _                INSERT CODE FOR BRANCH TO FIXUP
+         NOP   0(,RX)             THIS CHANGES TO A BRANCH
+*
+         S     RCODE,=F'16'       FORCE RCODE BACK TO RZ
+         OI    CODE+13,X'F0'      TURN THE NOP INTO A BRANCH
+         B     NEXTSTMT
+ SPACE
+NOTFALSE DS    0H                 AN 'IF' STATEMENT IS NOW TRUE
+         LR    RCI,RY             RECOVER THE PSEUDO-CODE POINTER
+         L     RX,AXXXXPTR        RX <= A(NEXT FREE CORE AREA)
+         ST    RX,0(,RZ)          GO DIRECTLY THERE NEXT TIME
+         L     RCODE,ACPTR(RLI)   TOUCH ALL THE BASES
+         ST    RCODE,ACPTRSVR     REST OF STATEMENT MAY NOT COMPILE
+         LR    RCODE,RX           POINT TO NEXT FREE AREA IN USER CORE
+         ST    RCODE,AXXXXSVR     AGAIN, IT MAY NOT COMPILE
+         OI    AFLAGS,ATFLESWI    DON'T TOUCH PARTITIONED IN-LINE CODE
+BRNCH    B     BUMPCODE            TO COMPLETE THE STATEMENT
+ SPACE
+SETUPIF  SMLB  18 _           SET UP IN-LINE CODE FOR AN 'IF' STATEMENT
+         LE    F0,0(,RX)          F0 = OPERAND 1
+         LE    F2,0(,RY)          F2 = OPERAND 2
+         CER   F0,F2
+         L     RTI,ATEMPORG       RESET TEMP PTR
+         NOP   NEXTSTMT           THIS TURNS INTO A CONDITIONAL BRANCH
+*
+PLANTCND S     RCODE,=F'30'       FORCE RCODE BACK TO RZ
+         LH    R0,BRNCH           R0 <= X'000047F0'
+         XR    R0,R1                    X'000047*0' REVERSE THE LOGIC
+         STH   R0,CODE+26         COMPLETE THE CONDITIONAL BRANCH INSTR
+         LA    RCODE,30(,RCODE)   RESET CODE REGISTER
+         BR    RET                RETURN
+ EJECT
+*
+*** THE REMAINDER OF THE CODE IN THIS SECTION HAS TO DO WITH COMPUTING
+*** ADDRESSES FOR ARRAYS.  A BRIEF STUDY OF THE TECHNIQUE USED TO
+*** DETERMINE WHETHER AND HOW TO COMPILE THE CODE MAKES IT EVIDENT THAT
+*** THERE HAS TO BE A BETTER WAY OF DOING IT.
+*
+         USING ATOZDSCT,RY
+ SPACE
+SSEVAL   DS    0H                 COMPUTE ADDRESS FOR SINGLE-SUBSCRIPT
+*
+         LE    F0,0(,RX)          F0 <= VALUE FOR SUBSCRIPT
+         FIX   F0,FIX1            FIX1 <= F0
+         LTR   FIX1,FIX1
+         BNP   SUBSERR
+         C     FIX1,ARRAYLFT
+         BH    SUBSERR
+         LH    RX,ARRAYRGT+2
+         LTR   RX,RX
+         BZ    COMEVAL
+         C     RX,=F'1'
+         BE    COMEVAL
+*
+         B     INCONER
+ SPACE
+DSEVAL   DS    0H                 COMPUTE ADDRESS FOR DOUBLE-SUBSCRIPT
+         FIX   F2,FIX2            FIX2 <= F2
+         LE    F0,0(,RX)          F0 <= VALUE FOR SECOND SUBSCRIPT
+         FIX   F0,FIX1            FIX1 <= F0
+         LTR   FIX1,FIX1
+         BNP   SUBSERR
+         C     FIX1,ARRAYLFT
+         BH    SUBSERR
+         LH    RX,ARRAYRGT+2
+         LTR   RX,RX
+         BZ    INCONER
+         LTR   FIX2,FIX2
+         BNP   SUBSERR
+         CR    FIX2,RX
+         BH    SUBSERR
+         BCTR  FIX1,0
+         MR    R0,RX
+         AR    FIX1,FIX2
+         LA    RTI,4(,RTI)
+*
+COMEVAL  BCTR  FIX1,0
+         SLL   FIX1,2
+         LH    RX,ARRAYIDX
+         LA    RX,0(RX,FIX1)
+         ST    RX,4(,RTI)
+         LA    RTI,8(,RTI)
+         A     RX,ARRAYBEG
+         LA    RY,0(RX,USER)      RY <= A(ARRAY ELEMENT)
+         BR    R15                RETURN
+         DROP  RY
+ EJECT
+TESTOPR1 LH    RX,OPERAND1
+         SRL   RX,10
+         N     RX,=XL4'1C'        RX <= CODE * 4
+         B     *+4(RX)
+         B     CANTDO             NULL, OR TEMP. ADDR. OF STRING
+         B     0(,RET)            A - Z
+         B     0(,RET)            A0 - Z9
+         B     CANTDO             A$ - Z$
+         B     CANTDO             TEMP. ADDRESS
+         B     OISWI              TEMP. VALUE
+         B     0(,RET)            NUMBER CONSTANT
+         B     CANTDO             STRING
+OISWI    OI    AFLAGS,ATFLESWI    SAVE ALL REFERENCES TO TEMP. STORAGE
+         BR    RET
+ SPACE
+GETRXRY  STM   R14,R0,8(R13)     SAVE ACROSS CALL TO FETCH
+*
+         CLI   OPERAND6,X'70'
+         BNL   CANTDO             BRANCH IF ITS A STRING OPERAND
+         CLI   OPERAND6,X'40'
+         BE    CANTDO             BRANCH IF TOO MANY TEMP. ADDRESSES.
+         CLI   OPERAND5,X'40'
+         BNE   CANTDO             BRANCH IF NOT SETTING UP TEMP. ADDR.
+         CLI   OPCODE3+1,X'06'
+         BH    CANTDO             BRANCH IF NOT 'IF' OR 'ASSIGN' STMNT.
+         TM    OPCODE3,X'7C'
+         BNZ   CANTDO             BRANCH IF TYPE 4 OR 5 PSEUDO-CODE
+         TM    OPCODE3,X'03'
+         BNO   CANTDO             BRANCH IF TYPE 1 OR 2 PSEUDO-CODE
+*
+         BAL   RET,TESTOPR1       TEST OPERAND1. DONT RETURN IF NO GOOD
+*
+         SR    RY,RY
+         IC    RY,OPERAND3+1
+         SLL   RY,4
+         LA    RY,ATOZ(RY)        RY <= A(ATOZ SLOT FOR ARRAY)
+*
+         LH    RX,OPERAND1
+         BAL   RET,FETCH          RX <= A(CURRENT VALUE FOR SUBSCRIPT)
+*
+         LM    R14,R0,8(R13)
+         BR    R14
+ SPACE
+CANTDO   SR    RCI,R0            RESET RCI TO INITIAL VALUE
+         IMO _                    USE INTERPRETIVE MODE ONLY
+         B     SUBS
+ EJECT
+TRYCMPLE SR    R0,R0             TRY TO COMPILE SUBSCRIPTED ARRAY TERM
+         CLC   OPCODE2(3),=X'030D10'
+         BNE   TRYDS
+*
+         CLI   OPERAND4+1,X'01'
+         BNE   CANTDO             BRANCH IF NOT SINGLY SUBSCRIPTED
+*
+         OI    AFLAGS,ATFLESWI    SAVE REFS. TO TEMP. STORAGE  10/12/71
+*
+         BAL   R14,GETRXRY        UPON RETURN RX WILL HOLD THE ADDRESS
+*                                 OF THE SOURCE FOR THE CURRENT VALUE
+*                                 FOR THE SUBSCRIPT AND RY WILL HOLD
+*                                 THE ADDRESS OF THE SLOT IN ATOZ.
+         SMLB  4
+         BAL   R15,SSEVAL         RY <= A(CURRENT ELEMENT IN ARRAY)
+*
+         CLI   OPCODE3+1,X'06'
+         BE    COMARRAY           BRANCH IF ITS ASSIGNMENT CODE
+*
+COMIFS   DS    0H                 AN 'IF' STATEMENT IS BEING COMPILED
+         LH    RX,OPERAND6
+         BAL   RET,FETCH          RX <= A(COMPARAND FOR IF STATEMENT)
+*
+         LA    RCI,12(,RCI)
+         SR    R1,R1
+         IC    R1,OPCODE+1
+         IC    R1,CONDCODE(R1)
+         L     RTI,ATEMPORG       RESET TEMP. PTR.
+         LE    F0,0(,RY)          F0 = OPERAND 1
+         LE    F2,0(,RX)          F2 = OPERAND 2
+         CER   F0,F2
+         EX    R1,IFACOMP
+         B     TISFALSE           CONDITION IS FALSE IF WE GOT HERE
+IFACOMP  BC    0,TISTRUE          BRANCH IF CONDITION IS TRUE
+ SPACE
+TISTRUE  BAL   RET,SETUPIA        SET UP THE IN-LINE CODE
+         B     BUMPCODE           TO COMPLETE THE STATEMENT
+ SPACE
+TISFALSE BAL   RET,SETUPIA        SET UP IN-LINE CODE
+         B     SETFIXUP           TO ADD CODE FOR BRANCHING TO FIX-UP
+ SPACE
+SETUPIA  BAL   R31,SMLX           RX DOESN'T CHANGE NOW, ONLY RY
+         LE    F0,0(,RY)          F0 = OPERAND 1
+         LE    F2,0(,RX)          F2 = OPERAND 2
+*
+         MVLA  10 _               SMLX ONLY SET UP 20 BYTES OF CODE
+         CER   F0,F2
+         L     RTI,ATEMPORG       RESET TEMP PTR
+         NOP   NEXTSTMT           THIS TURNS INTO A CONDITIONAL BRANCH
+*
+         B     PLANTCND           TO COMPLETE THE IN-LINE CODE
+ EJECT
+TRYDS    DS    0H        TRY TO COMPILE A DOUBLY SUBSCRIPTED ARRAY TERM
+         CLC   OPCODE3(3),=X'030D10'
+         BNE   CANTDO
+         CLI   OPERAND6+1,X'02'
+         BNE   CANTDO
+*
+         OI    AFLAGS,ATFLESWI    SAVE REFS. TO TEMP. STORAGE  10/12/71
+*
+         BAL   RET,TESTOPR1       TEST OPERAND1. DONT RETURN IF NO GOOD
+*
+         LH    RX,OPERAND1
+         BAL   RET,FETCH          RX <= A(VALUE FOR FIRST SUBSCRIPT)
+*
+         SMLB  4 _           SAVE ADDRESS OF SOURCE FOR FIRST SUBSCRIPT
+         LE    F2,0(,RX)        F2 <= CURRENT VALUE FOR FIRST SUBSCRIPT
+*
+         LA    R0,6
+         AR    RCI,R0            NOW GET THE ADDRESS OF THE CURRENT
+         BAL   R14,GETRXRY        VALUE FOR THE SECOND SUBSCRIPT, AND
+*                                 THE ADDRESS OF THE SLOT IN ATOZ.
+         SMLB  4
+         BAL   R15,DSEVAL         RY <= A(CURRENT ELEMENT IN ARRAY)
+*
+         CLI   OPCODE3+1,X'06'
+         BL    COMIFS             BRANCH IF ITS AN 'IF' STATEMENT
+*
+COMARRAY C     RTI,ATEMPEND       ITS AN ASSIGNMENT STATEMENT
+         BNL   TEMPFUL
+         ST    RTI,ATEMPPTR
+         LH    RX,OPERAND6
+         BAL   RET,FETCH          RX <= A(INPUT FOR ARRAY ELEMENT)
+*
+         BAL   R31,SMLX
+         LE    F0,0(,RX)          F0 <= INPUT FOR ARRAY ELEMENT
+         STE   F0,0(,RY)          ARRAY ELEMENT <= F0
+*
+         LA    RCI,12(,RCI)
+         B     TYPE03TL
+ SPACE
+         LTORG
+         TITLE 'BASIC COMPILER  -  INTERPRETER'
+*
+CONTINUE DS    0H
+*        THE LAST STMT EXECUTED WAS A PAUSE.  R0 CONTAINS THE
+*        STMT# OF THE PAUSE STMT.  CONTINUE EXECUTION ONE
+*        STMT BEYOND R0.
+*
+         LCR   R0,R0                   -R0 - STMT NUMBER
+FINDNEXT EQU   *
+         LA    RX,4                    -TO INDICATE TO FINDLINE
+*                                       TO GET STMT 1 BEYOND
+*                                       THIS ONE.
+*
+FINDLINE EQU   *
+*
+*        ENTER THIS CODE WHENEVER THE NEXT STATEMENT TO BE
+*        EXECUTED IS NOT IN SEQUENCE.  THIS OCCURS IN:
+*
+*              GO TO          RX=0
+*              GO SUB         RX=0
+*              IF THEN        RX=0
+*              RETURN         RX=4
+*              FOR LOOP       RX=4
+*
+*        CALL BINR (R0,R1)    (STATEMENT#,TABLE TO BE SEARCHED)
+*
+*        R0 IS THE STATEMENT NUMBER TO BE FOUND IN THE LINES TABLE
+*        IF  (R1 < 0) NOT FOUND - ERROR
+*
+         LA    R1,ALINEBEG
+         L     R15,VBINR
+         LCR   R0,R0                   -TO INDICATE ENTRY
+         BALR  R14,R15
+         LTR   R1,R1
+         BM    LINEERR
+*
+*        SET UP FOR NEW RLI
+*
+         LA    RLI,0(R1,RX)            -RX=0 IF WE CAME FROM A
+*                                       GO TO, GO SUB, IF THEN.
+*                                      -RX=4 IF WE CAME FROM A
+*                                       RETURN, FOR STATEMENT
+*
+         CNOP  0,4
+         LH    R0,0(RL,RLI)            -STMT #
+         CL    R0,HIGHLINE             -IS IT 10000?
+         BNE   REORGRTI           BRANCH IF NOT 'IMMEDIATE' STATEMENT
+*
+         LA    RX,2(RLI,RL)
+         NI    0(RX),X'3F'
+         OI    0(RX),X'40'
+         OI    AXXXXPTR,X'80'     INHIBIT COMPILER
+         L     RCODE,AXXXXPTR
+         ST    RCODE,ACPTR(RLI)
+         B     REORGRTI
+*
+*************** EXECUTE A BASIC STATEMENT *****************************
+*
+*   SAVE THE LINE NUMBER IN ASAVE (FIRST WORD OF USER AREA).
+*
+*
+*              SKIP OVER NON-EXECUTABLE INSTRUCTIONS
+*
+*              THE 2 HALFWORDS IN THE LINES TABLE ARE
+*                (1) - BASIC STATEMENT #
+*                (2) - 0,6,12,18...  (POINTER  TO PSEUDO-CODE)
+*                      1 - DIM
+*                      3 - DATA
+*                      5 - REM
+*                      7 - DEFN
+*                      9 - SYNTAX ERROR
+*                     11 - DEFINE FILE STATEMENT
+*                     -1 - DELETE
+*
+*****************************************************************
+*  UPPER BIT OF SW9 IS ON ONLY WHILE COMPILED CODE IS EXECUTING *
+*****************************************************************
+NEXTSTMT EQU   *                       -A COMPLETE BASIC STATEMENT
+*                                       HAS BEEN EXECUTED AND CONTROL
+*                                       MAY BE GIVEN UP HERE.
+*
+         LH    R0,0(RL,RLI)            -STMT #
+         CL    R0,HIGHLINE             -IS IT 10000?
+         BE    END                BRANCH IF IT WAS 'IMMEDIATE'
+*
+         LA    RLI,4(,RLI)
+*
+*        CHECK IF EXECUTION FELL THRU TO STMT 10000
+*        (STMT 10000 IS AN IMMEDIATE INSTRUCTION WHICH
+*        MAY NOT BE EXECUTED MORE THAN ONCE).
+*
+         LH    R0,0(RL,RLI)            -STMT #
+         CL    R0,HIGHLINE             -IS IT 10000?
+         BNL   END                      YES. DONE.
+*
+REORGRTI L     RTI,ATEMPORG                 -RE-INIT TEMP STACK POINTER
+         ST    RTI,ATEMPPTR
+*
+TESTSTMT LA    RX,2(RLI,RL)
+         TM    0(RX),X'80'
+         BO    OLDSTMT            BRANCH IF EXECUTABLE CODE SET UP
+*
+         NI    AFLAGS,255-ATFLESWI RESET REF. TO TEMP. STORAGE FLAG BIT
+*
+         LH    R0,0(RL,RLI)            -STMT #
+         ST    R0,ASAVE                -SAVE IT
+*
+         TM    AFLAGS,ASYNTAX          -ATTENTION?
+         BO    ATTENT
+*
+         TM    0(RX),X'40'
+         BNO   NEWSTMT            BRANCH IF STATEMENT NOT SEEN BEFORE
+*
+         L     RCODE,ACPTR(RLI)
+         ST    RCODE,ACPTRSVR     SAVE LOCATION PREVIOUSLY ASSIGNED
+         BINEC NEXTLINE           BRANCH IF STATEMENT WONT COMPILE
+*
+         L     RCODE,AXXXXPTR     RCODE <= A(NEXT FREE AREA FOR CODE)
+         LA    RCODE,0(,RCODE)    MAKE SURE FIRST BYTE IS CLEAN
+         ST    RCODE,ACPTR(RLI)   MAYBE IT WILL COMPILE THIS TIME
+         ST    RCODE,AXXXXSVR     AND THEN AGAIN -- MAYBE NOT
+         B     EXECUTBL
+ SPACE
+NEWSTMT  L     RCODE,AXXXXPTR     ASSIGN A LOCATION TO THE NEW STATMNT.
+         LA    RCODE,0(,RCODE)    MAKE SURE FIRST BYTE IS CLEAN
+         ST    RCODE,ACPTRSVR     NEEDED IN CASE IT WONT COMPILE
+         LA    RCODE,4(,RCODE)    BUMP THE FREE AREA POINTER
+         ST    RCODE,AXXXXSVR     NEEDED IN CASE IT WONT COMPILE
+         L     RCODE,AXXXXPTR     RCODE <= A(NEXT FREE AREA FOR CODE)
+         ST    RCODE,ACPTR(RLI)     SLOT NOW POINTS TO EXECUTABLE CODE
+*                                   AREA FOR THIS NEW STATEMENT
+*
+         MVC   CODE(4),GOTOSTMT   MOVE IN PROVISIONAL CODE IN CASE
+*                                 THE STATEMENT WONT COMPILE
+*
+         C     RLI,ALINEPTR            -END OF PROGRAM?
+         BNL   ENDERR
+*
+         TM    1(RX),OPSKIP             EXECUTABLE?
+         BZ    EXECUTBL                 YES.
+*
+         CLI   1(RX),OPSYNTAX          -THIS STATEMENT IS NOT
+*                                       EXECUTABLE.  IS IT IN ERROR?
+         BE    SYNTERR                 -YES. PRINT MESSAGE AND RETURN.
+*
+*                                 SET A FLAG BIT TO INDICATE EXECUTABLE
+         OI    0(RX),X'80'        CODE IS SET UP FOR THIS LINE.
+*
+         MVLA  4 _                     CODE FOR NULL STATEMENT
+         LA    RLI,4(,RLI)
+*
+         S     RLI,=F'4'
+         B     TSTNXTST           GO TO TEST NEXT STATEMENT
+ SPACE
+OLDSTMT  LH    R0,0(RL,RLI)            -STMT #
+         ST    R0,ASAVE                -SAVE IT
+*
+         TM    AFLAGS,ASYNTAX          -ATTENTION?
+         BO    ATTENT
+*
+         L     RZ,ACPTR(RLI)      RZ <= A(EXECUTABLE CODE FOR LINE)
+         BR    RZ                 DIVE IN
+ SPACE
+NEXTLINE TM    1(RX),OPSKIP             EXECUTABLE?
+         BNO   LOADRCI                  YES
+*
+         LA    RLI,4(,RLI)
+         B     TESTSTMT
+ SPACE
+EXECUTBL DS    0H                 SET A FLAG BIT TO INDICATE EXECUTABLE
+         OI    0(RX),X'80'        CODE IS BEING SET UP FOR THIS LINE.
+*
+LOADRCI  LH    RCI,2(RL,RLI)           -INDEX TO CODE TABLE
+         N     RCI,MASK1               REMOVE FLAG BITS
+         A     RCI,ACODEORG            -PSEUDO-CODE
+*
+NEXTCODE IC    RX,OPCODE               -OP-CODE GROUP INDEX (01-05)
+         SLL   RX,2
+         LA    RY,X'3C'
+         NR    RX,RY
+*
+         IC    RY,OPCODE+1
+         SLL   RY,2
+*
+BRANCH1  B     BRANCH1(RX)
+         B     TYPE01                   FOR
+         B     TYPE02(RY)               ALL OTHER BASIC STATEMENTS
+         B     TYPE03                   ARITH
+         B     TYPE04                   I/O
+         B     TYPE05                   MAT
+*
+*
+***********************************************************************
+      EJECT
+*************** FINISHED LINE OF PSEUDO-CODE **************************
+*
+SAVEEVAL EQU   *                       -ENTER FROM EVAL A-Z, A$-Z$
+*                                       TO SAVE THE ADDRESS OF THE
+*                                       ARRAY ELEMENT (NOT INCLUDING
+*                                       USER) IN THE TEMP STACK.
+         TM    OPCODE,OPLAST
+         BO    NDOFSTMT
+         C     RTI,ATEMPEND
+         BNL   TEMPFUL
+STRXTMP  ST    RX,0(,RTI)
+         LA    RTI,4(,RTI)
+         ST    RTI,ATEMPPTR
+         B     BUMPCODE
+ SPACE
+TESTLAST EQU   *                       -ENTER FROM TYPE 03(ARITHMETIC)
+         TM    OPCODE,OPLAST           -LAST PSEUDO CODE?
+         BO    NDOFSTMT                 YES
+         C     RTI,ATEMPEND
+         BNL   TEMPFUL
+*
+SAVETEMP EQU   *                       -ENTER FROM UNSTCKFN WHEN WE
+*                                       KNOW THERE IS ENOUGH ROOM IN
+*                                       TEMP STACK (SINCE WE JUST RE-
+*                                       SET THE POINTER).
+         MVLA  8
+         STE   F0,0(,RTI)
+         LA    RTI,4(,RTI)
+*
+         ST    RTI,ATEMPPTR
+*
+BUMPCODE DS    0H                      -A PSEUDO-CODE INSTRUCTION HAS
+*                                       BEEN EXECUTED AND MORE
+*                                       EXISTS.  BUMP TO NEXT.
+         LA    RCI,6(,RCI)
+         B     NEXTCODE
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC INTERPRETER  -  TYPE 01 - FOR STATEMENT'
+FNINIT   DS    0H                 SET UP ANOTHER FOR/NEXT SLOT
+*                                 AND INSERT STATEMENT NUMBERS
+*                                 OF THIS 'FOR' AND ASSOC. 'NEXT'.
+*
+         LH    R0,0(RL,RLI)            -SET UP TO FIND THE STATEMENT
+*                                       # OF THIS FOR STATEMENT IN THE
+*                                       FORC TABLE
+         LA    R1,AFORCBEG             -R1 - TYPE OF TABLE
+*
+*              SEARCH FORC TABLE FOR THIS FOR INST
+*              ONCE IT'S FOUND, FIND ITS CORRESPONDING
+*              NEXT.
+*
+         LCR   R0,R0                    -TO INDICATE ENTRY
+         L     R15,VBINR
+         BALR  R14,R15
+*
+         LTR   R1,R1                   WAS STATEMENT # FOUND?
+         BM    FORERR
+*
+*
+*              R1 NOW POINTS TO THE INDEX WITHIN THE FORC TABLE
+*              OF THE CURRENT FOR STATEMENT.
+*
+         L     RX,AFORCBEG
+         LA    RX,0(RX,USER)          -RX - POINTS TO REAL ADDRESS OF
+*                                      THE START OF THE FORC TABLE.
+*
+         LH    R0,2(R1,RX)            -R0- LOOP INDEX
+*                                      (1000-1019 FOR A-Z)
+*                                      (9000-9019 NEXT A-Z)
+*                                      (2000-2103 FOR A0-Z9)
+*                                      (A000-A103 NEXT A0-Z9)
+*
+         LA    SW,1                   -SW - COUNTER FOR FORS AND NEXTS.
+*                                      (WHEN A FOR IS HIT, BUMP IT.
+*                                       WHEN A NEXT IS HIT, DECREMENT
+*                                       IT.  WHEN IT = 0, TEST THE
+*                                       INDICES).
+*
+NEXTFIND EQU   *
+         LA    R1,4(R1)
+         C     R1,AFORCPTR
+         BNL   NEXTERR                 NO CORRESPONDING NEXT.
+*
+         LA    RY,0(R1,RX)            -RY -  ADDRESS OF CURRENT ENTRY.
+         TM    2(RY),X'80'            -IS IT A NEXT?
+         BO    TESTNEXT                YES
+*
+         LA    SW,1(SW)                BUMP FOR COUNTER.
+         B     NEXTFIND
+*
+TESTNEXT EQU   *
+         BCT   SW,NEXTFIND             NOT THE ONE.
+*
+*              NEXT FOUND- DO INDICES MATCH?
+*
+         LH    RX,2(RY)               PICK UP INDEX.
+         N     RX,LOW15
+         CR    R0,RX                  MATCH?
+         BNE   NEXTERR
+         LH    R0,0(RY)                 SAVE THE STATEMENT# OF THE
+*                                       ASSOCIATED NEXT.
+*
+*        A FOR STATEMENT IS ABOUT TO BE EXECUTED.  ITS
+*        CORRESPONDING NEXT HAS BEEN FOUND.
+*        MAKE AN ENTRY IN THE FORR TABLE OF THE FORM:
+*
+*              FORR(1) - 4 BYTES
+*                        MAX VALUE (WHEN MAX-OP IS HIT)
+*              FORR(2) - 4 BYTES
+*                        STEP (WHEN STEP-OP IS HIT)
+*              FORR(3) - 2 BYTES
+*                        THE STATEMENT# OF THE FOR.
+*                        AFTER THE NEXT OP IS DONE (WHEN
+*                        THE INDEX IS BUMPED) A TRANSFER
+*                        TO THE TEST-OP WILL BE MADE.  IF
+*                        THE LOOP IS NOT DONE YET, THE LINES
+*                        TABLE WILL BE SEARCHED FOR THIS ST.
+*                        AND CONTROL WILL BE GIVEN TO THE
+*                        STATEMENT FOLLOWING THIS ONE.
+*
+*              FORR(4) - 2 BYTES
+*                        THE STATEMENT# OF THE NEXT CORRESP-
+*                        ONDING TO THIS FOR STATEMENT.
+*                        WHEN THE LOOP IS COMPLETED, THIS
+*                        STATEMENT # WILL BE SEARCHED IN THE
+*                        LINES TABLE, AND THE STATEMENT
+*                        FOLLOWING WILL BE EXECUTED NEXT.
+*
+*
+*        SET UP FOR NEW ENTRY IN FORR TABLE.
+*
+         USING FORRDSCT,RY
+         L     RY,AFORRPTR
+         LA    RY,20(,RY)
+         C     RY,AFORREND
+         BNL   FORRFUL
+         ST    RY,AFORRPTR
+*        LA    RY,0(RY,USER)      NOT USED NOW
+*        A     RY,AFORRBEG        NOT USED NOW
+*
+         STH   R0,NEXTSTNO
+         LH    R0,0(RL,RLI)
+         STH   R0,FORSTNO               STATEMENT# OF THE FOR.
+*        SR    RTI,RTI   (NOT HERE)     RESET TEMPS
+         BR    R31                RETURN
+ EJECT
+*
+*************** TYPE 01  - FOR STATEMENT ******************************
+TYPE01   EQU   *
+*
+*              FOR STATEMENT EXECUTION:
+*
+         CLI   OPCODE+1,OPSTACK         BEGINNING OF FOR?
+         BNE   FOREXEC                  NO.
+*
+         BAL   R31,FNINIT
+         L     RTI,ATEMPORG                 -SET TEMPPTR BACK TO ZERO.
+         MVI   FORBRNCH,0         'NEXT' TESTS THIS FOR TYPE OF SLOT
+         B     BUMPCODE
+ SPACE
+*
+***********************************************************************
+FOREXEC  EQU   *
+         CLI   OPCODE+1,OPTEST
+         BH    NXTSTART
+*
+FORSOOTH DS    0H
+*
+*              FETCH OPERAND1
+*
+         L     RY,AFORRPTR
+         C     RY,AFORRORG             -IS THERE A CORRESPONDING FOR?
+         BNH   FORERR                   NO.  ERROR (NEXT WITHOUT FOR)
+*        LA    RY,0(RY,USER)      NOT USED NOW
+*        A     RY,AFORRBEG        NOT USED NOW
+*
+         LH    RX,OPERAND1
+         BAL   RET,FETCH
+         LE    F0,0(,RX)                 SAVE OPERAND1 IN F0.
+*
+         CLI   OPCODE+1,OPTEST
+         BH    FORNEXT
+         BE    FORTEST
+         CLI   OPCODE+1,OPSTEP
+         BE    FORSTEP
+*
+FORMAX   EQU   *
+         STE   F0,MAX
+         L     RTI,ATEMPORG       RESET TEMP PTR
+         B     BUMPCODE
+*
+FORSTEP  EQU   *
+         STE   F0,STEP
+         L     RTI,ATEMPORG       RESET TEMP PTR
+         B     BUMPCODE
+*
+FORNEXT  EQU   *
+         AE    F0,STEP
+         STE   F0,0(RX)
+*
+FORTEST  EQU   *
+         LE    F2,STEP
+         LTER  F2,F2                    MIN LOOP OR MAX LOOP?
+         BP    TESTMAX                  MAX.
+*
+TESTMIN  EQU   *
+         CE    F0,MAX
+         BNL   MORELOOP
+         B     ENDLOOP
+*
+TESTMAX  EQU   *
+         CE    F0,MAX                   LOOP DONE?
+         BNH   MORELOOP
+*
+ENDLOOP  EQU   *
+*
+*              LOOP IS COMPLETE.
+*              DELETE ENTRY IN FORR TABLE FOR THIS FORSTATEMENT
+*              AFTER PICKING UP STATEMENT# OF THE NEXT.
+*
+         LH    R0,NEXTSTNO
+*
+         L     RX,AFORRPTR
+         SH    RX,TWENTY
+         ST    RX,AFORRPTR
+         B     FINDNEXT
+*
+MORELOOP EQU   *
+         LH    R0,FORSTNO
+         B     FINDNEXT
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  TYPE 02 STATEMENTS'
+*************** TYPE 02 ***********************************************
+TYPE02   EQU   *
+         B     GOTO                    -NORMAL GO TO
+         B     GOTO                    -FROM AN IF STATEMENT
+         B     GOSUB
+         B     RESTORE
+         B     END
+         B     STOP
+         B     PAUSE
+         B     RETURN
+         B     DUMP
+         B     STACKFN                 -SEE TYPE 03
+         B     UNSTCKFN                -SEE TYPE 03
+         B     COMPGOTO
+         B     CLEAR
+ SPACE
+TEST4PTR L     R1,AFORRPTR             -CURRENT FOR ACTIVITY
+         C     R1,AFORRORG             -IN A FOR?
+         BNH   4(,R14)                   NO.  RETURN TO CALL + 4
+*
+*        TEST IF THE CURRENT STATEMENT IS ALREADY OUTSIDE OF
+*        THE FOR-LOOP (GOTTEN THERE FROM A GOSUB).
+*        IF SO, DO NOT UNSTACK.
+*
+         USING FORRDSCT,RY
+         LR    RY,R1                   -PICK UP CURRENT FOR ST.
+         LH    SW,0(RL,RLI)            -CURRENT STATEMENT
+         CH    SW,FORSTNO              -BELOW THE FOR?
+         BL    4(,R14)                  YES.  RETURN TO CALL + 4
+         CH    SW,NEXTSTNO             -ABOVE THE NEXT?
+         BH    4(,R14)                  YES.  RETURN TO CALL + 4
+*
+*        TEST IF THE STATEMENT WE ARE GOING TO IS ALSO INSIDE
+*        THE SAME FOR-LOOP.  IF SO, DO NOT UNSTACK.
+*
+         CH    RX,FORSTNO              -BRANCHING OUT?
+         BL    0(,R14)                  YES.  RETURN
+         CH    RX,NEXTSTNO             -BRANCHING OUT?
+         BNH   4(,R14)                   NO.  RETURN TO CALL + 4
+         B     0(,R14)                  YES.  RETURN
+ SPACE
+JUMP     SH    R1,TWENTY               -YES.  UNSTACK LAST FOR.
+         ST    R1,AFORRPTR
+         C     R1,AFORRORG             -ANY MORE FORS?
+         BNH   0(,R14)                  NO.
+*
+*        LOOK AT THE NEXT FOR.  IF THE ONE THAT WAS JUST UNSTACKED
+*        IS NOT IMBEDDED WITHIN THIS ONE, THEN STOP UNSTACKING.
+*
+         SH    RY,TWENTY               -BACK UP TO NEXT FOR
+         LH    SW,NEXTSTNO             -THE CURRENT ACTIVE FOR
+         CH    SW,FORUN                -WAS THE UNSTACKED FOR WITHIN?
+         BL    0(,R14)                  NO.  DO NOT CHECK FURTHER.
+         CH    RX,FORSTNO              -BRANCHING OUT?
+         BL    JUMP                     YES
+         CH    RX,NEXTSTNO             -BRANCHING OUT?
+         BH    JUMP
+         B     0(,R14)
+         DROP  RY
+ SPACE
+SCLNIRS  DS    0H                 SAVE CURRENT LINE NO. IN RETURN STACK
+         L     RY,ARETPTR
+         LA    RY,2(,RY)
+*
+         C     RY,ARETSIZ
+         BNL   RETFULL
+*
+         ST    RY,ARETPTR
+         LA    RY,0(RY,USER)
+         A     RY,ARETBEG
+         STH   RLI,0(,RY)
+         BR    R14                RETURN
+ SPACE
+*
+*************** GO TO *************************************************
+*
+GOTO     DS    0H
+*
+*        TRANSFER TO STATEMENT IN OPERAND1, BUT FIRST CHECK
+*        IF WE ARE TRANSFERRING OUT OF A FOR-LOOP.
+*        IF SO, FIX THE AFORRPTR.
+*
+         LH    RX,OPERAND1             -STATEMENT NUMBER
+         BAL   R14,TEST4PTR      TEST FOR BRANCHING OUT OF FOR-LOOP
+         B     *+8               BRANCHING OUT OF LOOP RETURN
+*
+         B     OKTOGOTO          NOT BRANCHING OUT RETURN FROM TEST4PTR
+*
+         SMLB  8 _               SET UP IN-LINE CODE TO ENTER TESTER
+         BAL   R14,TEST4PTR      TEST FOR BRANCHING OUT OF FOR-LOOP
+         BAL   R14,JUMP          UNSTACK FOR-LOOPS BEFORE LEAVING
+*
+OKTOGOTO LA    R1,ALINEBEG
+         L     R15,VBINR
+         LCR   R0,RX                   -TO INDICATE ENTRY
+         BALR  R14,R15
+         LTR   R1,R1
+         BM    LINEERR
+*
+         LR    RX,R1              RX <= LINE NUMBER OF DESTINATION
+         BIFEC TESTDEST           BRANCH IF SETTING UP IN-LINE CODE
+*
+         LR    RLI,R1             LINE NUMBER OF DESTINATION STATEMENT
+         B     REORGRTI
+ SPACE
+*
+*
+*************** GOSUB *************************************************
+*
+GOSUB    DS    0H
+*
+*              SAVE CURRENT LINE # IN RETURN STACK
+*
+         MVLA  4 _                SET UP IN-LINE CODE TO CALL SCLNIRS
+         BAL   R14,SCLNIRS        SAVE THE CURRENT LINE NUMBER
+*
+         LH    RX,OPERAND1            -STATEMENT# TO BRANCH TO.
+         B     OKTOGOTO
+*
+*************** RETURN ************************************************
+*
+RETURN   DS    0H
+*
+*              PICK UP LAST LINE # IN RETURN STACK
+*              AND GO TO 'NEXTSTMT' TO
+*              GO TO THE STATEMENT FOLLOWING
+*
+         MVLA  4 _                SET UP IN-LINE CODE TO GO TO *+4
+         B     *+4
+*
+         L     RY,ARETPTR
+*
+         LTR   RY,RY                   -ANY MORE GOSUBS?
+         BM    RETERR
+*
+         BCTR  RY,0
+         BCTR  RY,0
+         ST    RY,ARETPTR
+         LA    RY,2(RY,USER)
+         A     RY,ARETBEG
+         LH    RLI,0(,RY)         LINE NO. OF CALLING STATEMENT
+         B     NEXTSTMT
+*
+*************** RESTORE ***********************************************
+*
+RESTORE  IMO _                    INTERPRETIVE MODE ONLY
+*
+*        RESTORE THE DATA STACK POINTER BACK TO ZERO.
+*
+         SR    RX,RX
+         ST    RX,ADATARUN
+         B     NDOFSTMT
+*
+*************** DUMP **************************************************
+*
+DUMP     IMO
+*
+*        DUMP A0-Z9, A-Z(SIMPLE), A-Z(SINGLE DIM), A-Z (DOUBLE DIM),
+*        A$-Z$ (SIMPLE), A$-Z$ (SINGLE DIM).
+*
+         L     R15,VDUMP
+         LH    R0,0(RL,RLI)             -STATEMENT NUMBER OF 'DUMP'
+         BALR  R14,R15                  -CALL DUMP ROUTINE
+         B     NDOFSTMT
+*
+*************** COMPUTED GO TO ****************************************
+*
+*          OPCODE            OPERAND1       OPERAND2
+*          ------            --------       --------
+*           ON               VARIABLE       NUMBER OF GOTO'S
+*
+COMPGOTO IMO
+*
+         LH    RX,OPERAND1             -FETCH VARIABLE
+         BAL   RET,FETCH
+         LE    F0,0(,RX)
+         CE    F0,ONE                  -LESS THAN 1?
+         BL    NDOFSTMT                 YES. FALL TO NEXT STMT.
+         FIX   F0,RX                   -GET THE INTEGER PART
+         LH    RY,OPERAND2             -FETCH NUMBER OF GOTO'S.
+         CR    RX,RY                   -TOO BIG?
+         BH    NDOFSTMT                 YES. FALL TO NEXT STMT.
+COMPLOOP EQU   *
+         LA    RCI,6(,RCI)
+         BCT   RX,COMPLOOP
+         B     NEXTCODE
+*
+*************** CLEAR DATA ********************************************
+*
+CLEAR    IMO
+*
+*        RE-SET ALL ARRAYS BACK TO THEIR INITIAL VALUES.
+*        RE-SET A0-Z9 BACK TO THEIR INITIAL VALUES.
+*
+         L     R15,VLODR2
+         BALR  R14,R15
+         B     NDOFSTMT
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  TYPE 03 - ARITHMETIC'
+*************** TYPE 03  - ARITHMETIC *********************************
+*
+TYPE03   EQU   *
+         CLI   OPCODE+1,OPSUBS          SUBS OP?
+         BE    SUBS                     YES
+         LH    RX,OPERAND2              NO.  PICK UP OPERAND 2.
+         BAL   RET,FETCH
+         LR    RY,RX                    SAVE ADDRESS OF OPERAND 2.
+         LH    RX,OPERAND1
+         BAL   RET,FETCH
+*
+         LTR   R1,R1                    STRING OPERAND?
+         BP    STRINGOP                 YES.
+*
+         CLI   OPCODE+1,OPEQUAL         EQUALS OPERATOR?
+         BE    EQUALS                   YES.  DO STORE.
+*
+         BNL   ARITH
+*
+*                                 ITS:  IF <...> <OP> <...> THEN <...>
+         IC    R1,OPCODE+1
+         IC    R1,CONDCODE(R1)
+         L     RTI,ATEMPORG       RESET TEMP. PTR.
+         LE    F0,0(,RX)          F0 = OPERAND 1
+         LE    F2,0(,RY)          F2 = OPERAND 2
+         CER   F0,F2
+         EX    R1,IFCOMPA
+         B     ITSFALSE           CONDITION IS FALSE IF WE GOT HERE
+IFCOMPA  BC    0,ITSTRUE          BRANCH IF CONDITION IS TRUE
+ SPACE
+*
+*************** ADD, SUBTRACT, MULTIPLY, DIVIDE, EXPONENTIATE *********
+*
+*              CURRENT OP IS  +, -, *, /, OR **
+*              OPCODE +1 =    7, 8, 9, A, OR B
+*
+ARITH    CLI   OPCODE+1,OPMINUS
+         BL    ADD
+         BE    SUBTRACT
+         CLI   OPCODE+1,OPDIVIDE
+         BL    MULTIPLY
+         BE    DIVIDE
+*
+EXPON    SMLB  18
+LEF0RX   LE    F0,0(,RX)                F0 = OPERAND 1
+         LE    F2,0(,RY)               NO.  F2 = OPERAND 2
+         L     R15,VEXPON
+         BALR  R14,R15
+         B     EXITERR                 -EXPONENTIATE ERROR
+*
+         B     TYPE03TL
+ SPACE
+ADD      OPER  AER
+ SPACE
+SUBTRACT OPER  SER
+ SPACE
+MULTIPLY OPER  MER
+ SPACE
+DIVIDE   OPER  DER
+ SPACE
+EQUALS   CLI   OPCODE+6,1
+         BE    FORSTART           BRANCH IF THIS IS A 'FOR' STATEMENT
+*
+         SMLB  8
+LEF0RY   LE    F0,0(,RY)
+         STE   F0,0(,RX)
+*
+TYPE03TL TM    OPCODE,OPLAST
+         BO    EOTYPE03           BRANCH IF END OF STATEMENT
+*
+         C     RTI,ATEMPEND
+         BNL   TEMPFUL
+*
+         MVLA  8
+STEF0LA  STE   F0,0(,RTI)       SAVE THE PARTIAL RESULT
+LARTI    LA    RTI,4(,RTI)        POINT TO NEXT TEMP SLOT
+*
+         ST    RTI,ATEMPPTR
+         LA    RCI,6(,RCI)
+         B     NEXTCODE
+ SPACE
+EOTYPE03 MVLA  8
+         L     RTI,ATEMPORG
+         LA    RLI,4(,RLI)
+*
+         S     RLI,=F'4'
+         B     NDOFSTMT
+ SPACE
+STRINGOP CLI   OPCODE+1,OPEQUAL
+         BL    IFSTMT$
+*
+         SMLB  6
+         MVC   0(16,RX),0(RY)
+*
+         B     TESTLAST
+ SPACE
+*
+*************** IF STATEMENT ******************************************
+*
+IFSTMT$  EQU   *
+*
+*              COMPARE STRINGS
+*
+         SR    R1,R1
+         IC    R1,OPCODE+1
+         IC    R1,CONDCODE(R1)
+         CLC   0(16,RX),0(RY)
+         EX    R1,IFCOMP$
+*
+         DEC                      CONDITION IS FALSE, MAYBE NEXT TIME
+         B     NDOFSTMT
+ SPACE
+IFCOMP$  BC    0,TOOTRUE          BRANCH IF CONDITION IS TRUE
+ SPACE
+TOOTRUE  L     RTI,ATEMPORG       RESET TEMP PTR
+         BINEC BUMPCODE   BRANCH IF UNABLE TO EXECUTE IN-LINE CODE
+*
+         SMLB  14 _       O.K. TO SET UP CODE. STATEMENT WILL COMPILE
+         CLC   0(16,RX),0(RY)
+         L     RTI,ATEMPORG       RESET TEMP PTR
+         NOP   NEXTSTMT           THIS TURNS INTO A CONDITIONAL BRANCH
+*
+         BAL   RET,PLANTCND       TO INSERT OPERAND IN CONDITIONAL BR.
+         B     TYPE03TL           TO TEST FOR END OF STATEMENT
+*
+***********************************************************************
+ EJECT
+*************** SUBSCRIPT EVALUATION **********************************
+*
+SUBS     BIFEC TRYCMPLE           MAYBE THIS STATEMENT CAN BE COMPILED
+*                                                  OPERAND 1  OPERAND 2
+*              EVAL      A-Z                          10XX      1 OR 2
+*              DEFMAT    A-Z                          10XX      1 OR 2
+*              EVAL      A$-Z$                        30XX         1
+*              DEFMAT    ZER,CON,IDN                  9000-9002 1 OR 2
+*              EVAL      TRN                          9003         1
+*              EVAL      INV                          9004      1 OR 2
+*              EVAL      NRM                          9005         1
+*              EVAL      SIN,COS,TAN,ATN,LOG,EXP,     A000-A010    1
+*                        ABS,SGN,INT,RND,SQR
+*              EVAL      PAT,PDT,PSX,PSY,PCH,PLT
+*              EVAL      FNA-FNZ                      B0XX         1
+*
+*
+*        CHECK IF THIS SUBS IS:
+*              MAT A= TRN(B)
+*              MAT A= INV(B)
+*              MAT A= INV(B,X0)
+*       OR     MAT A= NRM(B)
+*        IF IT IS, SKIP TO EVALMFCT
+*
+         CLI   OPERAND3,SYMMATFN        IS NEXT OPERAND THE
+*                                       MAT FUNCTION?
+         BNE   CHINV                  -CHECK FOR INV WITH 2 ARGUMENTS
+         CLI   OPERAND3+1,X'02'         YES. IS IT TRN, INV, OR NRM?
+         BH    EVALMFCT                 YES.  BRANCH.
+*
+CHINV    ST   RTI,ATEMPPTR         RTI IS LIKELY TO BECOME R45
+         CLC   OPERAND5,SYMINV         -IS IT INV WITH 2 ARGUMENTS?
+         BNE   GETSUBS                  NO.
+         LA    R45,OPERAND3+1           YES. BRANCH WITH R45 SET
+         B     EVALDET                  TO POINT TO ARRAY TO BE INV
+*
+GETSUBS  L    RTI,ATEMPPTR        IN CASE IT WAS USED AS R45
+         LH    RX,OPERAND1              RX = SUBSCRIPT ADDRESS
+         BAL   RET,FETCH
+         LE    F0,0(,RX)
+         LA    RTI,4(RTI)               NEXT TEMP
+         ST    RTI,ATEMPPTR
+*
+         CLI   OPCODE2+1,OPEVAL         NEXT OP EVAL?
+         BE    EVAL                      YES
+         LA    RCI,6(RCI)               NEXT PSEUDO CODE
+         LER   F2,F0
+         B     GETSUBS
+EVAL     EQU   *
+*
+         CLI   OPERAND3,SYMFUNCT        -TEST IF SUBSCRIPTS SHOULD BE
+         BE    EVALFCT                   CONVERTED TO FIXED POINT.
+         LA    RCI,6(,RCI)               NEXT PSEUDO CODE
+         BH    EVALDEFN
+*
+         FIX   F0,FIX1                  -CONVERT F0 TO FIXED
+*
+         SR    FIX2,FIX2                -IF THERE IS ONLY 1 SUBSCRIPT
+         CLI   OPERAND2+1,X'02'         -2 SUBSCRIPTS?
+         BNE   TEST$
+*
+         FIX   F2,FIX2
+*
+TEST$    EQU   *
+*
+         CLI   OPCODE,OPARITH          -EVAL OR DEFMAT?
+         BNE   MATDEF
+*
+*************** SUBSCRIPT EVALUATION FOR ARRAYS ***********************
+*
+EVALAZ   EQU   *
+*
+*        1) CHECK THAT  0<I<MAXI AND
+*                       0<J<MAXJ (2 SUBSCRIPTS)
+*
+*        2) EVALUATE INDEX FUNCTION
+*
+*                   K= (I-1)*MAXJ + J - 1  (2 SUBSCRIPTS)
+*                   K= (I-1)               (1 SUBSCRIPT)
+*
+*        3) THE RIGHT-SUBCRIPT IS VARYING THE FASTEST.
+*
+         LTR   FIX1,FIX1
+         BNH   SUBSERR                 -SUBSCRIPT ZERO OR NEGATIVE
+         SR    SW,SW
+         IC    SW,OPERAND1+1
+*
+         CLI   OPERAND1,SYMATOZ$        -EVAL OF A-Z OR A$-A$?
+         BE    EVALSTRG
+         SLL   SW,4
+         LA    SW,ATOZ(SW)
+         USING ATOZDSCT,SW
+         C     FIX1,ARRAYLFT
+         BH    SUBSERR                 -SUBSCRIPT TOO BIG
+         LH    RX,ARRAYRGT+2           -RX - MAXJ
+         CLI   OPERAND2+1,X'02'
+         BE    EVALTWO
+*
+         LTR   RX,RX                   -CONSISTENT SUBSCRIPTS?
+         BZ    EVALIDX
+         C     RX,=F'1'
+         BE    EVALIDX
+         B     INCONER
+*
+EVALTWO  EQU   *
+         LTR   FIX2,FIX2
+         BNH   SUBSERR
+         LTR   RX,RX                    IS IT DOUBLY SUBSCRIPTED?
+         BZ    INCONER                  NO. ONLY SINGLE.
+         CR    FIX2,RX
+         BH    SUBSERR
+*
+         BCTR  FIX1,0                   K = I-1
+         MR    R0,RX                    K = (I-1) * MAXJ
+         AR    FIX1,FIX2                K = (I-1) * MAXJ + J
+*                                            R0-FIX1 = EVEN-ODD
+*                                            RX      = ARRAYRGT
+EVALIDX  EQU   *
+         BCTR  FIX1,0
+         SLL   FIX1,2
+         LH    RX,ARRAYIDX
+         LA    RX,0(RX,FIX1)
+         B     SAVEEVAL
+*
+*************** SUBSCRIPT EVALUATION FOR A$-Z$ ************************
+*
+EVALSTRG EQU   *
+*
+         SLL   SW,3
+         LA    SW,ATOZSTRG(SW)
+         USING ASTGDSCT,SW
+         LH    RX,ASTRGLFT+2           -CHECK THAN STRING WAS DIMED
+         LTR   RX,RX
+         BZ    SIMPLE
+         CR    FIX1,RX                 -CHECK SUBSRIPT BOUNDS
+         BH    SUBSERR
+         BCTR  FIX1,0
+         SLL   FIX1,4
+         LH    RX,ASTRGIDX
+         LA    RX,0(RX,FIX1)
+         B     SAVEEVAL
+*
+***********************************************************************
+         EJECT
+*************** FUNCTION EVALUATION ***********************************
+*
+EVALFCT  EQU   *
+*
+*        CALL THE FUNCTION ROUTINES FOR THE FIRST 8 FUNCTIONS
+*        (SIN, COS, TAN, ATN, LOG, EXP, SQR, RND
+*         PAT, PDT, PSX, PSY, PCH, PLT) AND
+*        EVALUATE ABS, SGN AND INT INLINE.
+*
+*        IF THE FUNCTION IS RND, CHECK THAT THE ARGUMENT IS
+*        A-Z (1000-1019) OR A0-Z9 (2000-2103)
+*
+         CLI   OPERAND3+1,RNDFUNCT      -RND?
+         BNE   CHECKFCT                  NO.
+         CLI   OPERAND1,SYMSIMPL        -SIMPLE VARIABLE?
+         BH    RNDERR
+CHECKFCT EQU   *
+         LA    RCI,6(,RCI)               -POINT TO EVAL OP
+         CLI   OPERAND1+1,ABSFUNCT
+         BL    CALLFCT
+         BE    EVALABS
+*
+         CLI   OPERAND1+1,SGNFUNCT
+         BE    EVALSGN
+*
+         CLI   OPERAND1+1,SGNINT
+         BE    EVALINT
+*
+CALLFCT  EQU   *
+         LR    R1,RX                    -ADDRESS OF ARGUMENT
+*                                        IN R1 (RND USES IT)
+         SR    RX,RX
+         IC    RX,OPERAND1+1
+*
+*                   RX= 0-8
+*
+         LH    R0,0(RL,RLI)            -CURRENT STMT. NUMBER
+         SLL   RX,2
+         L     R15,VFUNCT(RX)
+         BALR  R14,R15
+         B     EXITERR                 -FUNCTION ERROR
+         B     TESTLAST
+*
+EVALABS  EQU   *
+*
+         LPER  F0,F0
+         B     TESTLAST
+*
+EVALSGN  EQU   *
+*
+*        IF F0 > 0 THEN F0 = 1
+*        IF F0 = 0 THEN F0 = 0
+*        IF F0 < 0 THEN F0 = -1
+*
+         LE    F2,ONE
+         LTER  F0,F0
+         BZ    TESTLAST
+         BP    SGNPOS
+         LNER  F2,F2
+SGNPOS   EQU   *
+         LER   F0,F2
+         B     TESTLAST
+*
+*
+EVALINT  EQU   *
+*
+*        COMPUTE INT(X) - INTEGER PART OF X
+*                         (GREATEST INTEGER <= X)
+*        EG. INT (3.5)  = 3
+*        AND INT (-3.4) = -4
+*
+         LTER  F0,F0
+         BP    *+8
+         SE    F0,NEAR1                 -NEAR1=.9999999
+         AE    F0,INTZER                -INTZER=X'47000000'
+         B     TESTLAST
+*
+*************** DEFINED FUNCTION (DEF FN) EVALUATION ******************
+*
+EVALDEFN EQU   *
+*
+*              MAKE 3 ENTRIES IN THE TEMP STACK
+*              CONSISTING OF
+*
+*                 2 BYTES - ADEFNPTR (LAST EVAL FN)
+*                 2 BYTES - RCI-RC (PSEUDO-CODE)
+*                           (RETURN POINT FROM EVAL)
+*                 4 BYTES - F0  (ARGUMENT)
+*
+*
+*        FIND INDEX IN PSEUDO-CODE OF THE DEF FN CORRESPONDING
+*        TO THE CURRENT EVAL.
+*
+         SR    SW,SW
+         IC    SW,OPERAND1+1
+         SLL   SW,2
+         LA    SW,ATOZFCT(SW)
+         USING ADEFDSCT,SW
+         LH    RX,ADEFNO                WAS THE FUNCTION DEFINED?
+         LTR   RX,RX
+         BZ    DEFNERR                  NO.
+*
+*        PICK UP LAST ADEFNPTR AND SAVE IT (FOR NESTED EVALS)
+*
+         L     RY,ADEFNPTR
+         STH   RY,0(,RTI)             -SAVE IN TEMP STACK
+         LA    RY,8(,RTI)                -SET UP NEW ADEFNPTR
+         S     RY,ATEMPORG
+         ST    RY,ADEFNPTR
+*
+         S     RCI,ACODEORG             -SET UP RETURN POINT
+         STH   RCI,2(,RTI)             IN TEMP STACK
+*
+         LA    RTI,4(,RTI)               -FOR STACKFN
+*
+         LH    RCI,ADEFIDX              -SET UP NEW CODE INDEX
+         A     RCI,ACODEORG
+*
+*        FALL THROUGH TO STACKFN
+*
+*************** STACK VARIABLE FOR FNA-FNZ ****************************
+*
+STACKFN  EQU   *
+*
+*        PSEUDO-OP          OPERAND1          OPERAND2
+*        ---------          --------          --------
+*        STACKFN               -              ARGUMENT NAME
+*                                             (A-Z,A0-Z9)
+*
+*        AN ENTRY HAS BEEN MADE IN THE TEMP STACK WITH THE
+*        INFORMATION ON THE CURRENT EVAL FN A-Z.
+*        THE VALUE OF THE ARGUMENT IS IN F0.
+*        SAVE THE VALUE OF THE PARAMETER (OPERAND 2) IN THE
+*        TEMP STACK AND SET OPERAND 2 = F0.
+*
+         LER   F2,F0                   -VALUE OF ARGUMENT
+         LH    RX,OPERAND2
+         BAL   RET,FETCH
+         LE    F0,0(,RX)               -SAVE VALUE OF PARAMETER
+*
+         STE   F2,0(,RX)               -FOR DEFN
+         B     TESTLAST                -TO SAVE F0
+*
+*************** UNSTACK VARIABLE FOR FNA-FNZ **************************
+*
+UNSTCKFN EQU   *
+*
+*
+*        PSEUDO-OP          OPERAND1          OPERAND2
+*        ---------          --------          --------
+*        UNSTCKFN           RESULT            ARGUMENT NAME
+*                           (TEMPA,TEMPV)     (A-Z,A0-Z9)
+*
+*        THE FUNCTION FNA-FNZ HAS BEEN EVALUATED AND ITS
+*        VALUE IS IN THE LAST TEMP.
+*
+*
+         LH    RX,OPERAND1             -PICK UP RESULT OF DEF FN
+         BAL   RET,FETCH
+         LE    F0,0(,RX)               -SET UP F0 TO BE STORED
+*                                        IN LAST TEMP.
+*
+         LH    RX,OPERAND2             -GET ADDRESS OF ARGUMENT NAME
+         BAL   RET,FETCH                TO GET ITS VALUE RESTORED.
+*
+         L     RTI,ADEFNPTR            -LAST EVAL
+         A     RTI,ATEMPORG
+         SH    RTI,EIGHT               -POINT BACK TO SAVED INFO.
+*
+         LH    RY,0(,RTI)            -PICK UP LAST ADEFNPTR
+         ST    RY,ADEFNPTR
+*
+         LH    RCI,2(,RTI)           -PICK UP SAVE (RCI-RC)
+         A     RCI,ACODEORG            -RESET PSEUDO-CODE PTR.
+*
+         LE    F2,4(,RTI)            -PICK UP SAVED VALUE OF
+         STE   F2,0(,RX)               -ARGUMENT AND RESTORE IT.
+*
+         B     SAVETEMP
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  TYPE 04 - INPUT/OUTPUT'
+*************** TYPE 04  - INPUT/OUTPUT OPERATIONS ********************
+*
+TYPE04   IMO   *
+*
+*        CALL PRINT (A,TYPE,CODE)
+*
+*        CALL WRITE (A,TYPE,FILE,RECORD)
+*
+*        CALL INPUT (A,TYPE)
+*
+*        CALL READ  (A,TYPE,FILE,RECORD,EOFLINE#)
+*
+*        REGISTER 1 POINTS TO AN ADDRESS LIST WITH THE FOLLOWING
+*        INFORMATION:
+*
+*
+*              A     =  ADDRESS OF INFORMATION TO BE READ INTO OR
+*                       WRITTEN OUT FROM.
+*
+*              TYPE  =  0  INFORMATION IS A NUMBER
+*                    =  1  INFORMATION IS A STRING
+*
+*              CODE  =  0  BLANK
+*                    =  1  COMMA
+*                    =  2  SEMI-COLON
+*
+*              FILE  =  ADDRESS OF A FILE NUMBER
+*
+*              RECORD=  ADDRESS OF A LOGICAL RECORD NUMBER
+*
+*              EOFLINE#=WHERE TO GO AT END OF FILE
+*
+*        THE I/O ROUTINES RETURN TO 0(R14) FOR AN ERROR RETURN AND TO
+*        4(R14) FOR A NORMAL RETURN.
+*
+***********************************************************************
+*
+*        PICK UP ADDRESS OF OPERAND 1 (THE SUBJECT OF THE I/O)
+*
+         USING ATOZDSCT,SW
+         L     RTI,ATEMPORG                 -RESET TEMPPTR TO ZERO.
+         CLI   OPCODE+1,OPMATIO        -MAT READ OR MAT PRINT?
+         BNL   MATIO                    YES
+*
+         LH    RX,OPERAND1
+         BAL   RET,FETCH
+         ST    RX,ARG1                 -ADDRESS
+         ST    R1,ARG2                 -TYPE
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER OF I/O STMT.
+         LA    R1,ARG1                 -FOR I/O ROUTINES
+*
+*        BRANCH TO PROPER ROUTINE
+*
+         LR    R14,R9                  -R9 IS TYPE OF I/0
+         LA    R9,1                    INDEX FOR NON-MAT I/O
+         B     BRANCH3(R14)
+*
+BRANCH3  EQU   *
+*
+         B     READ
+         B     PRINT
+         B     READINIT
+         B     READVAR
+         B     WRITINIT
+         B     WRITEVAR
+         B     INPUTVAR
+*
+*************** MAT READ OR MAT PRINT *********************************
+*
+*        SET UP NUMBER OF ELEMENTS TO READ OR PRINT IN R9
+*        AND CALL THE PROPER I/O ROUTINE.
+*
+MATIO    EQU   *
+*
+         SR    RX,RX                   -FOR GETBASE ROUTINE
+         IC    RX,OPERAND1+1
+         BAL   RET,GETBASE             -RETURNS IN RX THE BASE OF
+*                                       THE ARRAY
+         ST    RX,ARG1                 -FOR PRINT ROUTINE
+*
+         L     R9,ARRAYLFT             -SW IS THE ADDRESS USED,SET
+         L     R1,ARRAYRGT              BY GETBASE.
+         LA    R1,0(R1)                WYPE HI BYTE
+         LTR   R1,R1                   -SINGLY-DIMENSIONED?
+         BZ    MATCHECK
+         MR    R8,R1                   -R9 IS THE NUMBER OF WORDS TO
+*                                       BE INPUTTED OR OUTPUTTED.
+*
+         B     MATCHECK                -TRANSFER TO CHECK FOR MATREAD
+*                                       OR MATPRINT.
+*
+DEFMATIO EQU   *
+*
+*        RE-DEFINE THE MATRIX FOR AN I/O OPERATION
+*        (ARRAYLFT AND ARRAYRGT ARE SET UP IN R0 AND R1)
+*
+         IC    RX,OPERAND1+1
+         BAL   RET,GETBASE
+         ST    RX,ARG1                 -FOR PRINT ROUTINE
+         BAL   RET,REDEFINE
+         LA    RCI,6(,RCI)              -BUMP TO MATREAD OR MATPRINT
+*                                       OP CODE
+         L     RTI,ATEMPORG                 -SET TEMPPTR BACK TO ZERO.
+*
+MATCHECK EQU   *
+         SR    RX,RX
+         ST    RX,ARG2                 -A NUMBER
+         L     RX,ARG1                 -BASE OF ARRAY
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER OF I/0
+         LA    R1,ARG1                 -FOR I/O ROUTINES
+*        07 - MAT READ                 08 - MAT PRINT
+*        09 - MAT INPUT                0A - MAT READ-I
+*        0B - MAT WRITE-I
+*
+         CLI   OPCODE+1,X'08'          -TYPE OF I/O
+         BL    MATREAD                  MAT READ
+         BE    MATPRINT                 MAT PRINT
+         CLI   OPCODE+1,X'0A'
+         BL    INPUTVAR                 MAT INPUT
+         BE    READVAR                  MAT READ-I
+         B     WRITEVAR                 MAT WRITE-I
+*
+*
+*************** READ FROM THE DATA STACK ******************************
+*
+READ     EQU   *
+*
+*        R9 IS THE NUMBER OF WORDS TO READ.
+*
+*
+MATREAD  EQU   *
+*
+*        R9 IS SET EXTERNALLY.
+*
+*        THE 'BASIC' READ STATEMENT AND THE 'BASIC' DATA STATEMENT
+*        ARE USED HERE.  THE READ MECHANISM TAKES THE NEXT ELEMENT
+*        IN THE DATA STACK AS ITS INPUT.
+*
+*        EACH DATA STATEMENT IS OF THE FORM:
+*
+*              WORD  1      -  DATA STATEMENT INFORMATION.
+*                              1ST HALF-WORD - STATEMENT NUMBER
+*                              2ND HALF-WORD - BYTES FOLLOWING
+*              WORDS 2 - N  -  DATA ELEMENTS (FLOATING-POINT NUMBERS)
+*              WORD  N+1    -  END OF DATA STATEMENT CODE
+*                              (X'80000000')
+*
+         L     R1,ADATARUN             -CURRENT STACK POINTER
+MATREADA LA    R1,4(,R1)                -SET UP NEW ADATAPTR
+DATATEST EQU   *
+         C     R1,ADATAPTR             -MORE ELEMENTS?
+         BNL   DATANUL                  NO.  SEND MESSAGE.
+*
+         LA    SW,0(R1,USER)           -PICK UP DATA ELEMENT.
+         A     SW,ADATABEG
+*
+         L     R45,0(,SW)
+*
+         CL    R45,LASTDATA             -IS THIS THE LAST DATA?
+*                                       ELEMENT IN THIS STATEMENT?
+         BNE   DATAMOVE                 NO.
+         LA    R1,8(,R1)                -YES.  SKIP OVER LAST WORD
+*                                       AND INFORMATION ABOUT NEXT
+*                                       DATA STATEMENT ( IF IT EXISTS)
+         B     DATATEST
+*
+DATAMOVE EQU   *
+*
+         CLI   ARG2+3,X'00'            -READ A STRING?
+         BZ    DATANUM                  NO
+*
+*        PICK UP THE NEXT 4 WORDS MAKING SURE THAT NO WORD
+*        = X'80000000'.
+*
+         LA    R14,4
+DATASTG  EQU   *
+         CL    R45,LASTDATA
+         BE    DATAERR
+         ST    R45,0(,RX)
+         LA    RX,4(,RX)
+         LA    SW,4(,SW)
+         L     R45,0(,SW)               -PICK UP NEXT 4 BYTES
+         BCT   R14,DATASTG
+         LA    R1,12(,R1)               -BUMP TO LAST WORD
+         ST    R1,ADATARUN
+         B     TESTIO
+*
+DATANUM  EQU   *
+         ST    R1,ADATARUN
+         ST    R45,0(,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MATREADA             -BR IF MORE TO READ.
+*
+TESTIO   EQU   *
+         TM    OPCODE,OPLAST           -MORE I/O?
+         BO    NDOFSTMT                 NO.
+         B     BUMPCODE
+*
+*************** PRINT OR MAT PRINT STATEMENT **************************
+*
+PRINT    EQU   *
+*
+*        R45 IS THE NUMBER OF WORDS TO PRINT
+*
+         LA    R45,1
+         SR    SW,SW                   -FOR CODE
+         CLI   OPERAND2+1,X'04'
+         BL    PCOMMA
+         BH    PBLANK
+         B     PSEMI
+*
+MATPRINT EQU   *
+*
+*        R9 SET EXTERNALLY TO BE NUMBER OF WORDS TO PRINT
+*        IF ITS A MAT PRINT WITH A BLANK CODE, CHANGE IT
+*        TO A COMMA.
+*
+         L     R9,ARRAYLFT             -FOR MATRIX PRINTING
+         L     R45,ARRAYLFT+4          -FOR MATRIX PRINTING
+         LTR   R45,R45                 -SINGLY-DIMED?
+         BP    MATPR                    NO.
+         LA    R45,1                    YES.
+MATPR    EQU   *
+         ST    R45,ARGSAVE             -SAVE COLUMN SIZE
+         SR    SW,SW                   -SWITCH FOR PRINT ROUTINE
+         CLI   OPERAND2+1,X'04'        -COMMA = 0D03(ARG3=1)
+*                                      -SEMI  = 0D04(ARG3=2)
+*                                      -BLANK = 0D05(ARG3=0)
+         BNE   PCOMMA
+PSEMI    EQU   *
+         LA    SW,1(,SW)
+PCOMMA   EQU   *
+         LA    SW,1(,SW)
+PBLANK   EQU   *
+         ST    SW,ARG3
+         L     RX,ARG1
+         L     R15,VPRINT
+*
+PMORE    EQU   *
+         ST    RX,ARG1
+         BALR  R14,R15
+         B     PRINTER
+         LA    RX,4(,RX)
+         BCT   R45,PMORE               -BR IF MORE TO PRINT.
+         CLI   OPCODE+1,OPMATPRT       -WAS IT A MATPRINT?
+         BNE   TESTIO                   NO. DONE.
+         ST    R45,ARG1                 YES.
+*                                       CALL PRINT ROUTINE TO
+         BALR  R14,R15                  PRINT THE ROW.
+*                                       (WITH ARG1 = 0)
+         B     PRINTER
+         TM    AFLAGS,ASYNTAX          -ATTENTION?
+         BO    ATTENT
+         L     R45,ARGSAVE             -RESTORE COLUMN SIZE
+         BCT   R9,PMORE                -PRINT MORE ROWS
+         B     TESTIO
+*
+*************** READ AND WRITE INITIALIZER ****************************
+*
+READINIT EQU   *
+*
+WRITINIT EQU   *
+*
+         L     RX,ARG1                 -FILE NUMBER
+         ST    RX,ARG3
+         LH    RX,OPERAND2             -RECORD NUMBER
+         BAL   RET,FETCH
+         ST    RX,ARG4
+         B     BUMPCODE
+*
+*************** READ (FILE,RECORD,EOFLINE#)  VARIABLE *****************
+*
+*        R9 IS THE NUMBER OF ELEMENTS
+*        R45 IS THE RETURN POINT FROM IOLOOP
+*
+READVAR  EQU   *
+         LH    RX,OPERAND2             -END OF LINE LINE #
+         ST    RX,ARG5
+         L     R15,VREAD
+         BALR  R45,0                   -TO RETURN TO NEXT INST
+         BALR  R14,R15
+         B     READERR                 -RET1- EOF WITH NO PLACE TO GO
+         B     READEOF                 -RET2- EOF WITH PLACE TO GO.
+         BCT   R9,IOLOOP               -FOR MATS
+         TM    OPCODE,OPLAST           -RET3- NORMAL RETURN.
+         BZ    BUMPCODE                 NOT LAST READ
+*
+         L     R15,VFREADT             -ISSUE LAST CALL TO READ
+         BALR  R14,R15
+         B     NDOFSTMT
+*
+READEOF  EQU   *
+         LR    R0,RX                   -LINE #
+         SR    RX,RX                   -GO TO SWITCH
+         B     FINDLINE
+*
+*************** WRITE (FILE,RECORD) VARIABLE **************************
+*
+*        R9 IS THE NUMBER OF ELEMENTS
+*        R45 IS THE RETURN POINT FROM IOLOOP
+*
+WRITEVAR EQU   *
+         L     R15,VWRITE
+         BALR  R45,0                   -TO RETURN TO NEXT INST
+         BALR  R14,R15
+         B     WRITERR
+         BCT   R9,IOLOOP               -FOR MATS
+         TM    OPCODE,OPLAST           -LAST WRITE?
+         BZ    BUMPCODE                 NO.
+*
+WRITEEND EQU   *
+         L     R15,VFWRITET            -ISSUE LAST CALL TO WRITE
+         BALR  R14,R15
+         B     NDOFSTMT
+*
+*************** INPUT STATEMENT ***************************************
+*
+*        R9 IS THE NUMBER OF ELEMENTS
+*        R45 IS THE RETURN POINT FROM IOLOOP
+*
+*
+INPUTVAR EQU   *
+         L     R15,VINPUT
+         BALR  R45,0                   -TO RETURN TO NEXT INST
+         BALR  R14,R15
+         B     INPUTER                  -ATTENTION SENSED.
+         BCT   R9,IOLOOP               -FOR MATS
+         B     TESTIO
+*
+*
+***********************************************************************
+*
+IOLOOP   EQU   *
+*
+*        ROUTINE USED FOR MAT INPUT, MAT READ-I AND MAT WRITE-I
+*
+         L     RX,ARG1                 -ADDRESS OF I/O ELEMENT
+         LA    RX,4(,RX)
+         ST    RX,ARG1                 -NEXT ELEMENT
+         BR    R45                     -RETURN
+*
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  TYPE 05 - MATRIX OPS'
+*************** TYPE 05  - MATRIX OPERATIONS **************************
+TYPE05   IMO   *
+*
+*        MAT A = B              0506   A    B                LA=LB
+*                                                            RA=RB
+*
+*        MAT A = B+C            0507   B    C                LA=LB=LC
+*                               0506   A    T(1)
+*
+*        MAT A = B-C            0508   B    C                LA=LB=LC
+*                               0506   A    T(1)             RA=RB=RC
+*
+*        MAT A = B*C            0509   B    C                LA=LB
+*                               0506   A    T(1)             RA=RC
+*                                                            RB=LC
+*
+*        MAT A = (<EXPR>)*C     050A   T(N) C                LA=LB
+*                               0506   A    T(N+1)           RA=RB
+*
+*        MAT A = TRN(B)         030C   B    -
+*                               030D   TRN  1                LA=RB
+*                               0506   A    T(2)             RA=LB
+*
+*        MAT A = INV(B)         030C   B    -                LA=LB=
+*                               030D   INV  1                RA=RB
+*                               0506   A    T(2)
+*
+*        MAT A = EIG(B)         030C   B    -                LA=LB=
+*                               030D   EIG  1                RA=RB
+*                               0506   A    T(2)
+*
+*        MAT A = INV(B,X0)      030C   X0   -
+*                               030C   B    -
+*                               030D   INV  2
+*                               0506   A    T(3)
+*
+*        MAT A = NRM(B)         030C   B    -
+*                               030D   NRM  1
+*                               0506   A    T(2)
+*
+*        MAT A = ZER            0506   A    ZER
+*
+*        MAT A = ZER (5,5)      030C   5    -
+*                               030C   5    -
+*                               050D   ZER  2
+*                               0506   A    T(3)
+*
+*        MAT A = CON            0506   A    CON
+*
+*        MAT A = CON (5,5)      SAME AS ZER
+*
+*        MAT A = IDN            0506   A    IDN              LA=RA
+*
+*        MAT A = IDN(5,5)       SAME AS ZER                  LA=RA
+*
+*        MAT READ A(5,5)        030C   5    -
+*                               030C   5    -
+*                               050D   A    2
+*
+*
+***********************************************************************
+*
+*        CODE FOR MAT STORE, MAT ADD, MAT SUBTRACT,
+*        MAT MULTIPLY AND MAT SCALAR MULTIPLY.
+*        THE MAT STORE MAY BE THE FUNCTION ZER, CON,
+*        OR IDN WITHOUT DEFMAT.
+*
+         USING ATOZDSCT,SW
+         CLI   OPCODE+1,OPMATSC         -SCALAR MULTIPLY?
+         BE    MATSMULT
+         IC    RX,OPERAND1+1            -CALL ROUTINE TO GET
+*                                        BASE OF ARRAY IN RX
+         BAL   RET,GETBASE               AND BASE OF INFORMATION
+*                                        ABOUT ARRAY IN SW.
+         ST    SW,ARG3                 -SAVE FOR MATSTORE
+*
+         ST    RX,ARG1                  -SAVE FOR CALL TO ROUTINE
+         LM    R0,R1,ARRAYLFT           -PICK UP DIMENSIONS.
+*
+         CLI   OPERAND2,SYMMATFN        -IS THIS A MAT STORE OF
+*                                        ZER, CON, IDN?
+         BE    MATINIT2                 YES.
+*
+*        MAT STORE, MAT ADD, MAT SUBTRACT, MAT MULTIPLY
+*
+         IC    RX,OPERAND2+1            -SET UP FOR SECOND ARRAY
+         BAL   RET,GETBASE
+         ST    RX,ARG2                  -SAVE ADDRESS IN ARG2
+*
+         CLI   OPCODE+1,OPMATM          -MATRIX MUTIPLY?
+         BE    MATMULT                   YES. BRANCH.
+*
+         CLI   OPCODE+1,OPMATST         -MAT STORE?
+         BNE   MATADSUB
+*
+**************MAT STORE*******************************************
+*
+         LM    R0,R1,ARRAYLFT           -SET UP TO RE-DEFINE
+         L     SW,ARG3                  -MATRIX TO BE STORED
+*                                        INTO
+         BAL   RET,REDEFINE
+         LM    R14,R15,ARG1            -MOVE R9 WORDS FROM
+*                                        R15 TO R14
+         SR    RX,RX
+MSTLOOP  EQU   *
+         L     R0,0(R15,RX)
+         ST    R0,0(R14,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MSTLOOP
+         B     NDOFSTMT
+*
+************** MAT ADD OR MAT SUBTRACT ***************************
+*
+MATADSUB EQU   *
+*
+         C     R0,ARRAYLFT              -LB=LC?
+         BNE   MATERR
+         C     R1,ARRAYRGT              -RB=RC?
+         BE    MATG1
+         BAL   RET,MATC1
+MATG1    IC    RX,OPERAND3+1            -RESULT ARRAY
+         BAL   RET,GETBASE
+         ST    RX,ARG3
+         BAL   RET,REDEFINE
+*
+         LM    R14,R0,ARG1
+         LR    R1,R0
+         SR    RX,RX
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER OF MAT INST
+         CLI   OPCODE+1,OPMATA          -MAT ADD?
+         BNE   MATSUB
+*
+MATADD   EQU   *
+         LE    F0,0(R14,RX)
+         AE    F0,0(R15,RX)
+         STE   F0,0(R1,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MATADD
+         B     NDOFSTMT
+*
+MATSUB   EQU   *
+         LE    F0,0(R14,RX)
+         SE    F0,0(R15,RX)
+         STE   F0,0(R1,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MATSUB
+         B     NDOFSTMT
+*
+************** MAT MULTIPLY **************************************
+*
+*        CHECK:
+*              LA=LB
+*              RA=RC
+*              RB=LC
+*
+MATMULT  EQU   *
+*
+         C     R1,ARRAYLFT              -RB=LC?
+         BE    MATG2
+         BAL   RET,MATC2
+MATG2    ST    R1,ARG4
+         L     R1,ARRAYRGT               SAVE RC
+         IC    RX,OPERAND3+1             PICK UP RESULT ARRAY
+         BAL   RET,GETBASE
+         ST    RX,ARG3
+*
+         BAL   RET,REDEFINE
+         ST    R0,ARG6
+         LTR   R1,R1
+         BP    MATLIM3
+         LA    R1,1
+MATLIM3  EQU   *
+         ST    R1,ARG5
+         L     R15,VMATM
+         B     MATCALL
+MATC1    CL    R1,=F'1'
+         BH    MATERR
+         CLC   ARRAYRGT(4),=F'1'
+         BH    MATERR
+         BR    RET
+MATC2    CL    R1,=F'1'
+         BH    MATERR
+         CLC   ARRAYLFT(4),=F'1'
+         BH    MATERR
+         BR    RET
+*
+*
+************** MAT SCALAR MULTIPLY *******************************
+*
+*        CHECK:
+*              LA=LB
+*              RA=RB
+*        (IF NOT, REDEFINE A TO BE (LB,RB)
+*        SET F0=SCALAR FACTOR
+*
+MATSMULT EQU   *
+*
+         IC    RX,OPERAND2+1            -SET UP ADDRESS OF ARRAY
+         BAL   RET,GETBASE
+         ST    RX,ARG1
+*
+         LM    R0,R1,ARRAYLFT
+         IC    RX,OPERAND3+1            -RESULT ARRAY
+         BAL   RET,GETBASE
+         ST    RX,ARG2
+*
+         BAL   RET,REDEFINE
+         LH    RX,OPERAND1             -FETCH SCALAR
+         BAL   RET,FETCH
+         LE    F2,0(,RX)
+         LM    R14,R15,ARG1
+         SR    RX,RX
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER OF MAT INST
+MSCLOOP  EQU   *
+         LE    F0,0(R14,RX)
+         MER   F0,F2
+         STE   F0,0(R15,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MSCLOOP
+         B     NDOFSTMT
+*
+*
+*************** SET UP TO REDEFINE THE MATRIX *************************
+*
+MATDEF   EQU   *
+*        OPERAND 1 MAY BE 9000(ZER), 9001(CON), 9002(IDN) OR
+*                         1000-1019 (A-Z).
+*
+         LR    R0,FIX1                 ARRAYLFT
+         LR    R1,FIX2                 ARRAYRGT
+         CLI   OPERAND1,SYMMATFN
+         BNE   DEFMATIO                 -THE OPERAND IS A-Z WHICH MEANS
+*                                        THE DEFMAT CAME FROM
+*                                        A MAT READ OR MAT PRINT
+*                                        (RATHER THAN ZER, CON, IDN).
+*
+*
+************** MAT ZER, CON, IDN **************************************
+*
+MATINIT  EQU   *
+*        THE CURRENT PSEUDO-CODE INSTRUCTION IS A DEFMAT.
+*        THE NEW DIMENSIONS OF THE ARRAY IN OPERAND 3 HAVE BEEN
+*        SET UP IN R0 AND R1 RESPECTIVELY.
+*        THE NEXT INSTRUCTION IS A MAT STORE INTO THE ARRAY
+*        IN OPERAND 3.
+*
+         IC    RX,OPERAND3+1            -THE OPERAND IS ZER, CON, OR
+*                                        IDN.  PICK UP THE OPERAND IN
+*                                        THE NEXT PSEUDO-CODE TO GET
+*                                        THE ARRAY TO BE RE-DEFINED.
+*
+         BAL   RET,GETBASE
+*
+         ST    RX,ARG1                 -SAVE ADDRESS FOR
+*                                       ZER, CON, IDN ROUT.
+         BAL   RET,REDEFINE            -DO THE REDEFINE
+         LA    RX,OPERAND1+1
+         B     MATFUNCT
+*
+MATINIT2 EQU   *
+*
+*        ENTER FROM MAT <LETTER> = ZER, CON, IDN
+*                   8506    1000-1019     9000,9001,9002
+*
+         LR    R9,R0                   -SET UP R9 (NUMBER OF
+         LTR   R1,R1                    WORDS IN ARRAY.
+         BNP   MATINIT3                -SINGLE-DIMENSIONED
+         MR    R8,R1
+MATINIT3 EQU   *
+         LA    RX,OPERAND2+1           -TYPE OF MATINIT
+*
+MATFUNCT EQU   *
+         L     R14,ARG1                -MATRIX TO BE OPERATED ON
+         SER   F0,F0
+         LE    F2,ONE
+         CLI   0(RX),SYMCON
+         BL    MATZER
+         BH    MATIDN
+*
+MATCON   EQU   *                       -SET MATRIX = 1
+         LER   F0,F2
+*
+MATZER   EQU   *                       -SET MATRIX = 0
+         SR    RX,RX
+*
+MZERCON  EQU   *
+         STE   F0,0(R14,RX)
+         LA    RX,4(,RX)
+         BCT   R9,MZERCON
+         B     NDOFSTMT
+*
+MATIDN   EQU   *                       -IDENTITY MATRIX
+         CR    R0,R1                   -SQUARE MATRIX?
+         BNE   MATERR
+         LR    R9,R1
+         SR    RX,RX
+MIDNLOOP EQU   *
+         CR    R1,R9                   -ON THE DIAGONAL?
+         BNE   MZERO
+         STE   F2,0(R14,RX)
+         B     MNEXT
+MZERO    STE   F0,0(R14,RX)
+MNEXT    LA    RX,4(,RX)
+         BCT   R1,MIDNLOOP
+         LR    R1,R0                   -RESET
+         BCT   R9,MIDNLOOP
+         B     NDOFSTMT
+*
+*
+************** TRN AND INV (AND DET) AND NRM **************************
+*
+EVALMFCT EQU   *
+*
+*
+*   FOR TRN, INV(WITH 1 ARGUMENT) AND NRM, THE CODE IS:
+*
+*        OPCODE -030C      OPERAND1-ARRAY TO BE OPERATED ON
+*        OPCODE2-030D      OPERAND3-9003(TRN)
+*                                   9004(INV)
+*                                   9005(NRM)
+*                                   9006(EIG)
+*        OPCODE3-0506      OPERAND5-RESULTANT ARRAY
+*
+*        LET R45 POINT TO OPERAND1+1
+*
+*
+*   FOR INV WITH DETERMINANT, THE CODE IS:
+*
+*        OPCODE -030C      OPERAND1-RESULTANT DETERMINANT
+*        OPCODE2-030C      OPERAND3-ARRAY TO BE INTERTED
+*        OPCODE3-030D      OPERAND5-9004
+*        OPCODE4-0506      OPERAND7-RESULTANT ARRAY (INVERSE)
+*
+*        LET R45 POINT TO OPERAND3+1 (THIS WILL BE SET AT THE
+*        CODE FOR HANDLING SUBS).
+*
+         LA    R45,OPERAND1+1
+*
+EVALDET  EQU   *
+*        (R45 HAS BEEN SET IN THE SUBS CODE TO BE A(OPERAND5+1)
+         IC    RX,0(R45)               -ARRAY TO BE INVERTED
+         BAL   RET,GETBASE
+         ST    RX,ARG1
+         LM    R0,R1,ARRAYLFT
+*
+         IC    RX,12(R45)               -RESULT ARRAY
+*                                        (EITHER OPERAND5+1 OR
+*                                         OPERAND7+1)
+         BAL   RET,GETBASE
+         ST    RX,ARG2
+         LTR   R1,R1                   -TEST FOR VECTOR
+         BNZ   SAVEDIMS
+         LA    R1,1
+SAVEDIMS EQU   *
+         STM   R0,R1,ARG3
+*
+         CLI   6(R45),X'04'            -TEST EITHER OPERAND3+1
+*                                       OR OPERAND5+1 FOR TYPE OF
+*                                       FUNCTION.
+         BL    EVALTRN                 -TRANSPOSE
+         BE    EVALINV                 -INVERSE
+         CLI   6(R45),X'06'
+         BE    EVALEIG            -EIGENVALUE
+*
+EVALNRM  EQU   *
+         BAL   RET,REDEFINE            -NORMALIZATION
+         L     R15,VNRM
+         B     MATCALL
+*
+EVALINV  EQU   *
+*
+*        CHECK LA=LB=RA=RB
+*
+         CR    R0,R1
+         BNE   MATERR
+         BAL   RET,REDEFINE
+*
+         L     R15,VINV
+         B     MATCALL
+*
+EVALEIG  EQU   *
+*
+*        CHECK LA=LB=RA=RB
+*
+         CR    R0,R1
+         BNE   MATERR
+         BAL   RET,REDEFINE
+*
+         L     R15,VEIG
+         B     MATCALL
+*
+*
+EVALTRN  EQU   *
+*
+*
+         LR    R14,R0                  -EXCHANGE R0 AND R1
+         LR    R0,R1
+         LR    R1,R14
+         BAL   RET,REDEFINE
+         L     R15,VTRN
+*
+MATCALL  EQU   *
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER OF MAT INST
+         LA    R1,ARG1
+         BALR  R14,R15
+         B     TESTDET                 -MATRIX ERROR
+*        NORMAL RETURN FROM FUNCTION ROUTINE
+*        TEST IF THIS WAS A CALL TO INV WITH 2 ARGUMENTS.
+*        IF SO, STORE F6 INTO OPERAND3
+*
+         CLI   OPCODE2+1,X'0C'         -TWO ARGUMENTS?
+         BNE   NDOFSTMT                 NO.
+*
+STOREDET EQU   *
+         LH    RX,OPERAND1
+         BAL   RET,FETCH
+         STE   F6,0(,RX)
+         B     NDOFSTMT
+*
+TESTDET  EQU   *
+*        ERROR RETURN FROM MATRIX FUNCTION.
+*        IF IT WASN'T INV WITH 2 ARGUMENTS, OR IF IT WAS
+*        TRN OR NRM, BRANCH OUT WITH ERROR MESSAGE IN R1.
+*        OTHERWISE, THE RETURN CAME FROM INV.
+*        INV CAN GIVE TWO ERROR RETURNS:
+*            1) MATRIX WAS SINGULAR
+*               F6=F4=0
+*               THEN SET OPERAND3=0.
+*            2) NUMBER OUT OF RANGE
+*               F6~=F4
+*               THEN EXIT WITH ERROR MESSAGE (R1=5011).
+*
+         CLI   OPCODE2+1,X'0C'         -INV WITH 2 ARGS?
+         BNE   EXITERR                  NO.
+         CER   F4,F6                   -WHAT KIND OF RETURN?
+         BNE   EXITERR                  OUT OF RANGE.  EXIT.
+         B     STOREDET                 SINGULAR.
+*
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  LOCAL ROUTINES'
+***********************************************************************
+FETCH    EQU   *
+*
+*              ROUTINE TO:
+*
+*              CONVERT OPERAND SYMBOL IN RX TO THE ACTUAL
+*              CORE ADDRESS OF THE OPERAND.
+*
+*              THE HIGH-ORDER BYTE OF THE OPERAND IS:
+*                          00 - PRINT NULL
+*                          1X - A - Z
+*                          2X - A0- Z9
+*                          3X - A$- Z$
+*                          4X - TEMP ADDRESS
+*                          5X - TEMP VALUE
+*                          6X - NUMBER CONSTANT
+*                          7X - STRING
+*                          8X - TEMP ADDRESS OF STRING
+*
+*              IF THE OPERAND IS A STRING (3X, 7X OR 8X) THEN
+*              SET REG R1 = 1.
+*              OTHERWISE, SET REG 1 = 0.
+         LA    SW,X'FFF'
+         NR    SW,RX                    SW - INDEX TO TABLE
+         SRL   RX,10                    SHIFT TO GET OPERAND CODE
+         LA    R1,X'3C'                 MASK FOR THE HIGH-ORDER
+*                                       6 BITS OF THE LAST BYTE.
+         NR    RX,R1
+         SR    R1,R1                    STRING-SWITCH
+         B     BRANCH2(RX)
+BRANCH2  EQU   *
+         B     0(RET)                   VARIABLE WAS X'0000' (PRINT)
+         B     FETCHAZ
+         B     FETCHA0
+         B     FETCHA$
+         B     FETCHTA
+         B     FETCHTV
+         B     FETCHCON
+         B     FETCHSTR
+         B     FETCHTA$
+*
+FETCHAZ  EQU   *                        OPERAND = A-Z
+*
+         SLL   SW,4                     GET INDEX TO A TO Z TAB
+         LA    SW,ATOZ(SW)
+         USING ATOZDSCT,SW
+         L     RX,ARRAYLFT
+         LTR   RX,RX                    WAS LETTER USED AS AN ARRAY?
+         BNZ   BASEALOC                 YES. GET FIRST ELMT.
+         LA    RX,ARRAYRGT              NO. VALUE IN ARRAYRGT.
+         BR    RET
+*
+FETCHA0  EQU   *                        OPERAND = A0-Z9
+*
+         SLL   SW,2
+         LA    RX,A0TOZ9(SW)
+         BR    RET
+*
+FETCHA$  EQU   *                        OPERAND = A$-Z$
+*
+         SLL   SW,3
+         LA    SW,ATOZSTRG(SW)
+         USING ASTGDSCT,SW
+         LH    R1,ASTRGDIM
+         LTR   R1,R1                    WAS STRING USED AS AN ARRAY?
+         BNZ   SIMPLE
+         LH    RX,ASTRGIDX              PICK UP STRING INDEX.
+         LA    RX,0(RX,USER)
+         A     RX,ARRAYBEG
+         LA    R1,1
+         BR    RET
+*
+FETCHTA  EQU   *                        OPERAND = TEMP ADDRESS
+*                                       (RESULT OF EVAL A-Z)
+         SLL   SW,2
+         A     SW,ADEFNPTR
+         L     RX,ATEMPORG        RX <= A(TEMP. AREA IN AREA)
+         L     RX,0(SW,RX)        RX <= CONTENTS OF A SLOT IN TEMP.
+         LA    RX,0(RX,USER)
+         A     RX,ARRAYBEG
+         BR    RET
+*
+FETCHTV  EQU   *                        OPERAND = TEMP VALUE
+*                                       (RESULT OF ARITHMATIC)
+         SLL   SW,2
+         A     SW,ADEFNPTR
+         L     RX,ATEMPORG        RX <= A(TEMP. AREA IN AREA)
+         LA    RX,0(SW,RX)        RX <= ADDRESS OF A SLOT IN TEMP.
+         BR    RET
+*
+FETCHSTR EQU   *                        OPERAND = STRING CONSTANT
+*
+         LA    R1,1
+FETCHCON EQU   *                        OPERAND = NUMBER CONSTANT
+*
+         SLL   SW,2
+         L     RX,ACONSBEG
+         LA    RX,0(RX,USER)
+         SR    RX,SW                    SUBTRACT (TABLE RUNNING UP)
+         BR    RET
+*
+FETCHTA$ EQU   *                        OPERAND = TEMP ADDRESS
+*                                       (RESULT OF EVAL A$-Z$)
+         LA    R1,1
+         B     FETCHTA
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+*
+GETBASE  EQU   *
+*
+*        RX CONTAINS AN OPERAND A-Z (00-19).  GET
+*        THE ACTUAL ADDRESS OF THE ARRAY IN RX.
+*
+*         USE SW AS THE BASE OF THE ATOZDSECT
+*        R0 IS ARRAYLFT AND R1 IS ARRAYRGT IF ENTERED PRECEDING A
+*        DEFMAT.  DO NOT DESTROY.
+*
+*
+         LA    SW,X'FF'
+         NR    SW,RX                    -EXTRACT LOW-ORDER BYTE
+         SLL   SW,4
+         LA    SW,ATOZ(SW)
+         USING ATOZDSCT,SW
+         L     RX,ATOZALOC             -SEE IF ARRAY HAS BEEN
+*                                       ALLOCATED.
+*        IF ARRAY WAS USED IN MAT READ A, MAT PRINT A,
+*        MAT A=..., AND WAS NEVER DIMENSIONED, NOR WAS
+*        IT EVER USED AS THE SUBJECT OF AN EVAL, NO CORE
+*        WILL HAVE BEEN ALLOCATED FOR IT.
+*
+         LTR   RX,RX
+         BNZ   BASEALOC
+*
+*        DYNAMICALLY ALLOCATE 100 WORDS FOR THIS ARRAY BY
+*        INSERTING A HIGH-ORDER '02' IN ATOZALOC AND
+*        CALLING THE LOADER.
+*
+         STM   R14,R1,ARGSAVE           -SAVE
+         LR    R1,SW                    -GIVE THE ALLOCATOR THE
+*                                        ATOZ LOCATION IN R1.
+         LH    R0,0(RL,RLI)            -STATEMENT NUMBER
+         MVI   ATOZALOC,X'02'
+         L     R15,VLODR1
+         BALR  R14,R15
+         LTR   R0,R0
+         BNZ   COREFUL
+         LM    R14,R1,ARGSAVE           -RESTORE
+*
+BASEALOC EQU   *
+         LH    RX,ARRAYIDX
+         LA    RX,0(RX,USER)            -RX = ADDRESS OF ARRAY
+         A     RX,ARRAYBEG
+         BR    RET
+*
+***********************************************************************
+         EJECT
+************** RE-DEFINE THE MATRIX *********************************
+*
+REDEFINE EQU   *
+*
+*        REGISTERS USED TO REDEFINE THE MATRIX:
+*              R0 - INPUT:  ARRAYLFT
+*              R1 - INPUT:  ARRAYRGT
+*              R8 - WORK:   EVEN REGISTER FOR MULTIPLY
+*              R9 - OUTPUT: NUMBER OF WORDS IN ARRAY
+*              R14- RET:   INPUT (RETURN REGISTER)
+*              R15- SW:    INPUT (FOR ATOZDSCT)
+*
+*        CHECK THAT R0*R1 <= ATOZALOC+2 (IF R1 IS NON-ZERO), OR
+*                      R0 <= ATOZALOC+2 (IF R1 IS ZERO).
+*
+         LTR   R0,R0                   -IS SUBSCRIPT POSITIVE?
+         BNP   SUBSERR                  NO.  ERROR.
+         LR    R9,R0
+         LTR   R1,R1                   -SINGLY-DIMENSIONED?
+         BZ    REDEFCHK                 YES.  NO MULTIPLY
+         BM    SUBSERR                  ERROR.
+         MR    R8,R1
+REDEFCHK EQU   *
+         CH    R9,ATOZALOC+2           -PROPER REDEFINITION
+         BH    MATDERR                  NO.  ERROR
+*
+         STM   R0,R1,ARRAYLFT          -SET NEW SUBSCRIPTS
+*
+         BR    RET
+*
+***********************************************************************
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  EXITS'
+*************** SET UP TO EXIT ****************************************
+*
+STOP     EQU   *
+         LA    R1,NSTOP
+         LA    RX,MSTOP
+         B     EXIT
+PAUSE    EQU   *
+         LA    R1,NPAUSE
+         LA    RX,MPAUSE
+         B     EXIT
+END      EQU   *
+         LA    R1,NEND
+         LA    RX,MSTOP
+         B     EXIT
+SUBSERR  EQU   *
+         LA    R1,NSUBSERR
+         B     EXITERR
+RETFULL  EQU   *
+         LA    R1,NRETFULL
+         B     FULLERR
+TEMPFUL  EQU   *
+         LA    R1,NTEMPFUL
+         B     FULLERR
+FORRFUL  EQU   *
+         LA    R1,NFORRFUL
+FULLERR  EQU    *                 -SET PERTINENT PTS.
+*                                  BACK UP.
+         MVC   ARETPTR,MINUS2
+         MVC   AFORRPTR,AFORRORG
+         XC    ADEFNPTR,ADEFNPTR
+         XC    ADATARUN,ADATARUN
+         B     EXITERR
+FORERR   EQU   *
+         LA    R1,NFORERR
+         B     EXITERR
+NEXTERR  EQU   *
+         LA    R1,NNEXTERR
+         B     EXITERR
+DEFNERR  EQU   *
+         LA    R1,NDEFNERR
+         B     EXITERR
+MATDERR  EQU   *
+         LA    R1,NMATDERR
+         B     EXITERR
+INCONER  EQU   *
+         LA    R1,NINCONER
+         B     EXITERR
+SIMPLE   EQU   *
+         LA    R1,NSIMPLE
+         B     EXITERR
+LINEERR  EQU   *
+         LA    R1,NLINEERR
+         B     EXITERR
+MATERR   EQU   *
+         LA    R1,NMATERR
+         B     EXITERR
+SYNTERR  EQU   *
+         LA    R1,NSYNTERR
+         B     EXITERR
+DATANUL  EQU   *
+         LA    R1,NDATANUL
+         B     EXITERR
+PRINTER  EQU   *
+         LA    R1,NPRINTER
+         B     EXITERR
+READERR  EQU   *
+         B     EXITERR
+WRITERR  EQU   *
+         B     EXITERR
+INPUTER  EQU   *
+         LA    R1,MATTENT
+         B     UPLEVEL1
+RETERR   EQU   *
+         LA    R1,NRETERR
+         B     EXITERR
+COREFUL  EQU   *
+         LA    R1,NCOREFUL
+         B     EXITERR
+ENDERR   EQU   *
+         L     R0,ASAVE
+         LTR   R0,R0                   -WAS ANYTHING EVER EXECUTED?
+         BNZ   END                      YES.  END OF EXECUTION MSG.
+         LA    R1,NENDERR
+         B     EXITERR
+RNDERR   EQU   *
+         LA    R1,NRNDERR
+         B     EXITERR
+DATAERR  EQU   *
+         LA    R1,NDATAERR
+         B     EXITERR
+*
+*************** CALL THE MESSAGE DISPATCHER ***************************
+*
+*        CLEAR OUT LAST LINE OF PRINT BUFFER
+*        A BLANK WILL BE PRINTED IF NOTHING WAS THERE.
+*        CALL RUNERR WITH R0 BEING THE CURRENT STATEMENT #
+*        AND R1 BEING THE MESSAGE NUMBER.
+*
+*
+*        THE FOLLOWING ENTRY IS FOR THE TIMER INTERRUPT ROUTINE
+*
+         ENTRY  ATTENT
+*
+ATTENT   EQU   *
+         LA    RX,MATTENT              -TELL CONTROL PROGRAM
+         LA    R1,NATTENT
+         B     EXIT
+*
+EXITERR  EQU   *
+         LA    RX,MUSERERR
+*
+EXIT     IMO
+*        LH    R0,0(RL,RLI)            -PICK UP LINE NUMBER
+*        ST    R0,ASAVE
+         L     R0,ASAVE                -PICK UP LINE NUMBER
+*
+*
+         LR    RY,R1                   -SAVE MESSAGE NUMBER FOR RUNERR
+         SR    R1,R1
+         L     R15,APBUF               -TEST IF THERE'S ANYTHING LEFT
+         C     R1,0(USER,R15)           IN THE PRINT BUFFER.
+         BZ    NOPRINT                  EMPTY.  SKIP.
+         ST    R1,ARG1                 -TELL PRINT TO CLEAR
+         LA    R1,ARG1
+         L     R15,VPRINT
+         BALR  R14,R15
+         B     PRINTER
+*
+NOPRINT  EQU   *
+*
+*        IF THIS WAS AN IMMEDIATE TYPE OF EXECUTION
+*        (I.E. USER TYPED 'DO.....', AND THEREFORE
+*        IT IS STMT 10000), AND THE MESSAGE = NEND,
+*        DO NOT CALL RUNERR.
+*
+         C     R0,HIGHLINE             -IS IT 10000?
+         BNE   MESSAGE                  NO.  PRINT MESSAGE.
+         LA    R1,NEND                 -NORMAL RETURN MESSAGE
+         CR    R1,RY                   -IS IT A NORMAL RETURN?
+         BE    UPLEVEL                  YES.  NO MESSAGE
+*                                       NO.  PRINT MESSAGE
+MESSAGE  EQU   *
+         LR    R1,RY                   -RESTORE MESSAGE NUMBER
+*
+         L     R15,VRUNERR
+         BALR  R14,R15
+*
+************** RETURN TO THE CONTROL PROGRAM **************************
+*
+UPLEVEL  EQU   *
+         LR    R1,RX                   -RETURN CODE
+UPLEVEL1 L     R13,4(R13)              -L   R13,SAVE+4
+         LM    R14,R15,12(R13)
+         LM    R2,R12,28(R13)
+         B     0(R14,R1)
+*
+***********************************************************************
+         TITLE 'BASIC COMPILER  -  STORAGE'
+*
+VLODR1   DC    V(LODR1)                -ALLOCATE A 10X10 ARRAY
+VLODR2   DC    V(LODR2)                -CLEAR DATA
+VRUNERR  DC    V(RUNERR)
+VBINR    DC    V(BINR)
+VEXPON   DC    V(POWER)
+VTRN     DC    V(TRN)
+VINV     DC    V(INV)
+VNRM     DC    V(NRM)
+VEIG     DC    V(EIG)
+VMATM    DC    V(MATM)                  -MAT MULTIPLY
+VPRINT   DC    V(PRINT)                 -PRINT
+VWRITE   DC    V(WRITE)                 -WRITE (N,I)
+VFWRITET DC    V(FWRITET)               -TERMINATE WRITE
+VINPUT   DC    V(INPUT)                 -INPUT
+VREAD    DC    V(READ)                  -READ  (N,I)
+VFREADT  DC    V(FREADT)                -TERMINATE READ
+VDUMP    DC    V(DUMP)                  -DUMP
+VFUNCT   EQU   *
+         DC    V(SIN,COS,TAN,ATN,LOG,EXP,SQR,RND)
+         DC    3F'0'  SPACING FOR ABS, SGN, AND INT
+         DC    V(PAT,PDT,PSX,PSY,PCH,PLT)
+         DS    0F
+UNZERO   DC    X'46000000'
+ONE      DC    X'41100000'
+NEAR1    DC    X'40FFFFFF'              -FOR INT(-X)
+INTZER   DC    X'47000000'              -FOR INT(X)
+LOW15    DC    X'00007FFF'
+LASTDATA DC    X'80000000'              -LAST DATA ELEMENT
+MINUS2   DC    F'-2'                -ARETPTR
+CONDCODE EQU   *
+         DC    X'4020D0B07080'          -IF STATEMENT COMP CODE
+EIGHT    DC    H'8'                     -TO DECREMENT RTI
+TWENTY   DC    H'20'                   -TO DECREMENT AFORRPTR
+SYMINV   DC    X'9004'                  -TO TEST FOR INV
+HIGHLINE DC    F'10000'                 -THE LINE# FOR IMMEDIATE MODE.
+*
+OPSKIP   EQU   X'01'
+OPSYNTAX EQU   X'09'
+OPLAST   EQU   X'80'
+OPARITH  EQU   X'03'
+OPEQUAL  EQU   X'06'
+OPMINUS  EQU   X'08'
+OPDIVIDE EQU   X'0A'
+OPEVAL   EQU   X'0D'
+OPSUBS   EQU   X'0C'
+OPMATIO  EQU   X'07'
+OPMATRD  EQU   X'07'
+OPMATPRT EQU   X'08'
+*
+OPMATST  EQU   X'06'
+OPMATA   EQU   X'07'
+OPMATS   EQU   X'08'
+OPMATM   EQU   X'09'
+OPMATSC  EQU   X'0A'
+OPDEFMAT EQU   X'02'
+*
+OPSTACK  EQU   X'00'
+OPTEST   EQU   X'03'
+OPSTEP   EQU   X'02'
+*
+SYMATOZ$ EQU   X'30'
+SYMSIMPL EQU   X'21'                    -FOR A-Z, A0-Z9
+SYMFUNCT EQU   X'A0'
+SYMMATFN EQU   X'90'
+TRNINV   EQU   X'02'
+RNDFUNCT EQU   X'07'
+ABSFUNCT EQU   X'08'
+SYMCON   EQU   X'01'
+SYMTRN   EQU   X'03'
+SGNFUNCT EQU   X'09'
+SGNINT   EQU   X'0A'
+ PRINT ON
+         LTORG
+ EJECT
+CODEDSCT DSECT
+OPCODE   DS    H
+OPERAND1 DS    H
+OPERAND2 DS    H
+OPCODE2  DS    H
+OPERAND3 DS    H
+OPERAND4 DS    H
+OPCODE3  DS    H
+OPERAND5 DS    H
+OPERAND6 DS    H
+OPCODE4  DS    H
+OPERAND7 DS    H
+OPERAND8 DS    H
+OPCODE5  DS    H
+OPERAND9 DS    H
+         DS    H
+ SPACE 2
+FORRDSCT DSECT
+MAX      DS    F
+STEP     DS    F
+FORSTNO  DS    H
+NEXTSTNO DS    H
+FORLINE  DS    H           LINE NUMBER OF FIRST STATEMENT WITHIN LOOP
+FORBRNCH DS    H           BRANCH CODE USED BY 'NEXT'
+FORINDEX DS    F           ADDRESS OF INDEX USED IN FOR/NEXT LOOP
+FORUN    EQU   FORSTNO+20             -TO LOOK AT UNSTACKED FOR
+NEXTUN   EQU   NEXTSTNO+20
+*
+*PRINT OFF
+         TITLE 'BASIC COMPILER  -  USER AREA DSECT'
+AREA     DSECT
+         COPY  AREA
+         END
+/*

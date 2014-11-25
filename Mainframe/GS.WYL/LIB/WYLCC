@@ -1,0 +1,677 @@
+;  wylcc - Compile a wylbur or milten module
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLCC as  "xcall wyl.gs.wyl.lib#wylcc /" rep
+;
+;  command syntax:
+;      wylcc <subsys> <module|ALL> <NOPROMPT|PROMPT> <NODECK|DECK>
+;
+;  <subsys>:
+;      name of subsystem; the default is WYLBUR; allowed are
+;      TESTWYL, MILTEN, TESTMIL, uuuWYL and uuuMIL
+;  <module|ALL>:
+;      name of module to assemble, or assemble all source modules
+;      for the subsystem; there is no default
+;  <NOPROMPT|PROMPT>:
+;      determines whether to verify actions about to be taken;
+;      default is NOPROMPT for non-destructive acitons, PROMPT for
+;      destructive actions (or is meant to be -- the feature is
+;      still under construction)
+;  <NODECK|DECK>:
+;      should this assembly produce object decks or not; the default
+;      is NODECK
+;  <DEBUG>:
+;      sets debug mode for this invocation; it will not run, but
+;      will report what it would have run
+;
+;  Modifications:
+;
+;  07/25/94  slp  Increase SYSLIN allocation
+;  07/22/94  slp  More documentation cleanup
+;  04/08/96  mpd  First version
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl boolean x.debug
+  dcl string x.program, x.stem
+  dcl string subsys, module, prompt, deck, source
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; initialize variables
+  subsys = 'WYLBUR'
+  prompt = 'NO'
+  deck = 'NO'
+  x.program = 'WYLBUR'
+  x.debug = FALSE
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wylcc tit 'wylcc temporary active' temp
+  x.temp = actno                   ; save temp active file number
+  pick &(x.act)                    ; but go back to original
+
+  ; scan command
+  pcall scan_command (parm_count, parm_string, \
+    subsys, module, prompt, deck);
+  if (x.program eq 'WYLBUR') x.stem = 'WYL'
+  else x.stem = 'MIL'
+
+  ; get list of modules to assemble
+  pick &(x.temp)                   ;switch to temp active
+  pcall get_module_lists (subsys)
+  pick &(x.act)                    ;switch back to user active
+
+  ; determine where to find source
+  if (substr(subsys,1,4) eq 'TEST') source = 'TEST'
+  elseif ((substr(subsys,1,3) eq 'WYL') or (substr(subsys,1,3) eq 'MIL')) \
+    source = 'PROD'
+  else source = 'USER'
+
+  ; go compile module (or modules)
+  if (module eq 'ALL') pcall compile_all (subsys,prompt,deck)
+  else \
+    begin
+    if (x.program eq 'WYLBUR') \
+      pcall comp_wyl_module (subsys,module,prompt,deck,source)
+    else \
+      pcall comp_mil_module (subsys,module,prompt,deck,source)
+    end
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+;<.page>
+;
+;  scan parameters passed on invoking command
+;
+proc scan_command (pc,ps,subsys,module,prompt,deck) \
+  begin
+
+  dcl string token,remain,type
+  dcl string delims
+
+  delims = ' ,;=''"'               ; define parm delimiters
+
+  ;  check for at least one parameter
+  remain = ps
+  if (ps eq '') \
+    begin
+    comm At least one parameter is required.
+    ps = '?'
+    end
+  if (strip(ps) eq '?') pcall error_msg( \
+    'Command syntax: wylcc <subsys> <module|ALL> <NOPROMPT|PROMPT> <NODECK|DECK>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan:  <subsys> <module|ALL> <NOPROMPT|PROMPT> <NODECK|DECK>
+  while (remain ne '') \
+    begin
+    syscall scan_parm(token,remain,type,' ,',delims)
+;   comm token=&(token) remain=&(remain)
+
+    cases \
+      begin
+      case (upper(token) eq 'WYLBUR') \
+        begin
+        subsys = 'WYLBUR'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'TESTWYL') \
+        begin
+        subsys = 'TESTWYL'
+        x.program = 'WYLBUR'
+        end
+      case ((size(token) eq 6) and \
+            (substr(upper(token),4,6) eq 'WYL')) \
+        begin
+        subsys = upper(token)
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'MILTEN') \
+        begin
+        subsys = 'MILTEN'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'TESTMIL') \
+        begin
+        subsys = 'TESTMIL'
+        x.program = 'MILTEN'
+        end
+      case ((size(token) eq 6) and \
+            (substr(upper(token),4,6) eq 'MIL')) \
+        begin
+        subsys = upper(token)
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'ALL') module = 'ALL'
+      case (upper(token) eq 'NOPROMPT') prompt = 'NO'
+      case (upper(token) eq 'PROMPT') prompt = 'YES'
+      case (upper(token) eq 'NODECK') deck = 'NO'
+      case (upper(token) eq 'DECK') deck = 'YES'
+      case (upper(token) eq 'DEBUG') x.debug = TRUE
+      case (TRUE) \
+        begin
+        if (module eq '') module = upper(token)
+        else pcall error_msg( \
+          'Multiple module names specified:  &(module), &(upper(token))')
+        end
+      end
+;   comm subsys=&(subsys) module=&(module) prompt=&(prompt) deck=&(deck)
+    end
+  if (module eq '') pcall error_msg('module/ALL parm is required')
+  return(subsys,module,prompt,deck)
+  end
+
+;<.page>
+;
+;  build list of modules in production subsystem, in test subsystem,
+;  and under user account to validate module names and to define
+;  what 'ALL' means
+;
+proc get_module_lists (subsys) \
+  begin
+
+  ; initialize name counts
+  dcl number x.prodn, x.testn, x.usern
+  x.prodn = 0                      ; no production modules
+  x.testn = 0                      ; no test modules
+  x.usern = 0                      ; no user modules
+
+  try quietly dump dir for wyl.gs.&(x.stem).&(x.program).c
+  if (tryattn) pcall attn
+  if (tryerr) pcall error_msg('WYL.GS.&(x.stem).&(x.program).C not found')
+  try quietly delete first         ; delete library name
+  try quietly delete first
+  try quietly delete first
+  try quietly ch 9/235 to '' nol   ; remove comments
+  dcl string x.prod[&(lines)+1]    ; allocate array to hold names
+  x.prodn = lines                  ; save number of modules
+  if (last gt 0) \
+    begin
+    pcall move_names(x.prod[])     ; move names from active to array
+    end
+  try quietly delete first/last    ; clear out working active file
+  if ((subsys eq 'WYLBUR') or (subsys eq 'MILTEN')) \
+    return                         ; if doing production, done
+
+  try quietly dump dir for wyl.gs.&(x.stem).test&(x.stem).c
+  if (tryattn) pcall attn
+  if (tryerr) pcall error_msg('WYL.GS.&(x.stem).TEST&(x.stem).C not found')
+  try quietly delete first         ; delete library name
+  try quietly delete first
+  try quietly delete first
+  try quietly ch 9/235 to '' nol   ; remove comments
+  dcl string x.test[&(lines)+1]    ; allocate array to hold names
+  x.testn = lines                  ; save number of modules
+  if (last gt 0) \
+    begin
+    pcall move_names(x.test[])     ; move names from active to array
+    end
+  try quietly delete first/last    ; clear out working active file
+  if (subsys eq 'TEST&(x.stem)') \
+    return                         ; if doing test system, done
+
+  try quietly dump dir for wyl.&(group).&(user).&(x.program).c
+  if (tryattn) pcall attn
+  if (tryerr) pcall error_msg('no user modules found')
+  try quietly delete first         ; delete library name
+  try quietly delete first
+  try quietly delete first
+  try quietly ch 9/235 to '' nol   ; remove comments
+  dcl string x.user[&(lines)+1]    ; allocate array to hold names
+  x.usern = lines                  ; save number of modules
+  if (last gt 0) \
+    begin
+    pcall move_names(x.user[])     ; move names from active to array
+    end
+  try quietly delete first/last    ; clear out working active file
+
+  end
+
+;
+;  tranfer list in active file to array
+;
+proc move_names (names[]) \
+  begin
+  dcl string text
+  i = 1
+  lno = 0
+  syscall line_next(lno,text)
+  while (lno gt 0) \
+    begin
+    names[i] = text
+    syscall line_next(lno,text)
+    i = i+1
+    end
+  end
+
+;<.page>
+;
+;  assemble all modules for this subsystem
+;
+proc compile_all (subsys,prompt,deck) \
+  begin
+  dcl number i,j
+
+  ; first compile all user modules
+  i = 1
+  while (i le x.usern) \
+    begin
+;   comm looking at user module &(x.user[i])
+    pcall comp_&(x.stem)_module (subsys,x.user[i],prompt,deck,'USER')
+    j = 1                          ; mark done in test system list
+    while ((j le x.testn) and (x.test[j] ne x.user[i])) j = j+1
+    if (x.test[j] eq x.user[i]) x.test[j] = '****'
+    j = 1                          ; mark done in production list
+    while ((j le x.prodn) and (x.prod[j] ne x.user[i])) j = j+1
+    if (x.prod[j] eq x.user[i]) x.prod[j] = '****'
+    i = i+1
+    end
+
+  ; now compile any additional test system modules
+  i = 1
+  while (i le x.testn) \
+    begin
+;   comm looking at test module &(x.test[i])
+    if (x.test[i] ne '****') \
+      pcall comp_&(x.stem)_module (subsys,x.test[i],prompt,deck,'TEST')
+    j = 1                          ; mark done in production list
+    while ((j le x.prodn) and (x.prod[j] ne x.test[i])) j = j+1
+    if (x.prod[j] eq x.test[i]) x.prod[j] = '****'
+    i = i+1
+    end
+
+  ; finally compile any remaining production modules
+  i = 1
+  while (i le x.prodn) \
+    begin
+;   comm looking at production module &(x.prod[i])
+    if (x.prod[i] ne '****') \
+      pcall comp_&(x.stem)_module (subsys,x.prod[i],prompt,deck,'PROD')
+    i = i+1
+    end
+  end
+
+;<.page>
+;
+;  compile one wylbur module
+;
+proc comp_wyl_module (subsys,module,prompt,deck,source) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  dcl string maclibname
+  pick &(x.temp)                   ; switch to temp active
+
+  ; make sure the module is in wylbur source
+  found = FALSE
+  i = 1
+  while ((i le x.prodn) and (module ne x.prod[i])) i = i+1
+  if (module eq x.prod[i]) found = TRUE
+  else \
+    begin
+    i = 1
+    while ((i le x.testn) and (module ne x.test[i])) i = i+1
+    if (module eq x.test[i]) found = TRUE
+    else \
+      begin
+      i = 1
+      while ((i le x.usern) and (module ne x.user[i])) i = i+1
+      if (module eq x.user[i]) found = TRUE
+      end
+    end
+  if (not found) pcall error_msg('Module '||module||' not found')
+
+  if (subsys eq 'WYLBUR') \
+    jobname = substr('WYL'||'#'||module||'    ',1,8)
+  elseif (subsys eq 'TESTWYL') \
+    jobname = substr('TWYL'||''||module||'    ',1,8)
+  else \
+    jobname = substr(user||'C'||module||'    ',1,8)
+
+  putend //&(jobname) JOB ,'Assemble &(module)',TIME=4,REGION=4M
+  putend //*
+  putend /*JOBPARM LINES=99,COPIES=1
+  putend /*JOBPARM FORMS=3HOL,PFORMAT=LAND,CHARS=BD13,DUPLEX=YES,FLASH=BAR4
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PUR * Q OUT MUL'
+  putend //*
+  putend //U EXEC IOPROGM
+
+  if (source eq 'PROD') \
+    putend //SYSUT1   DD  DSN=WYL.GS.WYL.WYLBUR.C(&(module)),DISP=SHR
+  elseif (source eq 'TEST') \
+    putend //SYSUT1   DD  DSN=WYL.GS.WYL.TESTWYL.C(&(module)),DISP=SHR
+  else \
+    begin
+      if (module ne 'DSECTS') \
+        putend //SYSUT1   DD  DSN=WYL.&(group).&(user).WYLBUR.C(&(module)),DISP=SHR
+      else \
+        putend //SYSUT1   DD  DSN=WYL.&(group).&(user).WYLBUR.C(&(module)),DISP=SHR
+    end
+
+  putend //SYSUT2 DD DSN=&&CSRC,SPACE=(TRK,(10,10)),DISP=(MOD,PASS),
+  putend //  UNIT=SYSDA,DCB=(RECFM=FB,LRECL=235,BLKSIZE=4700)
+
+  putend //C EXEC PGM=LC370B,ACCT=(C370C,SYS4),
+
+  if ((deck eq 'YES') and (module ne 'DSECTS')) dp = 'OBJECT'
+  else dp = 'NOOBJECT'
+
+  putend //  PARM='SN(&(module)) OPTIM TE &(dp)'
+  putend //STEPLIB  DD DSN=SYS4.SASC.C550.LOAD,
+  putend //            DISP=SHR COMPILER LIBRARY
+  putend //         DD DSN=SYS4.SASC.C550.LINKLIB,
+  putend //            DISP=SHR RUNTIME LIBRARY
+
+  if (subsys eq 'WYLBUR') \
+    begin
+      putend //H   DD  DSN=WYL.GS.WYL.WYLBUR.C.INCLUDE,DISP=SHR
+    end
+  elseif (subsys eq 'TESTWYL') \
+    begin
+      putend //H   DD  DSN=WYL.GS.WYL.TESTWYL.C.INCLUDE,DISP=SHR
+      putend //    DD  DSN=WYL.GS.WYL.WYLBUR.C.INCLUDE,DISP=SHR
+    end
+  else \
+    begin
+      maclibname = 'WYL.&(group).&(user).WYLBUR.C.INCLUDE'
+      if (verify(dsnverify(maclibname),'OK IN USE') eq 0) \
+         begin
+           putend //H   DD  DSN=&(maclibname),DISP=SHR
+           putend //    DD  DSN=WYL.GS.WYL.TESTWYL.C.INCLUDE,DISP=SHR
+           putend //    DD  DSN=WYL.GS.WYL.WYLBUR.C.INCLUDE,DISP=SHR
+         end
+      else \
+        begin
+        putend //H   DD  DSN=WYL.GS.WYL.TESTWYL.C.INCLUDE,DISP=SHR
+        putend //    DD  DSN=WYL.GS.WYL.WYLBUR.C.INCLUDE,DISP=SHR
+        end
+    end
+
+  putend //SYSLIB DD DSN=SYS4.SASC.C550.MACLIBC,
+  putend //          DISP=SHR STANDARD MACRO LIBRARY
+
+  if (dp eq 'OBJECT') \
+    begin
+    if ((subsys eq 'WYLBUR') or (subsys eq 'TESTWYL')) \
+      begin
+      objectname = 'WYL.GS.WYL.&(subsys).C.OBJ'
+      if (verify(dsnverify(objectname),'OK IN USE') ne 0) \
+        begin
+        alloc WYL.GS.WYL.&(subsys).C.OBJ card blocks 100 tracks 225
+        end
+      putend //SYSLIN   DD DSN=&(objectname)(&(module)),DISP=OLD
+      end
+    else \
+      begin
+      objectname = 'WYL.&(group).&(user).WYLBUR.C.OBJ'
+      if (verify(dsnverify(objectname),'OK IN USE') eq 0) \
+        putend //SYSLIN   DD  DSN=&(objectname)(&(module)),DISP=OLD
+      else \
+        begin
+        putend //SYSLIN   DD  DSN=&(objectname),
+        putend //             SPACE=(TRK,(30,5),RLSE),DISP=(NEW,CATLG),
+        putend //             UNIT=DISK,DCB=(LRECL=80,BLKSIZE=3120,RECFM=FB)
+        end
+      end
+    end
+
+  putend //SYSPRINT DD SYSOUT=A,DCB=PRINT
+  putend //SYSTERM DD SYSOUT=A
+  putend //SYSUT1 DD UNIT=SYSDA,SPACE=(TRK,(10,10))
+  putend //SYSUT2 DD UNIT=SYSDA,SPACE=(TRK,(10,10))
+  putend //SYSUT3 DD UNIT=SYSDA,SPACE=(TRK,(10,10))
+  putend //SYSDBLIB DD DSN=&&DBGLIB,SPACE=(4080,(20,20,1)),DISP=(,PASS),
+  putend //            UNIT=SYSDA,DCB=(RECFM=U,BLKSIZE=4080)
+  putend //SYSTMP01 DD UNIT=SYSDA,SPACE=(TRK,25)     VS1 ONLY
+  putend //SYSTMP02 DD UNIT=SYSDA,SPACE=(TRK,25)     VS1 ONLY
+  putend //SYSIN DD DSN=*.U.GO.SYSUT2,DISP=(OLD,PASS),VOL=REF=*.U.GO.SYSUT2
+
+  if (dp eq 'OBJECT') \
+    begin
+    if ((subsys eq 'WYLBUR') or (subsys eq 'TESTWYL')) \
+      begin
+      putend //*
+      putend //CONDENSE EXEC  PGM=IEBCOPY
+      putend //SYSPRINT DD  SYSOUT=A
+      putend //SYSUT1   DD  DSN=WYL.GS.WYL.&(subsys).C.OBJ,
+      putend //             DISP=OLD
+      putend //SYSUT2   DD  DSN=*.SYSUT1,DISP=OLD,VOL=REF=*.SYSUT1
+      putend //SYSIN    DD  DUMMY
+      end
+    end
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||module||' compilation aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+; compile one milten module
+;
+proc comp_mil_module (subsys,module,prompt,deck,source) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  ; make sure the module is in milten source
+  found = FALSE
+  i = 1
+  while ((i le x.prodn) and (module ne x.prod[i])) i = i+1
+  if (module eq x.prod[i]) found = TRUE
+  else \
+    begin
+    i = 1
+    while ((i le x.testn) and (module ne x.test[i])) i = i+1
+    if (module eq x.test[i]) found = TRUE
+    else \
+      begin
+      i = 1
+      while ((i le x.usern) and (module ne x.user[i])) i = i+1
+      if (module eq x.user[i]) found = TRUE
+      end
+    end
+  if (not found) pcall error_msg('Module '||module||' not found')
+
+  if (subsys eq 'MILTEN') \
+    jobname = substr('MIL'||'#'||module||'    ',1,8)
+  elseif (subsys eq 'TESTMIL') \
+    jobname = substr('TMIL'||''||module||'    ',1,8)
+  else \
+    jobname = substr(user||'#'||module||'    ',1,8)
+
+  putend //&(jobname) JOB ,'Assemble &(module)',TIME=4,REGION=4M
+  putend //*
+  putend /*JOBPARM LINES=99,COPIES=1
+  putend /*JOBPARM FORMS=3HOL,PFORMAT=LAND,CHARS=BD13,DUPLEX=YES,FLASH=BAR4
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PUR * Q OUT MUL'
+  putend //*
+  putend //ASM     EXEC PGM=IEV90,REGION=4000K,TIME=2,
+  if ((deck eq 'YES') and (module ne 'DSECTS')) dp = 'DECK'
+  else dp = 'NODECK'
+  putend // PARM=('TERM,DECIMAL,&(dp),NORENT,XREF,ESD,DXREF,LINECOUNT(32767)')
+  putend //STEPLIB  DD  DSN=SYS2.ASMH.SLACV29.LINKLIB,DISP=SHR
+  if (source eq 'PROD') \
+    begin
+      putend //SYSIN    DD DSN=WYL.GS.MIL.MILTEN.SOURCE(&(module)),DISP=SHR
+      putend //SYSLIB   DD  DSN=WYL.GS.MIL.MILTEN.MACLIB,DISP=SHR
+    end
+  elseif (source eq 'TEST') \
+    begin
+      putend //SYSIN    DD DSN=WYL.GS.MIL.TESTMIL.SOURCE(&(module)),DISP=SHR
+      putend //SYSLIB   DD  DSN=WYL.GS.MIL.MILTEN.MACLIB,DISP=SHR
+    end
+  else \
+    begin
+      putend //SYSIN    DD DSN=WYL.&(group).&(user).MIL&(module),DISP=SHR
+      maclibname = 'WYL.&(group).&(user).MILTEN.MACLIB'
+      if (verify(dsnverify(maclibname),'OK IN USE') eq 0) \
+         begin
+           putend //SYSLIB   DD  DSN=&(maclibname),DISP=SHR
+           putend //         DD  DSN=WYL.GS.MIL.MILTEN.MACLIB,DISP=SHR
+         end
+      else \
+         putend //SYSLIB   DD  DSN=WYL.GS.MIL.MILTEN.MACLIB,DISP=SHR
+    end
+
+  putend //         DD  DSN=WYL.GG.SYS.MACLIB,DISP=SHR
+  putend //         DD  DSN=SYS3.IS.MACLIB,DISP=SHR
+  putend //         DD  DSN=SYS3.MACLIB,DISP=SHR
+  putend //         DD  DSN=SYS1.MACLIB.REL313,DISP=SHR
+  putend //         DD  DSN=SYS1.MODGEN.REL313,DISP=SHR
+
+  if (dp eq 'DECK') \
+    begin
+    if ((subsys eq 'MILTEN') or (subsys eq 'TESTMIL')) \
+      begin
+      objectname = 'WYL.GS.MIL.&(subsys).OBJECT'
+      if (verify(dsnverify(objectname),'OK IN USE') ne 0) \
+        begin
+        alloc WYL.GS.MIL.&(subsys).OBJECT card blocks 100 tracks 225 on sys205
+        end
+      putend //SYSLIN   DD DSN=&(objectname)(MIL&(module)),DISP=OLD
+      end
+    else \
+      begin
+      objectname = 'WYL.&(group).&(user).OBJECT.MIL&(module)'
+      if (verify(dsnverify(objectname),'OK IN USE') eq 0) \
+        putend //SYSLIN   DD  DSN=&(objectname),DISP=OLD
+      else \
+        begin
+        putend //SYSLIN   DD  DSN=&(objectname),
+        putend //             SPACE=(TRK,(10,4),RLSE),DISP=(NEW,CATLG),
+        putend //             UNIT=DISK,DCB=(LRECL=80,BLKSIZE=3120,RECFM=FB)
+        end
+      end
+    end
+
+  putend //SYSTERM  DD  SYSOUT=T
+  putend //SYSUT1   DD  DSN=&SYSUT1,UNIT=SYSDA,DCB=BLKSIZE=5100,
+  putend //             SPACE=(8000,(150,30),,,ROUND)
+  putend //SYSPRINT DD  DSN=&PRINT,UNIT=SYSDA,SPACE=(CYL,(1,2)),
+  putend // DCB=(RECFM=FB,LRECL=121,BLKSIZE=5100),DISP=(,PASS)
+  putend //*
+  putend //EDIT    EXEC PGM=ASMEDIT,TIME=2,REGION=4000K,
+  putend //             PARM='STMT'
+  putend //STEPLIB  DD  DSN=WYL.GG.SYS.LINKLIB,DISP=SHR
+  putend //ASMOUT   DD  DSN=&PRINT,DISP=(OLD,DELETE)
+  putend //SYSPRINT DD  SYSOUT=A
+
+  if (dp eq 'DECK') \
+    begin
+    if ((subsys eq 'MILTEN') or (subsys eq 'TESTMIL')) \
+      begin
+      putend //*
+      putend //CONDENSE EXEC  PGM=IEBCOPY
+      putend //SYSPRINT DD  SYSOUT=A
+      putend //SYSUT1   DD  DSN=WYL.GS.MIL.&(subsys).OBJECT,
+      putend //             DISP=OLD
+      putend //SYSUT2   DD  DSN=*.SYSUT1,DISP=OLD,VOL=REF=*.SYSUT1
+      putend //SYSIN    DD  DUMMY
+      end
+    end
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||module||' compilation aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Exec wylcc failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WCCERR errmsg='&(msg)'
+  end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=wccerr errmsg="wylasm failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

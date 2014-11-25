@@ -1,0 +1,129 @@
+SYS3.SYSTEM.DOCLIB(HSMNOTES)                               2002/07/10 MCL
+also saved as WYL.GA.MCL.SMS.LIB#HSMNOTES
+
+Documentation note:  This file and doclib members HSMCMDS, HSMRECOV, ML1NOTE,
+SMSVOL have information about HSM.  Most of the JCL, utilities, and notes for
+HSM is in WYL.GA.MCL.SMS.LIB, which is referred to extensively in these notes.
+See also
+
+ SH21-1075     DFSMShsm Storage Administration Reference
+ SH21-1076     DFSMShsm Storage Administration Guide
+
+The current HSM setup does migration to level 1 (disk) only.  We are working
+on setting up migration to level 2 (tape) in support of tape mount reduction,
+but this note applies to the current implementation only.
+
+General goals:  HSM is first of all a tool for availability management, that
+is, for ensuring that applications needing disk space can get it.  To this end
+it does "primary space management" every evening, migrating datasets not
+recently used from "primary" disks to Migration Level One (ML1) storage.  It
+does this to meet free-space thresholds that we have defined.  Second, HSM
+conserves disk space because ML1 storage is compressed, and small datasets get
+packed into a VSAM cluster (a process called Small DataSet Packing, SDSP).
+
+For HSM to work, there must be available space in the ML1 pool and in the SDSP
+clusters (one SDSP per ML1 volume).  The SDSPs need to be condensed
+periodically, and ML1 volumes added when necessary.  If we implement ML2
+support, we can free up space by migration to level 2, but for now we must add
+ML1 volumes to meet the need.
+
+If the ML1 pool fills up, migration will stop; it will also stop if a backup
+of the HSM control datasets fails.  Eventually this will cause primary space
+to fill up also, and cause application jobs to fail.  Also, a lack of primary
+space can cause recall of migrated datasets to fail, making existing data
+unavailable to the clients.
+
+HSM is "healthy" if all of the following conditions are met:
+
+*  CDS backups running OK (run automatically at 11pm each night)
+*  SDSPs have free space
+*  ML1 pool has free space
+*  CDS healthy, have free space etc.
+
+CHECKING HSM STATUS
+
+You can get a general picture of what's working (or not) by doing
+
+   hsend query active
+
+in TSO.  The normal response would be:
+
+ ARC0101I QUERY ACTIVE COMMAND STARTING ON HOST=A
+ ARC0144I AUDIT=NOT HELD AND INACTIVE, LIST=NOT HELD AND INACTIVE, RECYCLE=NOT
+ ARC0144I (CONT.) HELD AND INACTIVE, REPORT=NOT HELD AND INACTIVE
+ ARC0160I MIGRATION=NOT HELD, AUTOMIGRATION=NOT HELD, RECALL=NOT HELD,
+ ARC0160I (CONT.) TAPERECALL=NOT HELD, DATA SET MIGRATION=INACTIVE, VOLUME
+ ARC0160I (CONT.) MIGRATION=INACTIVE, DATA SET RECALL=INACTIVE
+ ARC0163I BACKUP=NOT HELD, AUTOBACKUP=NOT HELD, RECOVERY=NOT HELD,
+ ARC0163I (CONT.) TAPEDATASETRECOVERY=NOT HELD, DATA SET BACKUP=NOT HELD, VOLUME
+ ARC0163I (CONT.) BACKUP=INACTIVE, DATA SET RECOVERY=INACTIVE, VOLUME
+ ARC0163I (CONT.) RECOVERY=INACTIVE
+ ... [additional msgs deleted]
+
+Note particularly that  Data Set Migration, Data Set Recall, and Backup all
+show "not held".
+
+The command
+
+   hsend query cdsversionbackup
+
+will elicit some general info on the backup process used for the control data
+sets.
+
+The TSO (or IDCAMS) command
+
+  listc level('hsm.smallds') allocation
+
+will generate a report on all the SDSP clusters.  You can then
+
+  xc wyl.ga.mcl.sms.lib#sdspfilt
+
+to edit this down to something useful; the result will be a report showing the
+allocated and use RBA for each SDSP.  If high-used is near high-allocated the
+SDSP needs to be condensed.  The output looks like:
+
+ -------- HSM.SMALLDS.VHSM100 ---------
+ SPACE-TYPE------CYLINDER     HI-A-RBA------1357025280
+ SPACE-PRI------------499     HI-U-RBA------1340252160
+ -------- HSM.SMALLDS.VHSM101 ---------
+ SPACE-TYPE------CYLINDER     HI-A-RBA------1037537280
+ SPACE-PRI------------499     HI-U-RBA------1031147520
+ -------- HSM.SMALLDS.VHSM102 ---------
+ SPACE-TYPE------CYLINDER     HI-A-RBA-------718049280
+ SPACE-PRI------------499     HI-U-RBA-------718049280
+
+ ...
+
+ -------- HSM.SMALLDS.VHSM133 ---------
+ SPACE-TYPE------CYLINDER     HI-A-RBA--------79872000
+ SPACE-PRI------------100     HI-U-RBA----------798720
+ -------- HSM.SMALLDS.VHSM134 ---------
+ SPACE-TYPE------CYLINDER     HI-A-RBA--------79872000
+ SPACE-PRI------------100     HI-U-RBA----------798720
+
+In this report, the first three shown are full, the last two are OK.
+
+SPACE ON ML1 VOLUMES
+
+The TSO command
+
+  hsend query space(hsm100)
+
+can be used to get space information for one volume (substitute the desired
+volume for "hsm100" above); any utility that can check disk free space may
+also be used.  For example,
+
+ //L#HSM JOB
+ //  EXEC  DISKLOOK,VOL=HSM,OPTION='TERM,NOPRINT,NODSN'
+ //SYSTERM DD SYSOUT=C
+
+will produce a one-line report for each HSM volume showing the free space.
+
+CONTROL DATA SETS
+
+The command
+
+  hsend query controldatasets
+
+will produce a brief report on the state of the control data sets.  In
+particular check that the MCDS (Migration Control Data Set) is not full.

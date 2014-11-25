@@ -1,0 +1,2496 @@
+MONITOR  TITLE 'Wings Task Monitor'
+********************************************************************
+*** %%Module: wings asm monitor;                                   *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- FILE SERVER MONITOR.                                 *
+***                                                                *
+***    This is an attacher and subtask monitor.  It handles        *
+***    subtask creation, monitoring and termination.  The subtasks *
+***    communicate by using common information in the GVT.  The    *
+***    monitor creates a task vector table (TVT) for each subtask  *
+***    it starts.                                                  *
+***                                                                *
+***    Some of this code came from a program called HAWK written   *
+***    some 13 years ago.                                          *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***    2002/06/19  mcl  report TCB addr of each subtask on start   *
+***                     or STATUS cmd; lower prio for subtasks     *
+***    1996/10/10  mcl  TZ adjustments in timestamp                *
+***    1996/03/04  mcl  cancel offending task if queue lock fail   *
+***    1996/02/20  mcl  LOGREL command                             *
+***    1994/02/15  MCL  fix EOTASK, was assuming regs loaded       *
+***                     Timestamp in STATUS, init TVTACCT          *
+***    1994/02/02  MCL  STATUS cmd handle bytes>2147483647         *
+***    1994/02/01  MCL  fix STAI option and parm address           *
+***    1990/11/26  Niz  Initial version.                           *
+***                                                                *
+********************************************************************
+MONITOR  HIBAL ASSOC=YES
+*
+         REGS  FSR,,,,,,,BR,WAR,,TVTR,MTVTR,(GVTR,LSR),SPR,RAR
+*
+         SYSDEFN
+*
+         IDENT 2170                11:11:32 06/19/2002 MCL
+*
+         PUSH  DSECTS
+SEGCB    RECORD 'SEGCB'
+*
+SCANCB   RECORD 'SCANCB'
+*
+         CVT   DSECT=YES
+*
+         IHASDWA
+*
+         IHAPSA
+*
+*CSCB     RECORD 'IEECHAIN'         Cscb mapping dsect
+*
+         IKJTCB ,                  Tcb mapping
+*
+         DCBD  DEVD=DA,DSORG=PS    DCB mapping dsect
+DCB      EQU   IHADCB
+*
+COM      RECORD BEGIN              Os communications area
+COMECBPT DS    A                   Ptr to ecb for stop/modify
+COMLAST  DS    0A                  Last pointer in parameter list
+COMEND   EQU   X'80'               - High order bit of last parm ptr
+COMCIBPT DS    A                   Ptr to command input buffer (cib)
+         END
+*
+         DSECT
+CIB      IEZCIB ,                  Stop/modify command input buffer
+*
+         IEZATTCH
+         POP   DSECTS
+*
+         USING GVT                 Universal assumption
+         USING MTVT                Universal assumption
+*
+         PTRACE DUMMY,TVTREG=MTVTR  Define TVT ptr
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+         EJECT
+*box
+*
+*  Global Vector Table
+*
+GVT      RECORD BEGIN
+         COPY  GVT                 Global vector table
+         END
+         EJECT
+*box
+*
+*  Task Vector Table
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+*
+         COPY  TRCENTRY            Trace table format
+         EJECT
+MONITOR  CSECT
+*box
+*
+*  Monitor's Task Vector Table
+*
+MTVT     RECORD BEGIN
+MTVTPFX  DS    XL(L'TVT)           Common section
+*-
+*-       Monitor private information.
+*-
+MTVTPARM DS    A                   Addr of OS parms
+MTVTCOMP DS    A                   OS comm area ptr
+MTVTSTKP DS    A                   Our stack ptr
+*
+MTVTECBL DS    A                     A(CSCB ECB) -- for stop/modify
+         DS    AL1(128),AL3(MTVTECB) Our ECB
+*
+MTVTECB  DC    F'0'
+*
+MTVTFLAG FLAG
+         FLAG  MTVTFINEOF          - End of file reached on SYSIN
+*
+MTVTUCM  DS    X                   Ucmid of requesting console
+*
+MTVTOSRA DS    A                   OS return addr
+MTVTRC   DC    F'0'                OS return code
+*
+         SCANCB PFX=MTVTSCN        Scanner control block
+*
+MTVTCURSG DS   A                   CURRENT seg control block addr
+*
+MTVTPRSG SEGCB ,                   MONPRINT seg control block
+*
+MTVTWTOSG SEGCB ,                  WTO seg control block
+*
+MTVTCMDSG SEGCB ,                  MONCMD seg control block
+         END
+*
+         SEGDEF DUMMY              (Neatness)
+*
+         TITLE 'Local Macros'
+*
+*  2 macros to push and pop SCANNER state as expected
+*  by monitors version of the scanner.  We must push
+*  the return address and the scancb pointer (r15).
+*  we do not normally push the loc,len... as we want
+*  that part to continue to increment as stuff is
+*  scanned off.  essentially we just want to be able
+*  to continue a scan in a scan routine.  so ...
+*
+*  NOTE: ARGS TO SCPUSH, SCPOP ARE IGNORED.
+*
+*  NOTE, CAUTION !! AHHHGG !!::
+*  IT IS TRUE THOUGH I CAN NOT BELIEVE IT !!
+*  R15 MUST BE SET TO SCANCB POINTER FOR A ROUTINE
+*  TO RETURN TO THE SCANNER! YUCK.  IT IS PUSHED
+*  AND POPPED BY SCPUSH,SCPOP !!
+*
+*  ** FREE REGISTER R15 **
+*
+*  OPPRESSIVE USAGE BY ORVYL SCANNER IS TERRIBLE.
+*
+*
+         MACRO
+&L       SCPUSH &M,&N
+&L       ST    R15,@R13
+         MVC   @R13+4(4),MTVTSCNRA
+         LA    R13,8(R13)
+         MEND
+*
+*
+         MACRO
+&L       SCPOP &M,&N
+         S     R13,=A(8)
+         L     R15,@R13
+         MVC   MTVTSCNRA,@R13+4
+         MEND
+*
+         TITLE 'Monitor initialization'
+MONITOR  CSECT
+*-
+*-       Initialization.
+*-
+         ENTRY STARTUP             OS entry point is here
+STARTUP  BASE
+         L     GVTR,=V(GVT)        Global vector table
+         CLEAR TVTR                No task vector table yet
+         CLEAR SPR,WAR             No stack yet
+         LR    R6,R14              Save OS return addr
+         LR    R5,R1               Save OS parm ptr
+         STCK  GVTTIME             timestamp startup       ML940329
+         L     R0,GVTTIME          time, left part
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,GVTTIME          save adjusted (local) time
+*-
+*-       Create and initialize our TVT.
+*-
+         L     R0,=A(TVTSIZE#)
+         GETMAIN R,LV=(0)          Allocate memory for TVT
+         LR    MTVTR,R1
+         WITH  (TVT,MTVTR),BEGIN
+         ZOT   TVT,L:=A(TVTSIZE#)  Zero entire TVT
+         MVC   TVTID,=C'TVT '      Set self identification
+         MVC   TVTTLEN,=AL2(TVTSIZE#)  Set length
+*
+         MVC   TVTNAME,=CL8'MONITOR'  Set our task name
+         MVC   TVTACCT,=C'*****'   No user ID
+         MVC   TVTLRCLK,GVTTIME    Initial time-stamp
+         MVC   TVTLACLK,TVTLRCLK   copy to "latest"
+         CLEAR R15                 monitor is task zero  ml20020620
+         ST    R15,GVTTSKID
+         ST    R15,TVTNO           Save our task number
+         ST    R15,TVTSEQ
+*
+         LA    R1,GVT
+         ST    R1,TVTGVTP          Save GVT ptr
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L R1,CVTTCBP'  TCB Words
+         MVC   TVTTCBP,@R1+4       Save our TCB ptr
+*
+*-
+*-       Build trace table.
+*-
+         LA    R2,L'TRCENTRY
+         MH    R2,=AL2(TRCNENT#)   Total length of trace table
+         LR    R0,R2
+         GETMAIN R,LV=(0)          Get memory for it
+         ST    R1,TVTTRBEG         Start of trace table
+         ST    R1,TVTTRCUR         Current trace table entry
+         AR    R2,R1
+         ST    R2,TVTTREND         End of trace table
+*
+         SET   TVTFTRC             This TVT can handle tracing
+*-
+*-       Put our TVT on the queue.
+*-
+         ST    MTVTR,GVTTVTQH      We are the queue head
+         ST    MTVTR,GVTTVTQT      We are the queue tail
+         END
+*
+         LA    R1,MTVTECB          Put monitor request ECB addr
+         ST    R1,GVTECBPT         into GVT
+*
+         ST    R6,MTVTOSRA         OS return address
+         MVC   MTVTPARM,@R5        OS parameter ptr
+*-
+*-       Set up a program stack.
+*-
+         L     R0,=A(64*1024)      64K stack
+         GETMAIN R,LV=(0)          Get stack space
+         ST    R1,MTVTSTKP         Save our stack ptr
+         L     SPR,MTVTSTKP        Stack ptr
+         LR    WAR,SPR             Ditto
+*-
+*-       General initialization.
+*-
+         VCALL AMODE31             Switch to 31-bit mode
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L R1,CVTTCBP'  TCB Words
+         L     R1,@R1+4            Our (current) tcb
+         WITH  (TCB,R1),'L R1,TCBTIO'  TIOT
+         MVC   GVTJOBNM,@R1        Save jobname
+         XPUSH ,,28,PTR=R6         Room for various HASPSERV stuff
+         HASPSERV JOBACCT,(R6)
+         IF    Z,BEGIN             We have the account info...
+         MVC   GVTACCT(3),@R6      uuu
+         MVI   GVTACCT+3,C'$'         $
+         MVC   GVTACCT+4(2),@R6+3      gg
+         END
+         HASPSERV JOBINFO,(R6)     Get jobno etc.
+         IF    Z,BEGIN
+         MVC   GVTJOBNO,@R6        Copy job number
+         END
+         XPOP  ,,28
+*
+*                                  Subpool 2 will be shared,
+         LA    R0,256
+         O     R0,=X'02000000'
+         GETMAIN R,LV=(0)          Get a bit, just to set up SP=2
+*-
+*-       Make a symbol table.
+*-
+         XPUSH ,,16,PTR=R2         Get stack space
+         WITH  (TVT,MTVTR),BEGIN
+         ADDSYM ENTRY=(R2),NAME='GVT',LOC=(GVTR),LEN=L:=A(L'GVT)
+         ADDSYM ENTRY=(R2),NAME='MTVT',LOC=(MTVTR),LEN=LH:TVTTLEN
+         ADDSYM ENTRY=L:=A(SYMMONIT)  MONITOR symbols
+         ADDSYM ENTRY=L:=V(SYMUTILS)  UTILS symbols
+         ADDSYM ENTRY=L:=V(SYMDUMP)   DUMPER symbols
+         ADDSYM ENTRY=L:=V(SYMSCANN)  SCANNER symbols
+         ADDSYM ENTRY=L:=V(SYMDEBUG)  DEBUG symbols
+         END
+         XPOP  ,,16
+*-
+*-
+*-       Initialize dump formatter.
+*-
+         CLEAR R1                  No local dump formatting routine
+         VCALL DUMPINIT            Initialize dump formatter
+*-
+*-       Init SEG routines (WTO, MONPRINT, MONCMD)
+*-
+         LA    R1,=CL8'MONPRINT'
+         LA    R15,MTVTPRSG
+         VCALL PRTINIT             Initialize output SEGCB
+*
+*        LA    R15,MTVTCMDSG
+*        VCALL MCMDINIT            Initialize Monitor CMD SEGCB
+*        COMMENT                   done later for each command
+*
+         LA    R15,MTVTWTOSG
+         VCALL WTOINIT             Initialize WTO SEGCB
+         LA    R15,MTVTWTOSG
+         LA    R0,MTVTPRSG
+         VCALL SETAUXSG            Set auxiliary WTO seg
+*
+**       SEGWR 'WTO log test',,MTVTWTOSG
+**       SEGWR 'Print log test',,MTVTPRSG
+         SEGDEF MTVTPRSG           (monitor default)
+*-
+*-       Establish operator STOP/MODIFY interface.
+*-
+         LA    R2,MTVTCOMP
+         EXTRACT (R2),'S',FIELDS=COMM
+         L     R6,MTVTCOMP         OS comm area (in CSCB)
+         WITH  (COM,R6),BEGIN
+         QEDIT ORIGIN=COMCIBPT,CIBCTR=2  Queue depth of two
+*
+         L     R1,COMECBPT         A(stop/modify ecb)
+         LA    R1,@R1
+         ST    R1,MTVTECBL         Put addr in our ECB list
+         LA    R1,MTVTECB          Main ECB
+         ST    R1,MTVTECBL+4       Save main ECB ptr
+         SET   MTVTECBL+4.X'80'    Set end of list
+*
+         L     R5,COMCIBPT         Ptr to first CIB
+         LA    R5,@R5
+         IF    (R5,NZ),BEGIN       Do if CIB present...
+         WITH  (CIB,R5)
+*
+*                 Delete start CIB if any
+         IF    (CIBVERB,EQ,CIBSTART),BEGIN  Start CIB...
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(R5)  Free it
+         END
+         END
+         END
+*-
+*-       Set defaults
+*-
+         SET   GVTFDIE
+*-
+*-       Process EXEC statment PARM= parms.
+*-
+         L     R2,MTVTPARM         R2 - EXEC .. PARM= .. address
+         IF    (R2,NZ),BEGIN
+         LH    R0,@R2              R1,R0 - PARM loc len
+         LA    R1,@R2+2
+         ACALL DOPARM
+         END
+*-
+*-       Read SYSIN lines.
+*-
+         ACALL DOSYSIN
+*
+*  go wait for console commands.
+*
+         GO    MAINLOOP            Main code
+         DROP  BR
+*
+         QLTORG
+         TITLE 'Main loop'
+*box
+*
+*        Main loop.
+*
+MAINLOOP BASE
+         L     SPR,MTVTSTKP        Reset stack ptrs
+         LR    WAR,SPR             Ditto
+*-
+*-       Check to see if it's time to die.
+*-
+         IF    (GVTFDIE,AND,(GVTNTASK,Z)),BEGIN
+         SEGWR 'Monitor terminated.  (all tasks have ended)'
+         L     R15,MTVTRC          Return code
+         L     R14,MTVTOSRA        Our return address
+         BR    R14                 Return to our creator
+         END
+*-
+*-       Main wait.
+*-
+         WAIT  ECBLIST=MTVTECBL
+*
+         IF    MTVTECB.X'40',BEGIN  Our ECB is posted...
+         CLEAR MTVTECB             Reset it for next time
+         ACALL TASKPOST            Check for subtask posts
+         END
+*
+         L     R1,MTVTECBL         Stop/modify ecb
+         IF    @R1.X'40',BEGIN     Posted...
+         ACALL OPERPOST            Check for operator commands
+         END
+*
+         GO    MAINLOOP            Start main loop
+*
+         DROP  BR
+*
+         QLTORG
+         EJECT
+*box
+*
+*  TASKPOST -- Routine to check for posts by any of our subtasks.
+*
+*
+TASKPOST PROC
+*
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WITH  TVT
+*
+         SEGDEF MTVTWTOSG
+*
+*-                       I
+*-       LOOP PROCESSING REQUESTS FOR MONITOR
+*-
+*-
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         IF    TVTFPOST,BEGIN      IF ACTION REQUESTED, DO IT TO IT
+         CLEAR TVTFPOST
+*-
+*-       MONITOR CMD REQUEST
+*-
+         IF    TVTFCMD,BEGIN
+         CLEAR TVTFCMD
+         ACALL CMDREQST
+         END   ,                      (monitor cmd request)
+*-
+*-       internal enqueue lock failure
+*-
+         IF    TVTFQLFAIL,BEGIN       somebody's hogging the queue
+         QSNAP 'Monitor posted with queue lock failure'
+         QSNAP GVTQLOCK
+         L     R1,GVTQLOCK         Queue lock word ->holder's TVT
+         IF    (R1,NZ),BEGIN       don't bother unless good pointer
+         LR    R3,R1               save a copy
+         ACALL CANTASK
+         END   ,                      (good pointer)
+         CLEAR GVTQLOCK            dequeue the queue
+         CLEAR TVTFQLFAIL          request is completed
+
+*   POST TASK, CMD COMPLETE
+         LA    R1,TVTMONCM
+         POST  (R1),0
+         END   ,                      (Queue lock fail)
+
+*-
+*-       END OF TASK CLEAN UP REQUEST
+*-
+         IF    TVTFEOTASK,BEGIN
+         CLEAR TVTFEOTASK
+*                                  GIVE END OF TASK MSG
+         IF    TVTFSTOPPING,BEGIN  stop
+         SEGT  TVTNAME
+         SEG   ' stopped.'
+         SEGWR
+         END   ,                      (stop)
+         ELSEIF TVTFABENDING,BEGIN    abend
+         SEGT  TVTNAME
+         SEG   ' abended.  System abend code='
+         L3    R3,TVTCODES
+         SRL   R3,12
+         SEGHX (R3),3
+         SEGWR
+         END   ,                      (abend)
+         ELSE  BEGIN               other
+         SEGT  TVTNAME
+         SEG   ' stopped. (termination status unknown.)'
+         SEGWR
+         END   ,                   (other)
+*                                  DETACH TASK
+         IF    (TVTTCBP,NZ),BEGIN
+         DETACH TVTTCBP
+         CLEAR TVTTCBP
+         DECR  R15,GVTNTASK
+         END   ,                   (tcbp)
+*                                  RESTART TASK IF APPROPRIATE
+         IF    ((TVTRESCNT,LT,TVTRESTART),AND,~TVTFNORESTART),BEGIN
+         INCR  R15,TVTRESCNT
+         LA    R1,TVT
+         ACALL STRTTASK
+         END
+         END
+*
+         END   , this task requests work
+         END   , loop thru all subtasks
+*
+         PEND
+         EJECT
+*
+*  CMDREQST -
+*
+*  PROCESS COMMAND REQUEST FROM SUBTASK
+*
+*
+CRWA     RECORD BEGIN
+CRCMDLEN DS    F
+CRCMD    DS    XL256
+CRSEGBF  DS    XL1025
+         END
+*
+*
+CMDREQST PROC  CRWA
+         WITH  TVT
+*
+*                                  MOVE CMD TO STACK
+         L     R2,TVTRSPBF         R2,R3 - CMD LOC LEN
+         L     R3,@R2
+         CEIL  R3,256
+         ST    R3,CRCMDLEN
+         LA    R2,@R2+4
+         LA    R4,CRCMD
+         LR    R5,R3
+         MVCL  R4,R2
+*
+*                                  INIT CMD OUTPUT SEG BUFFER
+         LA    R0,1024
+         LA    R1,CRSEGBF
+         LA    R2,TVT
+         LA    R15,MTVTCMDSG
+         VCALL MCMDINIT
+*
+*                                  PROCESS COMMAND
+         L     R0,CRCMDLEN
+         LA    R1,CRCMD
+         LA    R15,MTVTCMDSG       R15 - SEGCB
+         ACALL DOCMD               PROCESS COMMAND
+*
+*                                  POST TASK, CMD COMPLETE
+         LA    R1,TVTMONCM
+         POST  (R1),0
+*
+         PEND
+*
+         SEGDEF MTVTPRSG           (monitor default)
+         EJECT
+*box
+*
+*  OPERPOST -- Routine to check to see if we have any operator
+*    MODIFY or STOP commands from the console.
+*
+OPERPOST PROC
+*
+*                                  Get CIB
+         L     R6,MTVTCOMP
+         WITH  (COM,R6)
+         IF    ('L3 R5,COMCIBPT+1',Z),EXIT  That's odd
+         WITH  (CIB,R5)
+*
+*                                  Save, set console ID
+         MVC   MTVTUCM,CIBCONID    Save ucm id for reply msg
+         LA    R15,MTVTWTOSG
+         LC    R0,CIBCONID
+         VCALL SETCONID            Set console ID for WTO SEG
+*-
+*-       We have a command from the OS MODIFY interface.
+*-
+         IF    (CIBVERB,EQ,CIBMODFY),BEGIN  OS modify command...
+         XPUSH ,,133,PTR=R4        Room for command
+         LH    R3,CIBDATLN         Command len
+         IF    (R3,GT,133),'LA R3,133'
+         IF    ('LTR R15,R3',POS),'DEX R15,"MVC @R4,CIBDATA"'
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(R5)
+*
+*                                  PROCESS COMMENT
+         SEG   'Command: '
+         SEGWR (R4),(R3)
+         LR    R1,R4
+         LR    R0,R3
+         LA    R15,MTVTWTOSG
+         ACALL DOCMD
+         END
+*-
+*-       We have a request to shutdown from OS.
+*-
+         IF    (CIBVERB,EQ,CIBSTOP),BEGIN  OS stop command...
+         SET   GVTFDIE             Die when everything stops
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(R5)  Free it
+         SEGWR 'Command: STOP ALL' Treat stop, as STOP ALL command
+         SETMSG 'STOP ALL'
+         LA    R15,MTVTWTOSG
+         ACALL DOCMD
+         END
+*
+*                                  Clear Console ID
+         CLEAR R0
+         LA    R15,MTVTWTOSG
+         VCALL SETCONID
+*
+         PEND
+*
+         QLTORG
+         TITLE 'Process Monitor Command'
+*
+*  DOCMD - process monitor commands
+*
+*
+*  On entry:
+*    R1, R0 - Command location, length
+*    R15 - response SEGCB pointer (zero if none)
+*
+*  On exit:
+*    R15 - return code (not set, not used)
+*    We do not set return code because who cares.
+*    And what is a bad command anyway.  If you start
+*    an already started task is that an error ?
+*    Information about the completion of a command
+*    is always seg'ed to the R15 SEGCB.
+*
+*   NOTES:
+*   If WTO seg routine is specified. all output is
+*   sent as well to the print log.  (work in progress)
+*   the initial command is also seg'd to print log
+*   if command is from the console.
+*
+*
+DOCMDWA  RECORD BEGIN
+DOCMDLOC DS    A
+DOCMDLEN DS    F
+DOCMDSGB DS    A
+         END
+*
+*
+DOCMD    PROC  DOCMDWA
+*
+         CLEAR DOCMDWA
+         ST    R1,DOCMDLOC
+         ST    R0,DOCMDLEN
+         ST    R15,DOCMDSGB
+         ST    R15,MTVTCURSG       SET CURRENT SEG RTN
+         SEGDEF L:MTVTCURSG
+*
+*                                  SCAN CONTROL BLOCK
+         SCINIT L:DOCMDLOC,L:DOCMDLEN,MTVTSCNCB
+         SCAN   L:=A(CMDPRT),MTVTSCNCB
+         IF    M,BEGIN
+         LCR   R0,R0
+         SEG  (R0),(R1)
+         SEGWR ': invalid option/command.'
+         END
+*
+         PEND
+         TITLE 'Monitor Commands'
+*-
+*-       Command table.
+*-
+CMDPRT   SCKW  HELP,HELP,A
+         SCKW  ?,HELP
+         SCKW  DEFINE,DEFINE,A
+         SCKW  START,START,A
+         SCKW  STOP,STOP,A
+         SCKW  CANCEL,CANCEL,A
+         SCKW  SUSPEND,SUSPEND,A
+         SCKW  LOGREL,SPINLOG,A
+         SCKW  RESUME,RESUME,A
+         SCKW  STATUS,STATUS,A
+         SCKW  TRACE,SHOTRACE,A    PJG WISH LIST
+         SCKW  SC,SHOWCORE
+         SCKW  DC,DISASMBL
+         SCKW  SA,SHOWADDR
+         SCKW  PC,PTCHCORE
+         SCKW  ,BADCMD
+         TITLE 'HELP Command'
+*box
+*
+*        HELP command.
+*
+HELP     CPROC
+         SEGWR 'Commands are:'
+         SEGWR 'DEFINE task-name MODULE load-module-name ..'
+         SEGWR 'STATUS <task-name> | ALL [FULL]'
+         SEGWR 'START <task-name> | ALL'
+         SEGWR 'STOP <task-name> | ALL'
+         SEGWR 'CANCEL <task-name> | ALL'
+         SEGWR 'SUSPEND <task-name> | ALL'
+         SEGWR 'LOGREL <task-name> | ALL'
+         SEGWR 'RESUME <task-name> | ALL'
+         SEGWR 'TRACE task-name'
+         SEGWR 'SC <task-name> location'
+         SEGWR 'PC <task-name> location value VER value'
+         PEND
+         TITLE 'DEFINE Command'
+*box
+*
+*        DEFINE Command.
+*
+DEFINE   PROC
+         SCPUSH
+*
+         SCAN  ,MTVTSCNCB
+         IF    Z,BEGIN
+         SEGWR 'Missing task name'
+         B     DEFINEXX
+         END
+*-
+*-       Find existing task.
+*-
+         LA    R1,MTVTSCNKW        Task name
+         ACALL FINDTVT             Get corresponding task
+         IF    NZ,BEGIN
+         SEGT MTVTSCNKW,L'MTVTSCNKW
+         SEGWR ': task previously defined.'
+         B     DEFINEXX
+         END
+*-
+*-       Create a new task.
+*-
+         IF    Z,BEGIN             Create new task block...
+         LA    R1,MTVTSCNKW        Task name
+         ACALL MAKETVT             Make a new task
+         END
+*
+         LR    TVTR,R15
+         WITH  TVT
+*-
+*-       Process DEFINE options.
+*-
+         SCAN  L:=A(DEFPRT),MTVTSCNCB
+         IF    M,BEGIN
+         LCR   R0,R0
+         SEG  (R0),(R1)
+         SEGWR ': invalid option.'
+         END
+*
+DEFINEXX LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*        DEFINE Command Options.
+*
+DEFPRT   SCKW  MODULE,MODULE,(A,P)
+         SCKW  PARM,PARM,(A,P)
+         SCKW  RESTART,REST,(A,P,I)
+         SCKW  NORESTART,NOREST
+         SCKW  ,INVALID
+*
+*
+MODULE   PROC
+         IF    (R0,Z),BEGIN
+         SEGWR 'Missing MODULE load-module-name'
+         CLEAR  MTVTSCNLEN         Stop scan
+         EXIT  MODULE
+         END
+         WITH  TVT
+         MVC   TVTLMOD,MTVTSCNKW
+         PEND
+*
+PARM     PROC
+         SCPUSH
+         WITH  TVT
+         IF    (R0,Z),BEGIN
+         SEGWR 'Missing PARM string'
+         CLEAR  MTVTSCNLEN         Stop scan
+         B     PARMXX
+         END
+         IF    (R0,GE,L'TVTPTXT),BEGIN
+         SEGWR 'PARM string too long.'
+         CLEAR  MTVTSCNLEN         Stop scan
+         B     PARMXX
+         END
+         LA    R15,TVTPTXT
+         VCALL DEQSTR
+         IF    NEG,BEGIN
+         SEGWR 'PARM string not quoted.  PARM ignored.'
+         CLEAR  MTVTSCNLEN         Stop scan
+         B     PARMXX
+         END
+         STH   R0,TVTPLEN
+PARMXX   LABEL ,
+         SCPOP
+         PEND
+*
+REST     PROC
+         SCPUSH
+         L     R3,@R15             RESTART COUNT
+         IF    (R3,Z),BEGIN
+         SEGWR 'Missing RESTART count'
+         CLEAR  MTVTSCNLEN         Stop scan
+         B     RESTXX
+         END
+         WITH  TVT
+         ST    R3,TVTRESTART
+RESTXX   LABEL ,
+         SCPOP
+         PEND
+*
+NOREST   PROC
+         WITH  TVT
+         CLEAR TVTRESTART
+         PEND
+*
+         QLTORG
+         TITLE 'START Command'
+*box
+*
+*  START Command.
+*
+START    PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,STARTXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         CLEAR TVTRESCNT           CLEAR RESTART COUNT
+         LR    R1,TVTR
+         ACALL STRTTASK
+         END
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),STARTXX
+         LR    R1,R15
+         CLEAR TVTRESCNT           CLEAR RESTART COUNT
+         ACALL STRTTASK
+         END
+*
+STARTXX  LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*box
+*
+*  STRTTASK -- Routine to attach a subtask.
+*
+*    On entry:
+*      R1 - TVT ptr
+*
+STRTTASK PROC
+         LR    R6,R1               Task ptr
+         WITH  (TVT,R6)
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SEGT  TVTNAME
+         SEG   ' is already active'
+         SEGWR
+         EXIT  STRTTASK
+         END
+*
+*                                  Initialize TVT for start
+         LA    R1,TVT
+         ACALL INITTVT
+         INCR  R15,GVTTSKID        SET UNIQUE TASK SEQ #
+         ST    R15,TVTSEQ
+*
+         LA    R5,STRTATCH         Attach param list
+         WITH  (ATTCHLST,R5),BEGIN
+         MVC   ATPRGNM,TVTLMOD     Eploc=
+*        LA    R2,TVTECB           ** DEBUG ** REMOVE TVTECB !
+*        ST    R2,ATECBADR         Ecb=
+         LA    R3,TVT
+         ST    R3,ATSTAIAD         Stai= parameter addr ML940201
+         END
+         LA    R1,TVTPLIST         Param ptr
+*
+*                                  DO ATTACH !
+         ATTACH SF=(E,STRTATCH)
+*
+         ST    R1,TVTTCBP          Save TCB addr
+         INCR  R15,GVTNTASK
+*
+*         COMMENT                   WRITE OUT task started msg
+*         TIME  BIN
+*         LA    R15,MTVTPRSG
+*         VCALL SEGDAY
+*         SEGCOL 45
+         SEGT  TVTNAME
+         IF    (TVTNAME,NE,TVTLMOD),BEGIN
+         SEG   ' ('
+         SEGT  TVTLMOD
+         SEG   ')'
+         END
+         SEG   ' started, TCB='
+         SEGHX TVTTCBP,8           Report TCB address  mcl20020619
+         SEGWR
+*
+         PEND
+* 2002/06/19 mcl:  DPMOD=-1 so monitor higher than subtask
+*
+STRTATCH ATTACH EP=*-*,ESTAI=(STAI,*-*),ETXR=EOTASK,DPMOD=-1,          X
+               SHSPV=2,SZERO=NO,SF=L
+         TITLE 'STOP Command'
+*box
+*
+*  STOP Command.
+*
+STPWA    RECORD BEGIN
+STPTASK  DS    CL8
+STPPCODE DS    F
+         END
+*
+*
+STOP     PROC  STPWA
+         CLEAR STPWA
+         SCPUSH ,
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,STOPXX
+         MVC   STPTASK,@R1
+*
+*                                  Scan for stop post code
+*        ACALL SCANNUMB
+*        IF    POS,STOPXX
+         CLEAR R0
+         ST    R0,STPPCODE
+*
+*                                  If stop all tasks
+         LA    R1,STPTASK
+         IF    (@R1,EQ,'ALL '),BEGIN
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         L     R0,STPPCODE
+         ACALL STOPTASK
+         END
+         END
+*
+*                                  If stop specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),STOPXX
+         LR    R1,R15
+         L     R0,STPPCODE
+         ACALL STOPTASK
+         END
+*
+STOPXX   LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  STOP TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*    R0 - POST CODE
+*
+*
+STOPTASK PROC  ,
+         LR    TVTR,R1
+         WITH  TVT
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         IF    TVTFSUSPEND,BEGIN   Already suspended...
+         SEGT  TVTNAME
+         SEG   ' is suspended. Task not stopped.'
+         SEGWR
+         END
+         ELSE  BEGIN
+         IF    (TVTECBRQ,NZ),BEGIN
+         SET   TVTFSTOP
+         SET   TVTFSTOPPING
+         L     R1,TVTECBRQ
+         POST  (R1),(R0)           OR WHATEVER ...
+         SET   TVTFNORESTART
+         SEGT  TVTNAME
+         SEG   ' will be stopped. '
+         SEGWR
+         END
+         ELSE  BEGIN
+         SEG 'Unable to stop '
+         SEGT  TVTNAME
+         SEG '. (no stop ecb).'
+         SEGWR
+         END
+         END
+         END
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         EJECT
+*box
+*
+*  CANCEL Command.
+*
+CANCEL   PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,CANCELXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+*        SCAN FOR DUMP/NODUMP OPTIONS, FOR NOW WE ALWAYS DUMP
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         ACALL CANTASK
+         END
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+*        SCAN FOR DUMP/NODUMP OPTIONS, FOR NOW WE ALWAYS DUMP
+         ACALL FINDTASK
+         IF    (R15,Z),CANCELXX
+         LR    R1,R15
+         ACALL CANTASK
+         END
+*
+CANCELXX LABEL ,
+         SCPOP ,
+         PEND
+*
+*  CANCEL TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*    R0 - 0=NO DUMP, 1=DUMP (NOT YET IMPLEMENTED, WE ALWAYS DUMP)
+*
+*  NOTE:
+*  TASKS ARE CANCELLED WITH A DUMP. AND RETRY=NO
+*
+*  NOTE:
+*  TO ISSUE CALLRTM, WE MUST BE KEY ZERO, MODE SUPERVISOR AND
+*  HOLD THE LOCAL LOCK.  SO YOU WILL SEE SOME MUMBO-JUMBO BELOW.
+*
+*
+CTWA     RECORD BEGIN
+CTWAFLAG FLAG
+         FLAG  CTNOLOCK
+         FLAG  CTCANCEL
+         END
+*
+*
+CANTASK  PROC  CTWA
+         CLEAR CTWA
+         IF    (R1,Z),BEGIN        No task pointer
+         SEG   'Task does not exist.'
+         SEGWR ,
+         END   ,                   (no task)
+         ELSE BEGIN                got task
+         LR    TVTR,R1
+         WITH  TVT
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         L     R2,TVTTCBP          TCB
+         LA    R3,290  (=x'122')   Bogus reason for user cancel
+*
+*                                  DO CANCEL (CALLRTM) IF POSSIBLE
+         MODESET KEY=ZERO,MODE=SUP ***
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=COND,REGS=SAVE
+         IF    (R15,Z),BEGIN       got lock
+         CALLRTM TYPE=ABTERM,COMPCOD=290,REASON=(3),TCB=(2),           x
+               DUMP=YES      ** DEBUG ** RETRY=NO IS UNRECOGNIZED
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=SAVE
+         SET   CTCANCEL
+         END   ,                   (got lock)
+         ELSEIF (R15,EQ,4),BEGIN   IF WE HOLD LOCK
+         CALLRTM TYPE=ABTERM,COMPCOD=290,REASON=(3),TCB=(2),           x
+               DUMP=YES      ** DEBUG ** RETRY=NO IS UNRECOGNIZED
+         SET   CTCANCEL
+         END   ,                   (hold lock)
+         ELSE  BEGIN
+         SET   CTNOLOCK
+         END
+         MODESET KEY=NZERO,MODE=PROB
+*
+         IF    CTCANCEL,BEGIN      cancel
+         SET   TVTFNORESTART
+         SEGT  TVTNAME
+         SEG   ' has been cancelled.'
+         SEGWR
+         END   ,                   (cancel)
+         IF    CTNOLOCK,BEGIN      no lock
+         SEGT  TVTNAME
+         SEG   ' not cancelled. '
+         SEGWR '(unable to obain local lock.)'
+         END   ,                   (no lock)
+         END   ,                   (task is active)
+*
+         ELSE  BEGIN               not active
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END   ,                      (not active)
+         END   ,                      (exists)
+         PEND
+         TITLE 'SUSPEND Command'
+*box
+*
+*  SUSPEND Command.
+*
+SUSPEND  PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SUSPENDX
+*
+*                                  If suspend all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         ACALL SUSPTASK
+         END
+         END
+*
+*                                  If suspend specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SUSPENDX
+         LR    R1,R15
+         ACALL SUSPTASK
+         END
+*
+SUSPENDX LABEL ,
+         SCPOP ,
+         PEND
+         EJECT
+*
+*  SUSPEND TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+SUSPTASK PROC  ,
+         LR    TVTR,R1
+         WITH  TVT
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         IF    TVTFSUSPEND,BEGIN   Already suspended...
+         SEGT  TVTNAME
+         SEG   ' is already suspended.'
+         SEGWR
+         END
+         ELSE  BEGIN
+         STATUS  STOP,TCB=TVTTCBP  Make task non-dispatchable
+         SET   TVTFSUSPEND
+         SEGT  TVTNAME
+         SEG   ' suspended.'
+         SEGWR
+         END
+         END
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'SPINLOG Command'
+*box
+*
+*  SPINLOG Command:  Spin off the log dataset (close, unallocate,
+*                    reallocate, reopen)
+*
+SPINLOG  PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SPINLOGX
+*
+*                                  If spin all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         ACALL SPINTASK
+         END
+         END
+*
+*                                  If suspend specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SPINLOGX
+         LR    R1,R15
+         ACALL SPINTASK
+         END
+*
+SPINLOGX LABEL ,
+         SCPOP ,
+         PEND
+         EJECT
+*
+*  SPINLOG TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+SPINTASK PROC  ,
+         LR    TVTR,R1
+         WITH  TVT
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SET   TVTFSPINLOG
+         L     R1,TVTECBRQ
+         CLEAR R0                  post code
+         POST  (R1),(R0)           post the subtask
+         SEGT  TVTNAME
+         SEG   ' log will be released.'
+         SEGWR
+         END   ,                      (active)
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'RESUME Command'
+*box
+*
+*  RESUME Command.
+*
+RESUME   PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,RESUMEXX
+*
+*                                  If resume all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         ACALL RESMTASK
+         END
+         END
+*
+*                                  If resume specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),RESUMEXX
+         LR    R1,R15
+         ACALL RESMTASK
+         END
+*
+RESUMEXX LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  RESUME TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+RESMTASK PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         IF    ~TVTFSUSPEND,BEGIN  Not suspended...
+         SEGT  TVTNAME
+         SEG   ' is not suspended.'
+         SEGWR
+         END
+         ELSE  BEGIN
+         STATUS START,TCB=TVTTCBP
+         CLEAR TVTFSUSPEND
+         SEGT  TVTNAME
+         SEG   ' resumed.'
+         SEGWR
+         END
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+*
+         QLTORG
+         TITLE 'SHOW Commands'
+SHOW     PROC
+         SCPUSH
+         SCAN  SHOWPRT,MTVTSCNCB
+         IF    NEG,BEGIN
+         LCR   R0,R0
+         SEG  (R0),(R1)
+         SEGWR ': invalid SHOW option.'
+         B     SHOWXX
+         END
+*
+SHOWXX   LABEL ,
+         SCPOP
+         PEND
+*
+*
+SHOWPRT  SCKW  STATUS,STATUS,A
+*        SCKW  TRACE,SHTRACE
+         SCKW  ,INVALID
+*
+         TITLE 'SHOW STATUS Command'
+*box
+*
+*  STATUS Command.
+*
+*
+STATUS   PROC
+         SCPUSH ,
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,STATUSXX
+*
+*                                  If status all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         ACALL MAINSTAT            first do monitor        ML940329
+         L     TVTR,GVTTVTQH       First TVT is dummy (MTVT)
+         WHILE ('LT TVTR,TVTLINK',NZ),BEGIN
+         LR    R1,TVTR
+         ACALL TASKSTAT
+         END
+         END
+*
+*                                  If status MONITOR
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN                  ML940329
+         ACALL MAINSTAT
+         END
+*
+*                                  If status specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),STATUSXX
+         LR    R1,R15
+         ACALL TASKSTAT
+         END
+*
+STATUSXX LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*
+*  TASKSTAT - GIVE TASK STATUS
+*
+*
+TSTAWA   RECORD BEGIN
+TSTAWORK DS    CL20                Work area               ML940215
+         END
+*-
+TASKSTAT PROC  TSTAWA
+         LR    TVTR,R1
+         WITH  TVT
+*
+*                                  TASKNAME
+         SEG   TVTNAME
+         SEG   ' '
+         SEGHX TVTTCBP,8           TCB address          ml20020619
+         SEG   ' '
+*
+*                                  TASK STATUS
+         IF    (TVTTCBP,NZ),BEGIN  Task is running...
+         IF    TVTFSUSPEND,BEGIN
+         SEG   'suspended '
+         END
+         ELSEIF TVTFSTOPPING,BEGIN
+         SEG   'stopping  '
+         END
+         ELSEIF TVTSTWAITING,BEGIN
+         SEG   'WT '
+         END
+         ELSEIF TVTSTBUSY,BEGIN
+         SEG   'BY '
+         END
+         ELSE  BEGIN
+         SEG   '? '
+         END
+         END
+         ELSE  BEGIN
+         SEG   'IN '
+         END
+*
+*                                  USER
+         IF    (TVTTCBP,NZ),BEGIN
+         SEG   TVTGROUP
+         SEG   '.'
+         SEG   TVTUSER
+         SEG   ' ('
+         LH    R2,TVTLINE          Partner's line-number
+         SEGDC (R2),4
+         SEG   ') '
+         END
+         ELSE  BEGIN
+         SEG   '             '
+         END
+*  Timestamp
+         LM    R0,R1,TVTLRCLK      Last request timestamp
+         LA    R15,TSTAWORK        Work area
+         VCALL FMTTIME             format timestamp
+         SEG   (R1),8              into msg...omit hundredths
+         SEG   '/'
+         LM    R0,R1,TVTLACLK      Last action timestamp
+         LA    R15,TSTAWORK        Work area
+         VCALL FMTTIME             format timestamp
+         SEG   (R1),8              into msg...omit hundredths
+*
+*                                  COUNTERS ,,,
+         SEG   ' REQs='
+         L     R3,TVTCNTREQ
+         SEGDC (R3)
+         SEG   ' BSENT='
+* Following revised MCL 940202 to handle bytes>x'7FFFFFFF'
+         LM    R0,R1,TVTCNTBSENT   bytes sent (doubleword)
+         LA    R15,TSTAWORK        work area
+         VCALL DINTCONV            convert EBCDIC
+         SEG   (R1),(R0)
+         SPACE
+         SEG   ' BRECV='
+         LM    R0,R1,TVTCNTBRECVD  bytes received (doubleword)
+         LA    R15,TSTAWORK
+         VCALL DINTCONV            printable num
+         SEG   (R1),(R0)
+         SEGWR
+*
+         PEND
+*
+*
+*  MAINSTAT - Give Monitor Status
+*  MCL 94/03/21   ***WORK IN PROGRESS***
+*
+MSTAWA   RECORD BEGIN
+MSTAWORK DS    CL20                Work area
+         END
+*-
+MAINSTAT PROC  MSTAWA
+         LR    TVTR,R1
+         WITH  TVT
+*
+*                                  JOBNAME
+         SEGB  GVTJOBNO
+         SEGB  GVTJOBNM
+         LM    R0,R1,GVTTIME       Start time/date
+         SR    R2,R2
+         SR    R3,R3
+         LA    R15,MSTAWORK        Work area
+         VCALL FMTRCLCK
+         SEGB  (R1),(R0)           time/date to msg
+         SEG   '  '
+         SEGDC GVTNTASK
+         SEG   ' Tasks Active.'
+*
+         SEGWR
+*
+         PEND
+         TITLE 'SC - SHOW CORE Command'
+*box
+*
+*  SC Command.
+*
+*
+SHOWCORE PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SHOWCXX
+*
+*                                  If status all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     SHOWCXX
+         END
+*
+*                                  If monitor
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+         LA    R1,MTVT
+         ACALL SCTASK
+         END
+*
+*                                  If status specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SHOWCXX
+         LR    R1,R15
+         ACALL SCTASK
+         END
+*
+SHOWCXX  LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  SC TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+SCTASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL SHOWC
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'SG - SHOW REGISTERS Command'
+*box
+*
+*  SG Command.
+*
+*
+*  NOTE:
+*  This command is not yet implemented.
+*  The Monitors registers cannot be displayed.
+*
+*
+SHOWREGS PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SHOWGXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     SHOWGXX
+         END
+*
+*                                  If monitor
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+         SEGWR  'Monitor registers can not be displayed.'
+         B     SHOWGXX
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SHOWGXX
+         LR    R1,R15
+         ACALL SGTASK
+         END
+*
+SHOWGXX  LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  SG TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+SGTASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         IF    ~TVTFSUSPEND,BEGIN  If not suspended ..
+         STATUS STOP,TCB=TVTTCBP     suspend before SG
+         SET   TVTFSUSPEND
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL SHOWG
+         STATUS START,TCB=TVTTCBP  continue onward
+         CLEAR TVTFSUSPEND
+         END
+         ELSE  BEGIN               If suspended, just SG
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL SHOWG
+         END
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'SHOW TRACE Command'
+*box
+*
+*  TRACE Command.
+*
+*
+SHOTRACE PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SHOTRXX
+*
+*                                  If trace all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     SHOTRXX
+         END
+*
+**       COMMENT                   If monitor
+**       ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+**       LA    R1,MTVT
+**       ACALL SCTASK
+**       END
+*
+*                                  If trace specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SHOTRXX
+         LR    R1,R15
+         ACALL TRTASK
+         END
+*
+SHOTRXX  LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  TR TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+TRTASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTFTRC,NZ),BEGIN  Task has tracing active
+**?      SCTELL MTVTSCNCB
+         L     R3,TVTTRCUR         ->current trace table entry
+TRCALL   ACALL TRCDUMP             display the entry
+         S     R3,=A(L'TRCENTRY)     ->previous entry
+         IF    (R3,LT,TVTTRBEG),BEGIN  wrap backwards
+         L     R3,TVTTREND               around end
+         S     R3,=A(L'TRCENTRY)           of table
+         END
+         WITH  (TRCENTRY,R3)
+         IF    (TRCCLOCK,EQ,0),TRDONE    unused location, done
+         IF    (R3,NE,TVTTRCUR),TRCALL    loop back unless at start
+TRDONE   EQU   *
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' does not have tracing active.'
+         SEGWR
+         END
+         PEND
+TRCDWA   RECORD BEGIN
+TRCDWORK DS    CL20                Work area
+         END
+*-
+TRCDUMP  PROC  TRCDWA              Dump one trace table entry
+*  On entry:  R3->entry
+         WITH  (TRCENTRY,R3)
+         LM    R0,R1,TRCCLOCK      Timestamp
+         LA    R15,TRCDWORK        Work area
+         VCALL FMTTIME
+         SEGB  (R1),(R0)
+         SEG   TRCNAME             Routine name or trace ID
+         SEG   '  ('
+         SEGHX (R3)
+         SEG   ')'
+         SEGWR ,
+         SEG   'Regs 0-7:  '
+         LA    R4,TRCREGS
+         LA    R5,8                loop counter
+DT0      SEGHX @R4,8
+         SEG   '  '
+         LA    R4,4(R4)            ->next
+         BCT   R5,DT0
+         SEGWR ,
+         SEG   'Regs 8-15: '
+         LA    R5,8
+DT8      SEGHX @R4,8
+         SEG   '  '
+         LA    R4,4(R4)
+         BCT   R5,DT8
+         SEGWR ,
+         PEND
+         TITLE 'DC - DISASSEMBLE CORE Command'
+*box
+*
+*  DC Command.
+*
+*
+DISASMBL PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,DCXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     DCXX
+         END
+*
+*                                  If monitor
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+         LA    R1,MTVT
+         ACALL DCTASK
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),DCXX
+         LR    R1,R15
+         ACALL DCTASK
+         END
+*
+DCXX     LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  DC TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+DCTASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL DISASMC
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'SC - SHOW CORE Command'
+*box
+*
+*  SA Command.
+*
+*
+SHOWADDR PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,SHOWAXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     SHOWAXX
+         END
+*
+*                                  If monitor
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+         LA    R1,MTVT
+         ACALL SATASK
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),SHOWAXX
+         LR    R1,R15
+         ACALL SATASK
+         END
+*
+SHOWAXX  LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  SA TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+SATASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL SHOWA
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'SC - SHOW CORE Command'
+*box
+*
+*  PC Command.
+*
+*
+PTCHCORE PROC
+         SCPUSH
+         WITH  TVT
+*
+*                                  Scan for task name
+*                                  Find task TVT
+         ACALL SCANTASK
+         IF    NZ,PATCHCXX
+*
+*                                  If start all tasks
+         IF    (@R1,EQ,'ALL '),BEGIN
+         SEGWR 'Specific task must be specified.'
+         B     PATCHCXX
+         END
+*
+*                                  If monitor
+         ELSEIF (@R1,EQ,'MONITOR '),BEGIN
+         LA    R1,MTVT
+         ACALL PCTASK
+         END
+*
+*                                  If start specific task
+         ELSE  BEGIN
+         ACALL FINDTASK
+         IF    (R15,Z),PATCHCXX
+         LR    R1,R15
+         ACALL PCTASK
+         END
+*
+PATCHCXX LABEL ,
+         SCPOP
+         PEND
+         EJECT
+*
+*  PC TASK
+*
+*  ON ENTRY:
+*    R1 - TASK TVT PTR
+*
+*
+PCTASK   PROC  ,
+*
+         LR    TVTR,R1
+         WITH  TVT
+*
+         IF    (TVTTCBP,NZ),BEGIN  Task is active...
+         SCTELL MTVTSCNCB
+         L     R2,TVTSYMTB
+         CLEAR R3
+         CLEAR R4
+         L     R15,MTVTCURSG
+         VCALL PATCHC
+         END
+*
+         ELSE  BEGIN
+         SEGT  TVTNAME
+         SEG   ' is not active.'
+         SEGWR
+         END
+         PEND
+         TITLE 'Misc Command Stuff'
+*box
+*
+*  Not yet implemented message.
+*
+*
+NOTYET   PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+         SEG  (R1),(R0)
+         SEGWR 'Command not implemented. '
+         CLEAR  MTVTSCNLEN         Stop scan
+         SCPOP
+         PEND
+         EJECT
+*box
+*
+*        Unrecognized command.
+*
+BADCMD   PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+         SEG  (R1),(R0)
+         SEGWR ': unrecognized monitor command.'
+         CLEAR  MTVTSCNLEN         Stop scan
+         SCPOP
+         PEND
+*
+INVALID  PROC
+         SCPUSH ,                  R15 must stay the same! ha!
+         SEGT  (R1),(R0)
+         SEG   ': invalid option.'
+         CLEAR  MTVTSCNLEN         Stop scan
+         SCPOP
+         PEND
+*
+         SEGDEF DUMMY              (neatness)
+*
+         QLTORG
+         TITLE 'Process EXEC PARM= parameters'
+*
+*  Process EXEC PARM= parameters
+*
+*  On entry:
+*    R1,R0 - PARM LOC LENGTH
+*
+*
+DOPWA    RECORD BEGIN
+DOPLOC   DS    A
+DOPLEN   DS    F
+         END
+*
+*
+DOPARM   PROC  DOPWA
+         ST    R0,DOPLEN
+         ST    R1,DOPLOC
+*
+         SEGDEF MTVTWTOSG          Let oper know there are bad parms
+         SEG   'WINGS starting, parm= '
+         SEGWR L:DOPLOC,L:DOPLEN
+*
+         IF    (DOPLEN,GT,0),BEGIN
+         SCINIT L:DOPLOC,L:DOPLEN,MTVTSCNCB  Parm
+         SCAN  PARMPRT,MTVTSCNCB
+         IF    NEG,'SEGWR "Bad parms."'
+         END
+*
+         PEND
+         EJECT
+*-
+*-       OS PARM Options.
+*-
+PARMPRT  SCKW  TEST,GBLTEST,A
+         SCKW  PRODUCTION,GBLPROD,A
+         SCKW  PATH,GBLPATH,(A,P)
+         SCKW  NOSTART,GBLNOST
+*        SCKW  AUTO,GBLAUTO,A     DISCONTINUE
+*        SCKW  NOAUTO,GBLNAUTO,A
+         SCKW  ,BADPARM
+*-
+GBLTEST  PROC
+         SET   GVTFTEST            Test mode
+         PEND
+*
+GBLPROD  PROC
+         CLEAR GVTFTEST            Production mode
+         PEND
+*
+GBLPATH  PROC  ,                   Set new path name
+         IF    ((R0,P),AND,(R0,LE,8)),BEGIN
+         LR    R2,R0               Copy length of path name
+         DEX   R2,'MVC GVTPATHN(0),@R1'      Move in path name
+         OC    GVTPATHN,GVTBLANK   Force blanks and upper case
+         END
+         PEND
+*
+GBLNOST  PROC
+         CLEAR GVTFDIE
+         SET   GVTFNOSTART
+         PEND
+*
+*GBLAUTO  PROC
+*         SET   GVTFAUTO            Auto start tasks
+*         PEND
+**
+*GBLNAUTO PROC
+*         CLEAR GVTFAUTO,GVTFDIE    Don't auto start tasks
+*         PEND
+**
+BADPARM  PROC
+         SEG   (R1),(R0)
+         SEGWR ': unrecognized parm.'
+         PEND
+*
+         SEGDEF DUMMY              (neatness)
+*
+         QLTORG
+         TITLE 'Process (read) SYSIN file'
+         SEGDEF MTVTPRSG  (all sysin stuff goes to print log)
+*box
+*
+*  DOSYSIN - Process SYSIN file
+*
+*  Read and process all commands in SYSIN FILE
+*
+*
+*
+DOSYSWA  RECORD BEGIN
+DOSYSBUF DS    CL256
+         END
+*
+DOSYSIN  PROC  DOSYSWA
+*
+         LA    R1,DOSYSBUF
+         LA    R0,L'DOSYSBUF
+         WHILE ('ACALL GETSYSIN',Z),BEGIN  We have a SYSIN line...
+         SCINIT (R1),(R0),MTVTSCNCB
+*                                  for debug, write out cmd info
+         XPUSH R0,R1
+         SEG   'Command: '
+         XPOP  R0,R1
+         XPUSH R0,R1
+         SEGWR (R1),(R0)
+         XPOP  R0,R1
+         LA    R15,MTVTPRSG
+         ACALL DOCMD
+         LA    R1,DOSYSBUF
+         LA    R0,L'DOSYSBUF
+         END
+*
+         PEND
+         TITLE 'Read the next line from SYSIN'
+*box
+*
+*  GETSYSIN -- Routine to read the next line from SYSIN.
+*
+*    On entry:
+*     R1,R0 - line buffer loc, len
+*
+*    On exit, R15 (and cc):
+*      0 - R1,R0 = next SYSIN line loc, len
+*      4 - end of file
+*
+GETSWA   RECORD BEGIN
+GETSBUF  DS    A
+GETSBUFL DS    F
+         END
+*-
+GETSYSIN PROC  GETSWA
+         ST    R0,GETSBUFL
+         ST    R1,GETSBUF
+*
+         SEGDEF MTVTPRSG           Default SEGCB
+*-
+*-       We have already reached the end of file.
+*-
+         IF    MTVTFINEOF,'LA R15,4; B GETSEXIT'  Scram
+*-
+*-       Open SYSIN if this is the first call.
+*-
+         LA    R6,GVTINDCB         SYSIN DCB ptr
+         WITH  (DCB,R6)
+*
+         IF    ~DCBOFLGS.DCBOFOPN,BEGIN  First time...
+         VCALL AMODE24             ********
+         OPEN  ((6),(INPUT))
+         LR    R2,R15              Save RC
+         VCALL AMODE31             ********
+*
+         IF    ~DCBOFLGS.DCBOFOPN,BEGIN  Open failed...
+         SEGB  'Open failed for'
+         SEGB  DCBDDNAM
+         SEG   ' RC='
+         SEGDC (R2)
+         SEGWR ,
+         SET   MTVTFINEOF          Remember end of file
+         LA    R15,4               End of file
+         B     GETSEXIT
+         END
+*
+         IF    DCBRECFM.DCBRECU,BEGIN
+         SEGB  'Open failed for SYSIN; unable to read edit format.'
+         SEGWR ,
+         SEGB  ,
+         SET   MTVTFINEOF          Remember end of file
+         LA    R15,4               End of file
+         B     GETSEXIT
+         END
+*
+         END
+*-
+*-       Get first/next line from SYSIN.
+*-
+         VCALL AMODE24             ********
+         GET   (6)                 Get next buffer/record
+         VCALL AMODE31             ********
+*                                  EOF exit is below; see INEOF
+*-
+*-       Get loc, len of record (r1 is loc already)
+*-
+         LH    R0,DCBLRECL
+         IF    ((R0,EQ,80),AND,(@R1+76,EQ,'.')),BEGIN
+         LA    R0,72               No lineno
+         END
+         IF    (R0,GT,GETSBUFL),'L R0,GETSBUFL'
+         LR    R15,R0
+         L     R2,GETSBUF
+         MOVE  R15,@R2,@R1
+         SETMSG L:GETSBUF,(R0)
+         VCALL RTRIM               Trim trailing blanks
+         PRETURN (R0,R1)
+*
+*
+         CLEAR R15                 OK return code
+         B     GETSEXIT
+*-
+*-       End of SYSIN file (from EODAD= in DCB).
+*-
+INEOF    VCALL AMODE24             ********
+         CLOSE ((6))
+         FREEPOOL (6)
+         VCALL AMODE31             ********
+*
+         SET   MTVTFINEOF          Remember end of file
+         LA    R15,4               End of file return code
+GETSEXIT PEND
+*box
+*        Where should we move this?
+*
+GVTINDCB DCB DDNAME=SYSIN,DSORG=PS,MACRF=GL,EXLST=GVTINX,EODAD=INEOF
+*
+GVTINX   DC    0A(0),X'85',AL3(GVTINOEX)  DCB open exit
+*
+GVTINOEX LABEL
+         WITH  (DCB,R1),(*,R15),BEGIN
+         SET   DCBOFLGS.DCBOFPPC   Allow concat of unlike attributes
+         IF    (DCBBUFNO,Z),'MVI DCBBUFNO,2'  Bufno=2 default
+         IF    (DCBBLKSI,Z),BEGIN  No blksize...
+         MVC   DCBBLKSI,DCBLRECL   Blksize = lrecl
+         IF    (DCBBLKSI,Z),'MVC DCBBLKSI,=AL2(6223)'  Default
+         END
+         BR    RAR
+         END
+*
+         QLTORG
+         TITLE 'Monitor subroutines'
+*box
+*
+*  SCAN NUMBER
+*
+*  CAUTION !! CAUTION !! CAUTION !! ****
+*  ALWAYS RETURS R0=0  !!!!!!!!!
+*
+*  ON ENTRY:
+*    MTVTSCNCB - SCAN CONTROL BLOCK
+*
+*  ON EXIT:
+*    R0  - NUMERIC VALUE
+*    R15 - ZERO, VALID NUMBER SCANNED
+*    R15 - NEG, NULL SCAN  (RETURNS R0=0)
+*    R15 - POS, INVALID SCAN, ERRMSG SEG'D (RETURNS R0=0)
+*
+*    NOTE:
+*    THIS ROUTINE TO BE CALLED BY COMMAND PROCESSING ROUTINES
+*    ONLY.  THIS IS BECAUSE THE ERROR MESSAGES ARE SEG'D AS
+*    SPECIFIED BY THE DOCMD ROUTINE CALLER.
+*
+*
+SCANNUMB PROC
+*
+         CLEAR R0
+         CLEAR R15
+*
+         PEND
+         EJECT
+*box
+*
+*  SCAN TASK NAME
+*
+*  ON ENTRY:
+*    MTVTSCNCB - SCAN CONTROL BLOCK
+*
+*  ON EXIT:
+*    R15 - ZERO, VALID NAME SCANNED
+*    R15 - NZ, INVALID OR NO TVT NAME SCANNED
+*          IF NZ, MESSAGE IS TSEG TO MTVTCURSG. CURRENT SEG BUF.
+*    R1  - LEFT JUSTIFIED, UPPER CASE, BLANK PADDED NAME.
+*
+*    NOTE:
+*    THIS ROUTINE TO BE CALLED BY COMMAND PROCESSING ROUTINES
+*    ONLY.  THIS IS BECAUSE THE ERROR MESSAGES ARE SEG'D AS
+*    SPECIFIED BY THE DOCMD ROUTINE CALLER.
+*
+SCANTASK PROC
+*
+*                                  SCAN NAME
+         SCAN  ,MTVTSCNCB
+*
+*                                  CHECK FOR SCAN ERRORS
+         SEGDEF L:MTVTCURSG
+         IF    NEG,BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': invalid'
+         LA    R15,4
+         B     SCNTDONE
+         END
+         IF    (R0,GT,8),BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': name to long.'
+         LA    R15,4
+         B     SCNTDONE
+         END
+         IF    (R0,Z),BEGIN
+         SEGWR 'Missing TASK name.'
+         LA    R15,4
+         B     SCNTDONE
+         END
+*
+*                                  SCAN OK
+         LA    R1,MTVTSCNKW
+         PRETURN (R1)
+         CLEAR R15
+*
+SCNTDONE LABEL ,
+         PEND
+         EJECT
+*box
+*
+*  FIND TASK NAME
+*
+*  ON ENTRY -
+*    R1 - UPPER CASED, LEFT JUSTIFIED, BLANK PADDED TVT NAME
+*
+*  ON EXIT:
+*    R15 - TVT
+*    R15 - ZERO IF TASK NOT FOUND...
+*
+*  NOTE:
+*  THIS ROUTINE TO BE CALLED BY COMMAND PROCESSING ROUTINES
+*  ONLY.  THIS IS BECAUSE THE ERROR MESSAGES ARE SEG'D AS
+*  SPECIFIED BY THE DOCMD ROUTINE CALLER.
+*
+*  NOTE. CAUTION !!
+*  R15 NZ, IS GOOD RETURN CODE. R15 ZERO IS *NOT* FOUND.
+*  THIS IS THE OPPOSITE OF MOST RETURN CODE SETTINGS.
+*
+*
+FINDTASK PROC
+         ACALL FINDTVT
+         IF    Z,BEGIN
+         SEGT  (R1),8
+         SEGWR ': subtask not found'
+         END
+         PEND
+         EJECT
+*box
+*
+*  FINDTVT -- Routine to find the TVT, given the task name.
+*
+*   On entry:
+*     R1 - task name ptr (8 characters long)
+*
+*   On exit:
+*     R15 - TVT ptr (or zero if no match)
+*
+FINDTVT  PROC
+*
+         L     R15,GVTTVTQH        First TVT is dummy (MTVT)
+         WITH  (TVT,R15)
+         WHILE ('LT R15,TVTLINK',NZ),BEGIN
+         IF    (TVTNAME,EQ,@R1),EXIT  Exit loop if task found
+         END
+*
+         PEND
+         EJECT
+*box
+*
+*  MAKETVT -- Routine to allocate a new task block (TVT).
+*
+*    On entry:
+*      R1 - task name (8 characters)
+*
+*    On exit:
+*      R15 - TVT ptr
+*
+MAKETVT  PROC
+         LR    R5,R1               Save task name ptr
+*
+         L     R0,=A(TVTSIZE#)
+         GETMAIN R,LV=(0)          Allocate memory for TVT
+         LR    TVTR,R1
+         WITH  TVT
+         ZOT   TVT,L:=A(TVTSIZE#)  Zero entire TVT
+         MVC   TVTID,=C'TVT '      Set self identification
+         MVC   TVTTLEN,=AL2(TVTSIZE#)  Set length
+*
+         MVC   TVTNAME,@R5         Save task name
+         MVC   TVTACCT,=C'*****'   No user yet             ML940215
+         STCK  TVTLRCLK            Initial time-stamp      ML940215
+         L     R0,TVTLRCLK         time, left part
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,TVTLRCLK         save adjusted (local) time
+         MVC   TVTLACLK,TVTLRCLK   copy to "latest"        ML940330
+         MVC   TVTBFTIM,=F'60000'  buffer-full timeout     ML940218
+         INCR  R15,GVTTVTID        Kick task ID
+         ST    R15,TVTNO           Save our task number
+*
+*                                  Set up parm list
+         LA    R15,TVT             TVT ptr
+         ST    R15,TVTPLIST
+         LA    R15,TVTPLEN         Parm string ptr
+         ST    R15,TVTPLIST+4
+         OI    TVTPLIST+4,X'80'    Mark last parm
+*
+         LA    R1,GVT
+         ST    R1,TVTGVTP          Save GVT ptr
+*
+*         LA    R1,MTVTECB
+*         ST    R1,TVTMPOST
+*-
+*-       Put this task at the end of the linked list.
+*-
+         LT    R15,GVTTVTQT        Last task on queue
+         IF    Z,'ST TVTR,GVTTVTQH; ST TVTR,GVTTVTQT'  First entry
+         ELSE  BEGIN               Add us to the end of the queue...
+         WITH  (TVT,R15),'ST TVTR,TVTLINK'  Link up the new task
+         ST    TVTR,GVTTVTQT         Update tail ptr
+         END
+*
+         LA    R15,TVT
+         PEND
+*
+         QLTORG
+         EJECT
+*
+*  INITTVT -  ...
+*
+*
+*  INITIALIZE TVT,,, MAY HAVE ALREADY BEEN ACTIVE
+*  CLEAR ALL RELEVANT FIELDS.  CODE ON HIT AND MISS
+*  BASIS.  (IE. WHAT EVER WORKS !)
+*
+*
+INITTVT  PROC
+*
+         LR    R6,R1
+         WITH  (TVT,R6)
+*
+*                                  ZERO SOME IMPORTANT FIELDS
+         CLEAR TVTASCBP
+         CLEAR TVTTCBP
+*
+*                                  ZERO MOST TVT FIELDS
+*                ,                 (IE. ALL FIELDS AFTER TVTCLEAR)
+         LA    R2,TVTCLEAR
+         LA    R3,TVTSTART
+         AH    R3,TVTTLEN
+         SR    R3,R2
+         CLEAR R5
+         MVCL  R2,R4
+*
+         MVC   TVTACCT,=C'*****'   No user yet             ML940215
+         STCK  TVTLRCLK            Initial time-stamp      ML940215
+         L     R0,TVTLRCLK         time, left part
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,TVTLRCLK         save adjusted (local) time
+         MVC   TVTLACLK,TVTLRCLK   copy to "latest"        ML940330
+         MVC   TVTBFTIM,=F'60000'  buffer-full timeout     ML940218
+         PEND
+*
+         QLTORG
+         TITLE 'Subtask failure routines'
+*box
+*
+*        STAE -- Entered from MVS when a subtask has failed.
+*
+*        The purpose of this routine is to obtain abend code
+*        and reason.  We also mark the TASK as abending.
+*
+*
+STAI     WITH  (STAI,R15),BEGIN
+*
+         STM   R14,R12,@R13        Save regs
+         BASE
+*
+*                                  IF NO SDWA,  FORGET IT
+         IF    ((R0,EQ,12),OR,(R0,GT,16)),BEGIN
+         B     STAIEXIT            CONTINUE ABENDING
+         END
+*
+         L     GVTR,=V(GVT)        Global area
+         LR    R6,R1               Scb ptr
+         USING SDWA,R6
+         L     TVTR,SDWAPARM       Subtask's TVT ptr
+         USING TVT
+*
+*                                  GET ABEND CODES, REASONS
+         MVC   TVTCODES,SDWACMPC   Abend codes
+         LA    R6,SDWAEND          ->end of first section
+         USING SDWARC1,R6          next one follows
+         MVC   TVTREASN,SDWACRC    Reason codes
+         SET   TVTFABENDING
+*
+STAIEXIT LABEL ,
+         LM    R14,R12,@R13
+         CLEAR R15                 Continue abending
+         BR    R14
+         DROP  ,                   below can't assume regs ml940215
+         EJECT
+*box
+*
+*  EOTASK -- Entered from MVS.  This is the end of task exit
+*    for the subtasks we attach.
+*
+EOTASK   STM   R14,R12,@R13        Save regs
+         BASE
+         WITH  (TCB,R1),BEGIN
+         L     GVTR,=V(GVT)
+         WITH  (GVT,R12)                                   ML940215
+         L     R6,GVTTVTQH         First TVT is dummy (MTVT)
+         LR    R11,R6              ->MTVT                  ML940215
+         WITH  (MTVT,R11)                                  ML940215
+         WITH  (TVT,R6)
+         WHILE ('LT R6,TVTLINK',NZ),BEGIN
+         IF    (R1,EQ,TVTTCBP),EXIT
+         END
+         IF    (R6,Z),'ABEND 6,DUMP'
+         SET   TVTFPOST            Action pending
+         SET   TVTFEOTASK          Action is EOTASK
+         POST  MTVTECB             Post main ECB
+         LM    R14,R12,@R13        Restore regs
+         BR    R14
+         END
+*
+         DROP  BR
+*
+         LTORG
+MONITOR@ EQU   *-MONITOR,,C'N'     Monitor CSECT length
+*-
+*-       Our symbols.
+*-
+         DS    0D
+         ENTRY SYMMONIT            Monitor's symbol table
+SYMMONIT DC    CL8'MONITOR',A(MONITOR,MONITOR@)
+         DC    A(0)                End of table
+         END   .

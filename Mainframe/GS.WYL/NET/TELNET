@@ -1,0 +1,1133 @@
+;
+;;  TELNET -- Telnet command.
+;;
+;;
+;;  This exec file implements the "user telnet" service for
+;;  Wylbur users.  The "SYSCALL NET_xxx" function in Wylbur
+;;  provide the basic capability to open a TCP/IP connection to
+;;  another computer.  Documentation for the PATH and NET
+;;  SYSCALLs can be obtained from Jim Nisbet (niz@forsythe).
+;;
+;;  In the first version of this exec file, the exec did all the
+;;  character echoing processing.  It was too slow, so the NET_TALK
+;;  SYSCALL function was added to Wylbur to support all the normal
+;;  interacting with the remote computer.  It is only when the user
+;;  presses the "ATTNCHAR" that NET_TALK returns to the exec file.
+;;
+;;
+;;  Session variables used:
+;;    ses.telnet_cur        = current telnet session number
+;;                              (index for arrays below).
+;;    ses.telnet_hosts[]    = remote host name.
+;;    ses.telnet_pno[]      = our path number for current connection.
+;;    ses.telnet_ano[]      = working active file (used by NET_TALK).
+;;    ses.telnet_keepflag[] = keep the log active file (true/false).
+;;
+;;
+;;  Created 4/02/88, Niz
+;;
+;;  Modifications:
+;;    4/16/92  Niz  Make telnet active a temp unless KEEP specified.
+;;    4/03/91  Niz  Add "NOMSG" as a command option.
+;;    3/07/91  Niz  Add "NOESCAPE" as a command option.
+;;   12/31/90  Niz  Add "TERMINAL=ttype" as a command option.
+;
+
+
+
+xproc () begin
+   x.origact = actno
+   x.origheight = height
+   x.attn = 0           ; attn counter (see attnexit)
+
+   x.pgm = 'TELNET'               ; program name
+   x.maint = '(netexec-maint)'           ; maintenance people
+
+   x.host = ''                    ; current host name
+   x.pno = 0                      ; current netpath number
+   x.ano = 0                      ; current NET_TALK working actno
+
+   on error cmd 'xcall wyl.gs.wyl.net#\
+      _error(x.pgm, x.maint, errid, errmsg, errinfo)'
+   on attn  cmd 'xcall wyl.gs.wyl.net#\
+      _attn(x.pgm, x.maint, x.attn)'
+
+   set terminal height 0          ; turn off page/pause
+   set exec over                  ; see Niz for details
+
+   x.maxses = 10             ; const--max no. of telnet sessions
+   x.escape_allowed = true   ; allow TELNET escape sequence
+   x.telnet_message = true   ; write TELNET message
+
+   dcl str host, rc
+
+;
+;  Initialize telnet session variables if this is the first time.
+;
+
+   if (vartype('ses.telnet_cur') eq 'UNDEFINED') begin
+      try dcl num ses.telnet_cur
+      try dcl str ses.telnet_hosts[x.maxses]
+      try dcl str ses.telnet_pno[x.maxses]
+      try dcl str ses.telnet_ano[x.maxses]
+      try dcl bool ses.telnet_keepflag[x.maxses]
+   end
+
+;
+;  If "ses.telnet_debug = true" then we don't do error recovery.
+;
+
+   if (vartype('ses.telnet_debug') ne 'UNDEFINED') begin
+      if (ses.telnet_debug) begin
+         on error clear
+         on attn clear
+      end
+   end
+
+;
+;  If the user specified a parm then he wants to open a connection
+;    to the host he specified.
+;
+;    Allow either "telnet <existing session number>"
+;    or "telnet <host>".
+;
+
+   parm_string = strip(parm_string)
+   if (parm_string ne '') begin
+      if (verify(parm_string,'0123456789') eq 0) begin
+         dummyflag = false
+         pcall tel_pick(parm_string, dummyflag)
+      end
+
+      else begin
+         pcall tel_open(parm_string)
+      end
+
+      if (x.pno eq 0) pcall cleanup('error')
+   end
+
+   else begin
+      if (ses.telnet_cur ne 0) begin
+         x.cur = ses.telnet_cur
+         x.host = ses.telnet_hosts[x.cur]
+         x.pno = ses.telnet_pno[x.cur]
+         x.ano = ses.telnet_ano[x.cur]
+      end
+      else begin
+         write 'No remote connections have been established.'
+         write 'Type "telnet hostname" to connect to a \
+            remote computer.'
+         pcall cleanup('error')
+      end
+   end
+
+   if (fetype eq 'VTAM') pcall main_net_view
+   else pcall main_net_talk
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+;  Main loop (NET_TALK).
+;
+
+proc main_net_talk() begin
+   dcl str rc
+   dcl bool done
+
+   x.talk_reprompt = true
+
+   repeat begin
+      talk_opts = 'attnchar=1d '
+      if (not x.talk_reprompt) talk_opts = talk_opts || 'noreprompt'
+
+      on attn interrupt
+      try syscall net_talk(x.pno, talk_opts, x.ano, rc)
+      on attn nointerrupt
+
+      x.talk_reprompt = false
+
+      cases begin
+         case (rc eq 'ATTN') begin
+            if (x.escape_allowed) begin
+               pcall local_cmds
+            end
+         end
+
+         case (rc eq 'CONNECTION CLOSED') begin
+            pcall tel_close
+         end
+
+         case (rc eq 'END OF FILE') begin
+            pcall tel_close
+         end
+
+         case (rc eq 'NOT OPEN') begin
+            pcall tel_close
+         end
+
+         case (true) begin
+            write ''
+            write '-----'
+            write 'Telnet trouble, \
+               unrecognized NET_TALK return code: '||rc
+            write '-----'
+            done = true
+         end
+      end
+
+      if (x.pno eq 0) done = true
+   end
+   until (done)
+end
+
+
+
+; <.page>
+;
+;  Main loop for full screen I/O (NET_VIEW).
+;
+
+proc main_net_view() begin
+   dcl str rc
+   dcl bool done
+
+;
+;  Do intialization for NET_VIEW Syscall.
+;
+
+   if (vartype('x.net_view_msg') eq 'UNDEFINED') begin
+      dcl str x.net_view_msg
+   end
+
+   if (vartype('x.net_view_pf') eq 'UNDEFINED') begin
+      dcl str x.net_view_pf[9]
+      x.net_view_pf[1] = 'F1 Help'
+      x.net_view_pf[2] = 'F2 Attn'
+      x.net_view_pf[3] = 'F3 Pause'
+      x.net_view_pf[4] = 'F4 Prev'
+      x.net_view_pf[5] = 'F5 Next'
+      x.net_view_pf[6] = 'F6 Mark'
+      x.net_view_pf[7] = 'F7 Save/Mail'
+      x.net_view_pf[8] = 'F8 Print'
+      x.net_view_pf[9] = 'F9 Quit'
+   end
+
+   syscall net_control(x.pno, 'pf_prev=4 pf_next=5 pf_mark=6 \
+      pf_secure=10 pf_send=11')
+
+;
+;  Main NET_VIEW loop.
+;
+
+   repeat begin
+      on attn interrupt
+      try syscall net_view(x.pno, '', x.ano, rc)
+      on attn nointerrupt
+
+      cases begin
+         case (rc eq 'ATTN') begin
+            pcall tel_write(s'03')                 ; Send Ctrl-C
+            syscall net_control(x.pno, 'clrvtop')  ; Allow scrolling
+         end
+
+         case (rc eq 'CONNECTION CLOSED') begin
+            pcall tel_close
+         end
+
+         case (rc eq 'END OF FILE') begin
+            pcall tel_close
+         end
+
+         case (left(rc,2) eq 'PF') begin
+            pcall view_pfks(rc)
+         end
+
+         case (true) begin
+            write ''
+            write '-----'
+            write 'Telnet trouble, \
+               unrecognized NET_VIEW return code: '||rc
+            write '-----'
+            done = true
+         end
+      end
+
+      if (x.pno eq 0) done = true
+   end
+   until (done)
+end
+
+
+
+; <.page>
+;
+;  view_pfks  -- Routine to execute a program function
+;    key.
+;
+
+proc view_pfks(pf) begin
+   dcl str rc
+
+   cases begin
+      case (pf eq 'PF1') begin       ; HELP
+         clear screen
+         try list ~';'1 unn from wyl.gs.wyl.nethelp#tel.pf1
+         dummystr = inp('Press ENTER to continue... ', \
+            'attn max=1')
+      end
+
+      case (pf eq 'PF2') begin       ; ATTN
+         pcall tel_write(s'03')                 ; Send Ctrl-C
+         syscall net_control(x.pno, 'clrvtop')  ; Allow scrolling
+      end
+
+      case (pf eq 'PF3') begin       ; SUSPEND
+         clear screen
+         write 'Connection ' || x.cur || ' to ' || x.host || ' is suspended, \
+            the transcript is in your Active file.'
+         write ''
+         write 'Type TELNET when you want to resume the connection.'
+         write ''
+         x.origact = x.ano
+         pcall cleanup('')
+      end
+
+      case (pf eq 'PF7') begin       ; SAVE/MAIL
+         clear screen
+
+         pcall pf_save_mail
+
+         write ''
+         write ''
+         dummystr = inp('Press ENTER to continue... ', \
+            'attn max=1')
+      end
+
+      case (pf eq 'PF8') begin       ; PRINT
+         clear screen
+
+         pcall pf_print
+
+         write ''
+         write ''
+         dummystr = inp('Press ENTER to continue... ', \
+            'attn max=1')
+      end
+
+      case (pf eq 'PF9') begin       ; QUIT
+         pcall tel_close
+      end
+
+      case (true) begin
+         clear screen
+         write ''
+         write ''
+         write '***  ' || pf \
+            || ' is an undefined function key.  ***'
+
+         write ''
+         write ''
+         dummystr = inp('Press ENTER to continue... ', 'attn')
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  pf_print -- Routine to execute the PRINT function.
+;
+
+proc pf_print() begin
+   dcl num mark_lno
+
+   oldano = actno
+   pick &(x.ano)
+
+   syscall net_control(x.pno, 'getvmark', mark_lno)
+   if (mark_lno lt first) mark_lno = first
+
+   write '*** Print Transcript of TELNET Session ***'
+   write ''
+   write ''
+
+;
+;  Get printer destination name.
+;
+
+   if (vartype('ses.telnet_prdest') eq 'UNDEFINED') \
+      ses.telnet_prdest = ''
+
+   msg = 'Enter printer destination name? '
+   if (ses.telnet_prdest ne '') \
+      msg = 'Enter printer name (Return=' \
+      || ses.telnet_prdest || ')? '
+
+pf_print_loop:
+   instr = upper(strip(input(msg, 'attn')))
+   if (ioresult eq 'ATTN') begin
+      write 'No action taken.'
+      return
+   end
+   if (instr eq '') begin
+      instr = ses.telnet_prdest
+      if (instr eq '') goto pf_print_loop
+   end
+   if (not rf_dest_check(instr)) begin
+      write instr || ' is not a valid printer destination.'
+      write ''
+      goto pf_print_loop
+   end
+
+   ses.telnet_prdest = instr
+
+   count &(mark_lno)/last nolist
+   lcount = count
+   lpage = count/60
+
+;
+;  Make sure they are not printing too little accidently.
+;
+
+   if (lcount le 4) begin
+      write ''
+      write 'Note:  You will only be printing ' || lcount \
+         || ' lines.'
+      write ''
+      yn = yesno('Do you want to do this', 'yes no')
+      if (yn eq 'NO') begin
+         write ''
+         write 'If you want to print just a piece of the transcript'
+         write 'then use the MARK function key to mark the first'
+         write 'line to be printed, and then issue another PRINT.'
+         return
+      end
+   end
+
+;
+;  Make sure they are not printing too much accidently.
+;
+
+   if (lcount ge 500) begin
+      write ''
+      write 'Note:  This will print ' || lcount || ' lines (' \
+         || format(lpage, -1, 1) || ' pages).'
+      write ''
+      yn = yesno('Do you want to print all of this', 'yes no')
+      if (yn eq 'NO') begin
+         write ''
+         write 'If you want to print just a piece of the transcript'
+         write 'then use the MARK function key to mark the first'
+         write 'line to be printed, and then issue another PRINT.'
+         return
+      end
+   end
+   write ''
+
+;
+;  Now issue the print command.
+;
+
+   try print &(mark_lno)/last unn ind 3 \
+      dest=&(ses.telnet_prdest) \
+      id=tnet \
+      title 'Telnet transcript    &(xdate)'
+
+   if (not tryerr) begin
+      syscall net_control(x.pno, 'setvmark='||last)
+   end
+end
+
+
+
+; <.page>
+;
+;  pf_save_mail -- Routine to execute the SAVE/MAIL function.
+;
+
+proc pf_save_mail() begin
+   dcl num mark_lno
+
+   oldano = actno
+   pick &(x.ano)
+
+   syscall net_control(x.pno, 'getvmark', mark_lno)
+   if (mark_lno lt first) mark_lno = first
+
+   write '*** Save/Mail Transcript of TELNET Session ***'
+   write ''
+   write ''
+
+   yn = yesno('Do you want send the transcript \
+      as electronic mail', 'yes no')
+   write ''
+
+;
+;  Do MAIL command.
+;
+
+   if (yn eq 'YES') begin
+      write 'Send transcript as electronic mail...'
+      write ''
+
+      repeat begin
+         mailaddr = input('Enter the electronic mail address? ', \
+            'attn')
+         if (ioresult eq 'ATTN') begin
+            write 'No action taken.'
+            return
+         end
+         if (mailaddr eq '') begin
+            write 'Press ATTN to cancel the request.'
+            write ''
+         end
+      end
+      until (mailaddr ne '')
+
+      try mail &(mark_lno)/last \
+         to (&(mailaddr)) \
+         title 'Telnet session transcript'
+      cmd_worked = not tryerr
+   end
+
+;
+;  Do SAVE command.
+;
+
+   else begin
+      write 'Save transcript as a file...'
+      write ''
+
+      repeat begin
+         filename = input('Enter file name? ', 'attn')
+         if (ioresult eq 'ATTN') begin
+            write 'No action taken.'
+            return
+         end
+         if (filename eq '') begin
+            write 'Press ATTN to cancel the request.'
+            write ''
+         end
+      end
+      until (filename ne '')
+      saveopts = ''
+
+      write ''
+      hostname = input('Enter host name (or RETURN if local)? ', \
+         'attn')
+      if (ioresult eq 'ATTN') begin
+         write 'No action taken.'
+         return
+      end
+
+      if (hostname ne '') begin
+         saveopts = 'on ' || hostname
+         write ''
+         yn = yesno('Do you want to append this transcript \
+            to the old file', 'yes no')
+         if (yn eq 'YES') saveopts = saveopts || ' append'
+      end
+      write ''
+
+      try save &(filename) \
+         lines=&(mark_lno)/last \
+         &(saveopts)
+      cmd_worked = not tryerr
+   end
+
+;
+;  Only update marked line-number if the command worked.
+;
+
+   if (cmd_worked) begin
+      syscall net_control(x.pno, 'setvmark='||last)
+   end
+end
+
+
+
+; <.page>
+;
+;  local_cmds -- Routine to execute our own local commands.
+;
+
+proc local_cmds() begin
+   write s'15' || '-----'
+   x.talk_reprompt = true
+
+   done = false
+   while (not done) begin
+
+;
+;  Ask the user what they want.
+;
+      our_prompt = 'Telnet command (Q=quit, CR=resume telnet session)? '
+      full_cmd = strip(input(our_prompt, 'attn'))
+      cmd = lower(scan_token(full_cmd))
+
+      if (cmd eq '') cmd = 'resume'
+      if (ioresult eq 'ATTN') cmd = 'pause'
+
+      cases begin
+         case (abbrev('resume', cmd, 1)) begin
+            opt = scan_skip(full_cmd)
+            if (opt eq '') done = true
+            else pcall tel_pick(opt, done)
+         end
+
+         case (abbrev('quit', cmd, 1) or abbrev('exit', cmd, 3)) begin
+            pcall tel_close_all
+            pcall cleanup('')
+         end
+
+         case (abbrev('pause',cmd,3)) begin
+            write '[Connection ' || x.cur || ' to ' || x.host || \
+               ' suspended.  Type TELNET to continue.]'
+            pcall cleanup('')
+         end
+
+         case (abbrev('show', cmd, 2)) begin
+            try show telnet
+         end
+
+         case (cmd eq '?' or abbrev('help', cmd, 1)) begin
+            pcall help
+         end
+
+         case (verify(cmd, '0123456789') eq 0) begin
+            pcall tel_pick(cmd, done)
+         end
+
+         case (abbrev('previous', cmd, 1)) begin
+            pcall tel_previous(done)
+         end
+
+         case (abbrev('next', cmd, 1)) begin
+            pcall tel_next(done)
+         end
+
+         case (abbrev('attn', cmd, 1)) begin
+            pcall tel_write(s'03')
+            done = true
+         end
+
+         case (abbrev('xon', cmd, 3)) begin
+            pcall tel_write(s'11')        ; Send Ctrl-Q
+            done = true
+         end
+
+         case (abbrev('xoff', cmd, 3)) begin
+            pcall tel_write(s'13')        ; Send Ctrl-S
+            done = true
+         end
+
+         case (left(cmd,1) eq '^') begin          ; Send a control character...
+            if (size(cmd) ne 2) begin
+               write 'Expecting two character sequence (e.g. ^C for Ctrl-C).'
+            end
+            else begin
+               subcmd = substr(cmd, 2, 1)
+
+               if (size(subcmd) ne 1) subcmd = ' '
+
+               cval = bitand(nhex(display(ascii(subcmd))), n'1F')
+               pcall tel_write(shex(cval), 'transparent')
+               done = true
+            end
+         end
+
+         case (abbrev('open', cmd, 3)) begin
+            open_info = scan_skip(full_cmd)
+            if (open_info eq '') begin
+               write 'Missing host name for OPEN command.'
+            end
+            else begin
+               oldcur = x.cur
+               pcall tel_open(open_info)
+               done = (oldcur ne x.cur)
+            end
+         end
+
+         case (abbrev('close', cmd, 3)) begin
+            pcall tel_close
+            done = true
+         end
+
+         case (abbrev('list', cmd, 1)) begin
+            write '-----'
+            pcall redisplay
+            return
+         end
+
+         case (left(cmd,1) eq '@') begin  ; Wylbur cmd
+            wyl_cmd = substr(full_cmd, 2)
+            if (ioresult eq 'OK') begin
+               try &(wyl_cmd)
+            end
+         end
+
+         case (true) begin
+            write cmd || ': not a recognized TELNET command.'
+         end
+      end
+   end
+
+   write '-----'
+   if (x.cur ne 0) begin
+      write '[Resuming connection ' || x.cur || ' to ' \
+         || x.host || ' ... ]'
+   end
+   return
+end
+
+
+
+; <.page>
+;
+;  tel_open -- Routine to open a new telnet connection.
+;
+
+proc tel_open(parms) begin
+   dcl str host, options, open_opts, token, rc
+   dcl num c, pno
+   dcl bool keep_flag
+
+   options = parms
+   syscall scan_parm(host, options)
+   if (host eq '') begin
+      write 'Host name is missing.'
+      return
+   end
+   open_opts = 'host=' || host
+
+   while (options ne '') begin
+      syscall scan_parm(token, options)
+      token = upper(token)
+      cases begin
+         case (abbrev('KEEP', token, 3)) begin
+            keep_flag = true
+         end
+         case (abbrev('NOESCAPE', token, 5)) begin
+            x.escape_allowed = false
+         end
+         case (abbrev('NOMSG', token, 5)) begin
+            x.telnet_message = false
+         end
+         case (abbrev('TERMINAL', token, 3)) begin
+            dummy_type = ''
+            syscall scan_parm(token, options, dummy_type, '= ')
+            if (token eq '') begin
+               write 'Expecting TERMINAL=terminal-type.'
+               return
+            end
+            else begin
+               open_opts = open_opts || ' terminal=' || token
+            end
+         end
+         case (verify(token, '0123456789') eq 0) begin
+            open_opts = open_opts || ' port=' || token || ' iac'
+         end
+         case (true) begin
+            write token || ': unrecognized TELNET option.'
+            return
+         end
+      end
+   end
+
+;
+;  Find slot for this new telnet session.
+;
+
+   c = 1
+   while (c le x.maxses) begin
+      if (ses.telnet_pno[c] eq 0) goto open_got
+      c = c+1
+   end
+   write 'Too many telnet sessions already active.'
+   write 'Please close a connection before opening a new one.'
+   return
+
+open_got:
+
+;
+;  Open connection to remote host.
+;
+
+   if (x.telnet_message and x.escape_allowed) \
+      write "Escape character (to suspend telnet) is 'Ctrl-]'."
+
+   start_time = timebin
+   try syscall net_open(pno, open_opts, rc)
+   if (rc ne 'OK') begin
+      if (rc eq 'ERROR: UNKNOWN HOST') \
+         write 'Host '||host||' not found.'
+      elseif (rc eq 'ATTN') \
+         write 'No response from ' || host \
+         || ' after ' || int(timebin-start_time) || ' seconds.'
+      else \
+         write 'Can''t open connection: '||rc
+   end
+
+   if (pno eq 0) return
+
+;
+;  Open an Active file for responses from this session.
+;
+
+   origact = actno
+   openopts = 'temp'
+   if (keep_flag) openopts = ''
+   open telnet title 'Telnet &(squash(lower(parms)))' &(openopts)
+
+;
+;  Save information about current telnet session.
+;
+
+   ses.telnet_cur = c
+   ses.telnet_hosts[c] = host
+   ses.telnet_pno[c] = pno
+   ses.telnet_ano[c] = actno
+   ses.telnet_keepflag[c] = keep_flag
+
+   x.cur = c
+   x.host = host
+   x.pno = pno
+   x.ano = actno
+
+   pick &(origact)
+end
+
+
+
+; <.page>
+;
+;  tel_close -- Routine to close the current telnet connection.
+;
+
+proc tel_close() begin
+   dcl str msg, rc
+
+   if (x.cur eq 0) begin
+      write '[No connection is open.]'
+   end
+
+   else begin
+      syscall net_close(x.pno, '', rc)
+      msg = x.host || ' connection closed'
+      if (rc ne 'OK') msg = msg || ' (' || rc || ')'
+
+      if (ses.telnet_keepflag[x.cur]) begin
+         msg = msg || ', the transcript is in your Active file'
+         x.origact = x.ano
+      end
+      else begin
+         if (x.ano ne x.origact) begin
+            pick &(x.ano)
+            close
+         end
+      end
+
+      ses.telnet_cur = 0
+      ses.telnet_hosts[x.cur] = ''
+      ses.telnet_pno[x.cur] = 0
+      ses.telnet_ano[x.cur] = 0
+
+      x.cur = 0
+      x.host = ''
+      x.pno = 0
+      x.ano = 0
+
+      nses = 0
+      c = 1
+      while (c le x.maxses) begin
+         if (ses.telnet_pno[c] ne 0) begin
+            nses = nses+1
+            ses.telnet_cur = c
+         end
+         c = c + 1
+      end
+
+      if (nses gt 0) msg = msg || ', ' \
+         || nses || ' connections still active'
+
+      if (x.telnet_message) \
+         write s'15' || '[' || msg || '.]'
+      else \
+         write ''
+   end
+end
+
+
+
+; <.page>
+;
+;  tel_close_all -- Routine to close all telnet connections.
+;
+
+proc tel_close_all() begin
+   dcl str msg, rc
+
+   x.cur = 0
+   x.host = ''
+   x.pno = 0
+   x.ano = 0
+
+   c = x.maxses
+   while (c gt 0) begin
+      if (ses.telnet_pno[c] ne 0) begin
+         host = ses.telnet_hosts[c]
+         pno = ses.telnet_pno[c]
+         ano = ses.telnet_ano[c]
+
+         syscall net_close(pno, '', rc)
+         msg = host || ' connection closed'
+         if (rc ne 'OK') msg = msg || ' (' || rc || ')'
+
+         if (ses.telnet_keepflag[c]) begin
+            msg = msg || ', the transcript is in your Active file'
+            x.origact = c
+         end
+         write '[' || msg || ']'
+
+         ses.telnet_cur = 0
+         ses.telnet_hosts[c] = ''
+         ses.telnet_pno[c] = 0
+         ses.telnet_ano[c] = 0
+      end
+      c = c - 1
+   end
+end
+
+
+
+; <.page>
+;
+;  tel_pick -- Routine to pick a specific telnet session.
+;
+;     Returns:
+;        true = we switched sessions
+;        false = no action taken
+;
+
+proc tel_pick(sno_str, switched) begin
+   dcl num c
+
+   try quietly dummyval = ses.telnet_pno[sno_str]
+   if (tryerr) begin
+      write sno_str || ' is not a valid telnet session.'
+      switched = false
+      return(switched)
+   end
+
+   c = sno_str
+
+   if (ses.telnet_pno[c] eq 0) begin
+      write c || ' is not an active telnet session.'
+      switched = false
+      return(switched)
+   end
+
+;
+;  Make the new telnet session the current session.
+;
+
+   ses.telnet_cur = c
+   x.cur = c
+   x.host = ses.telnet_hosts[c]
+   x.pno = ses.telnet_pno[c]
+   x.ano = ses.telnet_ano[c]
+
+   switched = true
+   return(switched)
+end
+
+
+
+; <.page>
+;
+;  tel_previous -- Routine to select the previous telnet session.
+;
+;     Returns:
+;        true = we switched sessions
+;        false = no action taken
+;
+
+proc tel_previous(switched) begin
+
+;
+;  Find the previous telnet session and switch to that session.
+;    This there is previous session then this loop will fall through.
+;
+
+   old_ses = x.cur
+   c = old_ses - 1
+   if (c lt 1) c = x.maxses
+
+   while (c ne old_ses) begin
+      if (ses.telnet_pno[c] ne 0) begin
+
+;
+;  Make the new telnet session the current session.
+;
+
+         ses.telnet_cur = c
+         x.cur = c
+         x.host = ses.telnet_hosts[c]
+         x.pno = ses.telnet_pno[c]
+         x.ano = ses.telnet_ano[c]
+
+         switched = true
+         return(switched)
+      end
+
+      c = c - 1
+      if (c lt 1) c = x.maxses
+   end
+
+   switched = false
+   return(switched)
+end
+
+
+
+; <.page>
+;
+;  tel_next -- Routine to select the next telnet session.
+;
+;     Returns:
+;        true = we switched sessions
+;        false = no action taken
+;
+
+proc tel_next(switched) begin
+
+;
+;  Find the next telnet session and switch to that session.
+;    This there is no next session then this loop will fall through.
+;
+
+   old_ses = x.cur
+   c = old_ses + 1
+   if (c gt x.maxses) c = 1
+
+   while (c ne old_ses) begin
+      if (ses.telnet_pno[c] ne 0) begin
+
+;
+;  Make the new telnet session the current session.
+;
+
+         ses.telnet_cur = c
+         x.cur = c
+         x.host = ses.telnet_hosts[c]
+         x.pno = ses.telnet_pno[c]
+         x.ano = ses.telnet_ano[c]
+
+         switched = true
+         return(switched)
+      end
+
+      c = c + 1
+      if (c gt x.maxses) c = 1
+   end
+
+   switched = false
+   return(switched)
+end
+
+
+
+; <.page>
+;
+;  tel_write -- Routine to send text to the current telnet session.
+;
+
+proc tel_write(text, opts) begin
+   if (vartype('opts') eq 'UNDEFINED') opts = ''
+
+   rc = ''
+   syscall net_write(x.pno, opts, text, rc)
+end
+
+
+
+; <.page>
+;
+;  redisplay -- Routine to re-display the last few lines of the
+;    current telnet session.
+;
+
+proc redisplay() begin
+   clear screen
+
+   origano = actno
+
+   pick &(ses.telnet_ano[x.cur])
+
+   last_prompt = line(last)
+   if (right(last_prompt,2) eq '[]') ltext = lno_prev(last)
+   else ltext = last
+
+   ftext = max(first, ltext - 20)
+
+   try list &(ftext)/&(ltext) unn nomodel
+   x.talk_reprompt = true
+
+   pick &(origano)
+end
+
+
+
+; <.page>
+;
+;  help -- Display help text for our local commands.
+;
+
+proc help() begin
+   comm Local Telnet Commands:
+   comm
+   comm      <.u+>Command<.u->         <.u+>Action<.u->
+   comm      PAUSE           Suspend telnet connection and return to Wylbur.
+   comm      RESUME [n]      Resume the telnet session.
+   comm      SHOW            Show currently active telnet sessions.
+   comm      LIST            Display the last few lines of output again.
+   comm      PREVIOUS        Go to the previous telnet session.
+   comm      NEXT            Go to the next telnet session.
+   comm      OPEN [host]     Open a new telnet session.
+   comm      CLOSE           Close the current telnet session.
+   comm      QUIT            Close all connections and exit TELNET.
+   comm      ? or HELP       Display help options (this text).
+   comm
+   comm Little used special purpose commands:
+   comm
+   comm      @command        Execute a single Wylbur command.
+   comm      XON             Transmit a Ctrl-Q to the remote session.
+   comm      XOFF            Transmit a Ctrl-S to the remote session.
+   comm      ^alpha          Transmit any control character.  For example,
+   comm                      typing "^A" will send a Ctrl-A.
+   comm
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   set exec noover
+
+   set terminal height &(x.origheight)
+
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

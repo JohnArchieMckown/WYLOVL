@@ -1,0 +1,397 @@
+XCAN      TITLE 'WYLBUR/BASIC SCANNER'
+VSCN     CSECT
+*
+* REGISTER USAGE
+*
+WAR      EQU   6
+RR       EQU   5
+PR       EQU   4
+NR       EQU   3
+SR       EQU   2
+*
+         USING SA,8                    ##
+         USING WA,WAR                  ##
+         USING TWORK,10                  ##
+         EJECT
+* INITIALIZE
+*
+SCINIT   XENTER 0,15
+         LA    WAR,CLBSCAN              WORK AREA LOCATION
+         LA    1,0(,1)
+         STM   0,1,LEN                 SAVE LOC AND LENGTH
+         LTR   SR,0
+         BNP   ID
+         BCTR  SR,0
+         EX    SR,LCUCTRA              TRANSLATE TO UPPER CASE
+ID       XEXIT 0,15
+LCUCTRA  TR    0(0,1),LCUCT
+*
+         EJECT
+*  TELL LOCATION AND LENGTH
+*
+SCTELL   XENTER 2,15
+         LA    WAR,CLBSCAN              WORK AREA LOCATION
+         LM    0,1,LEN
+         XEXIT 2,15
+         EJECT
+SCAN     XENTER 2,12
+BASE     DS    0H
+         LA    WAR,CLBSCAN              WORK AREA LOCATION
+         ST    14,RA                   RETURN ADDR
+         ST    1,PRT                   ROUTING TABLE
+GOSCAN   LM    NR,PR,LEN               PICK UP LOC AND LEN
+         SR    RR,RR
+         MVI   FL,0                    CLEAR FLAGS
+RESCAN   LTR   NR,NR                   ANY LEFT?
+         BNP   DONE                    BR IF NOT
+         SR    2,2                     CLEAR TRT REGS
+         LA    1,0(PR,NR)
+         BCTR  NR,0
+         EX    NR,TRT
+         B     *+4(2)                  BR ON DELIM CODE
+         B     EOS                     0  END OF STRING
+         B     BLKCOM                  4  BLANK-COMMA
+         B     SQUOTE                  8  SINGLE QUOTE
+         B     DQUOTE                  12 DOUBLE QUOTE
+         B     LPAR                    16 LEFT PAREN
+         B     RPAR                    20 RIGHT PAREN
+         B     SLASH                    24 SLASH
+*
+*  PROCESS END OF STRING
+*
+EOS      TM    FL,FSQS+FDQS+FPS        STRING?
+         BZ    PREND                   BR IF NOT
+ILLSTR   SR    NR,NR                   UPDATE PTR
+         LR    PR,1
+         LR    0,1                     COMPUTE STRING PTR
+         L     1,LOC
+         SR    0,1
+         LCR   0,0                     INDICATE ILLEGAL STRING
+         B     RTN                     RETURN
+*
+* PROCESS BLANKS
+*
+BLKCOM   TM    FL,FSQS+FDQS+FPS        STRING BEING COLLECTED?
+         BNZ   GOSTRING                BR IF SO
+PREND    SR    1,PR                    COMPUTE TOKEN SIZE
+         ST    1,LEN                   PLANT TOKEN PTR
+         ST    PR,LOC
+         LA    PR,1(1,PR)              UPDATE STRING PTR
+         SR    NR,1
+         LTR   1,1                     TOKEN?
+         BP    TOKEN                   BR IF SO
+         B     RESCAN
+*
+*  PROCESS SLASH
+*
+SLASH    TM    FL,FSQS+FDQS+FPS         STRING BEING COLLECTED?
+         BNZ   GOSTRING                 BR IF SO
+         ST    PR,LOC                   TOKEN START
+         SR    1,PR                     COMPUTE TOKEN SIZE
+         BP    STOKEN                   TOKEN WON'T BE "/"
+         LA    1,1                      LENGTH "/" TOKEN
+         B     STORZ                    FINISH SETUP
+STOKEN   SR    NR,1                     NEW STRING SIZE
+         LA    NR,1(NR)                 KEEP "/" IN STRING
+STORZ    ST    1,LEN                    TOKEN LEN
+         LA    PR,0(1,PR)               POINT OVER TOKEN
+         B     TOKEN                    PROCESS
+*
+*  PROCESS SINGLE QUOTE
+*
+SQUOTE   TM    FL,FDQS+FPS             "STRING"?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FSQS                 OLD STRING?
+         BO    CSQ                     BR IF SO
+         CLR   1,PR                    COMPUTE TOKEN SIZE
+         BNE   PREVTOK                 BR IF PREVIOUS TOKEN
+         OI    FL,FSQS                 SET STRING SCAN
+         ST    PR,LOC
+         B     GOSTRING
+*
+CSQ      AR    NR,PR                   BUMP PTR
+         LR    PR,1
+         SR    NR,1
+         BNP   ESTR                    BR IF END
+         CLI   1(PR),C''''             QUOTE?
+         BNE   ESTR                    BR IF NOT
+MVS      BCTR  NR,0                    ELIMINATE 2ND QUOTE
+         LA    PR,2(,PR)
+         B     RESCAN
+*
+PREVTOK  SR    1,PR
+         ST    1,LEN                   PLANT PTR
+         ST    PR,LOC
+         AR    PR,1
+         SR    NR,1
+         LA    NR,1(,NR)
+         B     TOKEN
+*
+*  PROCESS DOUBLE QUOTE
+*
+DQUOTE   TM    FL,FSQS+FPS             'STRING'?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FDQS                 OLD STRING?
+         BO    CDQ                     BR IF SO
+         CLR   1,PR                    TOKEN SIZE
+         BNE   PREVTOK
+         OI    FL,FDQS                 SET STRING SCAN
+         ST    PR,LOC
+         B     GOSTRING
+*
+CDQ      AR    NR,PR                   UPDATE PTR
+         LR    PR,1
+         SR    NR,1
+         BNP   ESTR                    BR IF END
+         CLI   1(PR),C'"'              QUOTE?
+         BE    MVS                     BR IF SO
+ESTR     NI    FL,255-FSQS-FDQS-FPS    RESET STRING SCAN
+         LA    PR,1(,PR)
+         LR    0,PR                    COMPUTE TOKEN SIZE
+         S     0,LOC
+         ST    0,LEN
+         B     TOKEN
+*
+*  PROCESS LEFT PAREN
+*
+LPAR     TM    FL,FSQS+FDQS            QUOTED STRING?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FPS                  PAREN STRING?
+         BO    INP                     BR IF SO
+         CLR   1,PR                    TOKEN SIZE
+         BNE   PREVTOK                 BR IF PREVIOUS TOKEN
+         OI    FL,FPS                  SET PAREN SCAN
+         LA    SR,1
+         STH   SR,PCNT
+         ST    PR,LOC
+         B     GOSTRING
+*
+INP      LH    SR,PCNT                 PAREN COUNT
+         LA    SR,1(,SR)
+         STH   SR,PCNT
+         B     GOSTRING
+*
+*  PROCESS RIGHT PAREN
+*
+RPAR     TM    FL,FSQS+FDQS            QUOTED STRING?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FPS                  PAREN STRING?
+         BZ    ILLST                   BR IF NOT
+         LH    SR,PCNT                 DECR COUNT
+         BCTR  SR,0
+         STH   SR,PCNT
+         LTR   SR,SR
+         BNZ   GOSTRING
+         SR    NR,1                    UPDATE STR PTR
+         AR    NR,PR
+         LR    PR,1
+         B     ESTR
+*
+GOSTRING SR    NR,1                    UPDATE STRING PTRS
+         AR    NR,PR
+         LA    PR,1(,1)
+         B     RESCAN
+*
+ILLST    LR    0,PR                    COMPUTE -LENGTH
+         SR    0,1
+         LR    1,PR                    LOC OF TOKEN
+         AR    NR,0                    DECR LENGTH
+         SR    PR,0                    BUMP PTR
+         LA    PR,1(,PR)
+         B     RTN
+         EJECT
+*  PROCESS A TOKEN
+*
+TOKEN    LM    0,1,LEN                 LOC AND LENGTH
+         LR    SR,0
+         MVI   KW,C' '                 CLEAR KW AREA
+         MVC   KW+1(7),KW
+         CL    SR,=A(8)                MAX LEN IS 8
+         BH    PRKW                    BR IF TOO LONG
+         BCTR  SR,0
+         EX    SR,MVT                  MOVE KW
+         EX    SR,LCUCTRB              TR TO UPPER CASE
+PRKW     LTR   RR,RR                   ROUTINE?
+         BNZ   GORTN                   BR IF SO
+         L     SR,PRT                  ROUTING TABLE
+         LTR   SR,SR
+         BZ    NORT                    BR IF NONE
+KWSRCH   CLI   0(SR),1                 END?
+         BH    KWFND                   BR IF SO
+         CLC   KW(8),4(SR)             COMPARE KEYWORDS
+         BE    KWFND                   BR IF FOUND
+         LA    SR,12(,SR)              TRY NEXT
+         B     KWSRCH
+*
+KWFND    L     RR,0(,SR)               ROUTINE
+         CLI   0(SR),1                 PARM?
+         BE    RESCAN                  BR IF SO
+*
+GORTN    LA    RR,0(,RR)               CLEAR HI BYTE
+         LTR   14,RR                   TEST EP
+         BZ    RESCAN                  BR IF NONE
+         STM   NR,PR,LEN               SAVE LOC AND LEN
+         LA    15,KW                   KW PTR
+         LM    2,12,76(13)
+         LTR   0,0                     SET CC
+         BALR  14,14                   GO TO PARM ROUTINE
+         XENTER 2,12                   SAVE
+         L     7,=A(BASE)              RESTORE BASE
+         USING BASE,7                  ##
+         LA    WAR,CLBSCAN              WORK AREA LOCATION
+         B     GOSCAN                  CONTINUE SCAN
+*
+NORT     L     RR,RA
+         B     GORTN
+         EJECT
+*  TERMINAL PROCESSING
+*
+DONE     DS    0H
+         LR    1,PR
+         TM    FL,FSQS+FDQS+FPS        COLLECTING STRING?
+         BNZ   ILLSTR                  ERROR IF SO
+         SR    0,0                     ZOT LOC AND LEN
+         SR    1,1
+         MVI   KW,C' '                 CLEAR KW
+         MVC   KW+1(7),KW
+         LTR   RR,RR                   PARM MISSING?
+         BNZ   GORTN                   BR IF SO
+RTN      STM   NR,PR,LEN               SAVE STRING PTR
+         L     14,RA                   RETURN ADDR
+         LA    15,KW
+         LM    2,12,76(13)
+         LTR   0,0
+         BR    14
+         EJECT
+*  CONSTANTS
+*
+TRT      TRT   0(0,PR),CLTBL           SCAN
+MVT      MVC   KW(0),0(1)              MOVE TOKEN
+LCUCTRB  TR    KW(0),LCUCT
+         EJECT
+*  TRANSLATE LOWER TO UPPER CASE
+*
+LCUC     XENTER 2,12
+         LTR   SR,0
+         BNP   LCUCX                   BR IF NO STRING
+         BCTR  SR,0
+         EX    SR,LCUCI                TRANSLATE
+LCUCX    XEXIT 2,12
+LCUCI    TR    0(0,1),LCUCT
+         EJECT
+*  DOUBLE QUOTE SCAN
+*
+DQSCAN   XENTER 2,12
+         BCTR  0,0                     STRIP OFF OUTER QUOTES
+         BCTR  0,0
+         LR    RR,1                    REMEMBER KIND OF QUOTE
+         LA    1,1(,1)
+         LR    PR,1
+         LTR   NR,0
+         BNP   DQX                     BR IF NO STRING
+DQL      CLC   0(1,PR),0(RR)           QUOTE?
+         BE    QF                      BR IF SO
+DQLL     LA    PR,1(,PR)               NEXT CHAR
+         BCT   NR,DQL
+         LTR   0,0                     COURTESY
+DQX      XEXIT 2,12
+*
+QF       BCTR  NR,0
+         BCTR  NR,0
+         LTR   NR,NR
+         BM    DQX
+         BCTR  0,0
+         EX    NR,MVSTR                ELIMINATE 2ND QUOTE
+         LA    NR,1(,NR)
+         B     DQLL
+*
+MVSTR    MVC   0(0,PR),1(PR)
+         EJECT
+*  TRANSLATE TABLES
+*
+*    LOWER TO UPPER CASE
+*
+LCUCT    DC    256AL1(*-LCUCT)
+         ORG   LCUCT+X'81'
+         DC    C'ABCDEFGHI'
+         ORG   LCUCT+X'91'
+         DC    C'JKLMNOPQR'
+         ORG   LCUCT+X'A2'
+         DC    C'STUVWXYZ'
+         ORG
+*
+*    CLASS TABLE
+*
+CLTBL    DC    256AL1(4)
+         ORG   CLTBL+X'81'
+         DC    9X'00'
+         ORG   CLTBL+X'91'
+         DC    9X'00'
+         ORG   CLTBL+X'A2'
+         DC    8X'00'
+         ORG   CLTBL+C'A'
+         DC    9X'00'
+         ORG   CLTBL+C'J'
+         DC    9X'00'
+         ORG   CLTBL+C'S'
+         DC    8X'00'
+         ORG   CLTBL+C'0'
+         DC    10X'00'
+         ORG   CLTBL+C'.'
+         DC    X'00'
+         ORG   CLTBL+C'$'
+         DC    X'00'
+         ORG   CLTBL+C'@'
+         DC    X'00'
+         ORG   CLTBL+C'#'
+         DC    X'00'
+         ORG   CLTBL+C'&&'
+         DC    X'00'
+         ORG   CLTBL+C'_'
+         DC    X'00'
+         ORG   CLTBL+C'+'
+         DC    X'00'
+         ORG   CLTBL+C'-'
+         DC    X'00'
+         ORG   CLTBL+C'*'
+         DC    X'00'
+         ORG   CLTBL+C'/'
+         DC    X'00'
+         ORG   CLTBL+C'?'
+         DC    X'00'
+         ORG   CLTBL+C''''
+         DC    AL1(8)
+         ORG   CLTBL+C'"'
+         DC    AL1(12)
+         ORG   CLTBL+C'('
+         DC    AL1(16)
+         ORG   CLTBL+C')'
+         DC    AL1(20)
+         ORG
+         EJECT
+         LTORG
+         EJECT
+* SAVE AREA
+*
+SA       DSECT
+         DS    F
+         DS    (12-2+1)F
+PCNT     DS    H
+FL       DS    X
+*
+FSQS     EQU   X'80'                   SINGLE QUOTED STRING
+FDQS     EQU   X'40'                   DOUBLE QUOTED STRING
+FPS      EQU   X'20'                   PARENED STRING
+         EJECT
+*  WORK AREA
+*
+WA       DSECT
+KW       DS    CL8
+LEN      DS    F
+LOC      DS    F
+RA       DS    F
+PRT      DS    F
+         EJECT
+TWORK    DSECT
+         COPY  TWORK
+         END

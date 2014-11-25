@@ -1,0 +1,307 @@
+; Look at a tape.
+; Parm is tape number or  tapeno,unit
+; Mark Lawrence (GA.MCL)
+; Last revision date:
+CLR VAR
+DECLARE STR REVDATE
+REVDATE = '2001/08/11'
+;
+;  -- revision log --
+;  2001/08/11    Correct "check user-supplied unit" logic
+;  1999/11/09    TAPEUNITS list; remove XC kludge
+;  1999/06/24    Use SHOW TAPE TYPE, eliminate vol prefix table
+;  1997/09/16    MAGSTAR support
+;  1997/04/23    improve prefix-check logic for 1-letter prefixes
+;  1997/02/27    recognize F, G as 3490; recognize T3490E, minor help changes
+;  1994/12/22    allow S20000 tapes
+;  1994/07/27    additional RLG tape support
+;  1993/11/19    new tape unit names
+;  1992/08/10    recognize S1 series tapes
+;  1991/08/06    minor cleanup.  improve UNIT help for 3480, strip
+;                blanks from parms, etc.  Change forms help.
+;  1990/12/19    VERSION=TEST no longer needed for 3480 tape
+;  1990/07/03    Use FORMCHEK proc to check form codes
+;  1990/06/28    Support for GBAR, 3LAN form codes
+;  1989/03/07    Set line limit to 50K; add FORMS support
+;  1988/12/20    Improved 3480 JCL
+;  1987/12/09    Correct problem with null response to SYSTERM prompt
+;  1987/08/24    New variable names
+;  1986/09/23    Add PFORMAT=L132 to JCL, so 9700 users won't get
+;                just the left half of their output
+;  1985/08/04    Add D0 series tapes
+;  1985/07/29    Remove A7 prefix, 800BPI prompt
+;                Add 3480 support
+;
+; VARIABLE USAGE
+;
+; DFLT_UNIT    DEFAULT UNIT NAME
+; FORMS        Form code for output
+; FTST         Results of FORMCHEK test of form code
+; GACC         (boolean) user has G-account
+; N0           MISC. INDEX THINGS
+; OLDACT       User's previous ACTIVE file number
+; OLDESC       USER'S ESCAPE CHARACTER
+; S8           MISC. PROMPTS
+; TAPENO       TAPE NUMBER FOR JCL
+;  TAPETYPE info from SHOW TAPE TYPE
+; TERMYN       PRINT SYSTERM?
+; UNITNAME     UNIT NAME
+; UPARM        PARM  (TAPE NUMBER OR TAPENO,UNIT)
+;
+;
+DECLARE STRING  UPARM UNITNAME TAPENO DFLT_UNIT OLDESC PROPTS DPROPTS FTST TAPETYPE
+DECLARE NUM  OLDACT
+DECLARE BOOLEAN TERMYN X4090 GACC ODDTAPE
+DECLARE STRING TAPEUNITS
+TAPEUNITS ='TAPE TAPE9 T6250 T1600 3480 T3480 T3490E MAGSTAR'
+TERMYN = TRUE
+OLDESC = ESC
+SET ESC '&'
+OLDACT = 0
+IF (SUB(GROUP,1,1) EQ 'G') GACC=TRUE
+IF (MACHINE EQ 'RLG') GACC=TRUE ; SYSB likes odd tapes
+IF (COUNT GT 0) OLDACT = ACTNO
+UPARM = UPPER(STRIP(PARM))
+WRI 'TAPESNIF version of '||REVDATE
+IF (UPARM NE '') EXE 50 ; IF PARM
+REA STR S8 UPP PRO 'Do you want instructions? ' ATTN=40
+IF (S8 EQ '') EXE 40
+IF (SUB(S8,1,1) EQ 'N') EXE 40
+LIST 2001/2099 EXE UNN ATTN=40 ; INSTRUCTIONS
+;
+READ STR UPARM UPP PRO'Tape? ' ATTN=1200
+IF (UPARM EQ '?') LIST 2101/2199 EXE UNN ATTN=40
+   THEN EXE 40
+; SEE IF UNIT NAME
+UNITNAME = ''
+TAPENO = UPARM
+N0 = INDEX(UPARM,',')
+IF (N0 EQ 0) EXEC 60
+UNITNAME = STRIP(SUBSTR(UPARM,N0+1))
+TAPENO = STRIP(SUBSTR(UPARM,1,N0-1))
+WRI 'UNIT=&(UNITNAME) and VOL=&(TAPENO) specified.'
+; CHECK TAPE NUMBER. IT'S NOW IN TAPENO
+IF (UNITNAME EQ '') WRI 'VOL=&(TAPENO) specified.'
+IF (SIZE(TAPENO) NE 6) WRI '&(TAPENO):  Invalid; tape number must be six characters long.' ATTN=40
+   THEN EXE 40
+DUMP TAPE &(TAPENO) TYPE         ; general info    mcl 1999/06/24
+REA STR TAPETYPE USING LAST DELETE
+IF (SUB(TAPETYPE,1,1) NE '?') EXE 69   ; Prefix ok
+
+   WRI TAPENO||':  Unknown tape series.'
+   IF (~GACC) EXE 40 ; Try again
+   IF (YESNO('Use it anyway?') EQ 'NO') EXE 40
+   ODDTAPE=TRUE
+   IF (UNITNAME NE '') EXEC 75 ; got unit name, check it
+   UNITNAME='T6250' ; default
+   EXEC 83 ; must get unitname for unknown vol type
+
+DFLT_UNIT = 'T6250' ; default unit
+; tapetype info: col 1 = S|U|X/? scratch/user/nonTLMS/unknown
+; col 5 = 2|8|9|5 3420, 3480, 3490E, 3590
+UNITNAME=''
+S0 = SUB(TAPETYPE,5,1)   ; device type code
+IF (S0 EQ '2') UNITNAME='T6250'
+IF (S0 EQ '8') UNITNAME='T3480'
+IF (S0 EQ '9') UNITNAME='T3490E'
+IF (S0 EQ '5') UNITNAME='MAGSTAR'
+IF (UNITNAME NE '') EXE 100        ; just got name from type, don't check it
+EXE 80                             ; if somehow no name yet...
+; here to check user-supplied unit name
+IF (SIZE(UNITNAME) GE 4 AND IND(TAPEUNITS,UNITNAME) NE 0) EXE 100 ; OK
+IF (UNITNAME EQ 'T800') WRI '800BPI tape is no longer supported.'
+   THEN EXEC 80
+WRI '&(UNITNAME):  Invalid unit name.'
+;
+;  NOTE:  Following now invoked only if user gives unit and it's wrong
+; GET UNIT NAME
+UNITNAME = 'T6250' ; DEFAULT
+IF (IND('SU',SUB(TAPENO,2,1)) NE 0) EXE 100 ; STD. TAPE; DONE
+IF (SUB(TAPENO,2,1) GE '0' OR SUB(TAPENO,1,2) EQ 'XC') UNITNAME='T3480'
+   THEN EXE 100
+
+REA STR S8 UPP PRO 'Unit name (RETURN=T6250): '
+IF (S8 EQ '') EXE 100; DEFAULT
+UNITNAME = S8 ; COPY NAME
+EXEC 70
+
+; forms
+FORMS='GBAR'
+IF (MACHINE EQ 'RLG') FORMS='3HOL'
+X4090=FALSE
+REA STR S8 UPP PRO 'Forms to use (RETURN=&(FORMS)): ' ATTN=150
+S8=STRIP(S8)
+IF (S8 EQ '') EXE 150
+IF (S8 EQ '?') LIS 2201/2299 EXE UNN ATTN=110 ; HELP FORMS
+   THEN EXEC 110
+XCALL COMMANDS#FORMCHEK PUB (S8,FTST)
+; results in FTEST: XEROX, 3800, UNKNOWN, INVALID, or IMPACT
+IF (FTST EQ 'INVALID') WRI S8||': invalid; form code must be 4 characters.'
+   THEN EXEC 110
+IF (FTST EQ 'UNKNOWN' OR FTST EQ 'IMPACT') WRI S8||' is an unknown forms code.'
+   THEN EXEC 110 ; Bad code, try again
+FORMS=S8
+IF (FTST NE 'XEROX') EXE 150   ; Not 4090
+X4090 = TRUE
+
+; PRINTER OPTIONS, 4090 OR LOCAL
+REA STR PROPTS UPP PRO 'Printer Options? ' ATTN=110
+PROPTS=STRIP(PROPTS)
+IF (PROPTS EQ '?') LIS 2501/2599 EXE UNN ATTN=110
+   THEN EXEC 125
+DPROPTS=''
+IF (IND(PROPTS,'FLASH=') EQ 0) DPROPTS='FLASH=BAR4'
+IF (IND(PROPTS,'PFORMAT=') EQ 0) DPROPTS=DPROPTS||',PFORMAT=L132'
+DPROPTS=STRIP(DPROPTS,'B',',') ; strip extra commas
+IF (PROPTS EQ '') PROPTS=DPROPTS ; none from user, use default
+   THEN EXEC 150
+IF (DPROPTS EQ '') EXE 150 ; no defaults, user did it all
+PROPTS=DPROPTS||','||PROPTS    ; combine the two
+
+; SYSTERM
+REA STR S8 UPP PRO 'Do you want a directory of the tape printed (RETURN=YES)? '
+S8 = STRIP(S8)
+IF (S8 EQ '?') LIST 2301/2399 EXE UNN ATTN=151
+   THEN EXE 151
+IF (S8 EQ '') TERMYN=TRUE
+   THEN EXE 200
+IF (SUB(S8,1,1) EQ 'N') TERMYN = FALSE
+   THEN EXE 200
+IF (IND('YESOK',S8) NE 0) TERMYN = TRUE
+   THEN EXE 200
+WRI 'Please respond YES or NO, or ? for help '
+EXE 151
+
+; BUILD JCL
+JCLUNIT = UNITNAME
+IF (SUB(JCLUNIT,1,1) NE 'T') JCLUNIT='T'||JCLUNIT ;  "3480"->"T3480" etc.
+
+OPEN &(TAPENO) TITLE 'JCL generated by UTIL TAPESNIF'
+PUTEND //L#&(TAPENO) JOB ,'LOOK AT &(TAPENO)',TIME=(,15)
+PUTEND /*SETUP &(JCLUNIT)=1 INPUT=&(TAPENO)
+PUTEND /*JOBPARM PURGE=NO,NOTIFY=&(ACC),LINES=50,FORMS=&(FORMS)
+IF (PROPTS NE '') PUTEND /*JOBPARM &(PROPTS)
+IF (TERMYN) PUTEND // EXEC TAPESNIF,TERM=YES,
+   ELSE     PUTEND // EXEC TAPESNIF,
+PUTEND //  IVOL=&(TAPENO),IUNIT=&(UNITNAME)
+;  READY TO RUN
+;
+COMM
+REA STR S8 UPP PRO 'RUN? '
+IF (SIZE(S8) EQ 0) EXE 1030
+IF (SUBSTR(S8,1,1) EQ 'Y') EXE 1030
+IF (S8 EQ 'OK') EXEC 1030
+IF (S8 EQ 'HOLD') EXE 1035         ; RUN HOLD
+IF (SUBSTR(S8,1,1) EQ 'N') EXE 1100
+LIST 2401/2499 EXE UNN ATTN=1000
+EXE 1000
+;
+RUN NOTIFY
+EXE 1040
+RUN HOLD NOTIFY
+IF (OLDACT NE 0) PIC &(OLDACT)
+EXE 1200
+;
+; DON'T RUN
+;
+WRI 'The JCL is in your active file; issue a RUN command to submit the job.'
+IF (OLDACT NE 0) WRI 'Type PICK &(OLDACT) to restore your previous active file.'
+EXE 1200
+;
+; CLEAN UP
+;
+SET ESC '&(OLDESC)'
+CLR EXE
+* GENERAL INSTRUCTIONS/INFO
+You can get help with any prompt in this EXEC file by replying with a question
+mark (?).
+
+TAPESNIF is designed to analyze a mystery tape.  For labeled tapes, TAPESNIF
+will report the following information for each file:  Data set name, creation
+date, record format, logical record length, and block size.  For partitioned
+or direct data sets that were "unloaded" by a utility program (IOPROGM, IEBCOPY,
+or IEHMOVE), the original attributes of the file will also be reported.
+
+For labeled or unlabeled tapes, the following information will be reported:
+The number of blocks (physical records) in each file, the minimum, maximum,
+and average block lengths, the density (bits per inch), and, when the record
+format is known, the number of logical records and their minimum, maximum, and
+average lengths.  (Record format will be known if the tape is labeled, or, in
+the case of unlabeled tapes, if you specify it in the JCL or if it is a format
+(such as WYLBUR EDIT format) that TAPESNIF can recognize by examining the data
+blocks).
+
+For each file, the first 200 bytes (characters) of each of the first 10
+logical records will be printed in both character and hexadecimal notation.
+You can change these limits by modifying the JCL generated by this exec.  To
+change the number of records printed per file, add PSTOP to the EXEC statement
+in the JCL, e.g.,
+
+         //  EXEC  TAPESNIF,PSTOP=25,
+
+would print 25 records per file.  To change the part of the record that is
+printed, add PFIELD to the JCL.  For example, to print the second 100 bytes in
+each record, you could code
+
+         //  EXEC  TAPESNIF,PFIELD='101,100',
+
+in the JCL.  (To modify the JCL, reply NO to the RUN? prompt).
+
+TAPESNIF uses the IOPROGM data set utility program.
+
+Before you can read a tape you must turn it in at the Tape Librarian Window
+and have a number assigned to it.  If you have not done this yet, you should
+do so, allow 2 hours for the tape to be entered into the tape library, and
+then invoke TAPESNIF again.
+
+In the future, you can save time by providing the tape number (or tape number
+and unit name) when you invoke TAPESNIF.  If you provide a unit name, separate
+it from the tape number with a comma.  For example,
+
+  UTIL TAPESNIF AX1234        or
+  UTIL TAPESNIF S00099,3480
+
+*HELP TAPE NUMBER
+Every tape in the tape library is identified by a "tape number" or "reel
+number" consisting of one or two letters followed by five or four numerals.
+User-owned round-reel tapes brought in from outside are assigned numbers in
+the EX series, e.g., EX1234.  User-owned standard (round) tapes that are
+written here are assigned AU or EU series numbers; rental tapes supplied by
+the Data Center have AS and ES series numbers.  3480 tapes supplied by the
+Data Center have one letter and five numerals, e.g. S00913.  User-owned 3480
+tapes have numbers in the XC series.
+
+If your tape does not yet have a number, that is, it is still in your
+posession, use PRISM External Tape Management to check it in.
+* HELP FORMS
+The FORMS code indicates on which type of paper to print the output; in most
+cases this also indicates which printer to use.  Form BOND is 8-1/2 by 11 inch
+cut sheets and is printed on the Xerox 4090 or 4635 printer; form 3HOL is the
+same except that it is 3-hole punched.  Form GBAR (Stanford 4635 only) is the
+same as 3HOL, but has grey bars that simulate the blue-bar pattern of form 1181
+(an obsolete form that was used on the IBM 3800 printer).
+* HELP SYSTERM
+In addition to the extensive output described earlier, TAPESNIF can produce a
+summary listing, one line per file, describing the contents of the tape; this
+listing is generally useful only for labeled tapes.  If you respond YES to the
+prompt, this listing (the SYSTERM data set) will be generated.  If you reply
+NO, the SYSTERM output will be suppressed.
+*HELP RUN
+If you reply YES or "carriage return", the job will be submitted with a RUN
+command, and your previous active file will be restored.  If you reply HOLD,
+the job will be submitted with a RUN HOLD command and the active file will be
+restored as before.  If you reply NO, the job will not be run, and the JCL will
+be left in your active file for you to inspect or modify.  You will then have
+to issue a RUN command to actually submit the job.
+
+* HELP PRINT OPTIONS
+You can specify any options that could be specified on a JOBPARM statement; if
+you specify more than one option, they must be separated by commas with no
+spaces.  TAPESNIF will use PFORMAT=L132 (132-column "landscape" mode printing)
+unless you specify otherwise.  You can specify a remote printer by coding the
+appropriate DEST= code.  If output is to be on the Xerox 4635, you can specify
+DUPLEX=YES to have the output printed on both sides of the paper.
+
+TAPESNIF does not check these options for validity, so improper options may
+cause the job to fail.
+

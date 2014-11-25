@@ -1,0 +1,432 @@
+SYS3.SYSTEM.DOCLIB#SMS                       Last updated 02/10/95
+                                                  Susan Plass
+
+                          SMS Memory Dump
+
+This is an outline of SMS information:  plans, what's there now,
+how-to hints.  It was last extensively revised in July 1992 and
+needs review (and big holes filled in), but is included here as a
+start.
+
+
+SMS Configuration - Current and Planned
+
+o  Defined so far
+
+   Applications
+      GUINEA_PIG
+
+   Storage Classes
+      TEMP
+      SCRATCH
+      SMSTEST
+      VSAM
+      GSPACE
+
+   Storage Group    Volumes
+      SMSTEST       SMS001
+      SCRATCH       SCR001
+
+o  Production data sets
+
+      SYS2.SMS.PROD.ACS.SOURCE on SYS200
+      SYS2.SMS.PROD.ACS.TEST on SYS200
+      SMS.SCDS.SCDS1 on SYS201
+      SMS.SCDS.ACDS1 on SYS200
+      SMS.SCDS.ACDS2 on SYS201
+      SMS.COMMDS.COMMDS1 on SYS201
+      SMS.COMMDS.COMMDS2 on SYS200
+
+o  Description of goal storage classes
+
+   SCRATCH
+   PROD
+   PUB
+   CORE
+   SDC
+   VSAM
+   storage groups for user volume pools?
+   non-SMS
+
+
+<.page>
+SMS startup
+
+o  Define IEFSSNxx member containing only the SMS definition;
+   this must occur first in the SSN concatenation at IPL.  To
+   autostart SMS at IPL, code the name of the SMS initialization
+   routine in the SSN record; to provide for activation of SMS
+   after IPL, code only the parameter SMS.  To manually start
+   SMS, issue the command  T SMS=nn, where nn identifies the
+   PARMLIB member IGDSMSnn.
+
+o  Define IGDSMSnn member containing the names of the primary
+   ACDS and COMMDS.
+
+o  Allocate an SCDS, a primary ACDS and COMMDS, and a secondary
+   ACDS and COMMDS; the ACDS and COMMDS should not reside on the
+   same volume.
+
+   SCDS/ACDS size =   125,000
+                    + (2200 * (SG + MC + SC + DC + AG))
+                    + (800 * (DRV + LIB + VOL))
+
+                  =   125,000
+                    + (2200 * (10 + 5 + 10 + 5 + 10))
+                    + (800 * (16 + 4 + 300))
+
+                  =   125,000 + (2200 * 40) + (800 * 320)
+
+                  =   125,000 + 88,000 + 256,000
+
+                  =   469,000
+
+   COMMDS size    =   8192 + (28 * VOL)
+                  =   8192 + (28 * 300)
+                  =   8192 + 8400
+                  =   16,592
+
+   After the above exercise, all of the data sets were allocated
+   with one megabyte.  This is clearly much too big for the COMMDS.
+
+o  Use DSS to initialize a volume for SMS use.  One volume has been
+   initialized for testing, SMS001.
+
+o  Define a minimum SMS configuration; this must contain;
+         . base configuration containing one system
+         . one storage class definition
+         . one storage group definition with one volume
+         . storage group ACS routine
+
+   The initial SMS configuration contains one system, SYSD;
+   one storage class, SMSTEST; one storage group, SMSTEST;
+   and a simple storage group ACS routine named STORGRP.  It
+   also contains an initial storage class routine named
+   STORCLAS.  The source for these routines is currently stored
+   in SYS2.SMS.NEW.ACS.SOURCE.
+
+o  Validate the entire configuration using ISMF.
+
+o  Activate SMS.
+
+o  Activate the configuration.
+
+<.page>
+SMS commands
+
+o  To activate SMS with the primary ACDS:
+         T SMS=01
+
+o  To activate SMS with the secondary ACDS:
+         T SMS=02
+
+o  To save the current ACDS configuration:
+         SETSMS SAVEACDS(SMS.ACDS2.ACDS)
+
+o  To recover the saved ACDS configuration:
+         SETSMS ACDS(SMS.ACDS2.ACDS)
+
+o  To display SMS status:
+         D SMS
+
+
+
+System-Determined Block Size
+
+To have the system supply a block size, code a DD statement for a new
+data set and include a DCB parameter.  Code the RECFM and LRECL, and
+DSORG=PS or PO as required; omit the BLKSIZE.  The system will supply
+a reasonable block size.  For RECFM=FB, it will be rounded to a
+multiple of LRECL.
+
+Omitting DSORG or RECFM will cause the system to not supply BLKSIZE.
+The system will not supply a BLKSIZE for RECFM=U data sets.
+
+When using IOPROGM, you may omit all DCB parameters; IOPROGM will
+copy RECFM and LRECL, and will supply a BLKSIZE.  Only IOPROGM can
+reblock EDIT format data sets, and only IEBCOPY can reblock load
+module libraries.
+
+If you code a DD statement in a manner that causes the system to
+determine the block size, then IOPROGM sees it as already set, and
+will use it.
+
+<.page>
+SMS Migration Considerations
+
+o  All data sets to be controlled by SMS must be catalogued;
+   SMS-managed data sets which are not catalogued cannot be
+   allocated, renamed, or scratched.
+
+o  There are changes in the way GDG entries are handled.
+
+o  The presence of a JOBCAT statement in a job will result in the
+   job being cancelled in the first step that references a
+   system-managed data set.
+
+o  The presence of a STEPCAT statement in a step that references
+   a system-managed data set will cause that step and the
+   remainder of the job to fail.
+
+o  All permanent SMS data sets are catalogued at the time of
+   space allocation (as opposed to step termination), and they
+   are uncatalogued when the data set is scratched.
+
+o  A deferred rolled-in GDG entry is kept and the base BCS
+   record is not updated when there is a system interruption, or
+   when a disposition of KEEP is specified.  (Eg, the common ABEND
+   specification DISP=(NEW,CATLG,KEEP)).  The data set so kept
+   will be reused (written over) automatically when the job or
+   step is rerun.
+
+o  An attempt to use IEHPROGM to catalog or uncatalog a system-
+   managed data set results in an error message with no action
+   taken; IDCAMS must be used for catalog manipulation.
+
+o  IEHMOVE not supported for SMS-managed data sets; this will
+   have implications for user data set backup.
+
+<.page>
+SMS notes
+
+o  ACS routines are invoked in the following order:
+         1)  Data class
+         2)  Storage class
+         3)  Management class
+         4)  Storage group
+   For each ACS routine, there is also a user exit which can be
+   invoked.
+
+o  The storage class ACS routine determines whether the data set
+   will be SMS-managed; if no storage class is assigned, the data
+   set is not SMS-managed.
+
+o  If SMS is not active, you
+         . cannot scratch an SMS data set via either catalog or
+           specific volume reference
+         . can uncatalog and catalog an SMS data set
+
+o  When WYLBUR scratches an SMS data set, it IS uncatalogued, but
+   WYLBUR doesn't know it and reports otherwise.
+
+o  WYLBUR can save data sets under SMS on non-SMS volumes.  It
+   cannot save on an SMS volume even with specific volume reference.
+
+o  Lower case in ACS routine messages is converted to upper case
+   when translated.
+
+o  IBM starter set sample ACS routines are found in:
+
+         Directory of $SYS1.SAMPLIB on SYS202
+
+         Member    Title
+         DFPSSDCR
+         DFPSSIMP
+         DFPSSMCR
+         DFPSSSCR
+         DFPSSSGR
+
+o  Adding a volume to SMS
+   .  Volume to be converted must be formatted with an indexed VTOC.
+   .  SMS must be active when the convert job is run.
+
+o  The RACF DFP parameter DATAAPPL corresponds to the ACS routine
+   variable &APPLIC.
+
+o  Non-transparencies
+
+o  Test environment
+
+o  Changing storage attributes
+
+o  Tuning
+
+o  Timetable
+
+o  HSM
+<.page>
+
+                          SMS How-to Notes
+
+
+o  Backup/Recovery of control files
+
+o  Backup/Recovery of user files
+
+o  Security
+
+   .  Define storage administrator group to own profiles:
+         group is SMSADMIN, currently containing GG$SLP, GG$AOS,
+         and GG$PJG
+
+   .  To protect the SMS admin programs,
+         RDEFINE PROGRAM pgmname OWNER(profile owner) -
+               UACC(NONE) ADDMEM('libname'/volser/NOPADCHK)
+
+   .  Be sure to protect the SMS control data sets!
+
+   .  To protect the SMS admin functions,
+         RDEFINE FACILITY resname OWNER(resowner) UACC(NONE)
+
+   .  To grant access to a function,
+         PERMIT 'resname' CLASS(FACILITY) ID(userid) ACCESS(READ)
+
+   .  The facilties which may be protected are:
+
+         STGADMIN.IGD.ACTIVATE.CONFIGURATION
+         STGADMIN.IDC.DIAGNOSE.CATALOG
+         STGADMIN.IDC.DIAGNOSE.VVDS
+         STGADMIN.IGG.ALTER.UNCONVERT
+         STGADMIN.IGG.ALTER.SMS
+         STGADMIN.ADR.COPY.BYPASSACS
+         STGADMIN.ADR.RESTORE.BYPASSACS
+         STGADMIN.ADR.CONVERTV
+
+      and a few others less critical, or just use
+
+         STGADMIN.*
+
+   .  Update IGDSMSxx member in parmlib to use RACF defaults
+      by specifying ACSDEFAULTS=YES
+
+   .  To protect the ability to modify SMS defaults,
+
+         RDEFINE FIELD GROUP.DFP.* OWNER(SYS1) UACC(READ)
+         PERMIT GROUP.DFP.* CLASS(FIELD) ID(SMSADMIN) ACCESS(UPDATE)
+
+         RDEFINE FIELD USER.DFP.* OWNER(SYS1) UACC(NONE)
+         PERMIT USER.DFP.* CLASS(FIELD) ID(SMSADMIN) ACCESS(UPDATE)
+         PERMIT USER.DFP.* CLASS(FIELD) ID(&RACUID) ACCESS(READ)
+
+         RDEFINE FIELD USER.DFP.DATACLAS OWNER(SYS1) UACC(NONE)
+         PERMIT USER.DFP.DATACLAS CLASS(FIELD) ID(&RACUID) -
+               ACCESS(READ)
+
+         RDEFINE FIELD DATASET.DFP.* OWNER(SYS1) UACC(READ)
+         PERMIT DATASET.DFP.* CLASS(FIELD) ID(SMSADMIN) -
+               ACCESS(UPDATE)
+         SETROPTS RACLIST(FIELD) REFRESH
+
+   .  To define a user SMS default storage class:
+         ALTUSER userid DFP(STORCLAS(storclas name))
+   .  To remove a user SMS default storage class:
+         ALTUSER userid DFP(NOSTORCLAS)
+   .  To list the SMS defaults for a user,
+         LISTUSER userid DFP
+   .  The data set owner of a data set defaults to the data set
+      (or profile?) HLQ; to change this owner,
+         ALTDSD 'profile name' DFP(RESOWNER(new owner) GENERIC
+      Then refresh any in-core copies of the profile:
+         SETROPTS GENERIC(DATASET) REFRESH
+   .  To list the RESOWNER assigned by a profile,
+         LISTDSD DATASET('profile name') DFP GENERIC
+   .  To protect a storage class using RACF,
+         RDEFINE STORCLAS storclas name OWNER(stg admin group) -
+               UACC(NONE)
+   .  To allow public access to a storage class using RACF,
+         RDEFINE STORCLAS storclas name OWNER(stg admin group) -
+               UACC(READ)
+   .  To allow a user access to a storage class using RACF,
+         PERMIT storclas name CLASS(STORCLAS) ID(userid) -
+               ACCESS(READ)
+   .  To list users allowed to access a storage class,
+         RLIST STORCLAS storclas name AUTHUSER
+   .  To remove a user's access to a storage class,
+         PERMIT storclas name CLASS(STORCLAS) ID(userid) DELETE
+   .  To significantly reduce overhead caused by RACF protection
+      of SMS classes,
+         SETROPTS RACLIST(STORCLAS MGMTCLAS)
+      But then for each profile added, changed, or deleted, you
+      must issue:
+         SETROPTS RACLIST(class name) REFRESH
+
+   Notes:
+      .  The authority to use a storage class and a management
+         class is not checked against the user who allocates the
+         data set, but rather the owner of the data derived from
+         either the RESOWNER field in the protecting profile or
+         from the HLQ for the data set.
+
+o  How to
+
+   Add a new storage group
+
+      1)  Run DSF INSTALL for at least one volume.
+      2)  Run DSF INIT with STORAGEGROUP parameter.
+      3)  VARY ONLINE to each host other than one on which DSF was
+          run.
+      4)  Define the new storage group.
+      5)  Define the volumes for the storage group.
+      6)  Update storage group ACS routine to select the new storage
+          group.
+      7)  Translate the new ACS routine.
+      8)  Validate the new configuration.
+      9)  Activate the new configuration.
+     10)  Allocate a VVDS on the new volume (so it will be big
+          enough).
+
+   Add a new volume to an existing storage group
+      1)  Run DSF INSTALL for the volume.
+      2)  Run DSF INIT with STORAGEGROUP parameter.
+      3)  VARY ONLINE to each host other than one on which DSF was run.
+      4)  Define the volume to its storage group.
+      5)  Validate the configuration with ISMF.
+      6)  Activate the updated SCDS.
+      7)  Allocate a VVDS on the new volume (so it will be big enough).
+
+   Remove a volume from a storage group
+      1)  Assign status DISNEW to the volume.
+      2)  Move all data sets from the volume.
+      3)  Remove the volume from its storage group.
+      4)  Validate the new configuration.
+      5)  Activate the new configuration.
+      6)  Vary the volume offline to MVS.
+      7)  Remove the volume from the system.
+
+   Remove an entire storage group
+      1)  Assign the status DISNEW to the storage group.
+      2)  Use HSM or DSS to move all data out of the storage group.
+      3)  Delete the storage group from SMS.
+      4)  Change ACS routines so they no longer refer to the group.
+      5)  Translate the ACS routines.
+      6)  Validate the new configuration.
+      7)  Activate the new configuration.
+
+   Move a volume from one storage group to another
+      1)  Remove the volume from the original storage group.
+      2)  Define the volume to the new storage group.
+      3)  Validate the new configuration.
+      4)  Activate the new configuration.
+
+   Rename a storage group
+      1)  Disable the storage group.
+      2)  Delete the storage group with ISMF Storage Group
+          Application.
+      3)  Define the storage group with the new name.
+      4)  Add all volumes back to the group under the new name.
+      5)  Change the storage group ACS routine accordingly.
+      6)  Translate the storage group ACS routine.
+      7)  Validate the SCDS.
+      8)  Activate the new configuration.
+
+   Once removed from its storage group, you can
+      .  Read data sets on the volume
+      .  Write into existing data sets
+      .  Extend existing data sets on the same volume
+
+   You cannot, however
+      .  Allocate new data sets on the volume
+      .  Rename existing data sets
+      .  Delete data sets
+      .  Use HSM for data sets on the volume
+      .  HSM recall data sets guaranteed on that volume
+
+<.page>
+Updating ACS Routines
+      1)  Edit new routine source into the appropriate member of
+          SYS2.SMS.TEST.ACS.SOURCE.
+      2)  Using ISMF, choose ACS Routine, then TRANSLATE.  If
+          translation is successful, VALIDATE the entire SCDS.
+      3)  When ready to use, choose CONTROL DATA SETS, then
+          ACTIVATE the configuration.  You must exit to the main
+          ISMF menu for the activation to occur.

@@ -1,0 +1,408 @@
+;
+;
+;  fchange - change library members or catalog data sets by assiciative range
+;  an extension of "flist" by mcl 1999/03/25
+;  command usage:
+;   fchange <assoc range> to <new string> <change-opts> from [<lib-specs>|<cat specs>] <col-opts>
+;
+;  <new string>
+;        any valid target of a CHANGE command
+;  <change-opts>
+;        any reasonable option of a CHANGE command, e.g. MODIFY, VERIFY
+;  <lib specs>:
+;        any thing that you would put after a "SHOW DIR FOR" ..
+;  <cat specs>:
+;        anything that would follow a "SHOW CAT" the word
+;        cat must be included.
+;
+;  examples:
+;        fchange c'sysaff=sysb' to '' modify from lib
+;        fchange 'TEST' to 'PROD' from cat lik font collect clear
+;        fchange 'SPACE     '10 to ' ' from &usr.source
+;
+;  revisions ------
+;  1999/03/25 mcl created (from FLIST)
+;
+xproc () begin
+
+  ; ignore attns during initialization
+  on attn cmd ' pcall ignore_attn '
+  ; set error exit
+  on error cmd ' pcall error '
+  set exec llimit 10000
+
+  ; declare variables
+  dcl string range               ; range to list
+  dcl string target              ; target of change (new string, change command opts)
+  dcl string lib_specs           ; lib (cat) specifications
+  dcl string col_opts            ; collect options
+  ;dcl string x.file_names[...]  ; list of file names
+  dcl num error_count            ; count of erroneous list commands
+  x.orig_prefix = prefix         ; save true prefix
+
+  ; open temp active file
+  x.act = actno
+  open flist title 'flist temporary active' temp
+  x.temp = actno
+  pick &(x.act)
+
+  ; allow attentions
+  on attn cmd ' pcall attn '  interrupt
+
+  ; scan command
+  pcall scan_command (parm_count,parm_string, range, target, lib_specs,col_opts);
+
+  ; check for valid range
+  pcall check_range(range)
+
+  ; get member or  data set list
+  pcall init_filechange(lib_specs)
+
+  ; process collect options if any
+  pcall process_col_opts(col_opts)
+
+  ; list from files
+  pcall filechange(range,target,x.file_names[],error_count)
+
+  ; all done, cleanup and return
+  pcall cleanup
+  xreturn
+end
+
+
+;  scan_command
+;
+;  scan range, options
+;
+proc scan_command (pc,ps,range,target,lib_specs,col_opts) begin
+
+  dcl string token,remain,type
+  remain = ps
+  if (strip(ps) eq '') pcall error_msg( \
+    'Command Usage: flist <range> from <lib-name or cat> <collect-opts>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan: <range> from <lib-specs> <col-opts>
+  syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  while (( not abbrev('TO',upper(token),2)) and \
+      (token ne '')) begin
+    syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  end
+  if (not abbrev('TO',upper(token),2)) begin
+    pcall error_msg('Missing "TO" change specification. ')
+  end
+  range = strip(substr(ps,1,size(ps)-size(remain)-size(token)))
+  ps = substr(ps,size(ps)-size(remain)+1)
+
+  ;  scan: <target> from <lib-specs> <col-opts>
+  syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  while (( not abbrev('FROM',upper(token),3)) and \
+      (token ne '')) begin
+    syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  end
+  if (not abbrev('FROM',upper(token),3)) begin
+    pcall error_msg('Missing "from" <data set specification>. ')
+  end
+  target = strip(substr(ps,1,size(ps)-size(remain)-size(token)))
+  ps = substr(ps,size(ps)-size(remain)+1)
+
+  syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  while (( not abbrev('COLLECT',upper(token),3)) and \
+      (token ne '')) begin
+    syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+  end
+  lib_specs = strip(substr(ps,1,size(ps)-size(remain)-size(token)))
+  col_opts = strip(token||remain)
+; above is from FLIST, so "range" is actually <range> TO <target> [cha_opts]
+; at this point.  scan off the parts
+;    syscall scan_parm(token,remain,type,' ,',' ,;=''"')
+
+  return(range,target,lib_specs,col_opts)
+end
+
+
+;
+;  check range
+;
+;  this is just a small test meant to catch any crummy
+;  range specification early.
+;
+proc check_range(range) begin
+  pick &(x.temp)
+  putline 0 &(range)
+  putline 99999.999 &(range)
+  try quiet list &(range)
+  if (tryerr) begin
+    try list &(range)
+    pcall error_msg('Invalid range specification.')
+  end
+  delete f/l
+  pick &(x.act)
+
+  ; check for first,f,last,l ... these are invalid
+  range = strip(upper(range))
+  if (range eq 'FIRST' or range eq 'F') begin
+    pcall error_msg('first: invalid for external files')
+  end
+  if (range eq 'LAST' or range eq 'L') begin
+    pcall error_msg('last: invalid for external files')
+  end
+end
+
+
+;  init_filechange
+;
+;  initialize file list either with library member names or
+;  with cataloged data set names
+;
+;  lib_specs - library member (catalog) specifications
+;  x.file names - array of lib member names (returned)
+;
+;  x.file_names is declared and set up by this procedure, we
+;  hold off until here to set up the data set name array so
+;  that we can declare the array the right size.
+;
+proc init_filechange (lib_specs) begin
+
+  ; make sure we are using temp active
+  pick &(x.temp)
+
+  ; local variables
+  dcl string token  ; scan token work string
+  dcl string text  ; active file text work string
+  dcl string lib_name  ; lib data set name if lib
+  dcl number lno  ; working line number
+  lno = end
+
+  temp = upper(lib_specs)   ; convert lib (cat) specs to upper
+  syscall scan (token,temp)
+
+  cases begin
+    case (token ne 'CAT') begin      ; if lib, get member names
+
+      ; if '*' lib, resolve to prefix
+      if (token eq '*'  and  x.orig_prefix ne '') begin
+         syscall scan(token,lib_specs)
+         lib_specs = x.orig_prefix || ' ' || lib_specs
+      end
+      ; dump directory for lib
+      try dump dir for &(lib_specs)
+      if (tryattn) pcall attn
+      if (tryerr) pcall error_msg ('Error ('||tryid||') reading directory of '||lib_specs)
+
+      syscall scan(lib_name,lib_specs)     ; get lib name   mcl
+      lib_name = upper(lib_name)
+;     lib_specs is now options e.g. "ON SYSD01"   ;mcl 1997/10/22
+;     or maybe "LIKE F ON SYSD01'                 ;mcl 1998/09/01
+;  so, gotta separate directory options, which we no longer want, from dataset options,
+;  which will want to use.  Ugh... have to emulate some WYLBUR code here...   mcl 1998/09/01
+
+      lib_specs = upper(strip(lib_specs))  ; could have FROM, TO, LIKE, ON, VOL
+      text = ''
+      while (lib_specs ne '') begin
+         syscall scan(token,lib_specs)
+         if (abb('FROM',token,3) or abb('TO',token) or abb('LIKE',token)) begin   ; directory option
+;;d         wri 'found '||TOKEN                  ; DEBUG
+            syscall scan(token,lib_specs)        ; scan off target too
+;;d         wri 'scanned off '||TOKEN            ; DEBUG
+            end
+         else begin                              ; not a directory option
+            text=text||' '||token                ; so keep it
+            syscall scan(token,lib_specs)        ; and its target
+            text=text||' '||token
+;;d         wri 'keeping '||text                 ; DEBUG
+            end
+         lib_specs = strip(lib_specs)
+         end
+;;d   wri 'kept '||text                          ; debug
+      lib_specs = strip(text)                    ; options if any e.g. VOL SYSD01
+      ; declare names array
+      count first/last quiet
+      dcl string x.file_names[count]
+
+      ; read in member names
+      ch 9/120 to '' in first/last nolist  ; get member names
+      syscall line_next(lno,text)
+      syscall line_next(lno,text)
+      syscall line_next(lno,text)
+      i = 1
+      while (lno ne -1.000) begin
+;                           add dsn options in lib_specs mcl 1997/10/22
+        x.file_names[i] = lib_name||'#'||text||' '||lib_specs
+        syscall line_next(lno,text)
+        i = i+1
+      end
+    end
+
+    case (token eq 'CAT') begin   ; if CAT, get member names
+
+      ; dump cat of data set names
+      try dump &(lib_specs)
+      if (tryattn) pcall attn
+      if (tryerr) pcall error_msg (lib_specs||': invalid')
+
+      ; declare names array
+      count first/last quiet
+      dcl string x.file_names[count+2]
+
+      ; read in catalog data set names
+      syscall line_get(lno,text)
+      if ( not (abbrev(text,'No data sets found',10))) begin
+        i = 1
+        while (lno ne -1.000) begin
+          x.file_names[i] = text
+          syscall line_next(lno,text)
+          i = i+1
+        end
+      end
+    end
+  end
+  try delete first/last  ; clear end of dump active file
+  pick &(x.act)
+end
+
+
+;
+;  process collect options
+;
+proc process_col_opts(col_opts) begin
+  pick &(x.act)
+  try syscall collect_scan(col_opts)
+  if (tryerr or tryattn) begin
+    comm Command stopped.
+    pcall cleanup
+    xreturn
+  end
+  if (strip(col_opts) ne '') begin
+    pcall invalid(col_opts)
+  end
+end
+
+
+;  filechange - list from specified files
+;
+;  file_name[] - array of file names, terminated by '' element
+;  range - range to list (eg. c'big' and ~'*'1 )
+;
+proc filechange (range,target,file_name[],error_count) begin
+  i = 1
+  while (file_name[i] ne '') begin                         ;  file-list loop
+    ; see if this file contains any lines in range
+    try quiet count &(range) (1) from &(file_name[i])
+    if (tryerr and (substr(trymsg,1,3) eq '(1)')) \
+      try quiet count &(range) from &(file_name[i])
+    if (tryattn) pcall attn
+    if (tryerr) begin                                      ;  count-from failed
+      ; if library we call flist recursively ???
+      if (tryid eq 'NOMEMBER') begin             ; PDS found when doing cat list
+        ; xc xprocs#flist / &(range) from &(file_name[i])
+        comment &(file_name[i])
+        comment    *** library ***
+      end                                        ; (PDS found)
+      ; if list failed, we don't know why so let it fail and report problem,
+      ; then continue                                      ml960410
+      else begin                                 ; count-from failed, not NOMEMBER
+        comment
+        comment &(file_name[i])
+        try list &(range) from &(file_name[i])
+        if (tryerr) begin                        ; error doing list-from
+          wri 'Error ('||TRYID||') reading '||file_name[i]
+          error_count = error_count + 1
+          if ((TRYID eq 'SYNTAX') or (error_count gt 5)) pcall error;
+          if (error_count gt 5) pcall error;
+          end                                    ; (error doing list-from)
+      end                                        ; (count-from failed, not NOMEMBER)
+    end                                                    ; (count-from failed)
+    ; if all ok, and lines were found, get file and do the change(s)
+    else begin                                             ;  count-from OK
+      if (count gt 0) begin                                ;  lines found
+        comment
+        comment &(file_name[i])
+        use &(file_name[i]) keep
+        try cha &(range) to &(target)
+        if (~tryerr and ~tryattn) save * replace
+        close
+   ;;;;;list &(range) from &(file_name[i])
+      end                                                  ;  (lines found)
+    end                                                    ;  (count-from OK)
+    i=i+1
+  end                                                      ; (file-list loop)
+end                                ; (filechange)
+
+
+;
+;   ignore attn routine
+;
+proc ignore_attn () begin
+  clear attn
+  on attn reset
+end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () begin
+  dumpflag = false
+  if (attnid ne 'MSGGIVEN') begin
+    if (xdump) dumpflag = true
+    clear xdump
+    comm Command stopped.
+    if (dumpflag) set xdump
+  end
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+end
+
+;
+;  error routine - clean up actives and exit
+;
+;  this routine processes unanticipated errors. for
+;  unanticipated errors we print exec error line info.
+;  otherwise we do not, we hide that command is an exec.
+;  a few errors are anticipated and processed separately
+;  below.  they are:
+;
+;  if dump error, do not print errid
+;
+proc  error () begin
+  ; if dump error, do not print exec error info
+  if (errid eq 'BADXDUMP') begin
+    pcall cleanup
+    xreturn err errid=BADXDUMP errmsg=''
+  end
+  ; unanticipated error, print it all
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Flist failed.'
+end
+
+;
+;
+;  give error message, clean up and exit
+;
+;
+proc error_msg (msg) begin
+  clear xdump
+  pcall cleanup
+  xreturn errid=BADFLIST errmsg='&(msg)'
+end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=BADFLIST errmsg="Flist failed.  (during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  if (xdump) begin
+    dcl num dumpline,dumpnext,dumpdelta,dumpact
+    syscall collect_get_info(dumpline,dumpnext,dumpdelta,dumpact)
+    pick &(dumpact)
+  end
+end

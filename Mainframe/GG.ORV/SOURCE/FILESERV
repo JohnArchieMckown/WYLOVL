@@ -1,0 +1,1428 @@
+FILESERV TITLE 'MP-ORVYL File services'
+         COPY  HEADER
+         SPACE
+M1RAR    EQU   R9                      Return register for mode 1
+         SPACE
+FILESERV MODULE TRCNUM=6,ID=SE
+         TITLE 'FILESERV - Global data areas'
+         COPY  PZERO
+         USING PZERO,R0
+         EJECT
+         COPY  MAT
+         EJECT
+         COPY  SLISTMAC
+         EJECT
+         COPY  QLISTMAC
+         EJECT
+         COPY  SBPARM
+         EJECT
+         COPY  FIOPARM                 File I/O parameters
+         EJECT
+         COPY  DSALPARM                DASD allocation parms
+         EJECT
+         COPY  PFINFO                  DASD open information
+         EJECT
+         COPY  CACHPARM
+         EJECT
+         COPY  VMPARM                  Virtual memory parameters
+         EJECT
+         COPY  LOCKPARM                Lock parameters
+         EJECT
+         COPY  SMFPFX
+         SPACE 4
+         COPY  SMFFILE
+         SPACE 2
+SMFFSDAT RECORD BEGIN
+SMFFSIOC DS    A                       I/O count
+SMFFSTIM DS    A                       I/O time
+         END   ,
+         EJECT
+         COPY  PARMPARM
+         EJECT
+         COPY  PAGEPARM
+         EJECT
+         COPY  FILEPARM                Parameters for this module
+         EJECT
+         COPY  FBHDR
+         EJECT
+         COPY  FSB
+         EJECT
+         COPY  FILECB
+         EJECT
+         COPY  FILEDSD
+         EJECT
+         COPY  FILIOP
+         EJECT
+         COPY  IOSPARM
+         EJECT
+FILESERV CSECT ,
+         TITLE 'File system block information'
+*********************************************************************
+*  File system block information                                    *
+*                                                                   *
+*   Input - @FILEBLKI                                               *
+*                                                                   *
+*  Output - RVR = 0                                                 *
+*             @FILEBLKI contains return parameters                  *
+*           RVR = 4                                                 *
+*             Invalid File System ID for input                      *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+FILEBLKI PROC  @FILEBLKI,SCOPE=GLOBAL
+         L     RY,MATPTR
+         WITH  (MAT,RY),BEGIN
+         L     RY,MATFILCB
+         END   ,
+         WITH  (FILECB,RY)
+         L     RX,FILEFFSB
+         WITH  (FSB,RX)
+         L     RS,@FILFSID
+         IF    (RS,NEG),BADFSID
+         WHILE (RS,NZ),BEGIN           Loop through file systems
+         IF    (RX,ZERO),BADFSID
+         L     RX,FSBCHAIN
+         DECR  RS
+         END   ,                       OF Loop through file systems
+         IF    (RX,ZERO),BEGIN
+BADFSID  LA    RVR,4
+         EXIT  FILEBLKI
+         END   ,
+*-
+*-       Fill in file system information.
+*-
+         MVC   @FILTBLK,FSBTBLK        Total blocks
+         MVC   @FILABLK,FSBABLK        Available blocks
+         MVC   @FILUMAX,=X'00FFFFFF'   Maximum alloc by a user
+         MVC   @FILNAME,FSBNAME        File system name
+         LA    RM,FSBFIOCT             Point to first one
+         LA    RN,FSBFIOCN             Count of counts
+         CLEAR RVR,R1
+         LOOP  BEGIN
+         ADL   RVR,@RM
+         LA    RM,@RM+L'FSBFIOCT
+         UNTIL (BCT,RN),END
+         ST    R1,@FILIOCT             Total IO count
+         LA    RM,FSBFCACT             Point to first one
+         LA    RN,FSBFCACN             Count of counts
+         CLEAR RVR,R1
+         LOOP  BEGIN
+         ADL   RVR,@RM
+         LA    RM,@RM+L'FSBFIOCT
+         UNTIL (BCT,RN),END
+         STM   R0,R1,@FILCACT          Total cache read counts
+         IF    FSBANAVL,'SET @FILFNA'  Set not available
+         IF    FSBARO,'SET @FILFRO'    Set Read Only
+         IF    FSBFCACHE,'SET @FILFCACHE'  File caching enabled
+         IF    (FSBDSZ,EQ,=Y(4096)),'SET @FILF4K'
+*
+         CLEAR RVR                     Set OK return
+         PEND  ,
+         TITLE 'File system SMF routine'
+*********************************************************************
+*  Write System Management Facilities record                        *
+*                                                                   *
+*   Input - none                                                    *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+#FILSMF  RECORD BEGIN
+#SMFTIME DS    D                       TOD of this interval
+#SMFNAM  DS    CL8                     Subsystem Name
+#SMFBLEN DS    A                       Buffer length
+         END   ,
+         SPACE
+FILSMF   PROC  ,#FILSMF,SCOPE=GLOBAL
+         L     RX,MATPTR
+         WITH  (MAT,RX),BEGIN
+         MVC   #SMFNAM,MATSNAME        Who we are
+         L     RX,MATFILCB
+         END   ,
+         WITH  (FILECB,RX)
+*
+*  Get buffer for SMF record
+*
+         L     RS,FILEFSBC             Number of file systems
+         MH    RS,=Y(L'SMFFSDAT)        times field size
+         ST    RS,#SMFBLEN
+         LA    RS,@RS+L'SMFFILE
+         VMGET (RS),LOC=GLOBHI
+         IF    ('LTR RK,RVR',ZERO),'ABORT NOSMFBUFF'
+         WITH  (SMFFILE,RK)
+*
+*  Fill in prefix
+*
+         WITH  (SMFPFX,SMFFPFX),BEGIN
+         CLEAR SMFFPFX
+         MVC   SMFSYSTM,#SMFNAM        Say who we are
+         MVC   SMFCAT,=CL4'ORVF'       File record
+         MVC   SMFNSEG,=A(2)           General and file system segs
+         END   ,
+*
+*  Fill in basic fields - offsets of segments
+*
+         MVC   SMFFGLOC,=A(SMFFGEN-SMFFILE)
+         MVC   SMFFLOC,=A(SMFFFILE-SMFFILE)
+*
+*  Fill in general section - elapsed real time
+*
+         MVC   SMFFGLEN,=A(L'SMFFGEN)
+         MVC   #SMFTIME,FILMTIME
+         STCK  FILMTIME
+         LM    RA,RB,FILMTIME          Store 2 middle bytes of elapse
+         SDL   RA,#SMFTIME             |
+         SRDL  RA,16                   |
+         ST    RB,SMFFTIME             |
+*
+*  Fill in file system section - length and number of file systems
+*
+         L     RB,#SMFBLEN
+         LA    RB,@RB+L'SMFFFILE
+         ST    RB,SMFFLEN
+         L     RS,FILEFSBC             Number of file systems
+         ST    RS,SMFFNFS              |
+*
+*  Loop through file systems
+*
+         L     RJ,FILEFFSB             First file system
+         LA    RM,SMFFILE+L'SMFFILE    Data area for SMF
+         LOOP  BEGIN                   Loop through FSs
+         WITH  (FSB,RJ)
+         WITH  (SMFFSDAT,RM)
+         MVC   SMFFSIOC,FSBIOCT        I/O count - total
+         MVC   SMFFSTIM,FSBIOTIM+2     I/O time - total
+         LA    RM,SMFFSDAT+L'SMFFSDAT  Next data area
+         L     RJ,FSBCHAIN             Next FSB
+         UNTIL (BCT,RS),END            OF Loop through FSs
+*
+*  Write SMF record
+*
+         LA    RA,SMFFILE              Location
+         L     RB,#SMFBLEN
+         LA    RB,@RB+L'SMFFILE
+         ICM   RB,8,=AL1(SMFNUM)       SMF number
+         SYSCTL RA,RB,TYPE=SMF
+*
+*  Free buffer
+*
+         N     RB,=X'00FFFFFF'
+         VMFREE A=LA:SMFFILE,(RB),LOC=GLOBHI
+         PEND  ,
+         TITLE 'MP-ORVYL File services'
+         LTORG ,
+         TITLE 'File systems initialization'
+*********************************************************************
+*                                                                   *
+*********************************************************************
+         SPACE
+#FILEINIT RECORD BEGIN
+#FIPREV  DS    A                       Previous FSB
+#FIFSID  DS    A                       File sys ID being initialized
+#FIPARM  DS    A                       Parameter allocation block
+#FIWORK  DS    D                       Work area
+         END   ,
+         SPACE
+FIPARMS  RECORD BEGIN
+FITYPE   DS    XL(L'PARMIN)            Parameter request type
+FIKEY1   DS    CL8                     Keyword 1
+FIKEY2   DS    CL8                     | 2
+FIKEY3   DS    CL8                     | 3
+FISTR    DS    CL80                    Return area
+         END   ,
+         SPACE
+FILEINIT PROC  ,#FILEINIT,SCOPE=GLOBAL
+         VMGET L'FILECB,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RX,RVR',ZERO),'ABORT NOFILECB'
+         WITH  (FILECB,RX)
+         CLEAR FILECB                  Clear and set ID
+         MVC   FILEID,=CL8'FILECB'     |
+         L     RY,MATPTR
+         WITH  (MAT,RY),'ST  RX,MATFILCB'   Set anchor in MAT
+         VMGET L'FIPARMS,LOC=GLOBHI    Parameter allocation block
+         IF    (RVR,ZERO),'ABORT NOFILEPRM'
+         ST    RVR,#FIPARM             |
+*
+*  Allocate file system group table
+*
+         L     RB,=A(36*26)
+         VMGET (RB),LOC=GLOBHI
+         IF    (RVR,ZERO),'ABORT NOFSGT'
+         ST    RVR,FILEFSGT
+         LR    RA,RVR                  Set to all X'FF' - unavail
+         L     RK,=X'FF000000'         |
+         MVCL  RA,RJ                   |
+*
+*  Initialize buffer management routines
+*
+         L     RN,#FIPARM
+         WITH  (FIPARMS,RN),BEGIN
+         WITH  (PARMIN,FITYPE)
+*
+*  Init File IO blocks
+*
+         GETPARM2 KEY=(FILE,FILEIOS),REGS=(RA,RJ)
+         IF    NZ,'LA  RA,100'     Minimum if none specified
+         PSET  @SBINIT
+         PMOV  @SBILEN,=A(L'FILIOP) Buffer length
+         ST    RA,@SBICNT          Count of buffers
+         SET   @SBGLHI             High memory
+         SET   @SBFIX              Fixed
+         VCALL SBUFINIT            Initialize the buffer pool
+         ST    RVR,FILEIOP         IO parm blocks
+*
+*  Exclude all cache blocks from any guest dump?
+*
+         GETPARM2 FISTR,KEY=(,CDUMPNOT),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FILBNOTD                Don't dump cache blocks
+         END   ,                       OF Look for Y/N
+*
+*  Use hiperspace cache?
+*
+         GETPARM2 FISTR,KEY=(,HCACHE),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FILBFHCA                Use hiperspace cache
+         END   ,                       OF Look for Y/N
+*
+*        Hiperspace cache
+*
+         IF    FILBFHCA,BEGIN      Hiperspace cache
+*-
+*-       Initialize file cache.
+*-
+         GETPARM2 KEY=(,FILEBUFH),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'L RA,=A(10000)' Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF         Number of buffers
+         VCALL CHOPEN              Call hiperspace init
+         ST    RVR,FILE2KCH        Save cache info
+         ST    RVR,FILE4KCH        Save cache info
+*-
+*-       Initialize system record file cache
+*-
+         GETPARM2 KEY=(,FSYSBUFH),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,1000'    Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF         Number of buffers
+         VCALL CHOPEN              Call hiperspace init
+         ST    RVR,FILE2KCS        Save cache info
+         ST    RVR,FILE4KCs        Save cache info
+*-
+*-       Initialize Read Buffer Table
+*-
+         GETPARM2 KEY=(,,READBUFH),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,100'      Minimum if none specified
+         PSET  @SBINIT
+         PMOV  @SBILEN,=A(4096)    Buffer length
+         ST    RA,@SBICNT          Count of buffers
+         SET   @SBGLHI             High non-fixed memory
+         VCALL SBUFINIT            Initialize the buffer pool
+         ST    RVR,FILE2KRB        Read buffers
+         ST    RVR,FILE4KRB        Read buffers
+         END   ,                   Hiperspace cache
+*
+*        Regular cache
+*
+         ELSE  BEGIN               Regular cache
+*-
+*-       Initialize 2K file buffer cache.
+*-
+         GETPARM2 KEY=(,BUF2K,FILEBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'L RA,=A(10000)' Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF         Number of buffers
+         PMOV  @CAODLEN,=A(2048)   Orvyl file sys block length
+         VCALL CAOPEN              Initialize caching routines
+         ST    RVR,FILE2KCH        Save cache info
+*-
+*-       Initialize 2K sytem record file buffer cache
+*-
+         GETPARM2 KEY=(,,FSYSBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,1000'    Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF         Number of buffers
+         PMOV  @CAODLEN,=A(2048)   Orvyl file sys block length
+         VCALL CAOPEN              Initialize caching routines
+         ST    RVR,FILE2KCS        2K sys cache buffers
+*-
+*-       Initialize 2K Read Buffer Table
+*-
+         GETPARM2 KEY=(,,READBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,20'      Minimum if none specified
+         PSET  @SBINIT
+         PMOV  @SBILEN,=A(2048)   Buffer length
+         ST    RA,@SBICNT         Count of buffers
+         SET   @SBGLHI            High non-fixed memory
+         VCALL SBUFINIT           Initialize the buffer pool
+         ST    RVR,FILE2KRB       2K Read buffers
+*-
+*-       Initialize 4K file buffer cache.
+*-
+         GETPARM2 KEY=(,BUF4K,FILEBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,100'    Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF        Number of buffers
+         PMOV  @CAODLEN,=A(4096)  Orvyl file sys block length
+         VCALL CAOPEN             Initialize caching routines
+         ST    RVR,FILE4KCH       Save cache ptr
+*-
+*-       Initialize 4K sytem record file buffer cache
+*-
+         GETPARM2 KEY=(,,FSYSBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,1000'    Minimum if none specified
+         PSET  @CAOPEN
+         IF    FILBNOTD,'SET @CAOFNOT' Don't dump cache blocks
+         ST    RA,@CAONBUF         Number of buffers
+         PMOV  @CAODLEN,=A(4096)   Orvyl file sys block length
+         VCALL CAOPEN              Initialize caching routines
+         ST    RVR,FILE4KCS        4K sys cache buffers
+*-
+*-       Initialize 4K Read Buffer Table
+*-
+         GETPARM2 KEY=(,,READBUFS),TYPE=INT,REGS=(RA,RJ)
+         IF    NZ,'LA  RA,2'       Minimum if none specified
+         PSET  @SBINIT
+         PMOV  @SBILEN,=A(4096)    Buffer length
+         ST    RA,@SBICNT          Count of buffers
+         SET   @SBGLHI             High non-fixed memory
+         VCALL SBUFINIT            Initialize the buffer pool
+         ST    RVR,FILE4KRB        4K Read buffers
+         END   ,
+         END   ,                   Regular cache
+*
+*  Set MAT pointer to buffer wait block list
+*
+         LA    R15,FILEBW          Init list
+         L     RY,MATPTR           Set pointer for RESMAN in MAT
+         WITH  (MAT,RY),'ST R15,MATSBWB' Set anchor in MAT
+*
+*  Set up I/O loop
+*
+         LA    RK,FILEFFSB-(FSBCHAIN-FSB)       Set anchor as prev
+         ST    RK,#FIPREV              |
+         CLEAR #FIFSID                 | first file sys coming up
+*
+*  Loop through FSs, initializing them
+*
+INITFS   LOOP  BEGIN                   Loop through FSs
+         L     RN,#FIPARM
+         WITH  (FIPARMS,RN),BEGIN      Parameter addr
+         WITH  (PARMIN,FITYPE)
+         MVC   FIKEY2,=CL8'FS'         Set second level keyword
+         L     RA,#FIFSID              |
+         INCR  RA                      | fsid + 1
+         CVD   RA,#FIWORK              |
+         UNPK  FIKEY2+2(3),#FIWORK     |
+         OI    FIKEY2+4,C'0'           | set sign of last digit
+*
+         VMGET L'FSB,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RS,RVR',ZERO),'ABORT NOFSBMEM'
+         WITH  (FSB,RS)                FSB addr
+         LR    RA,RVR                  | Clear FSB
+         LA    RB,L'FSB                |
+         CLEAR RK                      |
+         MVCL  RA,RJ                   |
+         SET   FSBINIT                 Set as in initialization
+*
+         PSET  @FSINIT
+         PMOV  @FSIFSB,LA:FSB
+         PMOV  @FSIPARM,LA:FIPARMS
+         LCALL FSINIT
+*
+         IF    (FSBTBLK,ZERO),BEGIN    No file system of that number
+         VMFREE A=LA:FSB,L'FSB,LOC=GLOBHI,FIX=YES
+         EXIT  INITFS
+         END   ,                       OF No file sys of that number
+*
+*  Set FSID for this file system
+*
+         L     RA,#FIFSID              Get File System ID
+         STC   RA,FSBID                Save ID
+         STC   RA,FSBBID+L'FSBBID-1    Easier to find in dumps
+         INCR  RA
+         ST    RA,#FIFSID
+*
+*  Get Owner account for this FSID
+*
+         MVC   FSBOWNER,=CL6'GG.ORV'   Default owner
+         GETPARM2 FISTR,KEY=(,,OWNER),TYPE=STRING,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Owner parm OK
+         CEIL  RB,L'FSBOWNER
+         DEX   RB,'MVC FSBOWNER(0),@RA'
+         END   ,                       OF Owner parm OK
+*
+*  Get Name of this file system
+*
+         MVC   FSBNAME,=CL8' '         Default name
+         GETPARM2 FISTR,KEY=(,,NAME),TYPE=STRING,REGS=(RA,RJ)
+         IF    NZ,'LA EPAR,2 ; B BADPARM '
+         CEIL  RB,L'FSBNAME
+         DEX   RB,'MVC FSBNAME(0),@RA'
+*
+*  Get DDNAME of this file system
+*
+         MVC   FSBDDN,=CL8' '          Default DDNAME
+         GETPARM2 FISTR,KEY=(,,DDNAME),TYPE=STRING,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              DDNAME supplied
+         CEIL  RB,L'FSBDDN
+         DEX   RB,'MVC FSBDDN(0),@RA'
+         END   ,                       OF DDNAME supplied
+*
+*  Get default block allocation of this file system
+*
+         MVC   FSBDBLK,=A(2500)        Default block allocation
+         GETPARM2 KEY=(,,DEFBLOCK),TYPE=INT,REGS=(RA,RJ)
+         IF    ZERO,BEGIN
+         ST    RA,FSBDBLK
+         END   ,                       OF Default block allocation
+*
+*  Get number of catalog buffers this file system
+*  This number is stored in FSBBLKTOP, and buffers are allocated
+*  later
+         MVC   FSBBLKTOP,=A(4)         Default number of blocks
+         GETPARM2 KEY=(,,CATBUFF),TYPE=INT,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Catalog buffers
+         FLOOR RA,4
+         CEIL  RA,CFSBBUF
+         ST    RA,FSBBLKTOP
+         END   ,                       OF Catalog buffers
+*
+*  Get number of blocks to cache in block allocation buffer
+*
+         MVC   FSBBMCNO,=Y(64)         Default number to cache
+         GETPARM2 KEY=(,,BITCACHE),TYPE=INT,REGS=(RA,RJ)
+         IF    ZERO,'STH RA,FSBBMCNO'   Number of blocks to cache
+*
+*  Is this a production file system?
+*
+         GETPARM2 FISTR,KEY=(,,PROD),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FSBSPROD                Production file sys
+         END   ,                       OF Look for Y/N
+*-
+*-       Allow batch when system is in Read-Only mode?
+*-
+         GETPARM2 FISTR,KEY=(,,BATCHRO),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FSBSABRO                Allow batch in read-only
+         END   ,                       OF Look for Y/N
+*-
+*-       Allow non-ixr'd files?
+*-
+         GETPARM2 FISTR,KEY=(,,NONIXR),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FSBONIXR                Allow non-ixr files
+         END   ,                       OF Look for Y/N
+*-
+*-       Allow file caching?
+*-
+         GETPARM2 FISTR,KEY=(,,CACHE),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         SET   FSBFCACHE               Do file caching
+         END   ,                       OF Look for Y/N
+*
+*  Is this the designated file system for temporary files?
+*
+         GETPARM2 FISTR,KEY=(,,TEMPFILE),TYPE=YESNO,REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Look for Y/N
+         IF    ('CLI FISTR,C"Y"',NE),EXIT
+         IF    (FILTEMPF,NZ),'ABORT MULTI_TEMPFILES'
+         ST    RS,FILTEMPF             Set file sys for temp files
+         IF    (FSBNAME,EQ,'TEMPFILE'),'SET FSBSTEMP' Dedicated to temp
+         END   ,                       OF Look for Y/N
+*
+*  Set up accounts for this FS
+*    Parameters are in the form A7..ZX etc
+*
+         LOOP  BEGIN                   Get account keywords
+         GETPARM2 FISTR,KEY=(,,ACCT),TYPE=STRING,REGS=(RA,RJ)
+         IF    NZ,EXIT
+         LA    RVR,0                   | Preset error code
+         IF    (RB,NE,6),BADACC
+         LA    RVR,4                   Error code - no dots
+         IF    ('CLC FISTR+2(2),=C".."',NE),BADACC
+         MVC   FISTR+2(2),FISTR+4      Translate - Move 2nd acct
+         OC    FISTR(4),=CL4' '        | to upper case
+         TR    FISTR(4),ACCTBL         | to numerics
+         LA    RVR,8                   Preset error code
+         IF    (('CLI FISTR+0,25',GT),OR,('CLI FISTR+1,35',GT),OR,     *
+               (' CLI FISTR+2,25',GT),OR,('CLI FISTR+3,35',GT)),       *
+               BADACC
+         LC    RA,FISTR                Starting account
+         MH    RA,=Y(36)               |
+         LC    RB,FISTR+1              |
+         ALR   RA,RB                   |
+         LC    RJ,FISTR+2              Ending account
+         MH    RJ,=Y(36)               |
+         LC    RK,FISTR+3              |
+         ALR   RJ,RK                   |
+         LA    RVR,12                  Preset error code
+         IF    ('SR RJ,RA',NEG),BADACC
+         LA    RJ,@RJ+1                Number of acct groups
+         AL    RA,FILEFSGT             Offset of first acc group
+         LR    EPAR,RA                 |
+         LR    RB,RJ                   Check for unassigned - len
+         L     RK,=X'FF000000'         |
+         LA    RVR,12                  | preset error code
+         CLCL  RA,RJ                   |
+         IF    NE,BADACC               |
+         ICM   RK,8,FSBID              Set file system id
+         LR    RA,EPAR                 | location
+         LR    RB,RJ                   | length
+         MVCL  RA,RJ                   |
+         END   ,                       OF Get account keywords
+         LA    RB,FSB
+         END   ,                       OF Parameter addr
+
+         WITH  (FSB,RB)
+         L     RJ,#FIPREV
+         WITH  (FSB,RJ),LABEL=PREV,BEGIN
+         ST    RB,PREV.FSBCHAIN        Back points fwd
+         END   ,
+         ST    RB,#FIPREV              Set this as previous
+*
+*  Set Buffer Management Pointers
+*
+         IF    (FSBDSZ,EQ,2048),BEGIN
+         IF    FILBFHCA,'SET FSBHCACHE' Indicate hiperspace cache
+         MVC   FSBCACHE,FILE2KCH       Block Cache anchor
+         MVC   FSBRBT,FILE2KRB         Read Buffer Table
+         MVC   FSBCACHS,FILE2KCS       Sys cache anchor
+         END   ,
+         ELSE  BEGIN
+         IF    FILBFHCA,'SET FSBHCACHE' Indicate hiperspace cache
+         MVC   FSBCACHE,FILE4KCH       Block Cache anchor
+         MVC   FSBRBT,FILE4KRB         Read Buffer Table
+         MVC   FSBCACHS,FILE4KCS       Sys cache anchor
+         END   ,
+         MVC   FSBIOP,FILEIOP          Set pointer for io parm blks
+         END   ,                       OF Loop through FSs
+*
+*  FSB initializations are complete
+*
+         MVC   FILEFSBC,#FIFSID        Number of FSBs
+*
+*  Free parameter area
+*
+         VMFREE A=L:#FIPARM,L'FIPARMS,LOC=GLOBHI
+*
+*  Now initialize the File Systems
+*
+         L     RK,FILEFFSB         First FSB
+         WITH  (FSB,RK)
+         CLEAR RA                  FSID
+         LOOP  BEGIN               Init all file systems
+         SET   FSBINIT             Set init in progress
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         VCALL FMANINIT            Manager init
+         VCALL FCATINIT            Catalog init
+         VCALL FBITINIT            Bitmap init
+         CLEAR FSBINIT             Init done
+*
+* CLAIM OWNERSHIP OF THE FILE SYSTEMS
+*
+         REGCH (RVR,R0),(RS,R1)
+         LA    RS,L'FSBNAME            MAXIMUM NAME LENGTH
+         LOOP  BEGIN
+         LA    RM,FSBNAME-1(RS)        LAST CHARACTER
+         CLI   @RM,C' '                STRIP
+         IF    NE,EXIT                 | BLANKS
+         DECR  RS
+         END   ,
+         LA    RVR,FSBNAME             Location / RS = length
+         L     RM,MATPTR
+         WITH  (MAT,RM),'LA RM,MATSNAME'
+         LA    RN,X'03'                Enqueue exclusive
+         SYSCTL RVR,RM,TYPE=MVSENQ
+         IF    NZ,'SET  FSBARO'        MARK IT READ ONLY IF IN USE
+*
+         INCR  RA
+         L     RK,FSBCHAIN             Next FSB
+         UNTIL (RK,ZERO),END           |
+         SPACE ,
+*
+*  INITIALIZE TEMP FILE DELETE PROCESSING
+*
+         VCALL FMANTDIN                Initialize temp file delete
+*
+*  TELL JES IF EVERYTHING CAME UP OK
+*
+         ACALL STATFS
+         VCALL M1GOSTAT
+         PEND  ,
+         SPACE
+BADPARM  ABORT BADFILEPARM             EPAR = CODE OF WHICH PARM
+         SPACE
+BADACC   ABORT BADFILEACCT             RVR = subclass of error
+         EJECT ,
+ACCTBL   EQU   ACCTDATA-C'A'
+ACCTDATA DC    (C'9'-C'A'+1)X'FF'
+         ORG   ACCTBL+C'A'
+         DC    AL1(00,01,02,03,04,05,06,07,08)  A..I
+         ORG   ACCTBL+C'J'
+         DC    AL1(09,10,11,12,13,14,15,16,17)  J..R
+         ORG   ACCTBL+C'S'
+         DC    AL1(18,19,20,21,22,23,24,25)     S..Z
+         ORG   ACCTBL+C'0'
+         DC    AL1(26,27,28,29,30,31,32,33,34,35)       0..9
+         ORG   ,
+         LTORG ,
+         TITLE 'Initialize a single file system'
+*********************************************************************
+*  Open the datasets for an individual file system                  *
+*                                                                   *
+*   Input - @FSINIT                                                 *
+*             The FSB is allocated and cleared, but otherwise       *
+*           uninitialized.                                          *
+*             The parameter area is set up with the parameter type  *
+*           (string) and the proper keywords to retrieve the files  *
+*           for the file system in question.                        *
+*                                                                   *
+*  Output - FSB                                                     *
+*             If no files are found, then the total block count is  *
+*           zero, and the calling routine will take this as a       *
+*           signal to stop initializing FSBs                        *
+*                                                                   *
+*********************************************************************
+         SPACE
+#FSINIT  RECORD BEGIN
+#FSIIOID DS    A                       I/O id for I/O supervisor
+#FSIPRE  DS    A                       Previous DS descriptor
+#FSICBLK DS    A                       Contiguous block count
+         END   ,
+
+@FSINIT  RECORD BEGIN
+@FSIFSB  DS    A                       Pointer to FSB
+@FSIPARM DS    A                       Init parameter pointer
+         END   ,
+
+FILEDAL  RECORD BEGIN
+DALFIO   DS    XL(L'#FIOOPEN)          Host master parameters
+         DS    0D
+DALAINFO DS    XL(L'@DSALLO)           Allocation info
+         DS    0D
+DALOINFO DS    XL(L'#PFINFO)           Open info
+         DS    0D
+DALCLR   EQU   DALAINFO,*-DALAINFO,C'A'
+         END   ,
+
+FSINIT   PROC  @FSINIT,#FSINIT
+         L     RY,@FSIFSB              FSB pointer
+         WITH  (FSB,RY)                |
+         MVC   FSBBID,=CL4'FSB'        Set block id
+*
+*  Get I/O id from I/O supervisor
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         ST    RVR,#FSIIOID
+*
+*  Get dataset allocation area (used by host)
+*
+         VMGET L'FILEDAL,LOC=GLOBHI,FIX=YES     DS alloc work area
+         IF    ('LTR RX,RVR',ZERO),'ABORT NOFILDAL'
+         WITH  (FILEDAL,RX)
+         WITH  (#FIOOPEN,DALFIO)
+         WITH  (@DSALLO,DALAINFO)
+         WITH  (#PFINFO,DALOINFO)
+         MVC   #FIOOCMD,=A(#FCOPEN)
+         LRA   RK,@DSALLO              Set alloc area addr
+         ST    RK,#FIOALLO             |
+         LRA   RK,#PFINFO              Set open info area addr
+         ST    RK,#FIOINFO             |
+*
+*  Initialize loop parameters for opening datasets
+*
+         LA    RK,FSBFRDB-(DSDNXT-FILEDSD)      First RDB pointer
+         ST    RK,#FSIPRE              |
+         CLEAR #FSICBLK                Cumulative block count
+*
+*  Open all datasets for this file system
+*
+FSDSNOPN LOOP  BEGIN                   Open all datasets
+         L     RN,@FSIPARM
+         WITH  (FIPARMS,RN),BEGIN      Addr to parameter area
+         WITH  (PARMIN,FITYPE)
+         GETPARM2 FISTR,KEY=(,,FILE),TYPE=STRING,REGS=(RA,RJ)
+         IF    NZ,EXIT,FSDSNOPN        No more DSNs this file sys
+*
+         CLEAR DALCLR                  Clear alloc work area
+         VMGET L'FILEDSD,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RK,RVR',ZERO),'ABORT NOFILDSD'
+         WITH  (FILEDSD,RK)
+         CLEAR FILEDSD
+*
+         MVI   DSDDSN,C' '             Blank dataset name
+         MVC   DSDDSN+1(L'DSDDSN-1),DSDDSN
+         CEIL  RB,L'DSDDSN
+         DEX   RB,'MVC DSDDSN(0),@RA'
+         PSET  @DSDEDIT
+         PMOV  @DSDEDSN,DSDDSN
+         ACALL DSDEDIT                 Edit all other FSBs thus far
+         IF    (RVR,Z),BEGIN
+         PMOV  @DSDEFSB,LA:FSB         Edit this one also
+         ACALL DSDEDIT
+         END   ,
+         IF    (RVR,NZ),'ABORT DSN_MULTI_REF' Already opened to Orvyl
+         L     RJ,#FSIPRE              Point fwd to this DS block
+         WITH  (FILEDSD,RJ),LABEL=PREV,BEGIN
+         ST    RK,PREV.DSDNXT          |
+         END   ,                       OF Point fwd to this DS block
+         ST    RK,#FSIPRE              | and set ourselves as prev
+         END   ,                       OF Addr to parameter area
+*
+         WITH  (FILEDSD,RK)
+         MVC   @DSDSN,DSDDSN           Set Host alloc parms
+         SET   @DSSHR                  |
+*
+*  Get a channel ID
+*
+         LA    RB,#IOUFILE
+         SYSCTL (RB),TYPE=ALLOC
+         IF    (RB,ZERO),'ABORT FILEDAL'        Dynamic alloc no good
+         ST    RB,DSDCHID
+*
+*  Do the I/O to allocate the file
+*
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,(RB)           Channel ID
+         PMOV  @IOSID,#FSIIOID         I/O Supervisor ID
+         PMOV  @IOSPID,PZCURPID        This process ID
+         PMOV  @IOSCP,LA:#FIOOPEN      Channel program
+         REGCH (RA,R2)                 Hardware uses R2 for key
+         IPK   ,                       |
+         STC   RA,@IOSKEY              |
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+         IF    (RVR,NZ),BEGIN      Bad I/O completion...
+         ORVSNAP DSDDSN            File name with problems
+         ORVSNAP DSDDSN+16         Next part of dsname
+         ABORT FILEOPEN            Terminate
+         END
+*
+*  Check and set up file parameters
+*
+         L     RA,#FSICBLK             Absolute blk offset
+         ST    RA,DSDSTART             |
+         L     RB,#PFIBKS              Number of blocks
+         ST    RB,DSDCNT               |
+         ALR   RA,RB                   Update cumulative cnt
+         ST    RA,#FSICBLK             |
+         L     RA,#PFIBLK              Block len
+         LC    RB,#PFIKEY              Key len
+         IF    (RB,Z),BEGIN            Unkeyed blocks
+         LA    RB,L'FBHDR              Default header length
+         SR    RA,RB                   Block length includes header
+         END   ,
+         IF    ((RA,NE,2048),AND,(RA,NE,4096)),'ABORT FBLKSIZE'
+         STH   RA,DSDLEN               |
+         STH   RB,DSDHDR               |
+*
+         IF    (FSBDSZ,ZERO),'STH RA,FSBDSZ'
+         IF    (#PFODPO,OR,^#PFORF,OR,(RB,GT,L'FILHDR),OR,             +
+               ('CH RA,FSBDSZ',NE)),BEGIN
+         ABORT FILETYPE
+         END   ,
+*
+*  Loop to next file name
+*
+         END   ,                       OF Open all datasets
+         L     RB,#FSICBLK             Total number of blocks
+         ST    RB,FSBTBLK              |
+         IF    (RB,LT,200),'SET FSBANAVL'       No file activity
+         MVC   FSBLRDB,#FSIPRE
+*
+*  Free work area for allocs
+*
+         VMFREE A=LA:FILEDAL,L'FILEDAL,LOC=GLOBHI,FIX=YES
+*
+*  Free I/O id
+*
+         PSET  @IOSID                  Free I/O id
+         PMOV  @IOSID,#FSIIOID         |
+         VCALL IOSIDFRE                |
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  Add or remove a volume from the file system                      *
+*                                                                   *
+*********************************************************************
+#FSADDV  RECORD BEGIN
+#FSAIOID DS    F
+#FSAFDAL DS    A
+#FSAFDSD DS    A
+         END   ,
+
+FSADDVOL PROC  @FSADDV,#FSADDV,SCOPE=GLOBAL
+*
+*  Determine file system id
+*
+         CLEAR #FSADDV
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATFILCB'
+         WITH  (FILECB,RY),BEGIN
+         L     RY,FILEFFSB         Point to first FSB
+         L     R0,FILEFSBC         Count of FSB's
+         END   ,
+         L     R14,@FSADDVF        File system name pointer
+         WITH  (FSB,RY)
+         LOOP  BEGIN
+         CLC   FSBNAME,@R14        Same name?
+         IF    EQ,EXIT             Found
+         L     RY,FSBCHAIN         Next in chain
+         UNTIL (BCT,R0),END
+         IF    (R0,Z),BEGIN        Invalid file system name
+         LA    RN,4
+         B     FSADDVOX            Exit
+         END   ,
+*
+*  Get dataset allocation area (used by host)
+*
+         VMGET L'FILEDAL,LOC=GLOBHI,FIX=YES DS alloc work area
+         IF    ('LTR RX,RVR',ZERO),'ABORT NOFILDAL2'
+         ST    RX,#FSAFDAL
+         WITH  (FILEDAL,RX)
+         CLEAR DALCLR              Clear alloc work area
+*
+*  Get I/O id from I/O supervisor
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         ST    RVR,#FSAIOID
+
+         WITH  (FILEDSD,RK)
+         WITH  (FILEDSD,RJ),LABEL=PREV
+
+         IF    (@FSADDVD,NZ),BEGIN Add volume
+*
+*  Get DSD for volume to add
+*
+         VMGET L'FILEDSD,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RK,RVR',ZERO),'ABORT NOFILDSD2'
+         ST    RK,#FSAFDSD         Save pointer
+         CLEAR FILEDSD
+         L     R14,@FSADDVD        DSN pointer
+         MVC   DSDDSN,@R14         Set DSN
+         PSET  @DSDEDIT
+         PMOV  @DSDEDSN,DSDDSN
+         ACALL DSDEDIT
+         IF    (RVR,NZ),BEGIN
+         LA    RN,28               Volume already referenced
+         B     FSADDVOX            Exit
+         END   ,
+
+         WITH  (#FIOOPEN,DALFIO)
+         WITH  (@DSALLO,DALAINFO)
+         WITH  (#PFINFO,DALOINFO)
+         MVC   #FIOOCMD,=A(#FCOPEN)
+         LRA   RS,@DSALLO              Set alloc area addr
+         ST    RS,#FIOALLO             |
+         LRA   RS,#PFINFO              Set open info area addr
+         ST    RS,#FIOINFO             |
+         MVC   @DSDSN,DSDDSN           Set Host alloc parms
+         SET   @DSSHR                  |
+*
+*  Get a channel ID
+*
+         LA    RB,#IOUFILE
+         SYSCTL (RB),TYPE=ALLOC
+         IF    (RB,ZERO),BEGIN     Allocation error
+         LA    RN,8
+         B     FSADDVOX            Exit
+         END   ,
+         ST    RB,DSDCHID
+*
+*  Do the I/O to allocate the file
+*
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,(RB)           Channel ID
+         PMOV  @IOSID,#FSAIOID         I/O Supervisor ID
+         PMOV  @IOSPID,PZCURPID        This process ID
+         PMOV  @IOSCP,LA:#FIOOPEN      Channel program
+         REGCH (RA,R2)                 Hardware uses R2 for key
+         IPK   ,                       |
+         STC   RA,@IOSKEY              |
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+         IF    (RVR,NZ),BEGIN      Bad I/O completion...
+         LA    RN,12               Open error
+         B     FSADDVOX            Exit
+         END   ,
+*
+*  Check and set up file parameters
+*
+         L     RB,#PFIBKS              Number of blocks
+         ST    RB,DSDCNT               |
+         L     RA,#PFIBLK              Block len
+         LC    RB,#PFIKEY              Key len
+         IF    (RB,Z),BEGIN            Unkeyed blocks
+         LA    RB,L'FBHDR              Default header length
+         SR    RA,RB                   Block length includes header
+         END   ,
+         STH   RA,DSDLEN               |
+         STH   RB,DSDHDR               |
+*
+         L     RJ,FSBLRDB          Current last DSD
+         L     R15,PREV.DSDSTART   Get start of last
+         A     R15,PREV.DSDCNT     Calc start of new
+         ST    R15,DSDSTART        Set start of new volume
+         CLEAR RN                  Set to good return
+         IF    (PREV.DSDLEN,NE,DSDLEN),'LA RN,16'
+         ELSEIF (PREV.DSDHDR,NE,DSDHDR),'LA RN,20'
+         ELSE  BEGIN
+         A     R15,DSDCNT          Calc total blocks
+         LA    R15,@R15+7          Round up
+         SRL   R15,3               Calc number of bitmap bytes
+         CLEAR R14
+         LH    RVR,FSBDSZ          Block size
+         DR    R14,RVR
+         IF    (R14,NZ),'INCR R15' Need a block for extras too
+         IF    (R15,GT,FSBBITBC),'LA RN,24' Not enough bitmaps
+         END   ,
+
+         IF    (RN,NZ),FSADDVOC    Error, close dataset
+
+         CLEAR #FSAFDSD            Don't release
+         ST    RK,FSBLRDB          Set new last
+         ST    RK,PREV.DSDNXT      Set new next in old last
+         L     RVR,DSDCNT
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         VCALL FBITADDV            Bitmap processing needs to know
+         ORVSNAP 'Volume added to file system:'
+         ORVSNAP FSBNAME,L'FSBNAME
+         ORVSNAP FILEDSD,L'FILEDSD
+         B     FSADDVOX            Exit
+         END   ,                   Add volume
+
+         ELSE  BEGIN               Remove volume
+         L     RJ,FSBFRDB          Current first DSD
+         L     RK,FSBLRDB          Current last DSD
+         WHILE (RK,NE,PREV.DSDNXT),'L RJ,PREV.DSDNXT' Next to last
+         L     RVR,DSDCNT
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         VCALL FBITREMV            Bitmap processing needs to know
+         IF    (RVR,NZ),BEGIN
+         LA    RN,8                Blocks being used in volume
+         B     FSADDVOX            Exit
+         END   ,
+         CLEAR PREV.DSDNXT         Remove last from list
+         ST    RJ,FSBLRDB          Set new last
+         ST    RK,#FSAFDSD         Free DSD
+         ORVSNAP 'Volume removed from file system:'
+         ORVSNAP FSBNAME,L'FSBNAME
+         ORVSNAP FILEDSD,L'FILEDSD
+         END   ,                   Remove volume
+
+FSADDVOC LABEL ,                   Close volume
+
+         WITH  (#FICLOSE,DALFIO)
+         MVC   #FIOOCMD,=A(#FCCLOSE)
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,DSDCHID        Channel ID
+         PMOV  @IOSID,#FSAIOID         I/O Supervisor ID
+         PMOV  @IOSPID,PZCURPID        This process ID
+         PMOV  @IOSCP,LA:#FICLOSE      Channel program
+         REGCH (RA,R2)                 Hardware uses R2 for key
+         IPK   ,                       |
+         STC   RA,@IOSKEY              |
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+
+FSADDVOX LABEL ,                   Exit
+*
+*  Free DSD
+*
+         IF    (#FSAFDSD,NZ),BEGIN
+         VMFREE A=LA:FILEDSD,L'FILEDSD,LOC=GLOBHI,FIX=YES
+         END   ,
+*
+*  Free work area for allocs
+*
+         IF    (#FSAFDAL,NZ),BEGIN
+         VMFREE A=LA:FILEDAL,L'FILEDAL,LOC=GLOBHI,FIX=YES
+         END   ,
+*
+*  Free I/O id
+*
+         IF    (#FSAIOID,NZ),BEGIN
+         PSET  @IOSID                  Free I/O id
+         PMOV  @IOSID,#FSAIOID         |
+         VCALL IOSIDFRE                |
+         END   ,
+         LR    RVR,RN              Set return
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*
+*  Edit to make sure that a file system volume is not specified more
+*  than once to Orvyl.
+*
+*      RETURNS: RVR = 0  Volume not already opened
+*                     4  Volume already opened
+*
+*---------------------------------------------------------------------*
+@DSDEDIT RECORD BEGIN
+@DSDEFSB DS    A
+@DSDEDSN DS    CL44
+         END   ,
+DSDEDIT  PROC  @DSDEDIT
+         WITH  (FILEDSD,RJ)
+         WITH  (FSB,RB)
+         CLEAR RVR                 ASSUME ALL OK
+         IF    ('LT RB,@DSDEFSB',Z),BEGIN  Not single FSB option
+         L     RS,MATPTR
+         WITH  (MAT,RS),'L RS,MATFILCB'
+         WITH  (FILECB,RS),'L RB,FILEFFSB'
+         WHILE (RB,NZ),BEGIN
+         L     RJ,FSBFRDB          First DSD
+         WHILE (RJ,NZ),BEGIN
+         IF    (DSDDSN,EQ,@DSDEDSN),BEGIN Already opened!
+         LA    RVR,4
+         EXIT  DSDEDIT             Return error
+         END   ,
+         L     RJ,DSDNXT           Next DSD pointer
+         END   ,
+         L     RB,FSBCHAIN         Next FSB
+         END   ,
+         END   ,                   Not single FSB option
+         ELSE  BEGIN               Single FSB option
+         L     RJ,FSBFRDB          First DSD
+         WHILE (RJ,NZ),BEGIN
+         IF    (DSDDSN,EQ,@DSDEDSN),BEGIN Already opened!
+         LA    RVR,4
+         EXIT  DSDEDIT             Return error
+         END   ,
+         L     RJ,DSDNXT           Next DSD pointer
+         END   ,
+         END   ,                   Single FSB option
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*
+*  DETERMINE STATUS OF PRODUCTION FILE SYSTEM(S)
+*
+*      RETURNS: RVR = 0  ALL PRODUCTION FILE SYSTEMS AVAILABLE
+*                     4  ONE OR MORE UNAVAILABLE OR READ-ONLY
+*
+*---------------------------------------------------------------------*
+STATFS   PROC  SCOPE=GLOBAL
+         L     RS,MATPTR
+         WITH  (MAT,RS),'L RS,MATFILCB'
+         WITH  (FILECB,RS),'L RS,FILEFFSB'
+         USING FSB,RS                  ##
+         CLEAR RVR                     ASSUME ALL OK
+         WHILE (RS,NZ),BEGIN
+         IF    FSBSPROD,BEGIN          PRODUCTION FILE SYSTEMS ONLY
+         IF    FSBANAVL,'LA  RVR,4'    CHECK STATUS
+         IF    FSBSABRO,EXIT           READ ONLY OK
+         IF    FSBARO,'LA  RVR,4'      CHECK STATUS
+         END   ,
+         L     RS,FSBCHAIN
+         END   ,
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FDOIODO - File IO routine
+*
+*   Inputs - @FDOIODO
+*
+*   Output - None (all errors are fatal)
+*
+*---------------------------------------------------------------------*
+#FDOIODO RECORD BEGIN
+#STCK    DS    D
+#RETCODE DS    F
+#IOSID   DS    F
+         END   ,
+
+FDOIODO  PROC  @FDOIODO,#FDOIODO,SCOPE=GLOBAL
+         WITH  (FILIOP,RA)
+         WITH  (#FIODO,FILPARM)
+         WITH  (FBHDR,FILHDR)
+         WITH  (FSB,RB)
+         WITH  (FILEDSD,RK)
+
+         L     R15,PZCURASB
+         LM    R0,R3,@FDOIODO     Get input parms
+* R14 = return to caller address
+* R15 = ASB pointer
+* R0  = FSB pointer
+* R1  = block number
+* R2  = IO data buffer
+* R3  = data length (2), block type (1), flags (1)
+         XTRC  R14,R3,FDOIODO     Save some clues
+
+         L     RB,@FDOFSB          Point to FSB
+
+         CLEAR #RETCODE
+
+         IF    (^@FDOFW,AND,^@FDOFR),'ABORT BADIOENTRY'
+
+         IF    (@FDODATA,Z),BEGIN  Read buffer not supplied
+         IF    @FDOFW,'ABORT NO_WRITE_BUFF'
+         PSET  @SBGET
+         PMOV  @SBGPOO,FSBRBT      Get a read buffer
+         VCALL SBUFGET    Note: caller must release buffer when done!
+         MVC   @FDODATA,@SBGADR
+         MVC   @FDODATL,FSBDSZ
+         END   ,                   Read buffer not supplied
+
+         PSET  @SBGET
+         PMOV  @SBGPOO,FSBIOP      Get a IO parm block
+         VCALL SBUFGET
+         L     RA,@SBGADR          Point to IO parm block
+
+         LC    R15,FSBID
+         ST    R15,#FIOFSID        File system id
+         MVC   #FIOBLKID,@FDOBLK   Block number this file sys
+         LA    R15,FBHDR
+         ST    R15,#FIOHDRP        Header address
+
+         L     RK,FSBFRDB          List of RDB's
+         L     R15,#FIOBLKID       Get block id this file sys
+         LOOP  BEGIN               Loop forever
+         IF    (R15,LT,DSDCNT),EXIT On this device
+         SL    R15,DSDCNT          Decrement logical block number
+         IF    ('LT RK,DSDNXT',Z),'ABORT BAD_BLOCK_NUMBER'
+         END   ,                   End loop
+         ST    R15,#FIORBLK        Block number on this DS
+         LH    R15,DSDHDR          Length of header
+         ST    R15,#FIOHDRL        Set header len
+
+         IF    @FDOFW,BEGIN        Write
+         BAS   RS,FDOIOBLK         Edit block types
+         MVC   #FIODCMD,=A(#FCWRITE)
+         MVC   #FIODATAP,@FDODATA  Get data address
+         LH    R15,@FDODATL
+         ST    R15,#FIODATAL       Set data length
+         MVC   FBHBLOCK,@FDOBLK+1  Set block number
+         MVC   FBHTYPE,@FDOTYPE    Set block type
+         MVC   FBHLEN,@FDODATL     Set length of data
+         STCK  #STCK
+         MVC   FBHTIME,#STCK       Set write time
+         END   ,                   Write
+
+         ELSE  BEGIN               Read
+
+         MVC   #FIODCMD,=A(#FCREAD)
+         MVC   #FIODATAP,@FDODATA  Set data address
+         LH    R15,@FDODATL
+         ST    R15,#FIODATAL       Set data length
+
+         IF    (FSBFCACHE,AND,^@FDODISK),BEGIN Caching enabled
+         IF    @FDOFUSE,'L RS,FSBCACHE' User cache
+         ELSEIF (@FDOS106,OR,@FDOS115),'CLEAR RS' No cache
+         ELSE  'L RS,FSBCACHS'     System cache
+         IF    (RS,NZ),BEGIN       Cache defined for this
+         PSET  @CAIO
+         PMOV  @CAIOCIT,(RS)       CIT ptr
+         L     R14,#FIOFSID        File system ID
+         L     R15,#FIOBLKID       Block number in file system
+         STM   R14,R15,@CAIOKEY    Save as cache entry key
+         PMOV  @CAIOHP,L:#FIOHDRP  Header data ptr
+         PMOV  @CAIOHL,L:#FIOHDRL  Header length
+         PMOV  @CAIODP,L:#FIODATAP Data ptr
+         PMOV  @CAIODL,L:#FIODATAL Data length
+         IF    FSBHCACHE,'VCALL CHREAD' Hiperspace cache
+         ELSE  'VCALL CAREAD'      Look for block in cache
+         IF    (RVR,Z),BEGIN       Got it...
+         MVC   @FDODATA,#FIODATAP
+         MVC   @FDODATL,FBHLEN
+         MVC   @FDOTYPE,FBHTYPE
+         LA    RM,TTFCACH          Increment cache read counts
+         BAS   RN,FDOIOCTB
+         BAS   RS,FDOIOBLK         Edit block types
+         B     FDOIODOX            Done
+         END   ,                   Got it...
+         END   ,                   Cache defined for this
+         END   ,                   Caching enabled
+         END   ,                   Read
+
+         L     R15,#FIOHDRP        Set real address of header
+         LRA   R15,@R15
+         ST    R15,#FIOHDRR
+
+         IF    ('LT R0,#FIODATAL',Z),'CLEAR #FIODATAP' No addr/len list
+         ELSE  BEGIN
+
+         LRA   R15,FILIST          Set real address of addr/len list
+         ST    R15,#FIOIDALR
+
+         L     R15,#FIODATAP       Get first data address
+         LRA   R1,@R15
+         ST    R1,FILISTA1         Set real addr first data address
+         A     R15,=A(4096)        Calc end of page address
+         N     R15,=X'7FFFF000'
+         LR    R14,R15             Get end of page address
+         S     R14,#FIODATAP       Calc len to end of page
+         IF    (R14,GE,R0),BEGIN   Data does not reach end of page
+         ST    R0,FILISTL1         Use full data len
+         OI    FILISTA1,X'80'      Indicate last address
+         END
+         ELSE  BEGIN               Data spans page boundry
+         ST    R14,FILISTL1        Len in first page
+         LRA   R1,@R15
+         ST    R1,FILISTA2         Set real address of page boundry
+         SR    R0,R14              Calc len in second page
+         ST    R0,FILISTL2         Set second data length
+         OI    FILISTA2,X'80'      Indicate last address
+         END   ,
+         END   ,
+
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         ST    RVR,#IOSID          Save the number
+
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,DSDCHID    Channel ID
+         PMOV  @IOSID,#IOSID       I/O supervisor ID
+         PMOV  @IOSCP,LA:#FIODO    Channel program VA
+         IF    @FDOFR,BEGIN
+         L     RY,#FIOIDALR        Determine read storage key
+         ISKE  RX,RY
+         STC   RX,@IOSKEY
+         NI    @IOSKEY,X'F0'
+         END   ,
+         SET   @IOSFSYNC           Wait for I/O to complete
+         VCALL IOSDOIO
+
+         ST    RVR,#RETCODE
+         IF    (RVR,NZ),BEGIN
+         IF    @FDOFUSE,FDOIODOE   Exit on user IO error
+         ABORT FDOIO_BADSYSIO      IXR, bitmap or catalog block
+         END   ,
+
+         IF    @FDOS115,BEGIN      They want the header, not the data!
+         L     R0,@FDODATA
+         LH    R1,@FDODATL
+         LA    R14,FILHDR
+         LH    R15,DSDHDR          Length of header
+         STH   R15,@FDODATL        Set header length
+         MVCL  R0,R14              So, give it to them
+         END   ,
+
+         ELSE  BEGIN               Regular IO
+         IF    @FDOFR,BEGIN
+         MVC   @FDODATL,FBHLEN     Set return data length
+         MVC   @FDOTYPE,FBHTYPE    Set return block type
+         LA    RM,TTFREAD          Increment disk read counts
+         BAS   RN,FDOIOCTB
+         BAS   RS,FDOIOBLK         Edit block types
+         END   ,
+         ELSE  BEGIN
+         LA    RM,TTFWRIT          Increment disk write counts
+         BAS   RN,FDOIOCTB
+         END   ,
+
+* Update cache with copy of data block.
+
+         IF    FSBFCACHE,BEGIN     Caching enabled
+         IF    ('CLI @FDOTYPE,FBHTFSMB',EQ),'CLEAR RS' not needed much
+         ELSEIF ('TM @FDOTYPE,FBHTSYSR',NZ),'L RS,FSBCACHS' Sys cache
+         ELSE  'L RS,FSBCACHE'     General cache
+         IF    (RS,NZ),BEGIN       Cache defined for this
+         PSET  @CAIO
+         PMOV  @CAIOCIT,(RS)       CIT ptr
+         L     R14,#FIOFSID         File system ID
+         L     R15,#FIOBLKID        Block number in file system
+         STM   R14,R15,@CAIOKEY      Save as cache entry key
+         PMOV  @CAIOHP,L:#FIOHDRP  Header ptr
+         PMOV  @CAIOHL,L:#FIOHDRL  Header length
+         PMOV  @CAIODP,L:@FDODATA  Data ptr
+         PMOV  @CAIODL,LH:@FDODATL Data length
+         IF    FSBHCACHE,'VCALL CHWRITE' Hiperspace cache
+         ELSE  'VCALL CAWRITE'     Add/update block in cache
+         END   ,
+         END   ,                   Caching enabled
+         END   ,                   Regular IO
+
+* Maintain I/O time statistics.
+
+         PSET  @IOSTIME            Get elapsed time
+         PMOV  @IOSTID,#IOSID
+         VCALL IOSTIME
+
+         INCRS FSBIOCT             Update times and counts
+         INCRD FSBIOTIM,@IOSIOTIME
+         INCRS DSDICNT
+         INCRD DSDTIME,@IOSIOTIME
+
+FDOIODOE LABEL ,
+         PSET  @IOSIDFRE           Free the number
+         PMOV  @IOSFID,#IOSID
+         VCALL IOSIDFRE
+
+FDOIODOX LABEL ,
+         PSET  @SBFREE
+         PMOV  @SBFPOO,FSBIOP
+         PMOV  @SBFADR,LA:FILIOP   Put the IO parm block back
+         VCALL SBUFREE
+
+         L     RVR,#RETCODE        Set return code
+         EXIT  FDOIODO
+
+
+FDOIOBLK LABEL ,                   Check block type
+         IF    (^@FDOS106,AND,^@FDOS115),BEGIN
+         IF    ^@FDOFUSE,BEGIN
+         IF    ('TM @FDOTYPE,FBHTSYSR',Z),FDOIODOA
+         END   ,
+         ELSEIF ('CLI @FDOTYPE,FBHTUSER',EQ),'VCALL ACDSKIO' Count IO
+         END   ,
+         BR    RS
+
+FDOIODOA ABORT FILEBLKMISMATCH
+
+FDOIOCTB LABEL ,                   Increment counters
+         LA    RS,FDOTAB           Point to type table
+         LA    R0,FDOCNT           Count of table items
+         LOOP  BEGIN
+         IF    ('CLC FBHTYPE,0(RS)',EQ),EXIT
+         LA    RS,2(RS)
+         UNTIL (BCT,R0),END
+         LC    R0,1(RS)            Get counter displacement
+         AR    RM,R0               Add to IO type displacement
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATFILCB'
+         WITH  (FILECB,RY),'LA RY,TTFILECT(RM)'
+         CLEAR #STCK
+         MVI   #STCK+L'#STCK-1,1
+         INCRD @RY,#STCK
+         LA    RY,FSBFIOCT(RM)
+         INCRD @RY,#STCK
+         BR    RN                  Return
+
+FDOTAB   DC    AL1(FBHTFSMB,CTMASD) Block type counter displacements
+         DC    AL1(FBHTCAT,CTCATD)
+         DC    AL1(FBHTBIT,CTBITD)
+         DC    AL1(FBHTIXR,CTIXRD)
+         DC    AL1(FBHTSIXR,CTIXRD)
+         DC    AL1(FBHTMIXR,CTIXRD)
+         DC    AL1(FBHTZIXR,CTIXRD)
+         DC    AL1(FBHTUSER,CTUSED)
+FDOCNT   EQU   (*-FDOTAB)/2
+         DC    AL1(0,CTOTHD)       Are there any others?
+
+         PEND  ,
+         EJECT ,
+         LTORG ,
+         END   .

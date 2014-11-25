@@ -1,0 +1,2009 @@
+INIT     TITLE 'WYLBUR''s Initialization Routine'                               
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+         GBLC  &INSTALN                                                         
+*                                                                               
+WYLINIT  CSECT                                                                  
+         REGS  FSR,,,,,,JCBR,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR               
+         SPACE 2                                                                
+INIT     IDENT 4072                10:30:06 03/12/04  (SLP)                     
+*                                                                               
+         USING (CP),(CV)           Global assumptions                           
+*                                                                               
+         PUSH  DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         EJECT                                                                  
+PFCB     RECORD BEGIN                                                           
+         COPY  PFCB                                                             
+         END                                                                    
+         EJECT                                                                  
+         COPY  RSCGROUP                                                         
+         EJECT                                                                  
+PDBD     RECORD 'PDB'                                                           
+         EJECT                                                                  
+PATHD    RECORD 'PATH'                                                          
+         EJECT                                                                  
+PCWD     RECORD 'PCW'                                                           
+         EJECT                                                                  
+RDWD     RECORD 'RDW'                                                           
+         EJECT                                                                  
+         IHAASCB                                                                
+         EJECT ,                                                                
+         IHAECB ,                                                               
+JFDSECT  DSECT ,                                                                
+         IEFJFCBN ,                                                             
+         IEZIOB ,                                                               
+         EJECT                                                                  
+         IEZDEB                                                                 
+*                                                                               
+DEBDSZDA EQU   DEBNMTRK+L'DEBNMTRK-DEBDASD  len of da ext section               
+         EJECT                                                                  
+         DCBD  DEVD=DA,DSORG=PS                                                 
+*                                                                               
+DCB      EQU   IHADCB                                                           
+         EJECT                                                                  
+USERCVT  RECORD 'USERCVT'                                                       
+         EJECT                                                                  
+         CVT   DSECT=YES                                                        
+         EJECT                                                                  
+         IKJTCB                                                                 
+         EJECT ,                                                                
+         IEFUCBOB ,                                                             
+         EJECT                                                                  
+         IEZJSCB                                                                
+JSCB     EQU   IEZJSCB                                                          
+         EJECT                                                                  
+         COPY  CHRPARMS                                                         
+         EJECT                                                                  
+VOLDSECT VOLUME DSECT=YES                                                       
+VOLENTSZ EQU   *-VOLDSECT                                                       
+*                                                                               
+CV       RECORD BEGIN                                                           
+         COPY  CV                                                               
+         END                                                                    
+*                                                                               
+         COPY  SCANCB                                                           
+*                                                                               
+CP       DSECT                                                                  
+         COPY  CP                                                               
+*                                                                               
+DVTAREA  RECORD BEGIN                                                           
+         IHADVA DSECT=NO                                                        
+         END   ,                                                                
+         EJECT                                                                  
+         POP   DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+***                                                                             
+***  User Checkpoint Entry.                                                     
+***                                                                             
+CHKU     RECORD BEGIN                                                           
+CHKUFLAG FLAG                                                                   
+         FLAG  CHKUFPS             - Pseudo session (no LTIME upd)              
+         FLAG  CHKUFNAR            - No ACTIVE rcvy for this user               
+*                                                                               
+         DS    XL2                 Reserved                                     
+*                                                                               
+CHKUACCT DS    CL5                 Account (uuugg)                              
+*                                                                               
+CHKUPGNO DS    F                   Root page-number (for Actives)               
+         END                                                                    
+         TITLE 'WYLBUR''s Initialization Routines'                              
+**                                                                              
+**  OS entry point is here.                                                     
+**                                                                              
+         ENTRY WYLBUR                                                           
+WYLBUR   BASE                                                                   
+         L     CVR,=V(CV)          Set CV ptr                                   
+         CLEAR CPR                 No user CP                                   
+         ST    R14,CVOSRA          Save return addr                             
+         MVC   CVPARMP,@R1         Save parm ptr                                
+         CLEAR CVMAXSES            ***PJG*** REMOVE AFTER CV CHANGE             
+         VCALL LOCALTOD            Clock at start                               
+         STM   R0,R1,CVSCLCK                                                    
+*                                                                               
+         PRIVCHK ,                 System privs required, pal                   
+*-                                                                              
+*-   The I/O pages WYLBUR gets must be fixed and never swapped.  The            
+*-    following "SYSEVENT TRANSWAP" causes a single swap-out/swap-in            
+*-    now and then all current and future pages will not be swapped.            
+*-       Thanks to Barry Benight for figuring this out.                         
+*-                                                                              
+         CLEAR R1                  Zero means no ECB on SYSEVENT                
+         SYSEVENT TRANSWAP         Ensure non-swappable fixed pages             
+*-                                                                              
+*-       Get dispatcher stack.                                                  
+*-         The dispatcher's stack is now the same size as the user              
+*-         stack.                                                               
+*-                                                                              
+         L     R0,CVSTACKL         Stack length                                 
+         GETMAIN R,LV=(0)          Get dispatcher's stack                       
+         ST    R1,CVDSTK           Save ptr                                     
+*                                                                               
+         L     R8,CVDSTK           Set...                                       
+         LR    R13,R8              ...dispatcher stack                          
+*-                                                                              
+*-                                                                              
+*-       Get user stack and heap.                                               
+*-         (The stack has a little extra that can not be                        
+*-         copied into the page buffers.  The extra is 32K bytes.)              
+*-                                                                              
+         L     R0,CVSTACKL         Stack length                                 
+         A     R0,=A(32*1024)      Plus slop                                    
+         GETMAIN R,LV=(0)          Get stack                                    
+         ST    R1,CVSTACK                                                       
+         A     R1,CVSTACKL                                                      
+         ST    R1,CVSTACKE                                                      
+*                                                                               
+         L     R0,CVHEAPL                                                       
+         GETMAIN R,LV=(0)          Get heap                                     
+         ST    R1,CVHEAP                                                        
+         A     R1,CVHEAPL                                                       
+         ST    R1,CVHEAPE                                                       
+*                                                                               
+         L     R5,CVTPTR           Addr of CVT                                  
+         USING CVT,R5                                                           
+         IF    CVTDCB.X'80','SET CVFXA,CVFXA31'  MVS/XA mode                    
+         L     R2,CVTTCBP          Addr of TCB words                            
+         MVC   CVASCBP,@R2+12      Our ASCB ptr                                 
+         L     R2,@R2+4            Our TCB addr                                 
+         ST    R2,CVTCBP           Save addr                                    
+         WITH  (TCB,R2),BEGIN                                                   
+         MVC   CVKEY,TCBPKF        Save our storage key                         
+         L     R1,TCBJSCB          Our JSCB ptr                                 
+         WITH  (JSCB,R1),'L R15,JSCBTCBP'  Initiator TCB ptr                    
+         ST    R15,CVITCBP         Save initiator TCB ptr                       
+         L     R2,TCBTIO           Addr of our TIOT                             
+         END                                                                    
+         MVC   CVNAME,@R2          Save jobname                                 
+         MVC   CVWYLACC(3),CVNAME  (JESINIT may change this)                    
+         MVC   CVWYLSSN,@R2        Subsys name = jobname                        
+*                                                                               
+         LT    R1,CVTSMCA          SMF SMCA ptr                                 
+         IF    NZ,BEGIN                                                         
+         MVC   CVMACHID,CVBLANKS                                                
+         MVC   CVMACHID(4),@R1+16  SMF machine ID                               
+*        XWTO  'CVMACHID '         *** slp debug ***                            
+*        XWTO  CVMACHID,4          *** slp debug ***                            
+         END                                                                    
+         DROP  CVT                                                              
+*                                                                               
+         SET   CVFINIT             Doing initialization                         
+         SET   CVFRCVY             Default is recovery                          
+         CLEAR CVFFMT              And no reformatting                          
+         MVC   CVNIPG,=H'-1'       Use max pages (set later)                    
+*-                                                                              
+*-       Reduce our dispatching priority so that the subtasks can               
+*-         CHAP above the mother task.                                          
+*-                                                                              
+         CHAP  -2                  Reduce priority                              
+*-                                                                              
+*-       Switch into 31 bit addressing mode if MVS/XA.                          
+*-                                                                              
+         VCALL AMODE31             Switch to 31 bit mode if XA                  
+*-                                                                              
+*-       Get UPATH and UNET address tables.                                     
+*-                                                                              
+         L     R0,=A(CVPATH#*4)                                                 
+         VCALL GETCORE             Get UPATH address table                      
+         ST    R1,CVPATHP          Save it                                      
+         ZOT   (R1),(R0)           Initialize address table                     
+*                                                                               
+         L     R0,=A(CVNET#*4)                                                  
+         VCALL GETCORE             Get UPATH address table                      
+         ST    R1,CVNETP           Save it                                      
+         ZOT   (R1),(R0)           Initialize address table                     
+*                                                                               
+* Initialize TSEG buffer pool                                                   
+*                                                                               
+         VCALL TSEGPLIN                                                         
+*-                                                                              
+*-       Get Christa memory area                                                
+*-                                                                              
+         L     R0,=A(CHRPLEN)                                                   
+         VCALL GETCORE             Get Christa global data area                 
+         ST    R1,CVCHRIS          Save it                                      
+         LR    R2,R1               Preserve for init after ZOT                  
+         ZOT   (R1),(R0)           Initialize Christa data area                 
+         WITH  (CHRPARMS,R2),BEGIN                                              
+         MVC   CHRPRMID,=C'CHRP'   Fill in eye-catcher                          
+         MVC   CHRKPATH,=CL8'CHRISTA'  Default path name for keyword            
+         MVC   CHRUPATH,=CL8'CHRISTA'     and UserID to Christa                 
+*                                  Leave default access as none                 
+         END   ,                                                                
+*-                                                                              
+*-   Check WYLBUR's ACEE control block for the OPERATIONS                       
+*-   attribute.  If not on, set it.  This allows subtask I/O                    
+*-   operations for bypass all RACF security.                                   
+*-                                                                              
+         VCALL RACCHKOP            Check for OPERATIONS attribute.              
+*-                                                                              
+*- Wings needs to be our default filesystem so that the INIT EXECs              
+*- will work now that the routines in DIR have been converted to                
+*- Wings.   MPD 2/13/95                                                         
+*-                                                                              
+         SET   CVFWINGS                                                         
+*                                                                               
+         ACALL INITPARM            Go scan init parms                           
+*                                                                               
+*        XWTO  'AFTER INITPARM CVMACHID '  *** slp debug ***                    
+*        XWTO  CVMACHID,4          *** slp debug ***                            
+         AIF   ('&INSTALN' NE 'STANFORD').NOSTAN                                
+         IF  (CVMACHID,EQ,'SYSB '),BEGIN                                        
+         MVC CVMACHID,=CL8'RLG'                                                 
+         SET   CVFRLG              Running on an RLG machine                    
+         END                                                                    
+         IF  (CVMACHID,EQ,'SYSG '),BEGIN                                        
+*        XWTO  'CVMACHID is SYSG'  *** slp debug ***                            
+         SET   CVFRLG              Running on an RLG machine                    
+         END                                                                    
+.NOSTAN  ANOP                                                                   
+*                                                                               
+         CLEAR CVMACH              Set CVMACH appropriately                     
+         IF    (CVMACHID,EQ,'SYSA '),'SET CVFSYSA'  SYSA access                 
+         ELSEIF (CVMACHID,EQ,'RLG '),'SET CVFSYSB'  SYSB access                 
+         ELSEIF (CVMACHID,EQ,'SYSC '),'SET CVFSYSC'  SYSC access                
+         ELSEIF (CVMACHID,EQ,'SYSD '),'SET CVFSYSD'  SYSD access                
+         ELSEIF (CVMACHID,EQ,'SYSH '),'SET CVFSYSE'  SYSH access                
+         ELSEIF (CVMACHID,EQ,'SYSF '),'SET CVFSYSF'  SYSF access                
+         ELSEIF (CVMACHID,EQ,'SYSG '),'SET CVFSYSG'  SYSF access                
+         ELSE  'MVI CVMACH,X"FF"'  (Shouldn't happen)                           
+*                                                                               
+         LH    R0,CVTRCENT         No. of trace entries                         
+         VCALL FAILINIT            (Located in FAIL)                            
+         VCALL DBUGINIT            (Located in DEBUG)                           
+         VCALL INITFUNC                                                         
+         VCALL INITSYSV                                                         
+         VCALL INITPROC                                                         
+         VCALL INITWLOG            (Located in STAT)                            
+*                                                                               
+         FAIL  CVFFMT*CVFRCVY,BADP,'FORMAT and RECOVERY conflict.'              
+*                                                                               
+*!!      IF    ^CVFTEST,BEGIN      Do only for prod                             
+         MODESET KEY=ZERO          ********                                     
+         L     R1,CVTCBP           Our TCB addr                                 
+*-                                                                              
+*-       TCBUSER flag bit definitions:                                          
+*-          X'02' -- Allow RACF global bypass                                   
+*-                                                                              
+*- Note: Nobody remembers the X'02' flag and we don't seem to                   
+*-       have any user exits in the system which look for it.                   
+*-       So, if you need to have a clear TCBUSER field for                      
+*-       L$UCENV, you should be able to get rid of it. (But                     
+*-       test first).                                                           
+*-                                                                              
+*-       M. Durket  02/23/2000                                                  
+*-                                                                              
+         WITH  (TCB,R1),'OI TCBUSER,X"02"'  Set special modes                   
+         MODESET KEY=NZERO         ********                                     
+*!!      END                                                                    
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*    Set up checkpointing.                                                      
+*                                                                               
+*        Caution: All halfword definitions for checkpoint                       
+*                 values should be processed as unsigned 16                     
+*                 bit integers.                                                 
+*                                                                               
+*                 R5  -  Address of stack work area                             
+*                 R6  -  Address of checkpoint IOB, DCB, and CCW's              
+*                                                                               
+         SPACE ,                                                                
+ICHKPTWA RECORD BEGIN              Check-point init work area                   
+ICHKDVTA DC    (L'DVTAREA)X'00'    Devtype work area                            
+ICHKFLGS FLAG  ,                   Checkpoint initialization flags              
+         FLAG  ICHKOPEN              -  Checkpoint data set open                
+         FLAG  ICHK2ND               -  2nd try at checkpointing                
+         END   ,                                                                
+         SPACE ,                                                                
+         XPUSH ,,L'ICHKPTWA,PTR=R5 Reserve check-point area                     
+         L     R6,=A(CKPTDATA)     Address of checkpoint data                   
+         USING ICHKPTWA,R5         Addressability to work area                  
+         USING CKPTDATA,R6         Addressability to static data                
+         CLEAR ICHKPTWA            Initialize workarea to zeroes                
+         SPACE ,                                                                
+INITCKPT IF    ^CVFNCHK,BEGIN      Initialize checkpoint processing             
+         SPACE ,                                                                
+*-                                                                              
+*-       Assume errors will occur in checkpoint processing                      
+*-                                                                              
+         SET   CVFNCHK             No checkpointing at this point               
+*-                                                                              
+*-       Validity check options                                                 
+*-                                                                              
+         IF    ((CVMAXSES,NZ),AND,^CVFCFMT),BEGIN                               
+         XWTO  'MAXSES cannot be used without the CFMT option'                  
+         ACALL ICHKTERM            Terminate initialization                     
+         END   ,                                                                
+         SPACE 2                                                                
+*-                                                                              
+*-       Determine checkpoint file device characteristics                       
+*-                                                                              
+         LA    R4,ICHKDVTA         Address of DEVTYPE area                      
+         WITH  (DVTAREA,R4)        Addressability to DEVTYPE area               
+         DEVTYPE CHECKDCB+DCBDDNAM-IHADCB,DVTAREA,DEVTAB                        
+         IF    (R15,NZ),BEGIN      No DDCARD, no checkpointing                  
+         ACALL ICHKERR1            Report error                                 
+         EXIT  INITCKPT            Abort checkpointing                          
+         END   ,                                                                
+         SPACE ,                                                                
+         IF    (DVACLASS,NE,UCB3DACC),BEGIN  Must be on DASD device             
+         ACALL ICHKERR2            Report error                                 
+         EXIT  INITCKPT            Abort checkpointing                          
+         END   ,                                                                
+         SPACE ,                                                                
+         IF    ^DVAOPTS+1.X'10',BEGIN  Must support RPS                         
+         ACALL ICHKERR3            Device does not support rps                  
+         EXIT  INITCKPT            Abort checkpointing                          
+         END   ,                                                                
+         SPACE 2                                                                
+*-                                                                              
+*-       Determine maximum useable block for device                             
+*-                                                                              
+         LC    R3,DVAUNIT          LOAD UNIT TYPE                               
+         L     R2,=A(X'0100FFFF')  SET RKDD TO MAXIMUM VALUE                    
+         TRKCALC FUNCTN=TRKBAL,REGSAVE=YES,TYPE=(R3),                  X        
+               RKDD=(R2),MAXSIZE=YES                                            
+         IF    (R15,NE,8),BEGIN    ASSUME RECORD WON'T FIT                      
+         ACALL ICHKERR4            UNEXPECTED TRKCALC RETURN                    
+         EXIT  INITCKPT            ABORT CHECKPOINTING                          
+         END   ,                                                                
+         ST2   R0,ICHKMAXB         SAVE MAXIMUM USEABLE BLOCK                   
+         SPACE 2                                                                
+*-                                                                              
+*-       Calculate RPS sector number for record 1                               
+*-                                                                              
+         STM   R0,R15,@R13                                                      
+         L     R0,=A(X'00010001')  Just looking for R1 RPS value                
+         LA    R2,CHECKIOS         Put sector no. here                          
+         LC    R11,DVAUNIT         Device type                                  
+         L     R15,CVTPTR          CVT address                                  
+         L     R15,CVT0SCR1-CVT(,R15)  Sector convert routine addr              
+         BAS   R14,@R15+16         Enter sector convert routine                 
+         LM    R0,R15,@R13         Restore work registers                       
+         DROP  R4                  Release devtype area                         
+         SPACE ,                                                                
+*-                                                                              
+*-       Open the checkpoint file.                                              
+*-                                                                              
+         LA    R4,CHECKDCB         Address of checkpoint DCB                    
+         WITH  (IHADCB,R4)         Addressability to DCB                        
+         OPEN  (CHECKDCB,(OUTPUT)) Open checkpoint file                         
+         IF    ^DCBOFLGS.DCBOFOPN,BEGIN      Check open status                  
+         ACALL ICHKERR5            Report bad open                              
+         EXIT  INITCKPT            Abort checkpoint processing                  
+         END   ,                                                                
+         SET   ICHKOPEN            Set checkpoint dsn open                      
+         SPACE ,                                                                
+*-                                                                              
+*-       Validate DASD extents                                                  
+*-                                                                              
+         L     R3,DCBDEBAD        Address of deb control block                  
+         WITH  (DEBBASIC,R3),BEGIN                                              
+         IF    (DEBNMEXT,EQ,1),BEGIN   One extent...                            
+         LA    R2,DEBBASND                                                      
+         WITH  (DEBDASD,R2)                                                     
+         IF    (DEBNMTRK,NE,0),EXIT                                             
+         EXIT  INITCKPT            EXIT CHECKPOINTING INITIALIZATION            
+         END                                                                    
+         END                                                                    
+         SPACE ,                                                                
+*-                                                                              
+*-       Set MBBCCHHR seek address into checkpoint IOB                          
+*-                                                                              
+         LA    R15,CVCHKECB        ECB addr                                     
+         ST    R15,CHECKEP         Save ptr in IOB                              
+         CLEAR R0                  TTRN = Zero                                  
+         L     R1,DCBDEBAD         Address of DEB control bloick                
+         LA    R2,CHECKIOR         Put MBBCCHHR here                            
+         XPUSH R9,R15                                                           
+         LR    R3,R13                                                           
+         L     R15,CVTPTR                                                       
+         L     R15,CVTPCNVT-CVT(,R15)                                           
+         BASR  R14,R15             Convert ttr to mbbcchhr                      
+         LR    R13,R3                                                           
+         XPOP  R9,R15                                                           
+         DROP  R4                  Release checkdcb addressability              
+         SPACE 2                                                                
+*-                                                                              
+*-       Get I/O buffer (copy of checkpoint record).                            
+*-                                                                              
+         L2    R0,ICHKMAXB         Set maximum block possible                   
+         GETMAIN R,LV=(0)          Get I/O buffer area                          
+         ST    R1,CVCHKBUF         Save I/O buffer ptr                          
+         ST3   R1,CHECKC+1         Save point in read/write ccw                 
+         ST3   R1,CHECKFMD+1       Save address in format ccw                   
+         SPACE ,                                                                
+*-                                                                              
+*-       Initialize checkpoint track                                            
+*-                                                                              
+         IF    CVFCFMT,BEGIN       Format requested?                            
+         ACALL CHKPFMT             Format checkpoint record                     
+         IF    NZ,'EXIT INITCKPT'  No checkpointing possible                    
+         END   ,                                                                
+         LOOP  BEGIN               Try twice before aborting                    
+         ACALL CHKPREAD            Read in checkpoint track                     
+         IF    Z,EXIT              Successfull, great                           
+         IF    ICHK2ND,'EXIT INITCKPT' Abort checkpoint processing              
+         SET   ICHK2ND                 Indicate we've been here                 
+         SET   CVFCFMT                 Set to format checkpoint                 
+         ACALL CHKPFMT                 Format checkpoint record                 
+         IF    NZ,'EXIT INITCKPT'      No checkpointing possible                
+         END   ,                                                                
+         SPACE ,                                                                
+*-                                                                              
+*-       Reset IOB control blocks for checkpointing                             
+*-                                                                              
+         CLEAR CVCHKECB                                                         
+         MVI   CHECKC,X'05'        Write data                                   
+         MVC   CVCHKPUC,CVCHKUC    Set previous update count                    
+         MVI   CVCHKECB,X'7F'      ECB stays posted (see DISP logic)            
+         CLEAR CVFNCHK             Indicate checkpoint is active                
+         END   ,                                                                
+         EJECT ,                                                                
+*box                                                                            
+*                                                                               
+*  Complete checkpoint processing                                               
+*                                                                               
+         SPACE ,                                                                
+         IF    CVFNCHK,BEGIN       Report checkpointing status                  
+         XWTO  'No checkpoint processing will be done.'                         
+         IF    ICHKOPEN,BEGIN      Close required on checkpoint                 
+         CLOSE CHECKDCB            Close checkpoint file                        
+         END   ,                                                                
+         IF    (CVMAXSES,Z),BEGIN  Set default number of sessions               
+*-       Actually, you can use about anything here                              
+         MVC   CVMAXSES,=AL2(2600) Set 2,600 maximum sessions                   
+         END   ,                                                                
+         END   ELSE,BEGIN                                                       
+         XWTO  'Checkpoint processing is active.'                               
+         END   ,                                                                
+         SPACE ,                                                                
+         L2    R2,CVMAXSES         Maximum number of sessions                   
+         SEGCLR L:CVWTOSGP         Declare WTO seg control                      
+         SEGB  'Max session count is'  Report maximum sessions                  
+         SEGDC (R2)                    Convert session count                    
+         XWTO  ,                       Issue WTO to console                     
+         SPACE ,                                                                
+*-                                                                              
+*-       Get buffer for user checkpoint block                                   
+*-                                                                              
+         L2    R2,CVMAXSES         CV maximum sessions                          
+         MH    R2,=AL2(L'CHKU)     Times checkpoint entry size                  
+         ST2   R2,CVCHKTLN         Save table length                            
+         LR    R0,R2               Copy table length                            
+         GETMAIN R,LV=(0)          Request system memory                        
+         ST    R1,CVCHKTAB         User checkpoint table                        
+         IF    CVFNCHK,BEGIN       Zero buffer for no checkpointing             
+         ZOT   (R1),(R2)           Clear table                                  
+         END   ELSE,BEGIN          Initialize checkpoint table                  
+         LR    R0,R1               Address of checkpoint table                  
+         LR    R1,R2               Length of checkpoint table                   
+         L     R14,CVCHKBUF        Address of checkpoint i/o buffer             
+         AL    R14,=A(L'CVCHKPFX)  Point to user checkpoint table               
+         LR    R15,R1              Copy from length                             
+         MVCL  R0,R14              Setup user checkpoint entries                
+         END   ,                                                                
+         SPACE ,                                                                
+*-                                                                              
+*-       Allocate JCB buffers and initialize JCB area                           
+*-                                                                              
+         L2    R2,CVMAXSES         CV maximum sessions                          
+         AL    R2,=A(1)            Maximum JCB's + 1                            
+         LR    R3,R2               Copy JCB count                               
+         MH    R3,=AL2(L'JCB)      Storage required for JCB storage             
+*        GETMAIN R,LV=(3)          Request system storage                       
+         GETMAIN RC,LV=(3),LOC=ANY     Request JCB storage >16M line            
+         IF    (R15,NZ),BEGIN          Unable to obtain storage                 
+         XWTO  'Insufficient storage for JCB''s'                                
+         ACALL ICHKTERM                Abort processing                         
+         END   ,                                                                
+         ST    R1,CVFJCB           Save address of first JCB                    
+         LR    R0,R3               Copy JCB storage length                      
+         SL    R0,=A(L'JCB)        Back off one JCB                             
+         ALR   R0,R1               Address of last JCB                          
+         ST    R0,CVLJCB           Save address of last JCB                     
+         LR    R0,R1               Copy address of first JCB                    
+         LR    R1,R3               And length                                   
+         CLEAR R15                 Zero length and pad                          
+         MVCL  R0,R14              Clear jcb buffer area                        
+         CLEAR R0                  Zero jcb sequence count                      
+         L     R1,CVFJCB           Address of first jcb                         
+         LOOP  BEGIN                                                            
+         WITH  (JCB,R1)            Addressability to jcb                        
+         STH   R0,JCBSEQ           Set jcb sequence number                      
+         SET   JCBWFSO             And awaiting signon                          
+         LA    R1,JCBNEXT          Point to next jcb                            
+         AL    R0,=A(1)            Bump jcb sequence number                     
+         WHILE (BCT,R2),END        Initiaze next jcb                            
+         SPACE 2                                                                
+         DROP  R5                  Release checkpoint addressability            
+         DROP  R6                  Release checkpoint data                      
+         XPOP  PTR=R5              Release check-point work area                
+         EJECT                                                                  
+*-                                                                              
+*-       Run through and set up page files.                                     
+*-                                                                              
+         IF    CVFFMT,BEGIN        Formatting...                                
+         XWTO  'Formatting starting.'                                           
+         END                                                                    
+*                                                                               
+         L     R5,CVFPFCB          Run through PFCBs                            
+         USING PFCB,R5                                                          
+*                                                                               
+         XPUSH ,,L'DVTAREA,PTR=R6  Room for DEVTYPE stuff                       
+         USING DVTAREA,R6                                                       
+PFOPN    DEVTYPE PFCBDCB+(DCBDDNAM-DCB),DVTAREA,DEVTAB                          
+         IF    (R15,NZ),PFNOPN     File not included                            
+         CLI   DVACLASS,X'20'      Is file on direct access dev                 
+         BNE   PFNOPN              No, ignore it (dd dummy)                     
+         LH    R0,=AL2(CVPIOSZ)    Set R0 to blksize                            
+         LA    R1,DVTAREA          Set R1 to device table                       
+         VCALL CALCTRK             Get no. of records/track                     
+         ST    R1,PFCBRPT          Save no. of pages/track                      
+*                                                                               
+         LA    R2,PFCBDCB          Point at DCB                                 
+         OPEN  ((R2),(OUTPUT))     Open page file                               
+         TM    PFCBDCB+(DCBOFLGS-DCB),X'10'  Was open ok?                       
+         BO    PFOPND              Br if so                                     
+PFNOPN   CLEAR R0,PFCBNP           File not open so has no pages                
+         B     NEXTPF                                                           
+*                                                                               
+PFOPND   L     R2,PFCBDCB+(DCBDEBAD-DCB)  DEB ptr                               
+         WITH  (DEBBASIC,R2),BEGIN                                              
+         LC    R3,DEBNMEXT         No. of extents                               
+         LA    R2,DEBBASND         Device dependent section                     
+         END                                                                    
+*                                                                               
+         WITH  (DEBDASD,R2),BEGIN  Device dependent deb section                 
+         CLEAR R1                  Set no. of tracks                            
+*-                                                                              
+*-       This is a bug fix for a VS1.7K problem having to do with               
+*-         zero track datasets.                                                 
+*-                                                                              
+         IF    ((R3,EQ,1),AND,(DEBSTRHH,EQ,X'FFFF')),SKIPIT                     
+CNTTRK   AH    R1,DEBNMTRK         No. tracks in this extent                    
+         LA    R2,DEBDSZDA(,R2)    Size of extent area                          
+         BCT   R3,CNTTRK           Next extent                                  
+         END                                                                    
+SKIPIT   M     R0,PFCBRPT          Times records/track                          
+         ST    R1,PFCBNP           Save no. of pages                            
+         IF    (R1,Z),BEGIN        Skip PFCB if no pages                        
+         LA    R2,PFCBDCB                                                       
+         CLOSE ((R2))              Tidy up                                      
+         B     NEXTPF                                                           
+         END                                                                    
+*                                                                               
+         L     R15,PFCBDCB+X'2C'   DCBDEBAD                                     
+         CLRHI R15                 For 31-bit addressing mode                   
+         L     R15,@R15+X'20'      DEBUCBAD                                     
+         CLRHI R15                 For 31-bit addressing mode                   
+         ST    R15,PFCBUCBP        Save UCB ptr                                 
+*-                                                                              
+*-       Build sector number table for RPS devices.                             
+*-                                                                              
+         IF    DVAOPTS+1.X'10',BEGIN     RPS device...                          
+         L     R4,PFCBRPT          Get # of records/track                       
+         CH    R4,=AL2(PFCBSECM)   Is it within allowed value                   
+         BH    NEXTPF              Br no, don't use RPS                         
+         SET   PFCBFRPS            Set that this file has RPS                   
+*                                                                               
+* Now the resident sector calculation routine is used to                        
+*        calculate the sector that should be set for each                       
+*        record number.  the sector value is saved in the PFCB                  
+*        so that the resident routine is not needed during                      
+*        execution.  a description of how to use the routine                    
+*        can be found in the xdap portion of the manual data                    
+*        management for system programmers.                                     
+*                                                                               
+         IC    R2,DVAUNIT          Get device code for routine                  
+         SLL   R2,24               Put in high order byte                       
+         LA    R1,PFCBSECT         Point to first addr                          
+         OR    R2,R1               Set R2 for routine                           
+         LH    R0,=AL2(CVPIOSZ)    Get blksize                                  
+         SLL   R0,16               Put in left half of register                 
+         LA    R1,1                Set constant of 1                            
+         ALR   R0,R1               Set R0 for first record                      
+         L     R15,16              Point to CVT                                 
+         L     R15,CVT0SCR1-CVT(,R15)  Get address of sector routine            
+CALCSECT VCALL AMODE24             ********                                     
+         STM   R0,R15,@R13         Save all registers                           
+         BASR  R14,R15             Go do this record                            
+         LM    R0,R15,@R13         Restore all registers                        
+         VCALL AMODE31             ********                                     
+         ALR   R0,R1               Step to next record                          
+         ALR   R2,R1               Step to next store address                   
+         BCT   R4,CALCSECT         Loop until done                              
+         END                                                                    
+*                                                                               
+NEXTPF   IF    CVFFMT,BEGIN        Format the page file...                      
+         LA    R1,PFCB                                                          
+         LA    R15,DVTAREA                                                      
+         ACALL FMTPFCB             Foramt the page file                         
+         END                                                                    
+*                                                                               
+         LA    R5,PFCBNEXT         Next page file                               
+         CL    R5,CVLPFCB          At end of page files                         
+         BL    PFOPN               Br no to do next file                        
+         DROP  PFCB                                                             
+         XPOP  ,,L'DVTAREA         Tidy up                                      
+         DROP  DVTAREA                                                          
+*-                                                                              
+*-       If no page files are defined then we run in MEMPAGE                    
+*-         mode.                                                                
+*-                                                                              
+         CLEAR R2                  Number of page buffers                       
+*                                                                               
+         L     R5,CVFPFCB          First PFCB                                   
+         LOOP  BEGIN               Go through PFCBs...                          
+         WITH  (PFCB,R5)                                                        
+         AL    R2,PFCBNP           Total page buffer count                      
+         LA    R5,PFCBNEXT         Next PFCB                                    
+         IF    (R5,GE,CVLPFCB),EXIT  All done, scram                            
+         END                                                                    
+*                                                                               
+         IF    (R2,Z),'SET CVFMEMPAGE; CLEAR CVFRCVY; CLEAR CVNIPG'             
+         EJECT                                                                  
+*-                                                                              
+*-       Tidy up checkpoint record.                                             
+*-                                                                              
+         IF    (CVPGFAUTO+CVPGFREAL+CVPGFVIRT,Z),BEGIN  Odd...                  
+         SET   CVPGFAUTO           Assume AUTO                                  
+         END                                                                    
+*-                                                                              
+*-       Set up paging parameters.                                              
+*-                                                                              
+         VCALL CALCPGC             Set paging parameters                        
+*                                                                               
+         IF    (CVCPUMUL,Z),BEGIN  No CPU multiplier...                         
+         AIF   ('&INSTALN' NE 'STANFORD').NOCHFX                                
+         IF    (CVMACHID,EQ,'SYSA '),'MVC CVCPUMUL,=F"18750"'  18.75            
+.NOCHFX  ANOP                                                                   
+         END                                                                    
+*                                                                               
+         INCR  R15,CVCHKUC         Force checkpoint I/O                         
+*-                                                                              
+*-       Do general initialization.                                             
+*-                                                                              
+         VCALL KIOINIT             (Located in TERM)                            
+         VCALL TIMRINIT            (Located in TERM)                            
+         VCALL DISKINIT            Go init disk I/O                             
+         VCALL DISPINIT            Go initialize dispatcher queues              
+         VCALL STATINIT            Go initialize statistics                     
+*-                                                                              
+*-       Final initialization.                                                  
+*-                                                                              
+         VCALL JESINIT             Go init fetch/run paths                      
+*                                                                               
+         IF    (CVNOTIFY,Z),BEGIN  Set notification account...                  
+         IF    ^CVFTEST,EXIT       Only set if test system                      
+         MVC   CVNOTIFY,CVWYLACC   Set notify account                           
+         END                                                                    
+         SPACE 1                                                                
+*  Call SYMINIT to fill in address not available earlier                        
+         VCALL  SYMINIT            Located in FAIL                              
+         SPACE 1                                                                
+*                                                                               
+         ACALL RCVYINIT            Setup for recovery                           
+*                                                                               
+         L     R2,=A(ICMD)                                                      
+         CLC   @R2(L'ICMD),CVBLANKS  Any first command?                         
+         IF    NE,'SET CVFCMDS'    Yes, set execute first cmd flag              
+*                                                                               
+         VCALL STARTUP             Fire up the dispatcher                       
+         DC    H'0'                No return (honest)                           
+         LTORG ,                                                                
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RCVYINIT -- Routine to queue the users for setup who were logged             
+*    on so that these users' ACTIVE files can be recovered.                     
+*                                                                               
+*    This routine also marks the pages in the user's ACTIVE file                
+*    as allocated.                                                              
+*                                                                               
+RCVYINIT XENTER R2,R8,,LOCAL                                                    
+*-                                                                              
+*-       Just clean up checkpoint area if no recovery.                          
+*-                                                                              
+         IF    ^CVFRCVY,BEGIN      No recovery...                               
+         L     R0,CVCHKTAB         Address of checkpoint table                  
+         L2    R1,CVCHKTLN         Set checkpoint table length                  
+         CLEAR R15                 Zero from length and pad                     
+         MVCL  R0,R14              Zot checkpoint area to zero                  
+         INCR  R15,CVCHKUC         Kick update count                            
+         B     RCVYEXIT            Scram                                        
+         END                                                                    
+*-                                                                              
+*-       Setup users who were logged on last time.                              
+*-                                                                              
+         L     JCBR,CVFJCB         First possible user                          
+*                                                                               
+         LOOP  BEGIN               Go through users...                          
+         WITH  JCB                                                              
+         ST    JCBR,CVCURJCB       Set current JCB                              
+         CLEAR CPR                 No CP yet                                    
+*                                                                               
+         ACALL RCVYSET             Rebuild CP if user was logged on             
+         IF    Z,BEGIN             We have a user to recover...                 
+         ACALL RCVYCHK             Check we should recover this one             
+         IF    NZ,EXIT             Skip this user                               
+*-                                                                              
+*-       Put the user on the setup queue.                                       
+*-                                                                              
+         SETUP JCB                 Add user to setup queue                      
+*                                                                               
+         INCR  R0,CVNUSERS         Count user as logged on                      
+         END                                                                    
+*                                                                               
+         LA    JCBR,JCBNEXT                                                     
+         UNTIL (JCBR,GE,CVLJCB)                                                 
+         END                                                                    
+*                                                                               
+         CLEAR CPR                 No current user (!)                          
+         CLEAR CVOLDJCB,CVCURJCB   Ditto                                        
+*                                                                               
+RCVYEXIT XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RCVYSET -- Routine to update a CP with the recovery checkpoint               
+*    information kept for each user.  This routine is called during             
+*    ACTIVE file recovery in initialization.                                    
+*                                                                               
+*    On entry:                                                                  
+*      CVCURJCB - Our JCB                                                       
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - recover this user                                                    
+*      4 - don't recover this user                                              
+*      8 - can't recover this user                                              
+*                                                                               
+RCVYSET  PROC                                                                   
+         L     R6,CVCURJCB                                                      
+         WITH  (JCB,R6)                                                         
+*                                                                               
+         LH    R5,JCBSEQ           User's line number                           
+         MH    R5,=AL2(L'CHKU)     Checkpoint table index                       
+         A     R5,CVCHKTAB         Our checkpoint entry                         
+         WITH  (CHKU,R5)                                                        
+*                                                                               
+         LA    R4,4                Assume no one logged on                      
+*-                                                                              
+*-       Reconstruct logged on user.                                            
+*-                                                                              
+         IF    (CHKUACCT,NZ),BEGIN  User was logged on...                       
+         SEGCLR L:CVWTOSGP                                                      
+         SEG   'Line '                                                          
+         SEGDC LH:JCBSEQ                                                        
+         SEG   ' '                                                              
+         SEG   CHKUACCT+3,2                                                     
+         SEG   '.'                                                              
+         SEG   CHKUACCT,3                                                       
+         SEG   ' was logged on'                                                 
+         IF    (CHKUPGNO,Z),'SEG " (N)"'                                        
+         IF    CHKUFNAR,'SEG " (NR)"'                                           
+         SET   CVWTOFNOPFX+CVWTOFWTL  WTO logging flags                         
+         XWTO                                                                   
+         CLEAR CVWTOFNOPFX+CVWTOFWTL  Reset                                     
+*                                                                               
+         CLEAR JCBWFSO             Now logged on (sort of)                      
+         SET   JCBAFALO            And also logging off!                        
+*                                                                               
+         VCALL GETCP               Get a CP                                     
+         LA    R1,CPNSCAN          Set up scan cb in CP                         
+         ST    R1,CPNSCANP                                                      
+         SCCLR                                                                  
+         ST    CPR,JCBCPX          Save CP ptr                                  
+*                                                                               
+         MVC   CPREGS+(R14*4)(4),=V(RECOVERY)  Set recovery rtn                 
+         ST    CPR,CPREGS+(CPR*4)  Save our CP ptr                              
+         ST    CVR,CPREGS+(CVR*4)  Save CV ptr                                  
+         MVC   CPSACCT,CHKUACCT    User account                                 
+         MVC   JCBACCT,CHKUACCT    Set it in JCB too                            
+         IF    CHKUFNAR,'SET CPSSFNAR'  No recovery                             
+         IF    CHKUFPS,'SET CPSSFPS'  Pseudo session                            
+*                                                                               
+         IF    (CPSACCT,EQ,'JDNGG'),'CLEAR CPSSFNAR'  Hack!                     
+         IF    (CPSACCT,EQ,'LTMGQ'),'CLEAR CPSSFNAR'  Ditto                     
+         IF    (CPSACCT,EQ,'PCJGQ'),'CLEAR CPSSFNAR'  Ditto                     
+*-                                                                              
+*-       Reconstruct the Active file record group.                              
+*-                                                                              
+         CLEAR R4                  Need to recover this user                    
+*                                                                               
+         IF    (CPSSFNAR,OR,(CHKUPGNO,Z)),BEGIN  No recovery...                 
+         CLEAR CPTEXT              Reset (will be initialized later)            
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Re-build Active files...                     
+         L     R0,CHKUPGNO         Root page-number                             
+         LA    R1,=CL4'TEXT'       Type of record group                         
+         LA    R15,CPTEXT          Active file record group                     
+         VCALL RGRCVY              Recover and rebuild                          
+         IF    NZ,BEGIN            Trouble...                                   
+         ACALL RCVYERR             Complain to management                       
+         LA    R4,8                Can't recover Active file                    
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LR    R15,R4              Set rc                                       
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RCVYCHK -- Local routine to process "manual" recovery mode,                  
+*    where we ask the operator about every user we are planning                 
+*    to recover.                                                                
+*                                                                               
+*    On entry:                                                                  
+*      CP of the current user we are planning to recover                        
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - recover this user                                                    
+*      4 - don't recover this user                                              
+*                                                                               
+RCVYCHK  XENTER R2,R8,,LOCAL                                                    
+         CLEAR R15                 Assume good rc                               
+*                                                                               
+         IF    CVFMAN,BEGIN        Manual mode...                               
+RCVYLOOP CLEAR WTORECB,WTORREP                                                  
+         MVC   WTORGRP,CPSGRP                                                   
+         MVC   WTORUSER,CPSUSER                                                 
+*                                                                               
+RCVYWTOR WTOR  'Recover GG.UUU?',WTORREP,L'WTORREP,WTORECB,ROUTCDE=2            
+WTORGRP  EQU   RCVYWTOR+24,2,C'C'                                               
+WTORUSER EQU   RCVYWTOR+27,3,C'C'                                               
+         WAIT  ECB=WTORECB         Wait for operator                            
+         OC    WTORREP,CVBLANKS    Caps                                         
+*                                                                               
+         CLEAR R15                 Assume good rc                               
+         IF    ((WTORREP,EQ,'Y'),OR,(WTORREP,EQ,'U')),RCHKEXIT  OK              
+*                                                                               
+         IF    (WTORREP,EQ,'A'),'CLEAR CVFMAN; B RCHKEXIT'                      
+*                                                                               
+         IF    (WTORREP,NE,'N'),BEGIN                                           
+         WTO   'Answer "Recover?" prompt with:',ROUTCDE=2                       
+         WTO   'Y = Recover this user',ROUTCDE=2                                
+         WTO   'N = Skip this user',ROUTCDE=2                                   
+         WTO   'A = Recover ALL users',ROUTCDE=2                                
+         B     RCVYLOOP                                                         
+         END                                                                    
+*                                                                               
+         LCALL RCVYERR             Skip this user                               
+         LA    R15,4               Don't recover this user                      
+         END                                                                    
+*                                                                               
+RCHKEXIT XEXIT ,,LTR                                                            
+         DROP  BR                                                               
+*                                                                               
+WTORECB  DS    F                                                                
+WTORREP  DS    CL4                                                              
+         EJECT                                                                  
+CSETWA   RECORD BEGIN                                                           
+CSETCHKU DS    XL(L'CHKU)          Room for a checkpoint entry                  
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  CHECKSET -- Routine to update the recovery checkpoint                        
+*    information kept for each user (if it has changed).                        
+*                                                                               
+CHECKSET XPROC CSETWA                                                           
+         L     R5,CVCURJCB                                                      
+         WITH  (JCB,R5),'LH R15,JCBSEQ'  User number                            
+         FAIL  ((R15,NEG),OR,(R15,GT,CVMAXSES)),RTABERR,'Rcvy err.'             
+         MH    R15,=AL2(L'CHKU)    Index into user checkpoint table             
+*                                                                               
+         L     R5,CVCHKTAB                                                      
+         AR    R5,R15              R5 = Our checkpoint entry                    
+*-                                                                              
+*-       Build a new recovery checkpoint entry and then compare it              
+*-         with the existing one for this user.                                 
+*-                                                                              
+         LA    R6,CSETCHKU                                                      
+         WITH  (CHKU,R6)                                                        
+*                                                                               
+         CLEAR CHKU                                                             
+         IF    (CPSACCT,NZ),BEGIN  Set up CHKU...                               
+         IF    CPSSFPS,'SET CHKUFPS'  Pseudo-session                            
+         IF    CPSSFNAR,'SET CHKUFNAR'  No active file recovery                 
+         MVC   CHKUACCT,CPSACCT    Save account                                 
+         MVC   CHKUPGNO,CHKUPGNO-CHKU(R5)  Preserve pageno                      
+         END                                                                    
+*-                                                                              
+*-       If it has changed then update the checkpoint record.                   
+*-                                                                              
+         IF    (@R5,NE,CHKU),BEGIN  Update checkpoint entry...                  
+         MVC   @R5(L'CHKU),CHKU    Update our entry                             
+         INCR  R15,CVCHKUC         Need to do checkpoint I/O                    
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RCVYINFO -- Called by RECS when the root Active file record                  
+*    group page-number changes.  This page-number is the only                   
+*    thing that is saved in the checkpoint area.  The recovery                  
+*    processing must be able to rebuild the Active file record                  
+*    group from this page-number only.                                          
+*                                                                               
+*    On entry:                                                                  
+*      R0  - Root page-number                                                   
+*      @R1 - 4 byte group type name                                             
+*                                                                               
+RCVYINFO XPROC                                                                  
+         FAIL  (@R1,NE,'TEXT'),RCVYINFO,'Recovery pageno problem.'              
+*-                                                                              
+*-       Update the user's checkpoint record.                                   
+*-                                                                              
+         L     R5,CVCURJCB                                                      
+         WITH  (JCB,R5),'LH R15,JCBSEQ'  User number                            
+         FAIL  ((R15,NEG),OR,(R15,GT,CVMAXSES)),RTABERR,'Rcvy err.'             
+         MH    R15,=AL2(L'CHKU)    Index into user checkpoint table             
+*                                                                               
+         L     R5,CVCHKTAB                                                      
+         AR    R5,R15              Our checkpoint entry                         
+         WITH  (CHKU,R5)                                                        
+*                                                                               
+         IF    (R0,NE,CHKUPGNO),BEGIN  Pageno has changed...                    
+         ST    R0,CHKUPGNO         Update our entry                             
+         INCR  R15,CVCHKUC         Need to do checkpoint I/O                    
+         END                                                                    
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  RCVYERR -- Local routine to cleanup a user that can't be                     
+*    recovered.                                                                 
+*                                                                               
+RCVYERR  XENTER R2,R8,,LOCAL                                                    
+*-                                                                              
+*-       Log the recovery failure.                                              
+*-                                                                              
+         SEGCLR L:CVWTOSGP                                                      
+         SEG   'Unable to recover account '                                     
+         SEG   CPSGRP                                                           
+         SEG   '.'                                                              
+         SEG   CPSUSER                                                          
+         XWTO                                                                   
+*-                                                                              
+*-       Now reset the user's checkpoint entry.                                 
+*-                                                                              
+         L     R6,CVCURJCB                                                      
+         WITH  (JCB,R6),BEGIN                                                   
+         LH    R5,JCBSEQ           User number                                  
+         MH    R5,=AL2(L'CHKU)                                                  
+         A     R5,CVCHKTAB         Checkpoint table entry ptr                   
+         XC    @R5(L'CHKU),@R5     Zot entry                                    
+         INCR  R15,CVCHKUC         Rewrite checkpoint record                    
+*                                                                               
+         CLEAR JCBACCT             Reset account                                
+         SET   JCBWFSO             Waiting for signon                           
+         CLEAR JCBAFALO            Reset "logging off" flag                     
+*                                                                               
+         LT    CPR,JCBCPX          Need to free the CP?                         
+         IF    NZ,BEGIN            Yes...                                       
+         VCALL FREECP              Free CP                                      
+         CLEAR CPR,JCBCPX          Make it official                             
+         END                                                                    
+         END                                                                    
+         XEXIT                                                                  
+         DROP  BR                                                               
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  FMTPFCB -- Local routine to format all the pages in the                      
+*    specified page file.                                                       
+*                                                                               
+*    On entry:                                                                  
+*      R1  - PFCB addr                                                          
+*      R15 - DVTAREA ptr                                                        
+*                                                                               
+FMTPFCB  XENTER R2,R8,,LOCAL                                                    
+         LR    R5,R1                                                            
+         USING PFCB,R5                                                          
+*                                                                               
+         LR    R6,R15                                                           
+         USING DVTAREA,R6                                                       
+*                                                                               
+         IF    PFCBFRPS,BEGIN                                                   
+         MVC   FMTCCWP,=A(FMTCCWSC)  Start chan pgm at set sect                 
+         L     R0,=A(CVPIOSZ*X'10000')  Blocksize & no key & rec 0              
+         LA    R2,FMTSECT          Put sector no. here                          
+         ICM   R2,B'1000',DVAUNIT  Device type                                  
+         VCALL AMODE24             ********                                     
+         STM   R0,R15,@R13                                                      
+         L     R15,CVTPTR                                                       
+         WITH  (CVT,R15),'L R15,CVT0SCR1'  Get sector no. routine               
+         BASR  R14,R15                                                          
+         LM    R0,R15,@R13         Restore regs                                 
+         VCALL AMODE31             ********                                     
+         END                                                                    
+         LA    R1,PFCBDCB                                                       
+         ST    R1,FMTDCBP          Put DCB addr in IOB                          
+*                                                                               
+         LA    R2,1                Start with first record                      
+FMTLOOP  WHILE (R2,LE,PFCBNP),BEGIN                                             
+         LR    R1,R2                                                            
+         ACALL CALCSEEK            Get track address for record                 
+         MVC   OLDHH,HH            Save head no                                 
+         MVC   FMTSEEK,MBBCCHHR    Put seek addr in IOB                         
+         LA    R3,CKDS             "count" area                                 
+         LA    R4,CCWWRFMT         Dynamic CCW area                             
+FMTCHP   WHILE ((R3,LT,=A(CKDSEND)),AND,(R4,LT,=A(CCWWREND))),BEGIN             
+         LR    R1,R2               Record no                                    
+         ACALL CALCSEEK            Get corresponding cchhr                      
+         IF    (CC,NE,FMTSEEK+3),EXIT  Can't change cylinders                   
+         IF    (HH,NE,OLDHH),BEGIN  OK to switch heads, though...               
+         L     R1,PFCBDCB+(DCBDEBAD-DCB)  DEB ptr                               
+         LA    R1,DEBBASND-DEBBASIC(,R1)  Device dep. section of DEB            
+         WITH  (DEBDASD,R1),BEGIN                                               
+*-                                                                              
+*-    DEBDVMOD has the filemask for this dataset.  The filemask will            
+*-   allow seek heads only if the dataset was allocated by cylinder.            
+*-                                                                              
+         IF    (DEBDVMOD.X'18',^MIX),EXIT,FMTCHP   Shucks                       
+         END                                                                    
+         MVC   OLDHH,HH            Save new head no                             
+         MVC   @R3(8),MBBCCHHR                                                  
+         LR    R15,R3              Save track addr ptr                          
+         LA    R3,@R3+8                                                         
+         MVC   @R4(8),CCWSEEKH     Seek head CCW                                
+         LA    R15,@R15+1          Skip over "m"                                
+         ST3   R15,@R4+1           Put bbcchh ptr in seek head                  
+         MVC   @R4+8(8),CCWSEQ     Search id eq                                 
+         LA    R15,@R15+2          Skip over "bb"                               
+         ST3   R15,@R4+8+1         Plant cchhr ptr in search ideq               
+         MVC   @R4+16(8),CCWTIC    Famous tic *-8                               
+         LA    R15,@R4+8                                                        
+         ST3   R15,@R4+16+1        Don't forget the "*-8" part                  
+         LA    R4,@R4+3*8          Three ccws later                             
+         END                                                                    
+*-                                                                              
+*-       Now construct count (for write count, key, data).                      
+*-                                                                              
+         MVC   @R4(8),CCWWRCKD     Write ckd                                    
+         ST3   R3,@R4+1            Addr of count                                
+         LA    R4,@R4+8                                                         
+         MVC   @R3(4),CC           Move in cchh                                 
+         LC    R15,R                                                            
+         LA    R15,@R15+1          Readjust "r"                                 
+         STC   R15,@R3+4           Put it in count area                         
+         CLEAR (@R3+5,1)           Key len                                      
+         MVC   @R3+6(2),=AL2(CVPIOSZ)  I/O buffer length                        
+         LA    R3,@R3+8                                                         
+         LA    R2,@R2+1            Next record                                  
+         IF    (R2,GT,PFCBNP),EXIT All done                                     
+         END                                                                    
+         SH    R4,=H'8'            Back up                                      
+         CLEAR @R4+4.X'40'         Reset command chaining on last CCW           
+         EXCP  FMTIOB                                                           
+         WAIT  ECB=FMTECB                                                       
+         FAIL  (FMTECB,NE,X'7F'),PGIOERR,'I/O error during formatting'          
+         CLEAR (FMTECB,1)          Reset ECB                                    
+         END                                                                    
+         DECR  R2                  No. of pages in this pagefile                
+*                                                                               
+         IF    (R2,NZ),BEGIN       WTO formatted message...                     
+         SEGDC (R2),,L:CVWTOSGP                                                 
+         SEG   ' pages formatted on PAGE'                                       
+         SEGDC L:PFCBNO                                                         
+         XWTO                                                                   
+         END                                                                    
+         XEXIT                                                                  
+         DROP  PFCB,DVTAREA,BR                                                  
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CALCSEEK -- Routine to calculate MBBCCHHR from record no in R1.              
+*       with the assumption that R5 points to the PFCB.                         
+*       Also: the 'R' part of the MBBCCHHR is actually 'R-1'.                   
+*                                                                               
+CALCSEEK XENTER R2,R8,,LOCAL                                                    
+         WITH  (PFCB,R5),BEGIN                                                  
+         CLEAR R0                                                               
+         DECR  R1                                                               
+         D     R0,PFCBRPT          Result: R1=tt, R0=r                          
+         SLL   R0,8                                                             
+         SLL   R1,16                                                            
+         OR    R0,R1               Forms "ttrz"                                 
+         LA    R1,PFCBDCB                                                       
+         L     R1,DCBDEBAD-DCB(,R1)  DEB                                        
+         LA    R2,MBBCCHHR                                                      
+         VCALL AMODE24             ********                                     
+         XPUSH R9,R15              Save regs destroyed by convert rtn           
+         LR    R3,R13              Save stack ptr too                           
+         L     R15,16              CVT                                          
+         L     R15,@R15+28         Ttr to mbbcchhr convert routine              
+         BASR  R14,R15                                                          
+         LR    R13,R3                                                           
+         XPOP  R9,R15              Get our regs back                            
+         VCALL AMODE31             ********                                     
+         END                                                                    
+         XEXIT                                                                  
+         DROP  BR                                                               
+         SPACE 2                                                                
+         QLTORG                                                                 
+         EJECT                                                                  
+OLDHH    DS    XL2                                                              
+*                                                                               
+MBBCCHHR DS    D                                                                
+BB       EQU   MBBCCHHR+1,2,C'X'                                                
+CC       EQU   MBBCCHHR+3,2,C'X'                                                
+HH       EQU   MBBCCHHR+5,2,C'X'                                                
+R        EQU   MBBCCHHR+7,1,C'X'                                                
+*                                                                               
+CCWSEEKH CCW   X'1B',0,X'40',6     Seek head                                    
+CCWSEQ   CCW   X'31',0,X'40',5     Search id eq                                 
+CCWTIC   CCW   X'08',0,0,0         Tic                                          
+CCWWRCKD CCW   X'1D',0,X'60',8     Write, count, key, and data                  
+*                                                                               
+         DS    0F                                                               
+FMTIOB   DC    X'42',XL4'00',AL3(FMTECB),2A(0)                                  
+FMTCCWP  DC    A(FMTCCWS)          Chan pgm ptr                                 
+FMTDCBP  DC    A(0)                DCB ptr                                      
+         DC    2A(0)                                                            
+FMTSEEK  DC    XL8'00'             Seek address                                 
+*                                                                               
+FMTSECT  DC    X'00'               Sector no, if RPS device                     
+*                                                                               
+FMTECB   DC    F'0'                                                             
+*                                                                               
+FMTCCWSC CCW   X'23',FMTSECT,X'40',1  Set sector                                
+FMTCCWS  CCW   X'31',FMTSEEK+3,X'40',5  Search id eq                            
+         CCW   X'08',*-8,0,0       Tic *-8                                      
+CCWWRFMT DS    150D                A lot of CCWs                                
+CCWWREND EQU   *                                                                
+         DS    5D                  Slop                                         
+*                                                                               
+CKDS     DS    (8*150)X                                                         
+CKDSEND  EQU   *                                                                
+         DS    (8*5)X              Slop                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WYLBUR Checkpoint processing global data                                     
+*                                                                               
+         SPACE 2                                                                
+         DATA  BEGIN                                                            
+         ENTRY CHECKIOB                                                         
+CKPTDATA DC    0D'0'               START OF CHECKPOINT DATA                     
+CHECKDCB DCB   DDNAME=CHECK,MACRF=E,EXLST=CHECKXL,RECFM=F,DSORG=PS,    X        
+               DEVD=DA                                                          
+CHECKXL  DC    A(X'11000000'+CHECKABN) DCB ABEND EXIT                           
+         DC    A(X'87000000'+CHKJFCB)  JFCB ADDRESS                             
+*                                                                               
+CHECKIOB DC    0D'0',X'42',XL3'00'                                              
+CHECKEP  DC    A(*-*)                                                           
+CHECKCSW DC    A(0,0)                                                           
+CHECKIOC DC    A(CHECKCCW,CHECKDCB,0,0)                                         
+CHECKIOR DC    XL8'00'             Seek address                                 
+CHECKIOS DC    X'00'               Sector number, if RPS device                 
+         DC    0A(0)               ALIGNMENT                                    
+ICHKMAXB DC    AL2(0)              MAXIMUM USEABLE BLOCKSIZE                    
+*                                                                               
+CHECKCCW CCW   X'23',CHECKIOS,X'40',1    .Set sector                            
+         CCW   X'31',CHECKIOR+3,X'40',5  .Search id eq                          
+         CCW   X'08',*-8,0,0             .Tic *-8                               
+CHECKC   CCW   X'06',*-*,0,0             .Read checkpoint record                
+         SPACE ,                                                                
+CHECKFMT CCW   X'31',CHECKIOR+3,X'40',5  .Search ID equal                       
+         CCW   X'08',*-8,0,0             .TIC *-8                               
+CHECKFMC CCW   X'1D',*-*,X'80',8         .Write CKD (Count field)               
+CHECKFMD CCW   X'00',*-*,0,0             .Checkpoint record                     
+         SPACE ,                                                                
+CHKJFCB  DC    XL176'00'                                                        
+ICHKCNTF DC    C'CCHHRKDD'         RECORD 1 COUNT AREA                          
+         END   ,                                                                
+         EJECT ,                                                                
+*box                                                                            
+*        Format the Checkpoint record.                                          
+*                                                                               
+*              The CVFCFMT flag must be set to change the size                  
+*              of the check-point record.                                       
+*                                                                               
+CHKPFMT  PROC  ,                                                                
+         L2    R0,ICHKMAXB         Load maximum useable block                   
+         SL    R0,=A(L'CVCHKPFX)      -  less prefix length                     
+         SL    R0,=A(L'CVCHKSFX)      -  less suffix amount                     
+         SRDA  R0,32                    shift over                              
+         D     R0,=A(L'CHKU)            divide by entry length                  
+         IF    (CVMAXSES,NZ),BEGIN Utilize entire track                         
+         L2    R2,CVMAXSES         Load passed session count                    
+         IF    (R2,GT,R1),BEGIN    Insure within track boundary                 
+         LR    R3,R1               Preserve maximum computed value              
+         SEG   'MAXSES='           Report error to main console                 
+         SEGDC (R2)                Convert requested number                     
+         SEG   ' is too large, using ' Continue message                         
+         SEGDC (R3)                    Convert maximum sessions                 
+         XWTO  ,                       Report to console                        
+         LR    R1,R3                   Restore maximum session size             
+         END   ELSE,BEGIN          Utilize passed CVMAXSES value                
+         LR    R1,R2               Load passed value                            
+         END   ,                                                                
+         END   ,                                                                
+         ST2   R1,CVMAXSES         Save maximum session count                   
+         M     R0,=A(L'CHKU)       Compute table length                         
+         ST2   R1,CVCHKTLN         Save user table length                       
+         AL    R1,=A(L'CVCHKPFX)     +  prefix length                           
+         AL    R1,=A(L'CVCHKSFX)     +  suffix length                           
+         ST2   R1,CVCHKLEN         Update actual disk record length             
+         LA    R2,CHKJFCB          Address of jfcb                              
+         WITH  (JFDSECT,R2),BEGIN                                               
+         CLOSE CHECKDCB            Close checkpoint file                        
+         RDJFCB (CHECKDCB,(OUTPUT))    obtain jfcb to reset dscb                
+         L2    R1,CVCHKLEN             Load checkpoint record size              
+         ST2   R1,JFCBLKSI             update blksize field                     
+         ST2   R1,JFCLRECL             update lrecl field                       
+         OPEN  (CHECKDCB,(OUTPUT)),TYPE=J    Re-open checkpoint                 
+         END   ,                                                                
+         SPACE 2                                                                
+         L     R14,CVCHKBUF        Checkpoint i/o buffer address                
+         LA    R15,L'CVCHKPFX      Length of chkpt prefix                       
+         LA    R0,CVCHKPFX         Address of prefix                            
+         LR    R1,R15              Copy length                                  
+         MVCL  R14,R0              Move in prefix                               
+         SPACE ,                                                                
+         L2    R15,CVCHKTLN        Length of checkpoint table                   
+         CLEAR R1                  Zorch from length and pad                    
+         MVCL  R14,R0              Move in initial table                        
+         SPACE ,                                                                
+         LA    R15,L'CVCHKSFX      Length of suffix                             
+         LA    R0,CVCHKSFX         Address of suffix                            
+         LR    R1,R15              Copy length                                  
+         MVCL  R14,R0              Copy in suffix                               
+         SPACE ,                                                                
+         CLEAR CVCHKECB            Reset ecb (safety)                           
+         LA    R1,CHECKFMT         Address of ccw formating start               
+         ST    R1,CHECKIOC         Set iob ccw channel program start            
+         MVI   CHECKIOB,X'42'                                                   
+         MVI   CHECKIOR+7,0        Record 0                                     
+         LA    R1,ICHKCNTF         Address of cchhrkdd                          
+         ST3   R1,CHECKFMC+1       Point to data                                
+         MVC   @R1(4),CHECKIOR+3   Cchh                                         
+         MVC   @R1+4(2),=X'0100'   Counts                                       
+         MVC   @R1+6(2),CVCHKLEN   Counts                                       
+         L2    R1,CVCHKLEN         Length of checkpoint record                  
+         ST2   R1,CHECKFMD+6       Set length into ccw read                     
+         EXCP  CHECKIOB            Format and write data                        
+         WAIT  ECB=CVCHKECB                                                     
+         IF    (CVCHKECB,NE,X'7F'),BEGIN                                        
+         XWTO  'Checkpoint I/O error.  no checkpointing.'                       
+         LA    R15,12                  abort checkpointing                      
+         END   ELSE,BEGIN                                                       
+         CLEAR CVCHKECB                                                         
+         XWTO  'Checkpoint record formatted.'                                   
+         CLEAR R15                 Zero return code                             
+         END   ,                                                                
+         PEND  ,                                                                
+         EJECT ,                                                                
+*box                                                                            
+*                                                                               
+*  Read checkpoint record                                                       
+*                                                                               
+CHKPREAD PROC  ,                                                                
+         CLEAR CVCHKECB            Reset ecb (safety)                           
+         LA    R1,CHECKCCW         Address of checkpint read chain              
+         ST    R1,CHECKIOC         Set iob ccw channel program start            
+         MVI   CHECKIOB,X'42'      Reset iob error bits                         
+         MVI   CHECKIOR+7,1        Record no. 1                                 
+         L     R1,CVCHKBUF         Address of checkpoint buffer                 
+         ST3   R1,CHECKC+1         I/o buffer ptr                               
+         MVC   CHECKC+6(2),ICHKMAXB    attempt maximum block                    
+         EXCP  CHECKIOB            Issue i/o request                            
+         WAIT  ECB=CVCHKECB        Wait for i/o completion                      
+         LA    R15,12              Assume bad checkpoint record                 
+         IF    (CVCHKECB,NE,X'7F'),BEGIN                                        
+         CLI   CHECKEP,X'41'       Permanent i/o error                          
+         IF    NE,'EXIT CHKPREAD'  Bad checkpoint record                        
+         CLC   CHECKCSW+4(2),=XL2'0C40'      incorrect length?                  
+         IF    NE,'EXIT CHKPREAD'  Bad checkpoint record                        
+         L2    R0,CHECKCSW+6       Load residual length                         
+         IF    (R0,Z),'EXIT CHKPREAD'  bad checkpoint record                    
+         L2    R1,ICHKMAXB             load maximum block                       
+         SLR   R1,R0                   compute true record length               
+         ST2   R1,CVCHKLEN             save checkpoint record length            
+         ST2   R1,CHECKC+6             update read/write ccw                    
+         MVI   CHECKIOB,X'42'          reset iob error bit                      
+         END   ELSE,BEGIN                                                       
+         MVC   CVCHKLEN,ICHKMAXB   Set cv checkpoint record length              
+         END   ,                                                                
+         L     R2,CVCHKBUF         Data buffer ptr                              
+         IF    (@R2,NE,'CHEK'),EXIT                                             
+         L2    R0,CVCHKLEN         Length of buffer                             
+         ALR   R2,R0               End of buffer                                
+         SH    R2,=H'4'            Last 4 chars                                 
+         IF    (@R2,NE,'ENDC'),EXIT                                             
+         L2    R0,CVCHKLEN         Retrieve length of checkpoint                
+         SL    R0,=A(L'CVCHKPFX)     -  less prefix length                      
+         SL    R0,=A(L'CVCHKSFX)     -  less suffiex length                     
+         SRDA  R0,32                    shift for divide                        
+         D     R0,=A(L'CHKU)            maximum number of sessions              
+         IF    (R0,NZ),EXIT        Record size mismatch                         
+         IF    (CVMAXSES,NZ),BEGIN This should match read record                
+         L2    R0,CVMAXSES         Load specified session count                 
+         IF    (R0,NE,R1),BEGIN    Warn user of mismatch                        
+         XPUSH R1                  Save r1 value                                
+         XWTO  'Specified MAXSES value has been ignored.'                       
+         XPOP  R1                  Restrieve r1 value                           
+         END   ,                                                                
+         END   ,                                                                
+         ST2   R1,CVMAXSES         Set maximum sessions                         
+         L     R14,CVCHKBUF        Address of checkpoint record                 
+         LA    R15,L'CVCHKPFX      Length of prefix                             
+         LA    R0,CVCHKPFX         Address of checkpoint prefix                 
+         LR    R1,R15              Copy length                                  
+         MVCL  R0,R14              Move in prefix portion                       
+         CLEAR R15                 Indicate good checkpoint read                
+         PEND  ,                                                                
+ICHKTERM LABEL ,                                                                
+         L     R14,CVOSRA          Mvs system return address                    
+         BR    R14                 Return to mvs                                
+         SPACE 2                                                                
+ICHKERR1 PROC  ,                                                                
+         XWTO  'No CHECKPOINT DD found.',,l:cvwtosgp                            
+         PEND  ,                                                                
+ICHKERR2 PROC  ,                                                                
+         XWTO  'Checkpoint defined on non-dasd device',,l:cvwtosgp              
+         PEND  ,                                                                
+ICHKERR3 PROC  ,                                                                
+         XWTO  'Checkpoint device does not support rps'                         
+         PEND  ,                                                                
+ICHKERR4 PROC  ,                                                                
+         XWTO  'Unexpected return from trkcalc'                                 
+         PEND  ,                                                                
+ICHKERR5 PROC  ,                                                                
+         XWTO  'OPEN FAILED FOR CHECKPOINT DATA SET'                            
+         PEND  ,                                                                
+         SPACE ,                                                                
+         DROP  R6                  RELEASE CHKPT ROUTINES                       
+         LTORG ,                                                                
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CHECKABN -- Check DCB abend exit routine.  This routine just                 
+*    tells OS to forget about the error and turns off checkpoint                
+*    updating.                                                                  
+*                                                                               
+CHECKABN WITH  (CHECKABN,R15),BEGIN                                             
+         STM   R0,R15,@R13                                                      
+         L     CVR,=V(CV)                                                       
+*                                                                               
+         SET   CVFNCHK             No checkpointing any more                    
+         MVI   @R1+3,4             Forget about the error                       
+         LM    R0,R15,@R13                                                      
+         BR    R14                                                              
+         END                                                                    
+         EJECT                                                                  
+         DATA  BEGIN                                                            
+LFLAGS   FLAG  ,                   Local flags                                  
+         FLAG  TSTOPT              - Test option explicit                       
+         FLAG  TASKOPT             - Tasks option explicit                      
+         END                                                                    
+         SPACE 2                                                                
+INITWA   RECORD BEGIN                                                           
+         XSA   R2,R8                                                            
+*                                                                               
+INITPTR  DS    2F                  SYSIN buffer ptrs                            
+*                                                                               
+LINENO   DS    F                   Line-number                                  
+LINE     DS    CL(&LINESZ)         Unpressed line area                          
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  INITPARM -- Routine to set up initialization parameters by                   
+*    reading the SYSIN file and then scanning the OS parm.                      
+*    options specified in the OS parm will override SYSIN file                  
+*    options.                                                                   
+*                                                                               
+INITPARM XENTER R2,R8,L'INITWA                                                  
+         USING INITWA,WAR                                                       
+*                                                                               
+         VCALL GETCP               Get new CP (for CPSCAN)                      
+*-                                                                              
+*-       Process SYSIN file.                                                    
+*-                                                                              
+         VCALL AMODE24             ******** 24 bit mode (for QSAM)              
+         OPEN  (SYSIN,(INPUT))                                                  
+         VCALL AMODE31             ********                                     
+         IF    SYSIN+(DCBOFLGS-DCB).DCBOFOPN,BEGIN  Process sysin...            
+         LA    R6,SYSIN            SYSIN DCB ptr                                
+         WITH  (DCB,R6)                                                         
+*                                                                               
+         CLEAR R4,R5               Preset (not in a buffer yet)                 
+         STM   R4,R5,INITPTR       Save buffer ptrs                             
+*                                                                               
+PARMFILE LM    R4,R5,INITPTR       Get buffer ptrs                              
+         IF    (R4,NP),BEGIN       Get next buffer...                           
+         VCALL AMODE24             ********                                     
+         GET   SYSIN               Get next buffer/record                       
+         VCALL AMODE31             ********                                     
+         LR    R5,R1                                                            
+         IF    DCBRECFM.DCBRECU,BEGIN  WYLBUR edit format...                    
+         LH    R4,@R1              Record length                                
+         CEIL  R4,DCBLRECL         Keep us honest                               
+         SH    R4,=H'2'            Don't include record len hw                  
+         BNP   PARMFILE                                                         
+         LA    R5,@R5+2                                                         
+         END                                                                    
+         END                                                                    
+*                                                                               
+         IF    DCBRECFM.DCBRECU,BEGIN  Unpress line...                          
+         LR    R15,R5              Pressed line ptr                             
+         LA    R1,LINE                                                          
+         VCALL UNPRESS             Unpress line                                 
+         ST    R15,LINENO          Save WYLBUR lineno                           
+         LC    R15,@R5+4           Len byte                                     
+         LA    R15,@R15+5          Total pressed line len                       
+         AR    R5,R15                                                           
+         SR    R4,R15                                                           
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Fixed or variable...                         
+         LH    R0,DCBLRECL                                                      
+         IF    ((R0,EQ,80),AND,(@R5+76,EQ,'.')),'LA R0,72' No lineno            
+         CEIL  R0,L'LINE                                                        
+         LR    R15,R0                                                           
+         MOVE  R15,LINE,@R5                                                     
+         SETMSG   LINE,(R0)                                                     
+         END                                                                    
+*                                                                               
+         STM   R4,R5,INITPTR       Save buffer ptrs                             
+*                                                                               
+         OSCINIT (R1),(R0)                                                      
+         MVC   CPSCNERT,=A(PARMERR)  Set scan error addr                        
+         OI    CPSCNFLG,CPFRTNER   Indicate error rtn present                   
+         OSCAN INITPRT                                                          
+         BNZ   PARMERR                                                          
+         B     PARMFILE                                                         
+*                                                                               
+INEOF    LABEL ,                                                                
+         VCALL AMODE24             ********                                     
+         CLOSE (SYSIN)                                                          
+         FREEPOOL SYSIN                                                         
+         VCALL AMODE31             ********                                     
+         END                                                                    
+*-                                                                              
+*-       Scan the parm string.                                                  
+*-                                                                              
+         L     R15,CVPARMP         OS parm ptr                                  
+         LH    R0,@R15             Parm length                                  
+         LA    R1,@R15+2           Parm text addr                               
+         OSCINIT (R1),(R0)         Set to scan parm                             
+         MVC   CPSCNERT,=A(PARMERR)  Set scan error addr                        
+         OI    CPSCNFLG,CPFRTNER   Indicate error rtn present                   
+         CLEAR R6                  Flag: scanning OS parm now                   
+PARMSTR  OSCAN INITPRT             Scan for parms                               
+*-                                                                              
+*-       Now do final parm post-processing.                                     
+*-                                                                              
+         IF    (^TSTOPT,AND,(CVWYLSSN,NE,'WYLBUR')),'SET CVFTEST'               
+*                                                                               
+         IF    (^TASKOPT,AND,CVFTEST),BEGIN                                     
+         L     R1,=V(IOWRSG)       IOWA resource group                          
+         WITH  (RSCGROUP,R1)                                                    
+         MVC   RSG#FREE,=H'1'      Only attach one I/O task                     
+         END                                                                    
+*                                                                               
+         IF    ^CVFTEST,BEGIN      Production system defaults...                
+         SET   CVFNOTIM                                                         
+         END                                                                    
+*                                                                               
+*        ELSE  BEGIN               Test system defaults...          SLP         
+*        SET   CVFNOSMF            No accounting in testwyl         SLP         
+*        END                                                        SLP         
+*                                                                               
+         L     R5,CVTPTR                                                        
+         WITH  (CVT,R5),BEGIN                                                   
+         LT    R4,CVTUSER          USERCVT ptr                                  
+         IF    NZ,BEGIN                                                         
+         WITH  (USERCVT,R4)                                                     
+         IF    (USERCVT,NE,'SCIP'),EXIT  Not ours, scram                        
+         IF    ^CVFTEST,BEGIN      Production only...                           
+         IF    (CVWORD,Z),BEGIN    Set word from USERCVT...                     
+         MVC   CVWORD,USEWORD                                                   
+         IF    USEHSPFL.HSPFSYST,'SET CVFSYST'  Ditto for flag                  
+         END                                                                    
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         VCALL FREECP              Free CP                                      
+*                                                                               
+         XEXIT                                                                  
+         EJECT                                                                  
+***                                                                             
+***  SYSIN/parm options.                                                        
+***                                                                             
+INITPRT  OSCKW NAME,NAME,(A,P)                                                  
+         OSCKW ORVYL,ORVYL,(A,P)                                                
+         OSCKW WORD,WORD,(A,P)                                                  
+         OSCKW TEST,TEST,A                                                      
+         OSCKW TESTMIL,TESTMIL,A                                                
+         OSCKW PRODUCTION,PROD,A                                                
+         OSCKW RECOVERY,RCVY,A                                                  
+         OSCKW NORECOVERY,NORCVY,A                                              
+         OSCKW SKIP,NORCVY,A       (Same as "NORECOVERY")                       
+         OSCKW WINGS,WINGS,A                                                    
+         OSCKW OLDIBM,OLDIBM,A                                                  
+         OSCKW VISTA,VISTA,A                                                    
+         OSCKW RDEBUG,RDEBUG,A                                                  
+         OSCKW NOTIFY,NOTIFY,(A,P)                                              
+         OSCKW NONOTIFY,NONOTIFY,A                                              
+         OSCKW TIMEOUT,TIMEOUT,A                                                
+         OSCKW NOTIMEOUT,NOTIME,A                                               
+         OSCKW SYSA,SYSA                                                        
+         OSCKW SYSB,SYSB                                                        
+         OSCKW SYSC,SYSC                                                        
+         OSCKW SYSD,SYSD                                                        
+         OSCKW SYSH,SYSH                                                        
+         OSCKW SYSF,SYSF                                                        
+         OSCKW SYSG,SYSG                                                        
+         OSCKW RLG,SYSB                                                         
+         OSCKW SERVWYL,SERVWYL,A                                                
+         OSCKW NOSERVWYL,NOSERVW,A                                              
+         OSCKW SMF,SMF                                                          
+         OSCKW NOSMF,NOSMF                                                      
+         OSCKW PAGES,PAGES,(A,P,PI),9999                                        
+         OSCKW NTRACE,NTRACE,(A,P,I),65535                                      
+         OSCKW TASKS,TASKS,(A,P,PI),50                                          
+         OSCKW MBUFF,MBUFF,(A,P,PI)                                             
+         OSCKW NOTRACE,NOTRACE,A                                                
+         OSCKW TRACE,TRACE,A                                                    
+         OSCKW NOTRACE,NOTRACE,A                                                
+         OSCKW ROTATE,ROTATE,A                                                  
+         OSCKW NOROTATE,NOROTATE,A                                              
+         OSCKW RETRY,RETRY,A                                                    
+         OSCKW NORETRY,NORETRY,A                                                
+         OSCKW FORMAT,FORMAT,A                                                  
+         OSCKW FMT,FORMAT                                                       
+         OSCKW PFORMAT,PFORMAT,A                                                
+         OSCKW PFMT,PFORMAT,A                                                   
+         OSCKW CFORMAT,CFORMAT,A                                                
+         OSCKW CFMT,CFORMAT                                                     
+         OSCKW NOCHECK,NOCHECK,A                                                
+         OSCKW NOCHK,NOCHECK                                                    
+         OSCKW MANUAL,MANUAL,A                                                  
+         OSCKW COMMAND,CMD,(A,P)                                                
+         OSCKW CMD,CMD,(A,P)                                                    
+         OSCKW MEMBER,MEMBER,(A,P)                                              
+         OSCKW NOCOMMAND,NOCMD,A                                                
+         OSCKW NOCMD,NOCMD,A                                                    
+         OSCKW RUN,RUN                                                          
+         OSCKW NORUN,NORUN,A                                                    
+         OSCKW DUMP,DUMP,A                                                      
+         OSCKW NODUMP,NODUMP,A                                                  
+         OSCKW RACF,RACF,A                                                      
+         OSCKW NORACF,NORACF,A                                                  
+         OSCKW XA,XA                                                            
+         OSCKW NOXA,NOXA                                                        
+         OSCKW STAE,STAE,A                                                      
+         OSCKW NOSTAE,NOSTAE,A                                                  
+         OSCKW SPIE,SPIE,A                                                      
+         OSCKW NOSPIE,NOSPIE,A                                                  
+         OSCKW MAXSES,SETMXSES,(P,I),6000                                       
+         OSCKW ,CHKSLASH                                                        
+*                                                                               
+NAME     MVC   CVWYLSSN,@R15       Set subsys name                              
+         BR    RAR                                                              
+*                                                                               
+SETMXSES LABEL ,                                                                
+         IF    NP,BADPARM          Invalid interger value                       
+         ST2   R15,CVMAXSES        Set into the CV                              
+         BR    RAR                 Return to the scanner                        
+*                                                                               
+ORVYL    MVC   CVORVSSN,@R15                                                    
+         MVC   CVRLGSSN,@R15                                                    
+         BR    RAR                                                              
+*                                                                               
+WORD     MVC   CVWORD,@R15         Set subsys word                              
+         SET   CVFSYST                                                          
+         IF    (@R15,EQ,'NO '),'CLEAR CVWORD,CVFSYST'                           
+         BR    RAR                                                              
+*                                                                               
+TESTMIL  SET   CVFTMIL             Use test milten path names                   
+TEST     SET   CVFTEST             Set test system                              
+         SET   TSTOPT              Test/notest explicit                         
+         BR    RAR                                                              
+*                                                                               
+PROD     CLEAR CVFTEST             Reset test option                            
+         SET   TSTOPT              Notest is explicit                           
+         BR    RAR                                                              
+*                                                                               
+WINGS    SET   CVFWINGS                                                         
+         CLEAR CVFOLDIBM                                                        
+         BR    RAR                                                              
+*                                                                               
+OLDIBM   SET   CVFOLDIBM                                                        
+         CLEAR CVFWINGS                                                         
+         BR    RAR                                                              
+*                                                                               
+NOTIFY   IF    (R0,NE,6),BADPARM                                                
+         IF    (@R1+2,NE,'.'),BADPARM                                           
+         MVC   CVNOTIFY(3),@R1+3   uuu                                          
+         MVC   CVNOTIFY+3(2),@R1   gg                                           
+         BR    RAR                                                              
+*                                                                               
+NONOTIFY CLEAR CVNOTIFY                                                         
+         BR    RAR                                                              
+*                                                                               
+TIMEOUT  CLEAR CVFNOTIM                                                         
+         BR    RAR                                                              
+*                                                                               
+NOTIME   SET   CVFNOTIM                                                         
+         BR    RAR                                                              
+*                                                                               
+SYSA     MVC   CVMACHID,=CL8'SYSA'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSB     MVC   CVMACHID,=CL8'SYSB'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSC     MVC   CVMACHID,=CL8'SYSC'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSD     MVC   CVMACHID,=CL8'SYSD'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSH     MVC   CVMACHID,=CL8'SYSH'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSF     MVC   CVMACHID,=CL8'SYSF'                                              
+         BR    RAR                                                              
+*                                                                               
+SYSG     MVC   CVMACHID,=CL8'SYSG'                                              
+         BR    RAR                                                              
+*                                                                               
+SERVWYL  SET   CVFSERVWYL                                                       
+         BR    RAR                                                              
+*                                                                               
+NOSERVW  CLEAR CVFSERVWYL                                                       
+         BR    RAR                                                              
+*                                                                               
+SMF      CLEAR CVFNOSMF                                                         
+         BR    RAR                                                              
+*                                                                               
+NOSMF    SET   CVFNOSMF                                                         
+         BR    RAR                                                              
+*                                                                               
+NTRACE   STH   R15,CVTRCENT        Save no. of entries                          
+         BR    RAR                                                              
+*                                                                               
+TASKS    SET   TASKOPT             Option is explicit                           
+         L     R1,=V(IOWRSG)                                                    
+         WITH  (RSCGROUP,R1),'STH R15,RSG#FREE'                                 
+         BR    RAR                                                              
+*                                                                               
+MBUFF    LA    R15,@R15+7                                                       
+         N     R15,=X'FFFFFFF8'    Round to doubleword                          
+         ST    R15,CVMBUFF                                                      
+         BR    RAR                                                              
+*                                                                               
+TRACE    SET   CVENTON             Enable xenter tracing                        
+         BR    RAR                                                              
+*                                                                               
+NOTRACE  SET   CVENTOFF            Disable xenter tracing                       
+         BR    RAR                                                              
+*                                                                               
+ROTATE   LABEL ,                   WROTATE                                      
+*        SET   CVFPGROT            NO! WROTATE will bomb wylbur !!              
+         BR    RAR                                                              
+*                                                                               
+NOROTATE CLEAR CVFPGROT            Don't do page rotation                       
+         BR    RAR                                                              
+*                                                                               
+PAGES    STH   R15,CVNIPG          Number of pages to get                       
+         BR    RAR                                                              
+*                                                                               
+RCVY     SET   CVFRCVY                                                          
+         BR    RAR                                                              
+*                                                                               
+FORMAT   LENTER                                                                 
+         XWTO  'FORMAT is now the same as SKIP; which means'                    
+         XWTO  'that Active file recovery will be skipped.'                     
+         XWTO  'Specify "PFORMAT" to format the page files.'                    
+         XWTO  'MODE=SKIP assumed.'                                             
+         CLEAR CVFRCVY                                                          
+         LEXIT                                                                  
+*                                                                               
+PFORMAT  SET   CVFFMT                                                           
+         SET   CPSCNFLG.CPFSBLK    Blank kw (prevents future use)               
+NORCVY   CLEAR CVFRCVY                                                          
+         BR    RAR                                                              
+*                                                                               
+CFORMAT  SET   CVFCFMT                                                          
+         SET   CPSCNFLG.CPFSBLK    Blank kw (prevents future use)               
+         BR    RAR                                                              
+*                                                                               
+VISTA    SET   CVFVISTA            This is the VLOGON subsystem                 
+         BR    RAR                                                              
+*                                                                               
+RDEBUG   SET   CVFRBUG                                                          
+         BR    RAR                                                              
+*                                                                               
+RETRY    CLEAR CVFNORET                                                         
+         BR    RAR                                                              
+*                                                                               
+NORETRY  SET   CVFNORET                                                         
+         BR    RAR                                                              
+*                                                                               
+NOCHECK  SET   CVFNCHK                                                          
+         BR    RAR                                                              
+*                                                                               
+MANUAL   SET   CVFMAN              Manual recovery                              
+         BR    RAR                                                              
+*                                                                               
+CMD      LENTER                                                                 
+         VCALL DEQUOTE                                                          
+         L     R2,=A(ICMD)                                                      
+         MVC   @R2(L'ICMD),CVBLANKS  Pre-blank                                  
+         VCALL LRTRIM                                                           
+         CEIL  R0,L'ICMD                                                        
+         LR    R15,R0                                                           
+         MOVE  R15,@R2,@R1         Save new exec parms                          
+*                                                                               
+         L     R2,=A(ICMDMEMB)                                                  
+         MVC   @R2(L'ICMDMEMB),CVBLANKS                                         
+         LEXIT                                                                  
+*                                                                               
+MEMBER   L     R2,=A(ICMDMEMB)                                                  
+         MVC   @R2(8),@R15         Save new member name                         
+         BR    RAR                                                              
+*                                                                               
+NOCMD    L     R2,=A(ICMD)                                                      
+         MVC   @R2(L'ICMD),CVBLANKS  Don't execute first command                
+         BR    RAR                                                              
+*                                                                               
+RUN      CLEAR CVFNOR                                                           
+         BR    RAR                                                              
+*                                                                               
+NORUN    SET   CVFNOR                                                           
+         BR    RAR                                                              
+*                                                                               
+DUMP     SET   CVFDUMP                                                          
+         BR    RAR                                                              
+*                                                                               
+NODUMP   CLEAR CVFDUMP                                                          
+         BR    RAR                                                              
+*                                                                               
+RACF     CLEAR CVFNORACF                                                        
+         BR    RAR                                                              
+*                                                                               
+NORACF   SET   CVFNORACF                                                        
+         BR    RAR                                                              
+*                                                                               
+XA       IF    ^CVFXA,RAR                                                       
+         SET   CVFXA31                                                          
+         BR    RAR                                                              
+*                                                                               
+NOXA     CLEAR CVFXA31                                                          
+         BR    RAR                                                              
+*                                                                               
+STAE     CLEAR CVFNSTAE                                                         
+         BR    RAR                                                              
+*                                                                               
+NOSTAE   SET   CVFNSTAE                                                         
+         BR    RAR                                                              
+*                                                                               
+SPIE     CLEAR CVFNSPIE                                                         
+         BR    RAR                                                              
+*                                                                               
+NOSPIE   SET   CVFNSPIE                                                         
+         BR    RAR                                                              
+*                                                                               
+CHKSLASH IF    ((R0,NE,1),OR,(@R1,NE,'/')),BADPARM                              
+         L     R2,=A(ICMDPARM)                                                  
+         MVC   @R2(L'ICMDPARM),CVBLANKS                                         
+         OSCTELL                                                                
+         VCALL LRTRIM                                                           
+         CEIL  R0,L'ICMDPARM                                                    
+         LR    R15,R0                                                           
+         MOVE  R15,@R2,@R1         Save new exec parms                          
+         OSCDONE                                                                
+*                                                                               
+BADPARM  LENTER                                                                 
+         SEG   (R1),(R0),L:CVWTOSGP                                             
+         SEG   ' is a bad parm.'                                                
+         XWTO                                                                   
+         LEXIT                                                                  
+*                                                                               
+PARMERR  XWTO  'Error in parm.'                                                 
+         IF    (R6,NZ),PARMFILE    Resume scanning SYSIN                        
+         B     PARMSTR             Resume scanning OS parm                      
+*                                                                               
+         DROP  INITWA,BR                                                        
+         EJECT                                                                  
+SYSIN    DCB   DDNAME=SYSIN,DSORG=PS,MACRF=GL,EXLST=INEX,EODAD=INEOF            
+*                                                                               
+INEX     DC    0F'0',X'85',AL3(SYSINOP)                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SYSINOP -- OS open exit routine for SYSIN ddcard.                            
+*                                                                               
+*    On entry:                                                                  
+*      R1 - DCB ptr                                                             
+*      R15- base                                                                
+*                                                                               
+SYSINOP  LABEL                                                                  
+         WITH  (DCB,R1),(*,R15),BEGIN                                           
+         SET   DCBOFLGS.DCBOFPPC   Allow concat of unlike attributes            
+         IF    (DCBBUFNO,Z),'MVI DCBBUFNO,2'  bufno=2 default                   
+         IF    (DCBBLKSI,Z),BEGIN  No blksize...                                
+         MVC   DCBBLKSI,DCBLRECL   Blksize = lrecl                              
+         IF    (DCBBLKSI,Z),'MVC DCBBLKSI,=AL2(&BUFRMAX)'  Default              
+         END                                                                    
+         BR    RAR                                                              
+         END                                                                    
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  INITCMDS -- Routine to set the pseudo-user to execute a few                  
+*    commands to complete WYLBUR's initialization.                              
+*                                                                               
+*    This routine is called by the dispatcher.                                  
+*                                                                               
+INITCMDS XENTER                                                                 
+*        XWTO  'INITCMDS entered'  *** slp debug ***                            
+         SET   CVFPUSR             Run as pseudo-user                           
+         MVC   CVCURJCB,CVFJCB     Use the first line                           
+         L     JCBR,CVCURJCB                                                    
+         WITH  JCB,BEGIN                                                        
+         CLEAR JCBWFL.JCBWFSO      User is logged on                            
+         INCR  R15,CVNUSERS        Count as active user                         
+         SETUP JCB                                                              
+         END                                                                    
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  INITPUSR -- Initial entry for the pseudo-user.  This routine                 
+*    initializes the CP fields and then goes to the command                     
+*    processor.                                                                 
+*                                                                               
+INITPUSR GENTER                                                                 
+*        XWTO  'INITPUSR entered'  *** slp debug ***                            
+         VCALL INITCMD             Initialize                                   
+         VCALL INITCP              Initialize CP fields                         
+*                                                                               
+         SET   CPSSFNAR+CPSSFPS    No recovery, pseudo session                  
+*                                                                               
+         MVC   CPSACCT,CVWYLACC    Set as WYLBUR's account                      
+         L     R15,CVCURJCB                                                     
+         WITH  (JCB,R15),'MVC JCBACCT,CVWYLACC'  Set it here too                
+         SET   CPSFAPR+CPSFSPR+CPSFOPR  Priv'd                                  
+*-                                                                              
+*-       Initialize the CV record groups (in "user" mode).                      
+*-                                                                              
+         LCALL INITCVRG            Initialize CV RG's                           
+*                                                                               
+         B     CVNEXT                                                           
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  INITCVRG -- Local routine to initialize the public record                    
+*    groups.  Note that this must be done in user (not dispatcher)              
+*    mode.                                                                      
+*                                                                               
+INITCVRG PROC                                                                   
+*-                                                                              
+*-       Initialize public record groups.                                       
+*-                                                                              
+*        XWTO  'INITCVRG entered'  *** slp debug ***                            
+         LA    R15,CVEXEC          EXEC files                                   
+         LA    R0,4                                                             
+         LA    R1,=CL4'EXEC'                                                    
+         LA    R2,=CL4'M...'                                                    
+         VCALL INITRG                                                           
+*                                                                               
+         LA    R15,CVFLOW          FLOW information                             
+         LA    R0,16                                                            
+         LA    R1,=CL4'FLOW'                                                    
+         LA    R2,=CL4'M...'                                                    
+         VCALL INITRG                                                           
+*                                                                               
+         LA    R15,CVDATA          Exec GETDATA/PUTDATA records                 
+         LA    R0,CPDATANL                                                      
+         LA    R1,=CL4'DATA'                                                    
+         LA    R2,=CL4'M...'                                                    
+         VCALL INITRG                                                           
+*                                                                               
+         LA    R15,CVRG16          Misc Record Group 16                         
+         LA    R0,CPRG16NL                                                      
+         LA    R1,=CL4'RG16'                                                    
+         LA    R2,=CL4'M...'                                                    
+         VCALL INITRG                                                           
+*                                                                               
+         LA    R15,CVRG64          Misc Record Group 64                         
+         LA    R0,CPRG64NL                                                      
+         LA    R1,=CL4'RG64'                                                    
+         LA    R2,=CL4'M...'                                                    
+         VCALL INITRG                                                           
+*                                                                               
+         PFREE PAR                                                              
+         PFREE PBR                                                              
+         PEND                                                                   
+         EJECT                                                                  
+PCMDWA   RECORD BEGIN                                                           
+PCMDSG   SEGCB                                                                  
+PCMDTEXT DS    CL(&LINESZ)         Initial command is build here                
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  INITPCMD -- Entered from the command processor to get the                    
+*    next command for the pseudo-user.                                          
+*                                                                               
+*    When all the initial commands have been executed we set the                
+*    pseudo-user as logging off and return to the command                       
+*    processor (for the last time).                                             
+*                                                                               
+INITPCMD GENTER L'PCMDWA                                                        
+         USING PCMDWA,WAR                                                       
+         CLEAR PCMDWA                                                           
+*-                                                                              
+*-       Execute the initial command.                                           
+*-                                                                              
+*        XWTO  'INITPCMD entered'  *** slp debug ***                            
+         IF    (ICHK,Z),BEGIN      First time through...                        
+         MVI   ICHK,X'FF'          (Only do this once)                          
+*                                                                               
+         SEGINIT PCMDTEXT,,PCMDSG                                               
+         SEGT  ICMD                Basic command                                
+*                                                                               
+         IF    (ICMDMEMB,NE,CVBLANKS),BEGIN  Add in member...                   
+         SEG   '#'                                                              
+         SEGT  ICMDMEMB            Add member                                   
+         END                                                                    
+*                                                                               
+         IF    (ICMDPARM,NE,CVBLANKS),BEGIN  Add any parms...                   
+         SEG   '/'                                                              
+         SEGT  ICMDPARM                                                         
+         END                                                                    
+*                                                                               
+*        XWTO  PCMDTEXT,L:PCMDSGLENF  *** slp debug ***                         
+         SETMSG PCMDTEXT,L:PCMDSGLENF  Famous first command                     
+         VCALL EDTCOMMV            Go execute the command                       
+         DC    H'0'                (No return)                                  
+         END                                                                    
+*-                                                                              
+*-       All done with initialization commands.                                 
+*-                                                                              
+         L     JCBR,CVCURJCB                                                    
+         WITH  JCB,'SET JCBAFALO'  Logging off                                  
+         B     CVNEXT                                                           
+         DROP  BR                                                               
+*                                                                               
+*                                                                               
+ICHK     DC    X'00'               Set to FF after the first time               
+*                                                                               
+ICMD     DC    CL120'XCALL WYL.GS.WYL.PARMS'                                    
+ICMDMEMB DC    CL8'INITPROD'       Execute this member                          
+ICMDPARM DC    CL120' '                                                         
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+         VLTORG                                                                 
+         END   .                                                                

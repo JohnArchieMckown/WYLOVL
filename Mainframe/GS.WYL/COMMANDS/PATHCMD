@@ -1,0 +1,231 @@
+;
+;;  PATHCMD -- This exec implements commands which are sent
+;;    to another system via a Suzan path.
+;;
+;;    This is how the MILTEN and AMELIA commands are implemented.
+;;
+;;
+;;  Created, 8/16/90, Jim Nisbet
+;;
+;;  Modifications:
+;;     8/16/90  Niz     Initial version.
+;
+
+xproc () begin
+   x.origact = actno
+   x.attn = 0                      ; attn counter (see attnexit)
+
+   x.pgm = 'pathcmd'               ; program name
+   x.maint = '(gg.jdn)'            ; maintenance people
+
+   x.pno = 0
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit' int
+
+   dcl string rc, dummystr
+
+   ;
+   ;  Parse parameters.  The first parameter is the "yourtag"
+   ;    pathname and the second parameter is the command.
+   ;
+   p = index(parm_string,'/')
+   if (p eq 0) begin
+      write 'Internal pathcmd error (incorrect syntax).'
+      xreturn
+   end
+
+   x.pathname = upper(strip(left(parm_string, p-1)))
+   if (x.pathname eq '%%%MIL') x.pathname = milten
+
+   x.command = strip(substr(parm_string,p+1))
+   x.old_colinfo = ''
+
+   x.f_amelia = \
+      (index(x.pathname,'AMELIA')+index(x.pathname,'AMY') ne 0)
+
+   ;
+   ;  Handle processing "collect options".
+   ;
+   if (abbrev('DUMP',upper(scan_token(x.command)),3)) begin
+      x.command = 'collect end ' || x.command
+   end
+
+   try syscall collect_scan(x.command, dummystr, x.old_colinfo)
+   ; if not ok to clear, cleanup and exit
+   if (tryattn or tryerr) begin
+      try write 'No action taken.'
+      pcall cleanup('error')
+   end
+   x.origact = actno         ; "collect keep" could change actno
+
+   x.command = strip(x.command)
+
+   if (x.command eq '') begin
+      write 'Missing &(x.pathname) command.'
+      pcall cleanup('error')
+   end
+
+   ;
+   ;  Open command path.
+   ;
+   pathopts = 'yourtag=' || x.pathname || ' nowait'
+   if (x.f_amelia) \
+      pathopts = pathopts || ' bufsize=64000'
+   else \
+      pathopts = pathopts || ' noheaders'
+
+   try syscall path_open(x.pno, pathopts, rc)
+   if (rc ne 'OK') begin
+      comm &(x.pathname) command path is not currently available.
+      pcall cleanup('error')
+   end
+
+   ;
+   ;  Execute command.
+   ;
+   open &(x.pgm) title '&(tran(x.command,'"',"'"))' temp
+   pcall do_command(x.command)
+
+   ;
+   ;  Display results.
+   ;
+
+   if (lines ne 0) begin
+      try list unn
+   end
+
+   ;
+   ;  Finish up.
+   ;
+   close
+
+   syscall path_close(x.pno)
+   x.pno = 0
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+;  do_command -- Routine to execute a command and put the results
+;    at the end of the current Active file.
+;
+
+proc do_command(cmd) begin
+
+   dcl string rc
+   dcl number rcount
+
+   if (x.f_amelia) cmd = 'COMMAND:' || cmd
+
+   try syscall path_write(x.pno, '', cmd, rc)
+   if (rc ne 'OK') begin
+      write 'path write failed.'
+      pcall cleanup('error')
+   end
+
+   if (upper(left(cmd,3)) eq 'MON') begin
+      pcall do_monitor
+      return
+   end
+
+   try syscall path_readfile(x.pno, 'wait=20 eof=$END', \
+      rcount, rc)
+   if (line(last) eq '$END') begin
+      delete last
+      rc = 'EOF'
+   end
+
+   if (rc ne 'EOF') begin
+      putend Command response incomplete (path status=&(rc)).
+   end
+end
+
+
+
+; <.page>
+;
+;  do_monitor -- Routine to execute MONITOR command.  This command
+;    is different than the others because we want to display
+;    partial results.
+;
+
+proc do_monitor() begin
+   write 'MONITOR command not supported.'
+   pcall cleanup('error')
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles cleanup and restoring the user state.
+;
+
+proc cleanup(opt) begin
+   if (x.pno ne 0) begin
+      try syscall path_close(x.pno)
+      x.pno = 0
+   end
+
+   if (x.old_colinfo ne '') begin
+      syscall collect_set_info(&(x.old_colinfo))
+      x.old_colinfo = ''
+   end
+
+   pick &(x.origact)
+
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   if (opt eq 'attn') \
+      opt = "attn attnid=ATTN"
+   xreturn &(opt)
+end
+
+
+
+;<.page>
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   pcall cleanup('attn')
+end
+
+
+
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    Right now all we do is log the error information.
+;
+
+proc errorexit() begin
+   write '----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+   write ''
+   write '--> show vars type error'
+   try show vars type error
+
+   write ''
+   write '--> show vars type x'
+   try show vars type error
+
+   write ''
+   write '--> show vars type ses'
+   try show vars type error
+
+   write ''
+   write 'End of diagnostics.'
+
+   pcall cleanup('error')
+end

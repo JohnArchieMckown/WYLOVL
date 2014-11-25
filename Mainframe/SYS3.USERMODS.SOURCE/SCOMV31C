@@ -1,0 +1,3850 @@
+//&$SCOM    JOB ,'SUZAN SVC',TIME=(,15),CLASS=E,MSGCLASS=C
+/*JOBPARM  LINES=20
+//*
+//ASMSCOM PROC
+//ASM    EXEC  PGM=ASMA90,REGION=8M,
+//             PARM=('SYSPARM(SCOM),TERM,LANG(EN),OBJ',
+//             'LC(32500),XREF(SHORT),NODECK,NORLD,NODX,NOUS')
+//SYSLIB   DD  DSN=SYS3.DUMMYMAC,DISP=SHR
+//         DD  DSN=WYL.GG.SYS.MACLIB,DISP=SHR
+//         DD  DSN=SYS3.IS.MACLIB,DISP=SHR
+//         DD  DSN=SYS3.MACLIB,DISP=SHR
+//         DD  DSN=SYS1.MACLIB,DISP=SHR
+//         DD  DSN=SYS1.MODGEN,DISP=SHR
+//SYSLIN   DD  DSN=&&LOADSET,UNIT=SYSDA,SPACE=(3120,(80,20),RLSE),
+//             DISP=(MOD,PASS),DCB=(LRECL=80,BLKSIZE=3120,RECFM=FB)
+//SYSPRINT DD  DSN=&&PRINT,UNIT=SYSDA,SPACE=(3509,(200,100),RLSE),
+//             DCB=(RECFM=FB,LRECL=121,BLKSIZE=3509),DISP=(,PASS)
+//SYSTERM  DD  SYSOUT=C
+//SYSUT1   DD  DSN=&&SYSUT1,UNIT=SYSDA,
+//             SPACE=(5100,(200,100),,CONTIG,ROUND),DCB=BLKSIZE=5100
+//*
+//$EDIT  EXEC  PGM=ASMEDIT,COND=EVEN,REGION=1536K,PARM='STMT,DATA'
+//STEPLIB  DD  DSN=WYL.GG.SYS.LINKLIB,DISP=SHR
+//ASMOUT   DD  DSN=&&PRINT,DISP=(OLD,DELETE)
+//SYSPRINT DD  SYSOUT=A
+//SYSUDUMP DD  SYSOUT=A
+//*
+//LKED   EXEC  PGM=HEWL,PARM=(LET,XREF,NCAL),
+//             COND=(5,LT,ASM),REGION=384K
+//SYSLIN   DD  DSN=*.ASM.SYSLIN,DISP=(OLD,DELETE)
+//SYSPRINT DD  SYSOUT=A
+//SYSUT1   DD  DSN=&&SYSUT1,UNIT=SYSDA,SPACE=(3120,(120,10),,,ROUND)
+//*
+//       PEND
+//*
+//       EXEC  PURGEOLD
+//       EXEC  ASMSCOM
+//ASM.SYSIN DD *
+SCOM     TITLE 'SUZAN SVC --  Inter Address Space Communications SVC'
+*******************************************************************
+*                                                                 *
+*      SUZAN/370 - Release V - Class I - Stanford Proprietary     *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+         HIBAL
+         SPACE 2
+*
+*        SVC TYPE:        1
+*        LOCKS REQUIRED:  LOCAL
+*        SUBPOOLS:        FIXED SQA (245) USED FOR CONTROL BLOCKS
+*                         PAGED CSA (241) USED FOR BUFFER STORAGE
+*                         PAGED CSA (241) USED FOR SAVE STACK
+*                         AREAS ARE KEY 0, NON FETCH PROTECTED
+*        ADDRESSING MODE: 31 BIT
+*        RESIDENCY MODE:  24 BIT (ALLOWS BRANCH ENTRY FROM 24 BIT
+*                         CALLERS)
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*      Modification History                                       *
+*                                                                 *
+*   1.0-2.6 CAF, RAL, JDN, SCH, PJG (and probably others)         *
+*                                                                 *
+*   3.0  6/30/96  RAL                                             *
+*        Major overhaul including:                                *
+*          Added local buffering to reduce Getmain overhead       *
+*          Converted to Storage macro to reduce Getmain overhead  *
+*          Eliminated 24 bit mode dependencies                    *
+*          Eliminated need for CMS lock in command processing     *
+*          Added branch entry for authorized callers              *
+*          Re-organized for addressability                        *
+*          Added save stack for register availability             *
+*          Miscellaneous cleanup                                  *
+*                                                                 *
+*   3.1  Miscellaneous bug fixes                                  *
+*          Remove "controller" function                           *
+*          Improve close logic                                    *
+*          Added PCB pooling                                      *
+*          Add "close complete" (in compatibility mode)           *
+*                                                                 *
+*   3.1A 10/17/97 RAL                                             *
+*        Correct bug in Mode 1 Get/Locate                         *
+*                                                                 *
+*   3.1B 10/1/98  RAL                                             *
+*        Correct bug in full queue processing                     *
+*                                                                 *
+*   4.4C 03/07/02 DFF                                             *
+*        Provide for defered partner clearing (see PCBFCLRPART    *
+*        flag). This will fix the problem causing MVS to lock up  *
+*        when there are less than 4 CUPs defined. Remove          *
+*        extraneous unused routines for SRB blocks that were not  *
+*        removed when the SRB was included in the PCB block. Add  *
+*        diagnostics to the SCT (SCTEMPx fields).                 *
+*                                                                 *
+*******************************************************************
+         EJECT
+         SYSDEFN
+         GBLA  &SVCCOM                 (SEE "SYSDEFN" MACRO)
+*&SVCCOM  SETA  211
+*
+*
+IGC&SVCCOM  CSECT
+IGC&SVCCOM  AMODE 31
+IGC&SVCCOM  RMODE ANY
+         SPACE 3
+*
+*    Assembly constants
+*
+MAXBUF   EQU   64*1024                 USER BUFFER CHAIN MAXIMUM
+MAXPBUF  EQU   1024*1024               PRIVILEGED USER BUFFER MAX
+MAXTRANS EQU   (32*1024)-12            Single transaction maximum
+SPCSA    EQU   241                     Subpool for CSA
+SPSQA    EQU   245                     Subpool for SQA
+SPPCB    EQU   SPSQA                   PCBs (SRBs) Fixed, Key 0
+SPBUF    EQU   SPCSA                   Buffers Unfixed, Key 0
+STKSIZE  EQU   32*4                    Stack size
+         SPACE 2
+*GEN
+         TITLE 'SUZAN SVC --  Macro Definitions'
+         MACRO
+&L       XCALL &RTN,&ALTRTN
+*JOIN
+         AIF   (T'&RTN EQ 'A' OR T'&RTN EQ 'V').GOTSYM
+         AIF   ('&RTN'(1,1) EQ '(' AND  '&RTN'(K'&RTN,1) EQ ')').GOTREG
+&L      $L     R15,=A(&RTN)
+         AGO   .DOBR
+.GOTREG  ANOP
+.GOTSYM  ANOP
+&L      $L     R15,&RTN
+         AIF   ('&ALTRTN' EQ '').DOBR
+         LTR   R15,R15
+         AIF   ('&ALTRTN' EQ '*').SKIPZ
+         BZ    &ALTRTN
+         AGO   .DOBR
+.SKIPZ   BZ    *+6
+.DOBR    ANOP
+         BASR  R14,R15
+         MEND
+         SPACE 3
+         MACRO
+&L       INCRR &REG1,&REG2,&ADDR
+.*       Similar to INCR; but does CS for multi-cpus.
+&N       SETA  L'&ADDR
+         AIF   (&N NE 4).SORRY
+&L       L     &REG1,&ADDR
+         LA    &REG2,1
+         ALR   &REG2,&REG1
+         CS    &REG1,&REG2,&ADDR
+         BNZ   *-10
+         MEXIT
+.SORRY   MNOTE 8,'&ADDR HAS LENGTH OF &N, NOT 4'
+         MEND
+         TITLE 'SUZAN SVC --  Data Area Definitions'
+*******************************************************************
+*                                                                 *
+*      MVS Control Block Definitions                              *
+*                                                                 *
+*              PSA                                                *
+*              CVT                                                *
+*              ASCB                                               *
+*              TCB                                                *
+*              SRB                                                *
+*              WSAVT                                              *
+*              FRR                                                *
+*              SDWA                                               *
+*              RMPL                                               *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+         PRINT OFF
+         EJECT
+         IHAPSA
+         EJECT
+         CVT   DSECT=YES
+         EJECT
+         IHAASCB
+         EJECT
+         IHAASVT
+         EJECT
+         IKJTCB
+         EJECT
+         IEZJSCB
+         EJECT
+         IHASRB
+         EJECT
+         IHARB
+         EJECT
+         IHAWSAVT
+         EJECT
+         IHARMPL
+         EJECT
+         IHAFRRS
+         EJECT
+         IHASDWA  VRAMAP=NO
+         PRINT ON
+         EJECT
+*******************************************************************
+*                                                                 *
+*        SCIP CVT                                                 *
+*                                                                 *
+*******************************************************************
+SCV      RECORD BEGIN
+         SCIPCVT PFX=SCV
+SCVSUZAN EQU   SCVSUZCP
+*SCVSUZAN EQU   SCVSUZCT
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        Buffer Pool Control                                      *
+*                                                                 *
+*******************************************************************
+BPCTAB   RECORD BEGIN
+BPCSIZE  DS    A                       Size of this pool
+BPCREQ   DS    A                       Number of requests
+BPCCHN   DS    2A                      Buffer chain
+         DS    0D
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        SUZAN CONTROL TABLE                                      *
+*                                                                 *
+*******************************************************************
+SCT      RECORD BEGIN
+SCTIDENT DC    CL4'SUZY'               Eye catcher
+         DS    A                       Spare
+SCTCSECT DS    A                       Program start address
+*
+*  SCT fields
+*
+SCTCHAIN DS    A                       PCB chain
+SCTPCBS  DS    D                       Available PCBs
+SCTSTACK DS    D                       Available Stacks
+SCTRMTKN DS    A                       RMTR Token
+SCTRMTK2 DS    A                       RMTR Token
+SCTRMPRM DS    D                       RMTR parameter area
+*
+*  Low Memory Buffer Pool Control
+*
+SCTNBPL  EQU   8                       Number of buffer pools
+         DS    0D
+SCTBPCL  DS    (SCTNBPL*L'BPCTAB)X     Buffer pool descriptors
+*
+*  High Memory Buffer Pool Control
+*
+SCTNBPH  EQU   8                       Number of buffer pools
+         DS    0D
+SCTBPCH  DS    (SCTNBPH*L'BPCTAB)X     Buffer pool descriptors
+*
+*  Statistics area
+*
+SCTBPLBK EQU   1024                    Number of low buckets
+SCTBPHBK EQU   1024                    Number of high buckets
+*
+SCTBPLST DS    A                       Low memory buckets
+SCTBPHST DS    A                       High memory buckets
+*
+SCTCMDS  DS    A                       Number of command calls
+SCTOPNS  DS    A                       Number of open calls
+SCTRPCB  DS    A                       Number of PCBs requested
+SCTGPCB  DS    A                       Number of PCBs obtained
+SCTRSTK  DS    A                       Number of stacks requested
+SCTGSTK  DS    A                       Number of stacks obtained
+*
+SCTRMGR  DS    8A                      Resource Manager Work Area
+
+SCTEMPF0 DS    F                       FREEPCB counts
+SCTEMPF1 DS    F                       FREEPCB counts
+SCTEMPF2 DS    F                       FREEPCB counts
+SCTEMPF3 DS    F                       FREEPCB counts
+SCTEMPF4 DS    F                       FREEPCB counts
+SCTEMPF5 DS    F                       FREEPCB counts
+SCTEMPF6 DS    F                       FREEPCB counts
+SCTEMPF7 DS    F                       FREEPCB counts
+SCTEMPF8 DS    D                       TOD
+SCTEMPF9 DS    A
+SCTEMPFA DS    A
+SCTEMPFB DS    A
+SCTEMPFC DS    A
+
+SCTEMPM  EQU   48
+SCTEMPD  DS    F                       Diagnostic count
+SCTEMPC  DS    F                       Count of programs
+SCTEMPP  DS    XL(16*SCTEMPM)          Program names
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        PCB--PATH CONTROL BLOCK                                  *
+*                                                                 *
+*******************************************************************
+PCB      RECORD BEGIN
+*
+PCBID    DC    CL4'PCB '               ID
+PCBPASS  DS    CL4                     PATH PASSWORD
+PCBMY    DS    CL8                     MY SYMBOLIC NAME
+PCBYOU   DS    CL8                     PARTNERS SYMBOLIC NAME
+PCBSCT   DS    A                       Suzan Control Table
+PCBASCB  DS    A                       ASCB
+PCBTCB   DS    A                       TCB
+PCBECB   DS    A                       ECB ADDRESS
+PCBECBF  DS    A                       ADDRESS OF POST FLAGS
+PCBLLOC  DS    A                       ADDRESS OF LAST LOCATED BUFFER
+PCBABUF  DS    A                       Active BUFFER CHAIN
+PCBRET0  DS    A                       REGISTER 0 RETURN AREA
+PCBRET1  DS    A                       REGISTER 1 RETURN AREA
+PCBAMSK  DS    A                       ADDRESS 'AND' MASK
+PCBASID  DS    Y                       Address space ID
+*
+PCBKEY   DS    X                       Protect key
+*
+PCBXFL   FLAG  ,
+         FLAG  PCBFAUTH                Caller is authorized
+         FLAG  PCBFSRBFREE             SRB to free PCB/SRB memory
+         FLAG  PCBFUNLFREE             Unlock to free PCB/SRB memory
+         FLAG  PCBFCLRPART             Clear partner on unlock
+*
+PCBFREE  DS    X                       Free PCB test and set lock
+*
+PCBPFL   DS    AL1                     POST FLAGS (for partner)
+*
+PCBMFL   FLAG  ,                       Same as PATHMFL
+*
+*  The following fields are referenced and/or updated from other
+*     address spaces or tasks
+*
+PCBPART  DS    A                       PARTNERS PCB
+PCBCRBF  DS    A                       CURRENT BUFFER SIZE
+PCBMXBF  DS    A                       MAXIMUM BUFFER SIZE
+PCBNEXT  DS    A                       PCB CHAIN
+*
+         DS    0A,XL3                  *** Flag byte alignment ***
+PCBCAFL  FLAG  ,                       Cross address space flags
+         FLAG  PCBFPBHI                Partner's buffers in high memory
+         FLAG  PCBFACON                Path available for connection
+*
+PCBQBUF  DS    D                       Queued buffers
+*
+PCBSRB   DS    0D,(SRBSIZE)X           ROOM FOR THE SRB
+         DS    0D
+*
+PCBINFO  DS    XL160                   User information area
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        PATH--PATH INITIALIZATION INFORMATION                    *
+*                                                                 *
+*******************************************************************
+PATHB    RECORD BEGIN
+         PATH  VERSION=2
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        PCW--PATH COMMAND WORD                                   *
+*                                                                 *
+*******************************************************************
+PCWD     RECORD BEGIN
+         PCW
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*        RDW--RECORD DESCRIPTOR WORD                              *
+*                                                                 *
+*******************************************************************
+RDWD     RECORD BEGIN
+         RDW
+         END   ,
+         TITLE 'SUZAN SVC --  SVC Entry'
+*NOGEN
+*******************************************************************
+*                                                                 *
+*  SUZAN SVC ENTRY                                                *
+*                                                                 *
+*        Registers on entry from MVS:                             *
+*              R0  - Caller                                       *
+*                    Zero - Initialization call                   *
+*                    Neg  - Purge call                            *
+*                    Pos  - Command call                          *
+*              R1  - Caller                                       *
+*                    Init  - Path block address                   *
+*                    Purge - ASCB or TCB of purgee                *
+*                    Command - PCW address                        *
+*              R2  - Undefined                                    *
+*              R3  - CVT                                          *
+*              R4  - Caller's TCB                                 *
+*              R5  - Current RB                                   *
+*              R6  - Entry Address                                *
+*              R7  - Current ASCB                                 *
+*              R8  - Undefined                                    *
+*              R9  - Undefined                                    *
+*              R10 - Undefined                                    *
+*              R11 - Undefined                                    *
+*              R12 - Undefined                                    *
+*              R13 - Caller                                       *
+*              R14 - Return address                               *
+*              R15 - Caller                                       *
+*                    Purge - 0=TCB mode, 4=ASCB mode              *
+*                                                                 *
+*        Registers on return to MVS:                              *
+*              R14 - Return address                               *
+*              R15 - Return code                                  *
+*              R0  - Information for caller                       *
+*              R1  - Information for caller                       *
+*                                                                 *
+*******************************************************************
+         SPACE
+*
+IGC&SVCCOM  CSECT
+*
+         SPACE
+         REGS  ,,SR,(TR,CVTR),(QR,TCBR),RBR,BR,RAR,                    *
+               PCBR,(PCWR,PARMR),,,ADDR,SPR
+         SPACE 2
+         USING *,BR                    ##
+         B     START
+         IDENT
+START    LABEL ,
+         EJECT
+*
+*  Route request
+*
+         CLEAR QR,PCBR                 Pre-set return code and PCB
+         LTR   R0,R0
+         IF    P,CMDCALL
+         IF    Z,INITCALL
+*
+*  Purge call (from SUZANPRG) is no longer used
+*    so just return
+*
+         TITLE 'SUZAN SVC --  Cleanup and Return'
+*
+*  RETURN TO CALLER
+*
+*    Registers:
+*
+*        QR   = Return code
+*        PCBR = PCB pointer or 0
+*
+         SPACE 2
+*
+*  Set return registers and return to caller
+*
+RETURN   LABEL ,
+         LR    R15,QR                  SET RETURN CODE
+         IF    (PCBR,NZ),BEGIN
+         WITH  (PCB,PCBR),'LM  R0,R1,PCBRET0'  SET RETURN REGS
+         END   ,
+         L     R14,CVTPTR              CVT ADDRESS
+         WITH  (CVT,R14),'L  R14,CVTEXPRO'   TYPE 1 EXIT PROLOGUE
+         BR    R14                     HEAD ON BACK
+         TITLE 'SUZAN SVC --  Initialization Call'
+*
+*  Path Open Call
+*
+*    Input  - R1  = Pointer to address list of Path Blocks
+*
+INITCALL LABEL ,
+*
+*  First clean-up parameter pointer
+*
+         LR    PARMR,R1
+         WITH  (RBSECT,RBR),BEGIN
+         IF    (RBOPSW+4.X'80',Z),'N  PARMR,=X"00FFFFFF"'
+         ELSE  'N  PARMR,=X"7FFFFFFF"'
+         END   ,
+*
+*  Then do SVC initialization
+*     Uses Registers 10-11
+*
+         ACALL SCOMINIT
+         IF    (R15,NZ),INITEX           Return if error
+*
+*  Tally call to SVC routine
+*
+         USING SCT,R1
+         IF    (SCTIDENT,NE,'SUZY'),INITEX
+         INCRR R14,R15,SCTOPNS         Tally open call
+         DROP  R1
+*
+*  Get a stack area
+*     Uses Registers 10-11
+*
+         LCALL GETSTAK                 Get a stack
+         IF    (R15,NZ),INITEX
+         LR    SPR,R1                  Set stack pointer
+         CLEAR PCBR                    NO ACTIVE PCB
+*
+*  Initialization loop
+*
+         LOOP  BEGIN
+*
+*  Validate user supplied PATH block parameters
+*     Uses Registers 2-3, 10-11
+*     Requires local lock
+*     Expects RB pointer in R5 (RBR)
+*
+         L     R1,@PARMR               GET PATH BLOCK ADDRESS
+         ACALL CHKPATH                 Check parameters
+         IF    (R15,NZ),INITERR
+*
+*  Create new PCB
+*     Uses Registers 10-11
+*
+         ACALL BUILDPCB                Build the PCB
+         IF    (R15,NZ),INITERR
+         LR    PCBR,R1
+         USING PCB,PCBR                ##
+*
+*  Obtain CMS lock
+*
+*GEN
+         SETLOCK OBTAIN,TYPE=CMS,MODE=UNCOND,REGS=USE,RELATED=(SINITC)
+*NOGEN
+*
+*  ADD PCB TO ACTIVE CHAIN
+*
+         LA    R1,PCB                  PCB pointer
+         ACALL ADDPCB
+*
+*  Look for a partner
+*
+         LA    R1,PCB                  PCB pointer
+         ACALL FINDPART
+*
+*  We have a winner - connect us up
+*
+         IF    (R15,Z),BEGIN
+         LR    R15,R1                  Partner's PCB
+         LA    R1,PCB                  My PCB
+         ACALL CONNECT                 Go do it
+         END   ,
+* temp temp temp temp
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         WITH  (SCT,R15),BEGIN                ADDRESSING
+         IF    (SCTEMPC,LT,SCTEMPM),BEGIN     NUMB OF ENTRIES
+         USING PSA,R0
+         L     R14,PSATOLD                     tcb
+         DROP  R0
+         WITH  (TCB,R14),'L R14,TCBJSCB'       jscb
+         ICM   R14,B'1000',=X'00'              clear high order byte
+         WITH  (IEZJSCB,R14),'LA R14,JSCBPGMN' program name
+         LA    R1,SCTEMPP
+         LT    R0,SCTEMPC
+         IF    NZ,BEGIN
+         LOOP  BEGIN
+         CLC   @R1(8),@R14
+         IF    EQ,TEMP040
+         LA    R1,@R1+16
+         UNTIL (BCT,R0),END
+         END   ,
+         MVC   @R1(8),@R14
+         INCR  R0,SCTEMPC
+         IF    PCBFAUTH,'MVI @R1+9,C"A"'
+         IF    ('CLI PCBAMSK,0',EQ),'MVI @R1+10,C"1"'
+         ELSE  'MVI @R1+10,C"2"'
+TEMP040  LABEL ,
+         LA    R0,1
+         A     R0,@R1+12
+         ST    R0,@R1+12
+         END   ,                                NUMB OF ENTRIES
+         END   ,                               ADDRESSING
+* temp temp temp temp
+*
+*  Release the CMS lock
+*
+*GEN
+         SETLOCK RELEASE,TYPE=CMS,REGS=USE,RELATED=(SINITC)
+*NOGEN
+*
+*  If not end of list continue processing
+*
+         IF    (@PARMR.X'80',O),EXIT   REACHED LAST COMMAND
+         LA    PARMR,@PARMR+4           ELSE GO ON TO NEXT.
+         END   ,
+         CLEAR QR                      SET CONDITION CODE
+*
+*  Free the stack and return to caller
+*     Uses Registers 10-12
+*
+INITRET  LABEL ,
+         LR    R1,SPR
+         ACALL FREESTAK
+         CLEAR PCBR                    No PCB
+         B     RETURN
+*
+*  Error during set-up
+*
+INITEX   LA    QR,RCBADPID
+         B     RETURN
+*
+*  Error during initialization
+*
+INITERR  LA    QR,RCBADPID             ERROR RETURN CODE
+         B     INITRET
+         SPACE 3
+         LTORG
+         TITLE 'SUZAN SVC --  Command Processing Routines'
+*  Command Prolog
+*
+*  - Validate user supplied PCB
+*  - Move queued messages to active chain
+*  - Route request to proper processing routine
+*
+*  Input  - R0  = PCB pointer
+*           R1  = Command (PCW) pointer
+*
+CMDCALL  LABEL ,
+         LR    ADDR,R0                 PCB pointer from caller
+         LR    PCWR,R1                 PCW pointer
+         LR    SR,R15                  Command (Mode 2)
+*
+*  Get the SCT pointer
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L  R1,CVTUSER'
+         IF    (R1,Z),CMDIERR            No good
+         WITH  (SCV,R1),BEGIN
+         IF    (SCVIDENT,NE,'SCIP'),CMDIERR   SCIP LIVES ON!
+         L     R1,SCVSUZAN             Suzan Control Table
+         END   ,
+         IF    (R1,Z),CMDIERR            No good
+         USING SCT,R1
+         IF    (SCTIDENT,NE,'SUZY'),CMDIERR
+*
+*  Tally command calls
+*
+         INCRR R14,R15,SCTCMDS         Tally this call to Suzan
+         DROP  R1
+*
+*  Get a stack area
+*     Uses Registers 10-11
+*
+         LCALL GETSTAK                 Get a stack
+         IF    (R15,NZ),CMDIERR
+         LR    SPR,R1                  Set stack pointer
+*
+*  Establish FRR
+*     Uses Registers 10-11
+*
+         L     R0,=A(CMDFRR)           ERROR ROUTINE ADDRESS
+*GEN
+         SETFRR  A,FRRAD=(0),WRKREGS=(10,11),RELATED=(FRROFF)
+*NOGEN
+*
+*  Get CMS lock
+*
+*        SETLOCK OBTAIN,TYPE=CMS,MODE=UNCOND,REGS=USE,RELATED=(SCMS)
+*
+*  Validate PCB
+*
+         LR    PCBR,ADDR               PCB pointer from caller
+         USING PCB,PCBR
+         IF    (PCBID,NE,'PCB '),CMDPCBER   Error in PCB
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         IF    (R15,NE,PCBSCT),CMDPCBER      Error
+         USING SRB,PCBSRB
+         IF    (PCBSRB,NE,'SRB '),CMDPCBER    Error
+         USING PSA,R0
+         L     R15,PSAAOLD             Current ASCB
+         DROP  R0
+         IF    (R15,NE,SRBASCB),CMDPCBER   Error in SRB
+*
+*  PCB is ok, let's get down to business
+*
+         ST    ADDR,PCBRET0            DEFAULT RETURN R0
+         ST    PCWR,PCBRET1            DEFAULT RETURN R1
+*
+*  Check for queued messages
+*
+         LM    R14,R15,PCBQBUF         Queued chain and count
+         IF    (R14,NZ),BEGIN          Some are queued
+         LOOP  BEGIN
+         CLEAR R0                      Empty it out
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,PCBQBUF          UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  The queued chain is LIFO, reverse the chain to make it FIFO
+*
+         IF    (R14,Z),EXIT            No queued buffers
+         CLEAR R1                      FIFO Chain
+         LOOP  BEGIN
+         L     R15,@R14                Next in LIFO queue
+         ST    R1,@R14                 FIFO chain
+         LR    R1,R14                  Add buffer to FIFO
+         UNTIL ('LTR R14,R15',Z),END
+*
+*  Find end of active chain and add the new ones
+*
+         LA    R15,PCBABUF             HEAD OF CHAIN
+         WHILE ('LT  R14,@R15',NZ),'LR  R15,R14'  FIND END OF CHAIN
+         ST    R1,@R15                 Add new buffers to end of chain
+         END   ,
+*
+*  Now process command request
+*
+         IF    PCBMFL.PATHVER2,V2CMD   GO PROCESS VERSION 2 COMMAND
+         B     CMDLOOP                 GO PROCESS VERSION 1 COMMAND
+         TITLE 'SUZAN SVC --  Command Error Exits'
+*
+*  Command error exits
+*
+CMDIERR  LA    QR,RCBADPID
+         B     RETURN
+*
+CMDPCBER LA    QR,RCBADPID             INVALID PCB POINTER
+         CLEAR PCBR                    No active PCB
+         B     CMDRET
+*
+BADADDR  LABEL ,
+         IF    ~PCBMFL.PATHVER2,VPBAD         OLD STYLE
+         MODESET KEY=ZERO
+         LA    QR,PATHRIAD             INVALID ADDRESS
+         CLEAR PCBR                    No PCB
+         B     CMDRET
+*
+VPBAD    LABEL ,
+         MODESET KEY=ZERO
+         LA    QR,RCBDCMD              ERROR RETURN CODE
+         CLEAR PCBR                    No PCB
+         B     CMDRET
+*
+VCERR    LA    QR,RCDCHNER
+         B     CERREXIT
+*
+SENDERR  LABEL ,
+         LR    QR,R15                  Error code
+         B     CERREXIT                Report the error
+*
+NOPART   LA    QR,RCNOPART             NO PARTNER
+         B     CERREXIT
+*
+RETXOFLO LA    QR,RCMOFLO              HERE FOR OVERFLOW
+         B     CERREXIT
+*
+FREEXBAD LA    QR,RCFREXBD             RETURN CODE
+         LR    R0,R1                   SET ERROR POINTER
+*
+CERREXIT MODESET  EXTKEY=ZERO
+         ST    PCWR,PCBRET1            POINT TO COMMAND IN ERROR
+         ST    R0,PCBRET0              Other error info (maybe)
+         TITLE 'SUZAN SVC --  Command Exit'
+*
+*  COMMAND CALL EXIT
+*
+CMDRET  LABEL ,
+*
+*         SETLOCK RELEASE,TYPE=CMS,REGS=USE,RELATED=(SCMS)
+*
+*  Unstack the FRR
+*     Uses Registers 10-11
+*
+         SETFRR  D,WRKREGS=(10,11),RELATED=(FRRON)
+*NOGEN
+*
+*  Free the stack
+*     Uses Registers 10-12
+*
+         LR    R1,SPR
+         ACALL FREESTAK
+         B     RETURN                    AND GO BACK
+         TITLE 'SUZAN SVC --  Command Calls - Version 1'
+*
+*  COMMAND PROCESSING - VERSION 1
+*
+CMDLOOP  LABEL ,
+         N     PCWR,PCBAMSK            TO PROPER LENGTH
+         USING PCW,PCWR                ##
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         L3    ADDR,PCWADDR+1          GET ADDRESS PART OF COMMAND
+         IC    SR,PCWCMD               GET COMMAND
+         N     SR,=A(15)               REMOVE FLAGS
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         CH    SR,=Y(CMDMAX)           VALID?
+         BH    VPBAD
+         SLL   SR,2                    TURN INTO PCWCMD*4
+         B     *+4(SR)                 PROCESS CMD
+         B     CLOSECMD                0 : STAND ALONE CLOSE CMD
+         B     SENDCMD                 1 : SEND A TRANSACTION
+         B     SENDCMD                 2 : SEND DATA
+         B     RETLFCMD                3 : RETRIEVE-LOCATE AND FREE
+         B     RETLCMD                 4 : RETRIEVE LOCATE
+         B     GETMULT                 5 : RETRIEVE MULT TRANSACTIONS
+         B     GETDATA                 6 : RETRIEVE SING TRANSACTION
+         B     FREEXCMD                7 : FREE A LOCATED TRANSACTION
+         B     CMDDONE                 8 : ECB FOR DIS POST (REMOVED)
+         B     POSTCMD                 9 : DISCRETIONARY POST
+         B     CMDDONE                 10: GET STATISTICS (REMOVED)
+         B     PARTCMD                 11: GET PARTNER'S ASCB ADDRESS
+*
+CMDDONE  LABEL ,
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         TM    PCWCMD,CMDEND           END OF CHAIN?
+         BO    CLOSECMD
+         LA    PCWR,PCWSIZE(,PCWR)
+         B     CMDLOOP                 PROCESS NEXT CMD
+         EJECT
+*
+*  CLOSE COMMAND
+*
+CLOSECMD EQU   *
+         TM    PCWCMD,CMDCLOSC         REQUEST CONTROLLEE CLOSE?
+         IF    O,VPBAD                  No longer supported
+         TM    PCWCMD,CMDCLOS          REQUEST TO CLOSE SELF?
+         IF    O,CLOSE                 Yes, close up shop
+         CLEAR QR                      SET NORMAL (ZERO) RETURN CODE.
+*
+*  Post our partner if necessary
+*
+         IF    (PCBPFL,NZ),BEGIN
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+         IF    (R15,Z),BEGIN           All's well
+         LC    R0,PCBPFL               Post flags
+         CLEAR PCBPFL
+         ACALL DOPOST                  WAKE HIM UP
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         END   ,
+*
+*  If partner abandoned ship, spread the news
+*
+         ELSE  'LA  QR,RCNOPART'       No partner return
+         END   ,
+         B     CMDRET                  All done
+         EJECT
+*
+*  SEND A TRANSACTION
+*
+SENDCMD  LABEL ,
+         IF    (PCBPART,Z),NOPART      NOBODY TO POST
+         LR    QR,PCWR                 SAVE ORIGINAL POINTER
+         DROP  PCWR                    ##
+         USING PCW,QR                  ##
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR TR                      INITIALIZE TRANSACTION LENGTH
+VCHAIN0  SH    SR,=Y(4)                TRANSACTION OR DATA?
+         IF    P,BEGIN                 SEND DATA
+         LR    R15,ADDR                USER DATA ADDRESS
+         LA    ADDR,PCWLEN             RDW ADDRESS
+         LH    R1,PCWLEN               DATA LENGTH
+         END   ELSE,BEGIN              SEND TRANSACTION
+         IF    (ADDR,Z),VCERR          ILLEGAL ADDRESS
+         LA    R15,@ADDR+RDWSIZE       USER DATA ADDRESS
+         USING RDWD,ADDR               ##
+         LH    R1,RDWSZ                DATA LENGTH
+         SH    R1,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWSZ
+         END
+         IF    (R1,M),VPBAD            LENGTH CAN'T BE NEGATIVE
+         IF    P,BEGIN
+         AR    TR,R1                   MAINTAIN TOTAL LENGTH
+         WHILE (R1,GT,256),BEGIN
+         SH    R1,=Y(256)
+         CLC   @R15(256),@R15          VALIDATE
+         END   ,
+         DEX   R1,'CLC  @R15(0),@R15'  VALIDATE USERS AREA
+         END   ,
+         TM    RDWUFL,RDWFRST          MORE TO  CHAIN?
+         BNO   VCHAINOK
+         DROP  ADDR                    ##
+         TM    PCWCMD,CMDEND           END OF CHAIN?
+         BO    VCERR                   ERROR IF SO
+         LA    QR,PCWSIZE(,QR)         NEXT COMMAND.
+         L3    ADDR,PCWADDR+1          GET ADDRESS PART OF COMMAND
+         IC    SR,PCWCMD               GET COMMAND
+         N     SR,=A(15)               REMOVE FLAGS
+         CH    SR,=Y(CMDMAX)           VALID?
+         BH    VPBAD
+         CH    SR,=AL2(CMDSNDD)        GOOD COMMAND?
+         BH    VCERR
+         CH    SR,=AL2(CMDSNDX)
+         BL    VCERR
+         SLL   SR,2                    CONVERT TO A DISPLACEMENT
+         B     VCHAIN0                 LOOP
+         DROP  QR                      ##
+         USING PCW,PCWR                ##
+VCHAINOK MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Validate transaction buffer size
+*
+         LR    R0,TR                   Transaction length
+         LA    R1,PCB                  My PCB
+         LCALL CHKSIZE
+         IF    (R15,NZ),SENDERR        Report the error
+*
+*  Get a buffer
+*
+         LR    R0,TR                   SET REQUESTED LENGTH
+         LR    ADDR,TR                 SAVE REQUESTED LENGTH
+         IF    PCBFPBHI,'ACALL GETHBUF'
+         ELSE  'ACALL GETBUF'          GET THE BUFFER AREA
+         IF    (R15,NZ),VPBAD
+         CLEAR (@R1,8)                 Clear chain word and RDW
+         LR    TR,R1                   Buffer location
+         SET   PCBPFL.PATHFNI          POST NEW INFO
+         LA    R0,@ADDR+RDWSIZE        USER DATA+RDW
+         STH   R0,@R1+4                 SET LENGTH
+         LA    R0,@R1+RDWSIZE+4        BUFFER LOCATION
+         LR    R15,ADDR                 AND LENGTH
+         LOOP  BEGIN
+         L3    ADDR,PCWADDR+1          GET ADDRESS PART OF COMMAND
+         IC    SR,PCWCMD               GET COMMAND
+         N     SR,=A(15)               REMOVE FLAGS
+         SLL   SR,2                    CONVERT TO A DISPLACEMENT
+         SH    SR,=Y(4)                TRANSACTION OR DATA?
+         IF    P,BEGIN                 SEND DATA
+         LR    R14,ADDR                USER DATA ADDRESS
+         LH    R1,PCWLEN                AND LENGTH
+         LA    ADDR,PCWLEN             RDW ADDRESS
+         END   ,
+         ELSE  BEGIN                   SEND TRANSACTION
+         LA    R14,@ADDR+RDWSIZE       USER DATA ADDRESS
+         USING RDWD,ADDR               ##
+         LH    R1,RDWSZ                LENGTH OF THIS SECTION
+         SH    R1,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWLEN
+         END   ,
+         MVCL  R0,R14                  MOVE THIS TRANSACTION
+         IF    ~RDWUFL.RDWFRST,EXIT    No more to chain
+         DROP  ADDR                    ##
+         LA    PCWR,PCW+PCWSIZE        NEXT COMMAND.
+         END   ,
+*
+VCEND    LABEL ,
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+         IF    (R15,Z),BEGIN           Successly locked
+         LR    R0,R1                   Partner's PCB
+         LR    R1,TR                   Buffer location
+         LCALL ADDBUFF                 Add Buffer to queued chain
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         B     CMDDONE                 DO NEXT PCW
+         END   ,
+*
+*  Partner went away, release the buffer
+*
+         LR    R1,TR                   Buffer location
+         LCALL FREE
+         B     NOPART
+         EJECT
+*
+*  FREE PREVIOUS, THEN LOCATE TRANSACTION
+*
+RETLFCMD LABEL ,
+         L     R1,PCBLLOC              GET POINTER TO LAST LOCATED
+         IF    (R1,NZ),'LCALL FREE'    FREE THE BUFFER
+*
+*   LOCATE TRANSACTION
+*
+RETLCMD  EQU   *
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR (@ADDR,16)              Check response area
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Find a transaction
+*
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    Z,EXIT                  No, found a candidate
+         END   ,
+*
+*  If we found one, report transaction
+*
+         IF    (SR,NZ),BEGIN
+         OI    @SR+4+RDWSFL-RDW,RDWSFREE  INDICATE LOCATED
+         ST    SR,PCBLLOC              Mark as last located
+         LA    R14,@SR+4               GET TRANSACTION LOCATION
+         LH    R15,@SR+4+RDWSZ-RDW      AND LENGTH
+         STM   R14,R15,@ADDR           SET TRANSACTION POINTERS
+*
+*  Let caller know if more transactions waiting
+*
+         IF    ('LT R1,@SR',NZ),BEGIN   Another buffer exists
+         LA    R0,PATHFNI              NEW INFO
+         LR    R1,PCBR                 PCB pointer
+         ACALL DOPOST                  POST ME
+         END   ,
+         END   ,
+         B     CMDDONE
+         EJECT
+*
+*  OBTAIN MULTIPLE TRANSACTIONS
+*
+GETMULT EQU   *
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR (@ADDR,4)               ASSUME NONE HERE
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Find a transaction
+*
+GMLOOP   LABEL ,
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    Z,EXIT                  No, found a candidate
+         END   ,
+*
+*  If none found, we're all done
+*
+         IF    (SR,Z),CMDDONE
+         OI    @SR+4+RDWSFL-RDW,RDWSFREE  INDICATE LOCATED
+*
+*  Move transaction to user supplied buffer
+*
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         LH    R1,PCWLEN               GET TOTAL LENGTH
+         SH    R1,@ADDR                 AND SET REMAINING LENGTH
+         LH    R15,@SR+4+RDWSZ-RDW     GET TRANSACTION LENGTH
+         CR    R1,R15                  ENOUGH BUFF?
+         IF    L,BEGIN
+         LTH   R0,@ADDR+2              GET NUMBER OF TRANSACTIONS
+         IF    NZ,CMDDONE              AT LEAST ONE ALREADY PROCESSED
+         LR    R0,R15                  CALCULATE OVERAGE
+         SR    R0,R1
+         B     RETXOFLO                ERROR IF NOT
+         END   ,
+         LH    R14,@ADDR               GET PREVIOUS TRANSACTION SIZE
+         LA    R0,@ADDR+4              SET TARGET PAST INFO WORD
+         AR    R0,14                    AND PREVIOUS TRANSACTIONS
+         AR    R14,R15                 RESET TRANSACTION
+         STH   R14,@ADDR                 LENGTH TOTAL
+         LA    R14,1                   ALSO
+         AH    R14,@ADDR+2              INCREMENT
+         STH   R14,@ADDR+2               COUNT
+         LA    R14,@SR+4               SET TRANSACTION POINTER
+         LR    R1,R15                   AND LENGTH
+         MVCL  R0,R14                  MOVE THE TRANSACTION
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         LR    R1,SR                   SET BUFFER POINTER
+         LCALL FREE                     AND RELEASE IT
+         B     GMLOOP                  LOOK FOR MORE
+         EJECT
+*
+*  OBTAIN SINGLE TRANSACTION
+*
+GETDATA  EQU   *                       RETRIEVE A SINGLE TRANSACTION
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR (@ADDR,4)               ASSUME NONE HERE
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Find a transaction
+*
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    Z,EXIT                  No, found a candidate
+         END   ,
+*
+*  If we found one, report transaction
+*
+         IF    (SR,Z),CMDDONE          All done
+         OI    @SR+4+RDWSFL-RDW,RDWSFREE  INDICATE LOCATED
+*
+*  Move transaction to user supplied buffer
+*
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         LR    R0,ADDR                 SET TARGET
+         LH    R1,PCWLEN                AND TARGET LENGTH
+         LA    R14,@SR+4               SET TRANSACTION POINTER
+         LH    R15,@SR+4+RDWSZ-RDW      AND TRANSACTION LENGTH
+         CR    R1,R15                  ENOUGH BUFF?
+         IF    L,BEGIN
+         LR    R0,R15                  CALCULATE OVERAGE
+         SR    R0,R1
+         B     RETXOFLO                ERROR IF NOT
+         END   ,
+         MVCL  R0,R14                  MOVE THE TRANSACTION
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         LR    R1,SR                   SET BUFFER POINTER
+         LCALL FREE                     AND RELEASE IT
+         B     CMDDONE                 DONE
+         EJECT
+*
+*  RELEASE BUFFER COMMAND
+*
+FREEXCMD EQU   *
+         LR    R1,ADDR                 RDW POINTER
+         N     R1,PCBAMSK              CLEAR EXTRANEOUS
+         SH    R1,=Y(4)                BACK UP TO HEADER
+         LCALL FREE                     AND RELEASE IT
+         IF    (R15,NZ),FREEXBAD       Error in buffer address
+         B     CMDDONE                 DONE
+         SPACE 6
+*
+*  DISCRETIONARY POST COMMAND
+*
+POSTCMD  LABEL ,
+         IF    (PCBPART,Z),NOPART      NOBODY TO SEND TO
+         SET   PCBPFL.PATHFDP          SET REASON FOR POST
+         B     CMDDONE
+         EJECT
+*
+*  OBTAIN INFO ABOUT PARTNER AND PATH
+*      ASCB ADDRESS, BUFFER SIZE, PATH NAME & MY BUFFER CHAIN
+*
+PARTCMD  LABEL ,
+         IF    (PCBPART,Z),NOPART      NOBODY TO SEND TO
+         LH    SR,PCWLEN               LENGTH OF AREA
+         CEIL  SR,20
+         LR    R15,SR                  Copy length
+         MODESET KEYADDR=PCBKEY,WORKREG=15   SET USER KEY
+         DEX   R15,'OC  @ADDR(0),@ADDR'   Validate area
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+         IF    (R15,NZ),NOPART         Successly locked
+         WITH  (PCB,R1),BEGIN
+         IF    ('SH  SR,=Y(4)',M),PCDONE    IF ENOUGH ROOM
+         MVC   @ADDR(4),PCBASCB        SET THE ASCB
+         IF    ('SH  SR,=Y(4)',M),PCDONE    IF ENOUGH ROOM
+         MVC   @ADDR+4(4),PCBMXBF      SET BUFFER SIZE
+         IF    ('SH  SR,=Y(8)',M),PCDONE    IF ENOUGH ROOM
+         MVC   @ADDR+8(8),PCBMY        SET THE PATH NAME
+         END   ,
+         IF    ('SH  SR,=Y(4)',M),PCDONE      IF ENOUGH ROOM
+         LA    R0,PCBABUF
+         ST    R0,@ADDR+16                     SET THE BUFFER CHAIN
+PCDONE   LABEL ,
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         B     CMDDONE
+         DROP  PCWR                    ##
+         TITLE 'SUZAN SVC --  Command Calls - Version 2'
+*
+*  COMMAND PROCESSING - VERSION 2
+*
+V2CMD    LABEL ,
+         N     PARMR,PCBAMSK           CLEAR EXTRANEOUS
+         CH    SR,=Y(V2CMDMAX)         VALIDATE COMMAND CODE
+         BH    VPBAD
+         IF    (SR,Z),VPBAD
+         LA    R15,3                   CHECK Divisible by FOUR
+         IF    ('NR  R15,SR',NZ),VPBAD
+         B     *(SR)
+V2CMDS   B     CLOSE                   4 : CLOSE PATH
+         B     V2SEND                  8 : SEND A BUFFER
+         B     V2GETMOV               12 : RETRIEVE - MOVE
+         B     V2GETLOC               16 : RETRIEVE - LOCATE
+         B     V2GETLF                20 : FREE & RETRIEVE - LOCATE
+         B     V2FREE                 24 : RELEASE BUFFERS
+         B     V2POST                 28 : DISCRETIONARY POST
+         B     V2INFO                 32 : EXTRACT MISC INFO
+         B     V2SETINF               36 : Set info
+V2CMDMAX EQU   *-V2CMDS
+*
+V2DONE   LABEL ,
+         CLEAR QR                      SET NORMAL (ZERO) RETURN CODE.
+         B     CMDRET                  All done
+         EJECT
+*
+*  DISCRETIONARY POST COMMAND
+*
+V2POST   LABEL ,
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+         IF    (R15,NZ),NOPART         No one to post
+         LA    R0,PATHFDP              Reason for post
+         ACALL DOPOST                  WAKE HIM UP
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         B     V2DONE
+         EJECT
+*
+*  SEND A TRANSACTION
+*
+V2SEND   LABEL ,
+         IF    (PCBPART,Z),NOPART      NOBODY TO SEND TO
+         LR    ADDR,PARMR                 SAVE ORIGINAL POINTER
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR QR                    INITIALIZE TRANSACTION LENGTH
+         LOOP  BEGIN                   CHAIN THROUGH USER AREA
+         L     R15,@ADDR                 USER DATA ADDRESS
+         N     R15,PCBAMSK             CLEAN ADDRESS
+         L     R1,@ADDR+4                DATA LENGTH
+         IF    (R1,Z),BEGIN            LENGTH PRECEDES DATA (RDW)
+         WITH  (RDW,R15),'LH  R1,RDWSZ'   DATA LENGTH
+         LA    R15,@R15+4              POINT TO ACTUAL DATA AREA
+         SH    R1,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWSZ
+         END
+         IF    (R1,M),VPBAD            LENGTH CAN'T BE NEGATIVE
+         IF    P,BEGIN
+         AR    QR,R1                 MAINTAIN TOTAL LENGTH
+         WHILE (R1,GT,256),BEGIN
+         SH    R1,=Y(256)
+         CLC   @R15(256),@R15          VALIDATE
+         LA    R15,@R15+256            NEXT CHUNK
+         END   ,
+         IF    (R1,P),'DEX  R1,"CLC  @R15(0),@R15"'   FINISH UP
+         END   ,
+         IF    @ADDR.X'80',EXIT
+         LA    ADDR,@ADDR+8
+         END   ,
+*
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Validate transaction buffer size
+*
+         LR    R0,QR                   Transaction length
+         LA    R1,PCB                  My PCB
+         LCALL CHKSIZE
+         IF    (R15,NZ),SENDERR        Report the error
+*
+*  Get a buffer and copy data
+*
+         LR    R0,QR                   SET REQUESTED LENGTH
+         LR    ADDR,QR                 SAVE REQUESTED LENGTH
+         IF    PCBFPBHI,'ACALL GETHBUF'
+         ELSE  'ACALL GETBUF'          GET THE BUFFER AREA
+         IF    (R15,NZ),VPBAD          Couldn't get one
+         CLEAR (@R1,8)                 Clear chain word and RDW
+         LR    QR,R1                   Buffre location
+         LA    R0,@ADDR+RDWSIZE        USER DATA+RDW
+         LA    R15,@R1+4               RDW LOCATION
+         WITH  (RDW,R15),'STH  R0,RDWSZ'   DATA LENGTH
+         LA    R0,@R1+RDWSIZE+4        BUFFER LOCATION
+         LR    R15,ADDR                 AND LENGTH
+         LOOP  BEGIN
+         L     R14,@PARMR              USER ADDRESS
+         L     R1,@PARMR+4              AND LENGTH
+         N     R14,PCBAMSK             CLEAR EXTRANEOUS
+         IF    (R1,Z),BEGIN            LENGTH PRECEDES DATA (RDW)
+         WITH  (RDW,R14),'LH  R1,RDWSZ'   DATA LENGTH
+         LA    R14,@R14+4              POINT TO ACTUAL DATA AREA
+         SH    R1,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWSZ
+         END
+         MVCL  R0,R14                  MOVE AS MUCH AS POSSIBLE
+         IF    @PARMR.X'80',EXIT        NO MORE AREAS
+         LA    PARMR,@PARMR+8          NEXT AREA
+         END   ,
+*
+*  Lock the partner's PCB
+*
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+*
+*  Add the buffer to partner's chain and post him
+*
+         IF    (R15,Z),BEGIN           Successly locked
+         LR    R0,R1                   Partner's PCB
+         LR    R1,QR                   Buffer location
+         LCALL ADDBUFF                 Add Buffer to queued chain
+         L     R1,PCBPART              Partner's PCB
+         LA    R0,PATHFNI              Reason for post
+         ACALL DOPOST                  WAKE HIM UP
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         B     V2DONE                  DONE
+         END   ,
+*
+*  Partner went away, release the buffer
+*
+         LR    R1,QR                   Buffer location
+         LCALL FREE
+         B     NOPART
+         EJECT
+*
+*  FREE PREVIOUS, THEN RETRIEVE - LOCATE MODE
+*
+V2GETLF  LABEL ,
+         L     R1,PCBLLOC              GET POINTER TO LAST LOCATED
+         IF    (R1,NZ),' LCALL FREE'   FREE THE BUFFER
+*
+*   RETRIEVE - LOCATE MODE
+*              RETURNS BUFFER POINTER AND LENGTH
+*
+V2GETLOC LABEL ,
+         IF    (PARMR,Z),'CLEAR (PCBRET0,8)'    CLEAR RESPONSE
+         ELSE  BEGIN
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         CLEAR (@PARMR,8)              CLEAR ANSWER AREA
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         END   ,
+*
+*  Find a transaction
+*
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    Z,EXIT                  No, got a candidate
+         END   ,
+*
+*  Mark transaction taken
+*
+         IF    (SR,NZ),BEGIN
+         OI    @SR+4+RDWSFL-RDW,RDWSFREE  INDICATE LOCATED
+         ST    SR,PCBLLOC              SET LAST LOCATED TRANSACTION
+*
+*  Then report transaction
+*
+         IF    (PARMR,NZ),BEGIN
+         LA    R0,@SR+8                GET TRANSACTION LOCATION
+         LH    R1,@SR+4+RDWSZ-RDW       AND LENGTH
+         SH    R1,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWSZ
+         STM   R0,R1,@PARMR            SET TRANSACTION POINTERS
+         END   ELSE,BEGIN
+         LA    R1,@SR+8                GET TRANSACTION LOCATION
+         LH    R0,@SR+4+RDWSZ-RDW       AND LENGTH
+         SH    R0,=Y(RDWSIZE)          RDWSIZE INCLUDED IN RDWSZ
+         STM   R0,R1,PCBRET0           SET RETURN REGS
+         END   ,
+         END   ,
+         B     V2DONE
+         EJECT
+*
+*  RETRIEVE - MOVE BUFFER TO USER AREA(S)
+*
+V2GETMOV LABEL ,                       RETRIEVE A SINGLE TRANSACTION
+         CLEAR PCBRET1                 ASSUME NO DATA
+*
+*  Find a transaction
+*
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    Z,EXIT                  No, found a candidate
+         END   ,
+*
+*  If we found one, return transaction
+*
+         IF    (SR,NZ),BEGIN
+         OI    @SR+4+RDWSFL-RDW,RDWSFREE  INDICATE LOCATED
+         LA    R14,@SR+8               SET TRANSACTION POINTER
+         LH    R15,@SR+4+RDWSZ-RDW      AND TRANSACTION LENGTH
+         SH    R15,=Y(RDWSIZE)         RDWSIZE INCLUDED IN RDWSZ
+         ST    R15,PCBRET1             TOTAL LENGTH RETURNED
+         MODESET KEYADDR=PCBKEY,WORKREG=1   SET USER KEY
+         LOOP  BEGIN
+         LM    R0,R1,@PARMR            AREA ADDRESS AND LENGTH
+         N     R0,PCBAMSK              CLEAR EXTRANEOUS
+         MVCL  R0,R14                  MOVE AS MUCH AS POSSIBLE
+         IF    @PARMR.X'80',EXIT       DONE ALL AREAS
+         LA    PARMR,@PARMR+8          NEXT AREA
+         END   ,
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         IF    ('LTR  R0,R15',NZ),RETXOFLO   BUFFER NOT FULLY SENT
+         LR    R1,SR                   SET BUFFER POINTER
+         LCALL FREE                     AND RELEASE IT
+         END   ,
+         B     V2DONE                  DONE
+         EJECT
+*
+*  RELEASE BUFFER COMMAND
+*
+V2FREE   LABEL ,
+         IF    (PARMR,NZ),BEGIN
+         LR    R1,PARMR                DATA POINTER
+         N     R1,PCBAMSK              CLEAR EXTRANEOUS
+         SH    R1,=Y(8)                BACK UP TO BEGINNING
+         LCALL FREE                     AND RELEASE IT
+         IF    (R15,NZ),FREEXBAD       Error in buffer address
+         END   ELSE,BEGIN
+*
+*  Find a located transaction
+*
+         LOOP  BEGIN
+         LA    SR,PCBABUF              ACTIVE BUFFER CHAIN
+         WHILE ('LT  SR,@SR',NZ),BEGIN
+         TM    @SR+4+RDWSFL-RDW,RDWSFREE   LOCATED THIS ONE ALREADY?
+         IF    O,EXIT                  YES, FREE IT
+         END   ,
+*
+*  If we found one, release it
+*
+         IF    (SR,Z),EXIT
+         LR    R1,SR
+         LCALL FREE                    FREE IT
+         END   ,
+         END   ,
+         B     V2DONE                  DONE
+         EJECT
+*
+*  OBTAIN INFO ABOUT PARTNER AND PATH
+*      ASCB ADDRESS, BUFFER SIZE, PATH NAME & MY BUFFER CHAIN
+*
+V2INFO   LABEL ,
+         IF    (PCBPART,Z),NOPART      NOBODY TO SEND TO
+         LA    R1,PCBABUF              ACTIVE BUFFER CHAIN
+         ST    R1,PCBRET1              SET FOR RETURN
+         IF    (PARMR,Z),V2DONE
+*
+*  First validate the caller's area
+*
+         MODESET KEYADDR=PCBKEY,WORKREG=15   SET USER KEY
+         LR    SR,PARMR                Copy parameter list
+         CLEAR R15
+         LOOP  BEGIN
+         LM    R0,R1,@SR               AREA ADDRESS AND LENGTH
+         N     R0,PCBAMSK              CLEAR EXTRANEOUS
+         MVCL  R0,R14                  MOVE THE DATA
+         IF    @SR.X'80',EXIT          NO MORE AREAS
+         LA    SR,@SR+8                NEXT AREA
+         END   ,
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Now lock the PCB
+*
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART
+         IF    (R15,NZ),NOPART
+         LR    SR,R1                   PARTNERS PCB
+         L     R0,@PARMR               AREA ADDRESS
+         L     R15,@PARMR+4             AND LENGTH
+         N     R0,PCBAMSK              CLEAR EXTRANEOUS
+         WITH  (PCB,SR),BEGIN
+         LA    R1,4                    LENGTH THIS PIECE
+         LA    R14,PCBASCB             SEND THE ASCB
+         LCALL MOVINFO                 DO IT
+*
+         LA    R1,4                    LENGTH THIS PIECE
+         LA    R14,PCBMXBF             SEND BUFFER SIZE
+         LCALL MOVINFO                 DO IT
+*
+         LA    R1,8                    LENGTH THIS PIECE
+         LA    R14,PCBMY               SEND THE PATH NAME
+         LCALL MOVINFO                 DO IT
+         END   ,
+*
+         LA    R1,4                    LENGTH THIS PIECE
+         LA    R14,PCBRET1             SEND POINTER
+         LCALL MOVINFO                 DO IT
+*
+         LA    R1,16
+         LA    R14,=XL16'00'           Reserved
+         LCALL MOVINFO                 Add it
+*
+         LA    R1,L'PCBINFO
+         LA    R14,PCBINFO-PCB(SR)     Partner's PCBINFO
+         LCALL MOVINFO                 Add it
+*
+         LA    R1,L'PCBINFO
+         LA    R14,PCBINFO             Our PCBINFO
+         LCALL MOVINFO                 Add it
+*
+V2IEXIT  LABEL ,
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART
+         B     V2DONE
+         SPACE 2
+*
+*  MOVE DATA TO USER AREA
+*
+MOVINFO  LABEL ,
+         WHILE (R1,GT,R15),BEGIN
+         XR    R1,R15                  INVERT
+         XR    R15,R1                   THE
+         XR    R1,R15                    LENGTHS
+         MVCL  R0,R14                  MOVE AS MUCH AS POSSIBLE
+         LR    R1,R15
+         IF    @PARMR.X'80',V2IEXIT    NO MORE AREAS
+         LA    PARMR,@PARMR+8          NEXT AREA
+         L     R0,@PARMR               AREA ADDRESS
+         L     R15,@PARMR+4             AND LENGTH
+         N     R0,PCBAMSK              CLEAR EXTRANEOUS
+         END   ,
+         MVCL  R0,R14                  MOVE THE DATA
+         BR    RAR
+         EJECT
+*
+*  SET USER PATH INFORMATION
+*     (Caller must be APF authorized)
+*
+V2SETINF LABEL
+         IF    ~PCBFAUTH,VCERR         Only allow authorized callers
+*
+         LT    R15,@PARMR              Get parm length
+         BM    VCERR                   Negative earns you an error
+         CEIL  R15,L'PCBINFO           Not too long now
+         CLEAR PCBINFO                 Pre-zero area
+         MODESET KEYADDR=PCBKEY,WORKREG=15   SET USER KEY
+         MOVE  R15,PCBINFO,@PARMR+4    Save info user provided
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+         CLEAR QR                      Set normal (zero) return code
+         B     V2DONE
+         TITLE 'SUZAN SVC --  Command subroutines'
+*
+*  Validate transaction buffer size
+*
+*  Input  - R0   = Buffer length
+*           R1   = Caller's PCB
+*
+*  Output - R15  = 0 Ok
+*                    Error code
+*
+         SPACE ,
+CHKSIZE  LABEL ,
+         PUSH  RAR
+         PUSH  (R2,R3)
+         LR    R3,R1                   PCB pointer
+*
+*  Length must be positive and below maximum
+*
+         IF    (('LTR R2,R0',NP),OR,   Too terse                       *
+               (R2,GT,MAXTRANS)),BEGIN   Too verbose
+         LA    R15,PATHRBOM            Error code
+         B     CSEND                   Return
+         END   ,
+*
+*  Get the PCB lock
+*
+         LR    R1,R3                   Caller's PCB
+         LCALL LOCKPART
+         IF    (R15,NZ),BEGIN          Partner must have gone away
+         LA    R15,PATHRNOP            Error code
+         B     CSEND                   Return
+         END   ,
+         WITH  (PCB,R1),BEGIN
+*
+*  Make sure it will fit
+*
+         IF    (R2,GT,PCBMXBF),BEGIN   Too verbose
+         LR    R1,R3                   Caller's PCB
+         LCALL UNLKPART                Unlock
+         LA    R15,PATHRBOM            Note length is over maximum
+         B     CSEND
+         END   ,
+*
+*  Update the count
+*
+         L     R14,PCBCRBF             Get current used
+         LOOP  BEGIN
+         CLEAR R15                     Assume this will fit
+         LA    R0,@R14(R2)             New total data length
+         IF    (R0,GT,PCBMXBF),BEGIN
+         LR    R0,R14
+         O     R0,=X'80000000'         Mark overflow
+         LA    R15,RCSNDOVF            Note buffer doesn't fit
+         END   ,
+         IF    (R14,M),'O  R0,=X"80000000"'   Maintain overflow flag
+         CS    R14,R0,PCBCRBF           AND RESET
+         UNTIL Z,END
+         END   ,
+*
+*  Unlock partner's PCB
+*
+         LR    R2,R15                  Preserve return code
+         LR    R1,R3                   Caller's PCB
+         LCALL UNLKPART
+         LR    R15,R2
+*
+* Return with completion code in R15
+*
+CSEND    LABEL ,
+         POP   (R2,R3)
+         POP   RAR
+         BR    RAR
+         EJECT
+*
+*   DECHAIN AND RELEASE A BUFFER
+*
+FREE     LABEL ,
+         PUSH  RAR
+*
+*  Find this buffer's location on chain
+*
+         LA    R15,PCBABUF             HEAD OF BUFFER CHAIN
+         LOOP  BEGIN
+         C     R1,@R15                 THIS ONE?
+         IF    E,EXIT
+         LT    R15,@R15                GET NEXT IN CHAIN
+         IF    Z,'LA  R15,4; B  FBEND'   END OF CHAIN
+         END   ,
+*
+*  Remove this buffer from chain
+*
+         L     R0,@R1                  BUFFER CHAIN
+         ST    R0,@R15                 REMOVE FROM CHAIN
+         IF    (R1,EQ,PCBLLOC),'CLEAR PCBLLOC'   RESET POINTER
+*
+*  Update buffer size in use
+*
+         LA    R15,@R1+4               RDW
+         WITH  (RDW,R15),'LH  R15,RDWSZ'    GET TOTAL DATA LENGTH
+         SH    R15,=Y(RDWSIZE)         REDUCE BY RDW LENGTH
+         L     SR,PCBCRBF              GET CURRENT USED
+         LOOP  BEGIN
+         LA    R0,@SR
+         SR    R0,R15                  REDUCE BY DATA LENGTH
+         CS    SR,R0,PCBCRBF            AND RESET
+         UNTIL Z,END
+*
+*  Return the buffer to the pool
+*
+         LR    R0,R15                  BUFFER LENGTH
+         ACALL FREEBUF                 RELEASE the buffer
+*
+*  If full queue condition existed, let partner know
+*
+         IF    (SR,M),BEGIN
+         LA    R1,PCB                  My PCB
+         LCALL LOCKPART                Lock partner
+         IF    (R15,NZ),EXIT           Partner's gone, forget it
+         LA    R0,PATHFFQE             Reason for post
+         ACALL DOPOST                  WAKE HIM UP
+         LA    R1,PCB                  My PCB
+         LCALL UNLKPART                Unlock
+         END   ,
+FBEND    LABEL ,
+         POP   RAR
+         BR    RAR
+         EJECT
+*
+*  Close a PCB
+*
+CLOSE    LABEL ,
+*
+*  Obtain CMS lock
+*
+*GEN
+         SETLOCK OBTAIN,TYPE=CMS,MODE=UNCOND,REGS=USE,RELATED=(SCCLSE)
+*NOGEN
+*
+*  Remove the PCB from the ACTIVE CHAIN
+*
+         LA    R1,PCB                  PCB pointer
+         ACALL CLOSEPCB
+*
+*  If my SRB has been scheduled we can't free the PCB here
+*
+         WITH  (SRB,PCBSRB),'L  R1,SRBPARM'    CURRENT PARM FIELD
+         IF    (R1,NZ),'SET  PCBFSRBFREE'    Mark close in progress
+*
+*  Otherwise, free the PCB/SRB
+*
+         LA    R1,PCB
+*
+*  If both an SRB routine and a partner routine are still using
+*  this PCB, then whichever of them is done last will free it.
+*  Otherwise, either this routine or one of those two which is
+*  still using this PCB will do it. Otherwise just free it here.
+*
+         IF    (PCBFSRBFREE,AND,PCBFUNLFREE),'CLEAR R1' Not here
+         ELSEIF (PCBFSRBFREE,OR,PCBFUNLFREE),BEGIN Defered free
+         TS    PCBFREE
+         IF    Z,'CLEAR R1'              Last one gets to do it
+         ELSEIF PCBFUNLFREE,BEGIN            TEMP TEMP
+         L     R15,PCBSCT                    TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF0' TEMP TEMP
+         END   ,                             TEMP TEMP
+         END   ,
+         IF    (R1,NZ),'ACALL FREEPCB'   Free it here
+*
+*  Release the CMS lock
+*
+*GEN
+         SETLOCK RELEASE,TYPE=CMS,REGS=USE,RELATED=(SCCLSE)
+*NOGEN
+*
+*  All done, return to caller
+*
+         CLEAR QR                      SET NORMAL (ZERO) RETURN CODE.
+         CLEAR PCBR                    Assume PCB is gone
+         B     CMDRET                   and go back
+         EJECT
+*
+*  Patch area
+*
+         DC    16S(*)
+         DC    16S(*)
+         DC    16S(*)
+         DC    16S(*)
+         SPACE 3
+*
+*  End of primary addressability
+*
+         DROP  ,
+         SPACE 3
+         LTORG
+         TITLE 'SUZAN SVC --  Add Buffer to queued buffer chain'
+*
+*  Add a buffer to queued buffer chain
+*
+*  Input  - R0   = PCB
+*           R1   = Buffer pointer
+*
+*  Output - None
+*
+*  Register usage
+*     Base register  :  R4
+*     Return register:  RAR
+*     Return code    :  None
+*
+         SPACE ,
+ADDBUFF  LABEL ,
+         PUSH  (R2,R4)
+         BASE  R4
+         LR    R2,R1                   Buffer pointer
+         LR    R3,R0                   PCB
+         WITH  (PCB,R3),BEGIN
+         LM    R14,R15,PCBQBUF         Queued CHAIN & COUNT
+         LOOP  BEGIN
+         ST    R14,@R2                 Previous head of chain
+         LR    R0,R2                   This buffer is now head
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,PCBQBUF          Update chain
+         UNTIL Z,END
+         END   ,
+         POP   (R2,R4)
+         BR    RAR
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Lock Partner''s PCB Routine'
+*
+*  Lock Partner's PCB
+*
+*  Input :  R1  = Caller's PCB
+*
+*  Output:  R15 = 0 Ok, Lock complete
+*                 4 Error, Partner closed path
+*           R1  = Partner's PCB
+*
+*  Register usage
+*     Base register  :  R14
+*     Return register:  RAR
+*
+         SPACE ,
+LOCKPART LABEL ,
+         BASE  R14
+         LR    R15,R1                  Caller's PCB
+         WITH  (PCB,R15),BEGIN
+         L     R1,PCBPART              Partner PCB
+         LOOP  BEGIN
+         IF    (R1,Z),LPGONE           Partner disappeared
+         IF    M,'EX 0,*'              Partner already locked
+         L     R0,=X'80000000'         Busy bit
+         OR    R0,R1
+         CS    R1,R0,PCBPART
+         UNTIL Z,END
+         END   ,
+         CLEAR R15                     Good return
+LPEXIT   BR    RAR
+*
+*  Partner closed
+*
+LPGONE   LABEL ,
+         LA    R15,4                   Partner has departed
+         B     LPEXIT
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Unlock Partner''s PCB Routine'
+*
+*  Unlock Partner's PCB
+*
+*  Input :  R1  = Caller's PCB
+*
+*  Output:  R15 = 0 Ok, Unlock complete
+*
+*  Register usage
+*     Base register  :  R14
+*     Return register:  RAR
+*
+         SPACE ,
+UNLKPART LABEL ,
+         PUSH  R10
+         BASE  R10
+         WITH  (PCB,R1),BEGIN          PCB addressablility
+         L     R15,PCBPART             Partner PCB
+         LOOP  BEGIN
+         IF    (R15,NM),'EX 0,*'       Partner not locked or gone
+         IF    PCBFCLRPART,BEGIN       Partner wants to be gone
+         CLEAR R0
+         END   ,
+         ELSE  BEGIN
+         L     R0,=X'7FFFFFFF'         Busy bit
+         NR    R0,R15
+         END   ,
+         CS    R15,R0,PCBPART
+         UNTIL Z,END
+*
+         IF    PCBFCLRPART,BEGIN       Partner wants to be gone
+         LA    R1,@R15                 Partner's PCB
+         L     R15,PCBSCT                    TEMP TEMP
+         TS    PCBFREE
+         IF    NZ,BEGIN                Last one gets to do it
+         WITH  (SCT,R15),'INCR R14,SCTEMPF1' TEMP TEMP
+         WITH  (SCT,R15),'ST SPR,SCTEMPF7'   TEMP TEMP
+         WITH  (SCT,R15),'STCK SCTEMPF8'     TEMP TEMP
+         WITH  (SCT,R15),'ST RAR,SCTEMPF9'
+         WITH  (SCT,R15),'ST R1,SCTEMPFA'
+         PUSH  RAR
+* Note: R1 points to partner' PCB
+         ACALL FREEPCB                 Free it here
+         POP   RAR
+         END   ,
+         ELSE  BEGIN                         TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF2' TEMP TEMP
+         END   ,                             TEMP TEMP
+         END   ,                       Partner wants to be gone
+         END   ,                       PCB addressablility
+         POP   R10
+         CLEAR R15
+         BR    RAR
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Obtain Stack Routine'
+*
+*  Obtain a stack area
+*
+*  Input : None
+*
+*  Output:  R15 = 0 Ok
+*                 4 Error in memory allocation
+*           R1  = Stack pointer
+*
+*  Register usage
+*     Work registers :  R11
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+GETSTAK  LABEL ,
+         BASE  R10
+*
+*  Get Suzan table address
+*
+         L     R11,CVTPTR
+         WITH  (CVT,R11),'L  R11,CVTUSER'      SCIP CVT
+         WITH  (SCV,R11),'L  R11,SCVSUZAN'     Suzan table
+         USING SCT,R11
+         INCRR R0,R15,SCTRSTK          Count requests
+*
+*  Look for an available stack in the pool
+*
+         USING SCT,R11
+         LM    R14,R15,SCTSTACK        FREE CHAIN & COUNT
+         LOOP  BEGIN
+         IF    (R14,Z),ALLOSTAK        NONE ON THE CHAIN
+         L     R0,@R14                 NEXT IN LINE
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,SCTSTACK         UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  We were successful - set returns
+*
+         LR    R1,R14
+         CLEAR R15
+         B     GSEXIT
+*
+*  Obtain storage if no stack available
+*
+ALLOSTAK LABEL ,
+         INCRR R0,R15,SCTGSTK          Count getmains
+         LA    R0,STKSIZE
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPCSA,LOC=ANY
+*
+*  Initialize stack marker
+*
+         IF    (R15,Z),BEGIN
+         XC    @R1(STKSIZE),@R1
+         MVC   @R1+STKSIZE-4(4),=X'CADBEBAD'
+         END
+GSEXIT   BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Free Stack Routine'
+*
+*  Free a stack area
+*
+*  Input :  R1  = Stack pointer
+*
+*  Output:  R15 = 0 Ok
+*
+*  Register usage
+*     Work registers :  R11, R12
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+FREESTAK LABEL ,
+         BASE  R10
+         LR    R12,R1
+*
+*  Validate stack marker
+*
+         CLC   @R1+STKSIZE-4(4),=X'CADBEBAD'
+         IF    NE,'EX 0,*'
+*
+*  Get Suzan table address
+*
+         L     R11,CVTPTR
+         WITH  (CVT,R11),'L  R11,CVTUSER'      SCIP CVT
+         WITH  (SCV,R11),'L  R11,SCVSUZAN'     Suzan table
+*
+*  Add stack to the free pool
+*
+         USING SCT,R11
+         LM    R14,R15,SCTSTACK        FREE CHAIN & COUNT
+         LOOP  BEGIN
+         ST    R14,@R12                Previous head of chain
+         LR    R0,R12                  This PCB is now head
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,SCTSTACK         UPDATE FREE CHAIN
+         UNTIL Z,END
+         CLEAR R15
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Get Buffer Routine - Low Memory'
+*
+*  Get a buffer from low memory
+*
+*  - First try to get one from local pool
+*  - Create a new buffer if necessary
+*  - Update buffer size counter
+*
+*  Input  - R0   = Size requested
+*
+*  Output - R1  = Buffer pointer
+*           R15 = 0 Ok
+*                 4 Error in memory allocation
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+GETBUF   LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+*
+*  First compute final size
+*
+         AH    R0,=Y(4+RDWSIZE+7)      CHAIN WORD AND RDW
+         N     R0,=A(X'00FFFFF8')       ROUND TO DOUBLEWORD
+         LR    R12,R0                  Save size
+*
+* Validate size
+*
+         IF    (R12,GT,MAXTRANS),BEGIN
+         LA    R15,4                   Too big
+         B     GBEXIT
+         END
+*
+*  Get Suzan table address
+*
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         USING SCT,R15                 ##
+*
+*  Add request to histogram counters
+*
+         LR    R1,R12                  Requested size
+         SRL   R1,5                    Divide by 32
+         SLL   R1,2                    Multiply by 4
+         CEIL  R1,((SCTBPLBK-1)*4)     Make sure it's not too big
+         AL    R1,SCTBPLST             Bucket pointer
+*         INCRR R0,R14,@R1              Update the counter
+         L     R0,@R1                  Current value
+         LOOP  BEGIN
+         LA    R14,1                   Increment
+         AR    R14,R0                  New value
+         CS    R0,R14,@R1              Update
+         UNTIL Z,END
+*
+*  Find appropriate buffer pool control
+*
+         LA    R11,SCTBPCL             Buffer pool control
+         DROP  R15                     ##
+         USING BPCTAB,R11              ##
+         WHILE (R12,GT,BPCSIZE),'LA  R11,BPCTAB+L"BPCTAB'   Find pool
+*
+*  Look for an available buffer in this pool
+*
+         LM    R14,R15,BPCCHN          FREE CHAIN & COUNT
+         LOOP  BEGIN
+         IF    (R14,Z),NEWBUFF         NONE ON THE CHAIN
+         L     R0,@R14                 NEXT IN LINE
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,BPCCHN           UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  We found a buffer - set pointer and return
+*
+         LR    R1,R14                  Buffer address
+         CLEAR R15                     Set return code
+         B     GBEXIT                  Done
+*
+*  No buffer available - go fish
+*
+NEWBUFF  LABEL ,
+         INCRR R14,R15,BPCREQ          Count the request
+         L     R0,BPCSIZE              Buffer size this pool
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPBUF,LOC=BELOW
+         DROP  R11                     ##
+         IF    (R15,Z),BEGIN
+         IF    (R1,GE,16*1024*1024),'DC  H"0"'
+         END   ,
+*
+*  Return code and buffer address are all set, so return to caller
+*
+GBEXIT   LABEL ,
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Get Buffer Routine - High Memory'
+*
+*  Get a buffer from high memory
+*
+*  - First try to get one from local pool
+*  - Create a new buffer if necessary
+*  - Update buffer size counter
+*
+*  Input  - R0   = Size requested
+*
+*  Output - R1  = Buffer pointer
+*           R15 = 0 Ok
+*                 4 Error in memory allocation
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+GETHBUF  LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+*
+*  First compute final size
+*
+         AH    R0,=Y(4+RDWSIZE+7)      CHAIN WORD AND RDW
+         N     R0,=A(X'00FFFFF8')       ROUND TO DOUBLEWORD
+         LR    R12,R0                  Save size
+*
+* Validate size
+*
+         IF    (R12,GT,MAXTRANS),BEGIN
+         LA    R15,4                   Too big
+         B     GHBEXIT
+         END
+*
+*  Get Suzan table address
+*
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         USING SCT,R15                 ##
+*
+*  Add request to histogram counters
+*
+         LR    R1,R12                  Requested size
+         SRL   R1,5                    Divide by 32
+         SLL   R1,2                    Multiply by 4
+         CEIL  R1,((SCTBPHBK-1)*4)     Make sure it's not too big
+         AL    R1,SCTBPHST             Bucket pointer
+*         INCRR R0,R14,@R1              Update the counter
+         L     R0,@R1                  Current value
+         LOOP  BEGIN
+         LA    R14,1                   Increment
+         ALR   R14,R0                  New value
+         CS    R0,R14,@R1              Update
+         UNTIL Z,END
+*
+*  Find appropriate buffer pool control
+*
+         LA    R11,SCTBPCH             Buffer pool control
+         DROP  R15                     ##
+         USING BPCTAB,R11              ##
+         WHILE (R12,GT,BPCSIZE),'LA  R11,BPCTAB+L"BPCTAB'   Find pool
+*
+*  Look for an available buffer in this pool
+*
+         LM    R14,R15,BPCCHN          FREE CHAIN & COUNT
+         LOOP  BEGIN
+         IF    (R14,Z),NEWHBUFF        NONE ON THE CHAIN
+         L     R0,@R14                 NEXT IN LINE
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,BPCCHN           UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  We found a buffer - set pointer and return
+*
+         LR    R1,R14                  Buffer address
+         CLEAR R15                     Set return code
+         B     GHBEXIT                 Done
+*
+*  No buffer available - go fish
+*
+NEWHBUFF LABEL ,
+         INCRR R14,R15,BPCREQ          Count the request
+         L     R0,BPCSIZE              Buffer size this pool
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPBUF,LOC=ANY
+         DROP  R11                     ##
+*        IF    (R15,Z),BEGIN
+*        IF    (R1,LT,=A(16*1024*1024)).'DC  H"0"'
+*        END   ,
+*
+*  Return code and buffer address are all set, so return to caller
+*
+GHBEXIT  LABEL ,
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Free Buffer Routine'
+*
+*  Free a buffer
+*
+*  - Return buffer to local pool
+*
+*  Input  - R0  = Size of buffer
+*           R1  = Buffer address
+*
+*  Output - R15 = 0 Ok
+*                 4 Error in memory allocation
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+FREEBUF  LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+*
+*  First compute final size
+*
+         AH    R0,=Y(4+RDWSIZE+7)      CHAIN WORD AND RDW
+         N     R0,=A(X'00FFFFF8')       ROUND TO DOUBLEWORD
+         LR    R12,R1                  Buffer address
+*
+*  Get Suzan table address
+*
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         WITH  (SCT,R15),BEGIN
+         IF    (R12,GE,=A(16*1024*1024)),'LA R11,SCTBPCH' High buff
+         ELSE  'LA R11,SCTBPCL'        Low buffer pool control
+         END   ,
+*
+*  Find buffer pool control
+*
+         USING BPCTAB,R11              ##
+         WHILE (R0,GT,BPCSIZE),'LA  R11,BPCTAB+L"BPCTAB'   Get pool
+*
+*  Add buffer to this pool
+*
+         LM    R14,R15,BPCCHN          FREE CHAIN & COUNT
+         LOOP  BEGIN
+         ST    R14,@R12                Previous head of chain
+         LR    R0,R12                  This buffer is now head
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,BPCCHN           UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  Return to caller
+*
+         CLEAR R15
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Obtain PCB Routine'
+*
+*  Obtain a PCB
+*
+*  Input :  None
+*
+*  Output:  R15 = 0 Ok
+*                 4 Error in memory allocation
+*           R1  = PCB pointer
+*
+*  Register usage
+*     Work registers :  R11
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+GETPCB   LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+*
+*  Get Suzan table address
+*
+         L     R11,CVTPTR
+         WITH  (CVT,R11),'L  R11,CVTUSER'      SCIP CVT
+         WITH  (SCV,R11),'L  R11,SCVSUZAN'     Suzan table
+         USING SCT,R11                 ##
+         INCRR R0,R15,SCTRPCB          Count requests
+*
+*  Look for an available PCB in the pool
+*
+         LM    R14,R15,SCTPCBS         FREE CHAIN & COUNT
+         LOOP  BEGIN
+         IF    (R14,Z),ALLOPCB         NONE ON THE CHAIN
+         L     R0,@R14                 NEXT IN LINE
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,SCTPCBS          UPDATE FREE CHAIN
+         UNTIL Z,END
+         LR    R1,R14
+         CLEAR R15
+         B     GPCBEXIT                Done
+*
+*  Obtain PCB storage if none available
+*
+ALLOPCB  LABEL ,
+         INCRR R0,R14,SCTGPCB          Count getmains
+         LA    R0,L'PCB
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPPCB,LOC=ANY
+*
+GPCBEXIT LABEL ,
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Free PCB Routine'
+*
+*  Free a PCB
+*
+*  - Return PCB memory to MVS
+*
+*  Input  - R1  = PCB address
+*
+*  Output - R15 = 0 Ok
+*                 4 Error in memory de-allocation
+*
+*  Register usage
+*     Base register  :  R15
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+FREEPCB  LABEL
+         PUSH  (R10,R12)
+         PUSH  RAR
+         BASE  R10
+         LR    R12,R1                  PCB pointer
+         WITH  (PCB,R12),BEGIN
+*
+*  Release the chained buffers
+*
+         L     R11,PCBABUF             ACTIVE BUFFER CHAIN
+         WHILE (R11,NZ),BEGIN
+         LR    R1,R11                  Buffer pointer
+         L     R11,@R11                Next buffer on the chain
+         LA    R15,@R1+4               RDW
+         USING RDW,R15                 ##
+         LH    R0,RDWSZ                GET DATA LENGTH
+         DROP  R15                     ##
+         SH    R0,=Y(RDWSIZE)          REDUCE BY RDW LENGTH
+         ACALL FREEBUF                 RELEASE the buffer
+         END   ,
+*
+*  Release any queued buffers
+*
+         LM    R14,R15,PCBQBUF         Queued chain and count
+         IF    (R14,NZ),BEGIN          Some are queued
+         LOOP  BEGIN
+         CLEAR R0                      Empty it out
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,PCBQBUF          UPDATE FREE CHAIN
+         UNTIL Z,END
+*
+*  Free the queued buffers
+*
+         LR    R11,R14                 Chain head
+         WHILE (R11,NZ),BEGIN
+         LR    R1,R11                  Buffer pointer
+         L     R11,@R11                Next buffer on the chain
+         LA    R15,@R1+4               RDW
+         USING RDW,R15                 ##
+         LH    R0,RDWSZ                GET DATA LENGTH
+         DROP  R15                     ##
+         SH    R0,=Y(RDWSIZE)          REDUCE BY RDW LENGTH
+         ACALL FREEBUF                 RELEASE the buffer
+         END   ,
+         END   ,
+         END   ,
+*
+*  Get Suzan table address
+*
+         L     R11,CVTPTR
+         WITH  (CVT,R11),'L  R11,CVTUSER'      SCIP CVT
+         WITH  (SCV,R11),'L  R11,SCVSUZAN'     Suzan table
+*
+*  Add PCB to free pool
+*
+         WITH  (SCT,R11),BEGIN
+         LM    R14,R15,SCTPCBS         FREE CHAIN & COUNT
+         LOOP  BEGIN
+         ST    R14,@R12                Previous head of chain
+         LR    R0,R12                  This PCB is now head
+         LA    R1,1
+         ALR   R1,R15                  NEW COUNTER
+         CDS   R14,R0,SCTPCBS          UPDATE FREE CHAIN
+         UNTIL Z,END
+         END   ,
+         CLEAR R15
+         POP   RAR
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Post Scheduling Routine'
+*
+*  Post Scheduling
+*
+*  Local lock held on entry
+*  PCB lock held on entry
+*
+*  Input  - R0  = Post code
+*           R1  = PCB pointer
+*
+*  Output - R15 = 0 Ok
+*                 4 Error in post processing
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+DOPOST   LABEL ,
+         PUSH  (R10,R11)
+         BASE  R10
+         LR    R11,R1
+         USING PCB,R11                 ##
+         USING SRB,PCBSRB
+
+         PUSH  RAR
+*
+*  If Post recipient is in this address space do it now
+*
+         USING PSA,R0
+         L     R1,PSAAOLD              Current ASCB
+         DROP  R0
+         IF    (R1,EQ,PCBASCB),BEGIN
+         L     R1,PCBECBF              Flag byte address
+         L     R15,PCBECB              ECB address
+         ACALL POST
+         END   ,
+*
+*  Update SRB post flags
+*
+         ELSE  BEGIN
+         L     R1,SRBPARM              CURRENT PARM FIELD
+         LOOP  BEGIN
+         LR    R15,R0                  GET REASON FOR POST
+         OR    R15,R1                  INCLUDE PREVIOUS
+         CS    R1,R15,SRBPARM          UPDATE PARM FIELD
+         UNTIL Z,END
+*
+*  If previous parm value is zero we need to schedule the SRB
+*
+         IF    (R1,Z),BEGIN
+         L     R1,SRBASCB          Get ASCB ptr of postee
+         XCALL CHEKASCB            ASCB validity check routine
+*
+*  Address Space has terminated without closing path - due to
+*     FORCE, for example - so schedule the SRB close routine
+*
+         IF    (R15,NZ),BEGIN
+
+         MVC   SRBEP,=A(SRBCLOSE+X'80000000')    SRB ENTRY POINT
+         MVC   SRBRMTR,=A(SRBCLOSE+X'80000000')    Termination routine
+*GEN
+         SCHEDULE SRB=PCBSRB,SCOPE=GLOBAL
+*NOGEN
+         LA    R15,4                   Error return
+         B     PSTEXIT
+         END   ,
+*
+*  Schedule the SRB Post Routine
+*
+*GEN
+         SCHEDULE SRB=PCBSRB           ROLL IN THE BARREL
+*NOGEN
+         END   ,
+         END   ,
+         CLEAR R15                     Good return code
+*
+PSTEXIT  LABEL ,
+         POP   RAR
+         POP   (R10,R11)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  ASCB Validation Routine'
+*
+*   CHEKASCB - Validity check ASCB address
+*
+*     On entry:
+*       R1  - ASCB address
+*
+*     On exit:
+*       R15 - RC (0=OK, 4=BAD ASCB)
+*
+*     Register usage:
+*       R10 - base register
+*       R14 - return addr
+*
+CHEKASCB LABEL
+         PUSH  R10
+         BASE  R10
+         USING ASCB,R1                 ASCB base
+         LRA   R0,ASCB                 Validity check ASCB addr
+         BNZ   BADASCB
+         LRA   R0,ASCBASID+1
+         BNZ   BADASCB
+         IF    (ASCBASCB,NE,'ASCB'),BADASCB
+         L     R15,CVTPTR              Get CVT address
+         L     R15,CVTASVT-CVT(R15)    Get ASVT address
+         WITH  (ASVT,R15),BEGIN
+         LH    R0,ASCBASID             Get ASID
+         IF    ((R0,NP),OR,(R0,GT,ASVTMAXU)),BADASCB  Validity check
+         LA    R15,ASVTFRST            ASID index point
+         END   ,
+         SLL   R0,2                    Get ASID*4 for ASVT index
+         ALR   R15,R0                  Now have ASVT entry addr
+         N     R1,=X'7FFFFFFF'         Clean up ASCB addr
+         IF    (R1,NE,@R15),BADASCB    Check ASCB against ASVT entry
+         CLEAR R15                     Set good return
+CAEXIT   POP   R10
+         BR    R14
+*
+BADASCB  LA    R15,4                   Set bad return
+         B     CAEXIT
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Post Routine'
+*
+*  Post ECB and update post flags
+*
+*  Local lock held on entry
+*
+*  Input  - R0  = Post flags
+*           R1  = Flag byte pointer
+*           R15 = ECB pointer
+*
+*  Output - R15 = 0 Ok
+*                 4 Error in post processing
+*
+*  Register usage
+*     Base register  :  R12
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+POST     LABEL ,
+         PUSH  (R10,R12)
+         BASE  R12
+
+         LR    R11,R15                 ECB address
+*
+*  Align post flags to proper byte
+*
+         LA    R15,3                   CALCULATE WHICH BYTE
+         NR    R15,R1                  CONTAINS THE POST CODE
+         SLL   R15,3                    TIMES 8
+         SLL   R0,24                   SHIFT UP POST FLAGS
+         SRL   R0,@R15                 PUT POST CODE IN RIGHT SPOT
+*
+*  Update post flags
+*
+         N     R1,=X'7FFFFFFC'         Address TO A WORD BOUNDARY
+         L     R15,@R1                 Get word containing flags
+         LOOP  BEGIN
+         LR    R14,R15                 Copy current
+         OR    R14,R0                  INCLUDE NEW FLAGS
+         CS    R15,R14,@R1             UPDATE
+         UNTIL Z,END
+*
+*  Try to fast post the ECB
+*
+         LT    R1,@R11                 IS ECB WAITING?
+         IF    NM,BEGIN                NO
+         L     R0,=X'40000000'         SET POST BIT
+         CS    R1,R0,@R11              TRY A FAST POST
+         END   ,
+         IF    Z,'CLEAR R15'           Set return code if success
+         EJECT
+*
+*  If Compare and Swap failed we need to call POST
+*     Uses registers 10 (Post code, 11 (ECB address),
+*                    14 (return) and 15 (entry point)
+*
+         ELSE  BEGIN
+         CLEAR R10                     Post code
+         L     R15,CVTPTR              CVT ADDRESS
+         WITH  (CVT,R15),'XCALL  CVT0PT02'   POST ROUTINE
+         END   ,
+*
+*  Return to caller
+*
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Path Block Validation Routine'
+*
+*  Path Block validation
+*
+*  - Check parameters
+*  - Check addresses
+*
+*  Input : R1   = Path Block pointer
+*          RBR  = RB address
+*
+*  Output:  R15 = 0 Ok
+*                 4 Error in memory allocation
+*
+*  Register usage
+*     Work registers :  R2, R3, R11
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+CHKPATH  LABEL ,
+         BASE  R10
+*
+*  Establish FRR
+*
+         LA    R2,CPFRR                ERROR ROUTINE ADDRESS
+*GEN
+         SETFRR  A,FRRAD=(2),WRKREGS=(14,15),RELATED=(CPFRR)
+*NOGEN
+*
+*  VALIDATE USER SUPPLIED PATH BLOCK
+*
+         LR    R11,R1                  Path block pointer
+         USING PATHB,R11               ##
+*
+*  Determine addressing mode of caller
+*
+         WITH  (RBSECT,RBR),BEGIN
+         IF    (RBOPSW+4.X'80',O),'L  R1,=X"7FFFFFFF"'
+         ELSE  'L  R1,=X"00FFFFFF"'
+         END   ,
+         NR    R11,R1
+*
+*  Check parameters in caller's key
+*
+         USING PSA,R0
+         L     R14,PSATOLD             GET OUR TCB
+         DROP  R0
+         WITH  (TCB,R14),BEGIN
+         MODESET  EXTKEY=TCB,WORKREG=1   ENTER USER KEY
+         END   ,
+*
+*  Check flag byte settings
+*
+         OC    PATHMFL(1),PATHMFL      CHECK FLAGS OK
+         IF    PATHMFL.PATHVER2,BEGIN
+         TM    PATHMFL,255-PATHVER2-PATHMNAM
+         BNZ   CPERR
+         END   ELSE,BEGIN
+         TM    PATHMFL,255-PATHMNAM    CHECK VERSION 1 FLAGS
+         BNZ   CPERR
+         L     R1,=X'00FFFFFF'         Version one is always 24 bit
+         END   ,
+*
+*  Check Post flag byte addressability
+*
+         L     R15,PATHECBF            ECBF ADDRESS
+         NR    R15,R1
+         N     R15,=A(X'7FFFFFFC')     TO A WORD BOUNDARY
+         L     R0,@R15                 GET CONTENTS
+         LOOP  BEGIN
+         CS    R0,R0,@R15              VALIDATE ADDRESSABLE
+         UNTIL Z,END                   RETRY IF CHANGED
+*
+*  Check names
+*
+         CLC   PATHMY,PATHYOU          NAMES CAN'T BE IDENTICAL
+         BE    CPERR
+         CLC   PATHMY,=8X'FF'          PATHMY MUST BE SPECIFIED
+         BE    CPERR
+         CLC   PATHYOU,=8X'FF'         IF PATHYOU IS "ANYONE"
+         IF    EQ,BEGIN
+         IF    PATHMFL.PATHMNAM,CPERR  MUST BE NO NAME
+         END   ELSE,BEGIN
+         IF    ~PATHMFL.PATHMNAM,CPERR   ELSE MUST BE SPECIFIC NAME
+         END   ,
+*
+*  Check ECB addressability
+*
+         IF    PATHMFL.PATHVER2,'L  R15,PATHECB'   ECB ADDRESS
+         ELSE  'L3  R15,PATHOECB'       24 BIT ECB ADDRESS
+         LA    R0,3                    TEST FOR WORD BOUNDARY
+         IF    ('NR  R0,R15',NZ),CPERR   OOPS
+         L     R0,@R15                 GET CONTENTS
+         LOOP  BEGIN
+         CS    R0,R0,@R15              VALIDATE ADDRESSABLE
+         UNTIL Z,END                   RETRY IF CHANGED
+*
+*  Check path block addressability
+*
+         LA    R15,PATHMGC             PATH PCB POINTER
+         L     R0,@R15                 GET CONTENTS
+         LOOP  BEGIN
+         CS    R0,R0,@R15              VALIDATE ADDRESSABLE
+         UNTIL Z,END                   RETRY IF CHANGED
+*
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+*
+*  Check authorization of caller
+*    Note: Uses registers R2 and R3
+*          Requires local lock
+*
+*GEN
+         TESTAUTH  FCTN=1,STATE=YES,KEY=YES,RBLEVEL=1,BRANCH=YES
+*NOGEN
+*
+*  Check parameters from authorized callers
+*
+         IF    (R15,Z),BEGIN
+         L     R0,PATHBUF              REQUESTED BUFFER SIZE
+         CL    R0,=A(MAXPBUF)          PRIVILEGED BUFFER MAXIMUM
+         IF    H,CPERR                 TOO BIG
+*
+*  Check info area, if present
+*
+         IF    PATHMFL.PATHVER2,BEGIN
+         IF    ('LT  R14,PATHPINP',Z),EXIT
+         USING PSA,R0
+         L     R15,PSATOLD             GET OUR TCB
+         DROP  R0
+         WITH  (TCB,R15),BEGIN
+         MODESET  EXTKEY=TCB,WORKREG=1   ENTER USER KEY
+         END   ,
+         L     R15,@R14            Get length
+         IF    (R15,LGT,L'PCBINFO),'LA R15,L"PCBINFO'  Not too much
+         DEX   R15,'OC  @R14+4(0),@R14+4'   Check PINFO
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         END   ,
+         END   ,
+*
+*  Check parameters from un-authorized callers
+*
+         ELSE  BEGIN
+         L     R0,PATHBUF              REQUESTED BUFFER SIZE
+         CL    R0,=A(MAXBUF)           USER BUFFER MAXIMUM
+         IF    H,CPERR                 TOO BIG
+         END   ,
+*
+*  Set good return code and return to caller
+*
+         CLEAR R15
+         LR    R1,R11                  Restore Path Block pointer
+CPEXIT   LABEL ,
+*
+*  Unstack the FRR
+*     Uses Registers 10-11
+*
+*GEN
+         SETFRR  D,WRKREGS=(14,0),RELATED=(CPFRR)
+*NOGEN
+         BR    RAR
+*
+*  Set error return code and return to caller
+*
+CPERR    LABEL ,
+         MODESET  EXTKEY=ZERO          BACK TO KEY ZERO
+         LA    R15,4                   Return code
+         B     CPEXIT
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  CHKPATH FRR Recovery Routine'
+*
+*  CHKPATH FRR RECOVERY ROUTINE
+*
+*  - Normally entered because of improper address
+*  - Cancels abend if address problem
+*    otherwise lets abend process continue
+*
+*  Input  - R0  = 304 byte work area
+*           R1  = Pointer to SDWA
+*           R14 = Return address
+*           R15 = Entry point address
+*
+*  Output - SDWA updated
+*
+CPFRR    LABEL ,
+         USING *,R15                   ##
+         USING SDWA,R1                 ##
+         TM    SDWAERRD,SDWACLUP       CLEAN UP ONLY?
+         BO    CPFRRNG                   NO RETRY IF SO
+         TM    SDWAERRA,SDWAPCHK       PROGRAM CHECK?
+         BZ    CPFRRNG                   SOMETHING SERIOUS
+         CLI   SDWAICD1,X'04'          PROTECTION?
+         BE    CPFRRDO                   YES,  RETRY
+         CLI   SDWAICD1,X'05'          ADDRESSING?
+         BE    CPFRRDO                   YES, RETRY
+         CLI   SDWAICD1,X'10'          SEGMENT?
+         BE    CPFRRDO                   YES
+         CLI   SDWAICD1,X'11'          PAGE?
+         BE    CPFRRDO                   YES, RETRY
+*
+* Let abend continue
+*
+CPFRRNG  SETRP RC=0
+         BR    R14                     NO RETRY, CONTINUE ABEND
+*
+*  Request retry
+*
+CPFRRDO  L     R2,=A(CPERR+X'80000000')    RETRY POINT
+         MVC   SDWASR00,SDWATRAN       GET EXCEPTION ADDRESS
+         SETRP RETADDR=(R2),RETREGS=YES,RC=4,RECORD=NO,DUMP=NO
+         BR    R14                     RETURN TO SCOM
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Build PCB Routine'
+*
+*  Build a PCB
+*
+*  - Obtain storage
+*  - Fill in PCB fields
+*  - Fill in SRB fields
+*
+*  Input :  R1    = Path Block address
+*`          RBR   = RB address
+*
+*  Output:  R15 = 0 Ok
+*                 4 Error in memory allocation
+*           R1  = PCB address
+*
+*  Register usage
+*     Work registers :  R2, R11
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+BUILDPCB LABEL ,
+         PUSH  (R10,R11)
+         BASE  R10
+         LR    R11,R1                  Path block pointer
+         USING PATHB,R11
+         PUSH  RAR
+*
+*  Get a PCB
+*
+         ACALL GETPCB
+         IF    (R15,NZ),BPERR
+*
+*  Fill in the PCB
+*
+         USING PCB,R1                  ##
+         CLEAR PCB                     Clear PCB
+*
+         MVC   PCBID,=CL4'PCB '
+         MVC   PCBYOU,PATHYOU          NAME OF CALLEE
+         MVC   PCBMY,PATHMY            MY NAME
+         MVC   PCBPASS,PATHPASS        PASSWORD
+         MVC   PCBAMSK,=X'00FFFFFF'    Assume AMODE 24
+         USING PSA,R0
+         L     R15,PSAAOLD             OUR ASCB
+         ST    R15,PCBASCB             SET ASCB
+         WITH  (ASCB,R15),'MVC  PCBASID,ASCBASID'  SET ASCB ID
+         L     R15,PSATOLD             OUR TCB
+         ST    R15,PCBTCB              SET TCB
+         DROP  R0
+         WITH  (TCB,R15),'MVC  PCBKEY(1),TCBPKF'    PROTECT KEY
+*
+*  Set flags and buffer size
+*
+         OC    PCBMFL,PATHMFL          SET FLAGS
+         SET   PCBFACON                Note available for connection
+         MVC   PCBMXBF,PATHBUF         MAXIMUM INPUT BUFFER LENGTH
+         L     R14,CVTPTR
+         WITH  (CVT,R14),'L  R14,CVTUSER'      SCIP CVT
+         WITH  (SCV,R14),'L  R14,SCVSUZAN'     Suzan table
+         ST    R14,PCBSCT              Suzan Table pointer
+*
+*  Check for authorized caller
+*
+         PUSH  (R1,R3)                 Save work registers
+*GEN
+         TESTAUTH  FCTN=1,STATE=YES,KEY=YES,RBLEVEL=1,BRANCH=YES
+*NOGEN
+         POP   (R1,R3)
+         IF    (R15,Z),'SET PCBFAUTH'  Caller is authorized
+*
+*  Set version 2 options
+*
+         IF    PATHMFL.PATHVER2,BEGIN  Only available in vers 2...
+         USING RBSECT,RBR              ##
+         IF    RBOPSW+4.X'80','MVC  PCBAMSK,=X"7FFFFFFF"'  AMODE 31
+         DROP  R5                      ##
+*
+*  Get INFO data
+*
+         IF    PCBFAUTH,BEGIN          Only for authorized callers
+         IF    ('LT  R14,PATHPINP',Z),EXIT
+         L     R15,@R14            Get length
+         IF    (R15,LGT,L'PCBINFO),'LA R15,L"PCBINFO'  Not too much
+         MOVE  R15,PCBINFO,@R14+4   Copy in PINFO
+         END   ,
+         END   ,
+*
+*  Set flag byte pointer
+*
+         L     R14,PATHECBF            FLAG BYTE ADDRESS
+         N     R14,PCBAMSK             CLEAR HIGH BIT/BYTE
+         ST    R14,PCBECBF             FLAG BYTE ADDRESS
+*
+*  Set ECB address
+*
+         IF    PATHMFL.PATHVER2,'L  R14,PATHECB'   ECB ADDRESS
+         ELSE  'L3  R14,PATHOECB'      24 BIT ECB ADDRESS
+         N     R14,PCBAMSK             CLEAR HIGH BIT/BYTE
+         ST    R14,PCBECB              ECB ADDRESS
+*
+*  Build SRB
+*
+         WITH  (SRB,PCBSRB),BEGIN
+         MVC   SRBID,=CL4'SRB'         IDENTIFY
+         MVC   SRBASCB,PCBASCB         ASCB
+         MVC   SRBPASID,PCBASID        ASCB ID
+         MVC   SRBPTCB,PCBTCB          TCB
+*
+*  Set initial SRB routine addresses
+*
+         MVC   SRBEP,=A(SRBPOST+X'80000000')    SRB ROUTINE ENTRY POINT
+         MVC   SRBRMTR,=A(SRBPTERM+X'80000000')    Termination routine
+         END   ,
+*
+*  Set good return code and return to caller
+*
+         ST    R1,PATHMGC              PCB is the PATH MAGIC WORD
+         CLEAR R15
+BPEXIT   LABEL ,
+         POP   RAR
+         POP   (R10,R11)
+         BR    RAR
+*
+*  Set error return code and return to caller
+*
+BPERR    LABEL ,
+         LA    R15,4                   Return code
+         B     BPEXIT
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  PCB Add Routine'
+*
+*  Add PCB to the master chain
+*
+*  - Add PCB to the master chain
+*  - Search for partners
+*
+*  CMS and Local locks held on entry
+*
+*  Input :  R1  = PCB address
+*           SPR = Stack pointer
+*
+*  Output:  R15 = 0 Added to chain
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+ADDPCB   LABEL ,
+         PUSH  (R10,R11)
+         BASE  R10
+         LR    R11,R1
+         USING (PCB,R11)
+*
+*  Get opener's ASCB and TCB
+*
+         L     R1,PCBASCB              Get ASCB address
+         L     R0,PCBTCB                and TCB address
+*
+*  Get PCB chain head
+*
+         L     R14,PCBSCT              SCT pointer
+         WITH  (SCT,R14),'LA  R14,SCTCHAIN'   PCB Chain
+         SH    R14,=Y(PCBNEXT-PCB)
+*
+*  Loop through PCBS to find proper spot
+*
+         WHILE ('LT  R15,PCBNEXT-PCB(R14)',NZ),BEGIN
+         C     R1,PCBASCB-PCB(R15)        RIGHT NEIGHBORHOOD?
+         IF    NE,INPCBX                   NO
+         C     R0,PCBTCB-PCB(R15)         SORT BY TCB NEXT
+         IF    NE,INPCBX                   NOT THERE YET
+         CLC   PCBPASS,PCBPASS-PCB(R15)   NOW BY PASSWORD
+         IF    NE,INPCBX                   NOT THERE YET
+         CLC   PCBMY,PCBMY-PCB(R15)       AND BY MY NAME
+         IF    NE,INPCBX                   NOT THERE YET
+         CLC   PCBYOU,PCBYOU-PCB(R15)     AND FINALLY BY YOUR NAME
+INPCBX   IF    H,EXIT                     FOUND THE SPOT
+         LR    R14,R15                 Move through chain
+         END   ,
+*
+*  We found the spot
+*
+         ST    R15,PCBNEXT             Set next PCB in chain
+         ST    R11,PCBNEXT-PCB(R14)    ADD US TO CHAIN
+*
+*  Chain has been updated - return to caller
+*
+         CLEAR R15
+         POP   (R10,R11)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Find a Partner Routine'
+*
+*  Find a partner for a PCB
+*
+*  - Search for partners
+*
+*  CMS and Local locks held on entry
+*
+*  Input :  R1  = PCB address
+*           SPR = Stack pointer
+*
+*  Output:  R15 = 0 Partner found
+*                 4 Partner not found
+*           R1  = PCB address of partner
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+FINDPART LABEL ,
+         PUSH  (R10,R11)
+         BASE  R10
+         LR    R11,R1
+         USING (PCB,R11)
+         USING (SRB,PCBSRB)
+*
+*  Try to find a partner
+*
+         L     R1,PCBSCT               SCT pointer
+         WITH  (SCT,R1),'LA  R1,SCTCHAIN'   PCB Chain
+         SH    R1,=Y(PCBNEXT-PCB)
+FINDLOOP WHILE ('LT  R1,PCBNEXT-PCB(R1)',NZ),BEGIN
+         IF    (R11,EQ,R1),NEXT        DON'T TALK TO YOURSELF
+*
+*  Skip this one if it's not available
+*
+         WITH  (PCB,R1),BEGIN
+         IF    ~PCBFACON,NEXT,FINDLOOP
+         END   ,
+*
+*  Found an available one, check password
+*
+         IF    (PCBPASS,NE,PCBPASS-PCB(R1)),NEXT    Check PASSWORD
+*
+*  If specific caller requested, check it
+*
+         WITH  (PCB,R1),'TM  PCBMFL,PATHMNAM'
+         IF    O,BEGIN
+         IF    (PCBMY,NE,PCBYOU-PCB(R1)),NEXT,FINDLOOP
+         END   ,
+*
+*  Non-specific can not connect to non-specific
+*
+         ELSEIF ~PCBMFL.PATHMNAM,NEXT          ONE MUST BE NAMED
+*
+*  If I want specific caller check the name
+*
+         IF    (PCBMFL.PATHMNAM,AND,                                   *
+               (PCBYOU,NE,PCBMY-PCB(R1))),NEXT
+*
+*  We have a winner - note both as taken
+*
+         CLEAR PCBFACON
+         WITH  (PCB,R1),'CLEAR PCBFACON'
+*
+         CLEAR R15                     Return code
+         B     FPEXIT
+         END   ,
+*
+*  No partner found
+*
+         LA    R15,4
+*
+*  Return to caller
+*
+FPEXIT   LABEL ,
+         POP   (R10,R11)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Connect Partner PCBs Routine'
+*
+*  Connect partner PCBs
+*
+*  - Set PCB pointers
+*  - Post all parties
+*
+*  CMS and Local locks held on entry
+*
+*  Input :  R1  = Caller's PCB address
+*           R15 = Partner's PCB address
+*           SPR = Stack pointer
+*
+*  Output:  R15 = 0 Partner found
+*                 4 Partner not found
+*           R1  = PCB address of partner
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+CONNECT  LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+         LR    R11,R1                  Caller's PCB
+         USING (PCB,R11)
+         LR    R12,R15                 Partner's PCB
+         PUSH  RAR
+*
+*  Set the PCB pointers
+*
+         ST    R12,PCBPART             Connect him to me
+         WITH  (PCB,R12),BEGIN
+         ST    R11,PCBPART             Connect me to him
+         END   ,
+*
+*  If caller is 31 bit mode set partner's flag
+*
+         IF    (PCBAMSK,EQ,X'7F'),BEGIN
+         WITH  (PCB,R12)
+         SET   PCBFPBHI,MODE=LOCKED,REF=PCB,REGS=(R14,R15,R0)
+         END   ,
+*
+*  If partner is 31 bit mode set caller's flag
+*
+         USING PCB,R12
+         CLI   PCBAMSK,X'7F'
+         DROP  R12
+         IF    EQ,BEGIN
+         SET   PCBFPBHI,MODE=LOCKED,REF=PCB,REGS=(R14,R15,R0)
+         END   ,
+*
+*  Post everyone that a match was found
+*
+         LA    R0,PATHFOPN             Reason
+         LR    R1,R12                  Partner's PCB pointer
+         ACALL DOPOST                  WAKE HIM UP
+         LA    R0,PATHFOPN             Reason
+         LA    R1,PCB                  PCB pointer
+         ACALL DOPOST                  WAKE ME UP
+*
+         POP   RAR
+         POP   (R10,R12)
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  PCB Close Routine'
+*
+*  Close a PCB
+*
+*  - Notify partner
+*  - Release queued and waiting buffers
+*  - Remove PCB from the master chain
+*  - Release the PCB
+*
+*  CMS and Local locks held on entry
+*
+*  Input :  R1  = PCB address
+*           SPR = Stack pointer
+*
+*  Output:  R15 = 0 Close successful
+*
+*  Register usage
+*     Base register  :  R10
+*     Return register:  RAR
+*
+         SPACE ,
+CLOSEPCB LABEL ,
+         PUSH  (R10,R12)
+         BASE  R10
+         LR    R11,R1
+         USING PCB,R11
+
+         PUSH  RAR                     SAVE RETURN
+*
+         MVI   PCBID,C'p'              Clobber ID
+*
+*  If path is active, notify the partner
+*
+         L     R1,PCBPART              PARTNERS PCB
+         IF    (R1,NZ),BEGIN           WORRY ABOUT OTHER GUY?
+*
+*  Let him know his partner is gone
+*
+         WITH  (PCB,R1),BEGIN
+         SET   PCBFCLRPART             Incdicate wants to be cleared
+         CLEAR R0
+         L     R15,PCBPART             Partner's PCB lock
+         N     R15,=X'7FFFFFFF'        Clear lock bit
+         CS    R15,R0,PCBPART
+         END   ,
+         IF    NZ,BEGIN                Partner is locked
+         L     R14,PCBSCT
+         WITH  (SCT,R14),'INCR R15,SCTEMPD' count diagnostic
+         SET   PCBFUNLFREE             UNLOCK will free PCB
+         END   ,
+*
+*  Post partner with close (include pending post flags)
+*
+         SET   PCBPFL.PATHFCLS         TELL HIM WHY
+         LC    R0,PCBPFL               GET SUMMARY POST CODE
+         CLEAR PCBPFL
+         L     R1,PCBPART              PCB pointer
+         ACALL DOPOST                  WAKE HIM UP
+         END   ,
+*
+*  Find this PCB on the chain
+*
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         WITH  (SCT,R15),'LA  R15,SCTCHAIN'
+         SH    R15,=Y(PCBNEXT-PCB)
+         WHILE ('LT  R0,PCBNEXT-PCB(R15)',NZ),BEGIN
+         CR    R11,R0                  RIGHT ONE?
+         IF    EQ,GOREMOVE             FOUND THE SPOT
+         LR    R15,R0                  SET CURRENT
+         END   ,
+         DC    H'0'                    Pcb not on the chain
+*
+*  Remove This PCB from the chain
+*
+GOREMOVE L     R0,PCBNEXT              GET CHAIN TAIL
+         ST    R0,@R15+PCBNEXT-PCB     REMOVE US FROM CHAIN
+
+*
+*  Close is complete.
+*
+         POP   RAR                     Restore return address
+         POP   (R10,R12)               Get the saved registers
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Command Processing FRR Recovery Routine'
+*
+*  Command Processing FRR Recovery Routine
+*
+*  - Normally entered because of improper address
+*  - Cancels abend if address problem
+*    otherwise lets abend process continue
+*
+*  Input  - R0  = 304 byte work area
+*           R1  = Pointer to SDWA
+*           R14 = Return address
+*           R15 = Entry point address
+*
+*  Output - SDWA updated
+*
+CMDFRR    LABEL ,
+         USING *,R15                   ##
+         USING SDWA,R1                 ##
+         TM    SDWAERRD,SDWACLUP       CLEAN UP ONLY?
+         BO    FRRNG                   NO RETRY IF SO
+         TM    SDWAERRA,SDWAPCHK       PROGRAM CHECK?
+         BZ    FRRNG                   SOMETHING SERIOUS
+         CLI   SDWAICD1,X'04'          PROTECTION?
+         BE    FRRDO                   YES,  RETRY
+         CLI   SDWAICD1,X'05'          ADDRESSING?
+         BE    FRRDO                   YES, RETRY
+         CLI   SDWAICD1,X'10'          SEGMENT?
+         BE    FRRDO                   YES
+         CLI   SDWAICD1,X'11'          PAGE?
+         BE    FRRDO                   YES, RETRY
+*
+* Let abend continue
+*
+FRRNG    SETRP RC=0
+         BR    R14                     NO RETRY, CONTINUE ABEND
+*
+*  Request retry
+*
+FRRDO    L     R2,=A(BADADDR+X'80000000')    RETRY POINT
+         MVC   SDWASR00,SDWATRAN       GET EXCEPTION ADDRESS
+         SETRP RETADDR=(R2),RETREGS=YES,RC=4,RECORD=NO,DUMP=NO
+         BR    R14                     RETURN TO SCOM
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  SVC Initialization Routine'
+*
+* SVC initialization
+*
+*  - Create SCIP CVT if necesary
+*  - Create Suzan table if necessary
+*  - Establish RMTR if necessary
+*
+*  Input - None
+*
+*  Output - R15 = 0 Ok
+*                 4 Error in memory allocation
+*           R1  = Suzan Control Table (SCT) pointer
+*
+*  Register usage
+*     Work registers :  R11
+*     Base register  :  R10
+*     Return register:  RAR
+*     Return code    :  R15
+*
+         SPACE ,
+SCOMINIT LABEL ,
+         BASE  R10
+*
+*  Get SCIP CVT pointer
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L  R11,CVTUSER'
+*
+*  No SCIP CVT - create one
+*
+         IF    (R11,Z),BEGIN
+         LA    R0,L'SCV
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPCSA,LOC=BELOW
+         IF    (R15,NZ),CTERR
+         LR    R11,R1              SAVE ADDRESS
+         LR    R14,R1              Copy ADDRESS
+         LR    R0,R1                again
+         LA    R1,L'SCV            AREA LENGTH
+         CLEAR R15
+         MVCL  R0,R14              CLEAR AREA
+         WITH  (SCV,R11)
+         MVC   SCVIDENT,=C'SCIP'   SCIP LIVES ON!
+         STCK  SCVIPLTM            SAVE IPL TIME (WELL, SORT OF)
+*
+*  Now add the address to the CVT
+*
+         L     R15,CVTPTR
+         WITH  (CVT,R15)
+         CLEAR R14                     Field should be zero
+         CS    R14,R11,CVTUSER         Put address in CVT
+         DROP  R15
+*
+*  If compare and swap failed, someone beat us to it
+*     So trash the one we just made
+*
+         IF    NZ,BEGIN
+         LR    R1,R11                  Address
+         LA    R0,L'SCV                Length
+         STORAGE RELEASE,COND=YES,LENGTH=(0),ADDR=(1),SP=SPCSA,KEY=0
+*
+*  And get the SCIP CVT pointer
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L  R11,CVTUSER'
+         END   ,
+         END   ,
+*
+*  Get Suzan SVC Control table pointer
+*      If none - create one
+*
+         WITH  (SCV,R11),BEGIN
+         IF    (SCVIDENT,NE,'SCIP'),CTERR   SCIP LIVES ON!
+         L     R11,SCVSUZAN            Suzan Control Table
+         END   ,
+*
+*  CREATE SUZAN CONTROL TABLE if necessary
+*
+         IF    (R11,Z),BEGIN
+         LH    R0,=Y(L'SCT)
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPSQA,LOC=ANY
+         IF    (R15,NZ),CTERR
+         LR    R11,R1               SAVE ADDRESS
+         LR    R14,R1              Copy ADDRESS
+         LR    R0,R1                again
+         L     R1,=A(L'SCT)        AREA LENGTH
+         CLEAR R15
+         MVCL  R0,R14              CLEAR AREA
+*
+*  Fill in SCT
+*
+         WITH  (SCT,R11)
+         MVC   SCTIDENT,=C'SUZY'       SUZAN ID
+         MVC   SCTCSECT,=A(IGC&SVCCOM) Code location
+*
+*  Set up low memory buffer management
+*
+         LA    R1,SCTNBPL              Number of buffer pools
+         LA    R15,SCTBPCL             Buffer pool control area
+         LA    R14,BSTABL              Buffer size values
+         LOOP  BEGIN
+         WITH  (BPCTAB,R15)
+         MVC   BPCSIZE,@R14            Set size in control area
+         LA    R14,@R14+4              Next size word
+         LA    R15,BPCTAB+L'BPCTAB     Next control area
+         UNTIL (BCT,R1),END
+*
+*  Set up statistics area
+*
+         LH    R0,=Y(SCTBPLBK*4)       Area length
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPSQA,LOC=ANY
+         IF    (R15,NZ),LBERR
+         ST    R1,SCTBPLST             SAVE ADDRESS
+         LR    R14,R1                  Copy ADDRESS
+         LR    R0,R1                    again
+         LH    R1,=Y(SCTBPLBK*4)       Area length
+         CLEAR R15
+         MVCL  R0,R14                  CLEAR Table
+*
+*  Set up high memory buffer management
+*
+         LA    R1,SCTNBPH              Number of buffer pools
+         LA    R15,SCTBPCH             Buffer pool control area
+         LA    R14,BSTABH              Buffer size values
+         LOOP  BEGIN
+         WITH  (BPCTAB,R15)
+         MVC   BPCSIZE,@R14            Set size in control area
+         LA    R14,@R14+4              Next size word
+         LA    R15,BPCTAB+L'BPCTAB     Next control area
+         UNTIL (BCT,R1),END
+*
+*  Set up statistics area
+*
+         LH    R0,=Y(SCTBPHBK*4)       Area length
+         STORAGE OBTAIN,COND=YES,LENGTH=(0),KEY=0,SP=SPSQA,LOC=ANY
+         IF    (R15,NZ),HBERR          Clean up and quit
+         ST    R1,SCTBPHST             SAVE ADDRESS
+         LR    R14,R1                  Copy ADDRESS
+         LR    R0,R1                    again
+         LH    R1,=Y(SCTBPHBK*4)       Area length
+         CLEAR R15
+         MVCL  R0,R14                  CLEAR Table
+*
+*  Now add the Suzan Vector Table address to the SCIP CVT
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L  R1,CVTUSER'
+         WITH  (SCV,R1)
+         CLEAR R14                     Pointer should be zero
+         CS    R14,R11,SCVSUZAN        Put address in SCIP CVT
+*
+*  We also need to establish the RMTR exit
+*
+         IF    Z,BEGIN
+         RESMGR ADD,TOKEN=SCTRMTKN,PARAM=SCTRMPRM,ASID=ALL,            *
+               TYPE=ADDRSPC,ROUTINE=(BRANCH,SCOMRMTR),MF=(E,SCTRMGR)
+         IF    (R15,NZ),'ST  R15,SCTRMPRM'      Note error code
+*
+         CLEAR (SCTRMGR,32)
+         RESMGR ADD,TOKEN=SCTRMTK2,PARAM=SCTRMPRM,ASID=ALL,TCB=ALL,    *
+               TYPE=TASK,ROUTINE=(BRANCH,SCOMRMTR),MF=(E,SCTRMGR)
+         IF    (R15,NZ),'ST  R15,SCTRMPRM+4'      Note error code
+         END   ,
+*
+*  If compare and swap failed, someone beat us to it
+*     So trash the one we just made
+*
+         ELSE  BEGIN
+*
+*  Release the high buffer pool statistics table
+*
+         LH    R0,=Y(SCTBPHBK*4)       Area length
+         L     R1,SCTBPHBK              and address
+         STORAGE RELEASE,COND=YES,LENGTH=(0),ADDR=(1),SP=SPSQA,KEY=0
+*
+*  Release the low buffer pool statistics table
+*
+HBERR    LH    R0,=Y(SCTBPLBK*4)       Area length
+         L     R1,SCTBPLBK              and address
+         STORAGE RELEASE,COND=YES,LENGTH=(0),ADDR=(1),SP=SPSQA,KEY=0
+*
+*  Release the SVT
+*
+LBERR    LR    R1,R11                  Address
+         LH    R0,=Y(L'SCT)            Length
+         STORAGE RELEASE,COND=YES,LENGTH=(0),ADDR=(1),SP=SPSQA,KEY=0
+*
+*  And get the real pointer
+*
+         L     R1,CVTPTR
+         WITH  (CVT,R1),'L  R1,CVTUSER'
+         WITH  (SCV,R1),'L  R11,SCVSUZAN'
+         IF    (R11,Z),CTERR           No good
+         END   ,
+         END   ,
+*
+*  Set good return code and return to caller
+*
+         LR    R1,R11
+         CLEAR R15
+         BR    RAR
+*
+*  Set error return code and return to caller
+*
+CTERR    LA    R15,4
+         BR    RAR
+         SPACE ,
+         DROP  ,
+         SPACE 2
+         LTORG
+         SPACE
+*
+*  Low Buffer Pool Initialization Constants
+*
+BSTABL   DC    (SCTNBPL)A(0)           Buffer pool size table
+         ORG   BSTABL
+         DC    A(96)
+         DC    A(256)
+         DC    A(1024)
+         DC    A(2112)
+         DC    A(4160)
+         DC    A(8256)
+         DC    A(16384)
+         DC    A(32768)
+         ORG   ,
+*
+*  High Buffer Pool Initialization Constants
+*
+BSTABH   DC    (SCTNBPH)A(0)           Buffer pool size table
+         ORG   BSTABH
+         DC    A(96)
+         DC    A(256)
+         DC    A(1024)
+         DC    A(2048)
+         DC    A(4192)
+         DC    A(8192)
+         DC    A(16416)
+         DC    A(32768)
+         ORG   ,
+         TITLE 'SUZAN SVC --  SRB Post Routine'
+*******************************************************************
+*                                                                 *
+*  SRB Post ROUTINE                                               *
+*                                                                 *
+*        Registers on entry from MVS:                             *
+*              R0  - Address of the SRB                           *
+*              R1  - SRBPARM                                      *
+*              R2  - Undefined                                    *
+*              R3/R13 - Undefined                                 *
+*              R14 - Return address                               *
+*              R15 - Entry point address                          *
+*                                                                 *
+*        Entered in Supervisor state, unlocked, enabled           *
+*                                                                 *
+*        Registers on return to MVS:                              *
+*              R14 - Return address                               *
+*                                                                 *
+*        Exit in Supervisor state, unlocked                       *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+SRBPOST  LABEL ,
+         BASE  BR
+         LR    R4,R14                  SAVE RETURN
+         LR    R3,R0                   SRB POINTER
+         SL    R3,=A(PCBSRB-PCB)       COMPUTE PCB POINTER
+         USING PCB,R3                  ##
+         USING SRB,PCBSRB              ##
+*
+*  Get a stack area
+*     Uses Registers 10-11
+*
+         ACALL GETSTAK                 Get a stack
+         IF    (R15,NZ),SPEXIT
+         LR    SPR,R1                  Set stack pointer
+*
+*  Obtain LOCAL lock
+*
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=USE,               *
+               RELATED=(SCPSTL)
+*
+*  Get post flags
+*
+         L     R0,SRBPARM              GET CURRENT FLAGS
+         CLEAR R1
+         LOOP  BEGIN
+         CS    R0,R1,SRBPARM            AND CLEAR OUT
+         UNTIL Z,END
+*
+*  If PCB has already terminated - free it
+*
+         IF    PCBFSRBFREE,BEGIN
+         TS    PCBFREE
+         IF    NZ,BEGIN                Last one gets to do it
+         L     R15,PCBSCT                    TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF5' TEMP TEMP
+         LA    R1,PCB
+         ACALL FREEPCB
+         CLEAR R0                      No post
+         END   ,
+         ELSE  BEGIN                         TEMP TEMP
+         L     R15,PCBSCT                    TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF3' TEMP TEMP
+         END   ,                             TEMP TEMP
+         END   ,
+*
+*  Get flag byte and ECB addresses and call post routine
+*
+         IF    (R0,NZ),BEGIN
+         L     R1,PCBECBF              Flag byte address
+         L     R15,PCBECB              ECB address
+         ACALL POST
+         END   ,
+*
+*  Release LOCAL lock
+*
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=USE,RELATED=(SCPSTL)
+*
+*  Free the stack and return to caller
+*     Uses Registers 10-12
+*
+         LR    R1,SPR
+         ACALL FREESTAK
+SPEXIT   LABEL ,
+         BR    R4
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  SRB Post Termination Routine'
+*******************************************************************
+*                                                                 *
+*  SRB Post Termination Routine                                   *
+*                                                                 *
+*        Registers on entry from MVS:                             *
+*              R0  - Caller of PURGEDQ                            *
+*                    0 if issued by MVS                           *
+*              R1  - Address of dequeued SRB                      *
+*              R2  - SRBPARM                                      *
+*              R3 - R13 - Undefined                               *
+*              R14 - Return address                               *
+*              R15 - Entry point address                          *
+*                                                                 *
+*        Entered in Supervisor state, key 0, unlocked             *
+*                                                                 *
+*        Registers on return to MVS:                              *
+*              R14 - Return address                               *
+*                                                                 *
+*        Exit in Supervisor state, key 0, unlocked                *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+*
+*  SRB Post termination routine
+*
+SRBPTERM LABEL ,
+         BASE  BR
+         LR    R4,R14                  SAVE RETURN
+         LR    R3,R1                   SRB POINTER
+         SL    R3,=A(PCBSRB-PCB)       COMPUTE PCB POINTER
+         USING PCB,R3                  ##
+         USING SRB,PCBSRB              ##
+*
+*  Obtain LOCAL lock
+*
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=USE,               *
+               RELATED=(SCPSTTL)
+*
+*  If this PCB is terminating, free it up
+*
+         IF    PCBFSRBFREE,BEGIN
+         TS    PCBFREE
+         IF    NZ,BEGIN                Last one gets to do it
+         L     R15,PCBSCT                    TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF6' TEMP TEMP
+         ACALL GETSTAK                 Get a stack
+         IF    (R15,NZ),BEGIN          FREEPCB needs a stack!
+         LR    SPR,R1                  Set stack pointer
+         LA    R1,PCB
+         ACALL FREEPCB
+         LR    R1,SPR
+         ACALL FREESTAK
+         END   ,                       FREEPCB needs a stack!
+         END   ,
+         ELSE  BEGIN                         TEMP TEMP
+         L     R15,PCBSCT                    TEMP TEMP
+         WITH  (SCT,R15),'INCR R14,SCTEMPF4' TEMP TEMP
+         END   ,                             TEMP TEMP
+         END   ,
+*
+*  Release LOCAL lock
+*
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=USE,RELATED=(SCPSTTL)
+         BR    R4                      Return to caller
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  SRB Close Routine'
+*******************************************************************
+*                                                                 *
+*  SRB Close Routine                                              *
+*                                                                 *
+*        Registers on entry from MVS:                             *
+*              R0  - Address of the SRB                           *
+*              R1  - SRBPARM                                      *
+*              R2  - Undefined                                    *
+*              R3/R13 - Undefined                                 *
+*              R14 - Return address                               *
+*              R15 - Entry point address                          *
+*                                                                 *
+*        Entered in Supervisor state, unlocked, enabled           *
+*                                                                 *
+*        Registers on return to MVS:                              *
+*              R14 - Return address                               *
+*                                                                 *
+*        Exit in Supervisor state, unlocked                       *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+SRBCLOSE LABEL ,
+         BASE  BR
+         LR    R4,R14                  SAVE RETURN
+         LR    R3,R0                   SRB POINTER
+         SL    R3,=A(PCBSRB-PCB)       COMPUTE PCB POINTER
+         USING PCB,R3                  ##
+         USING SRB,PCBSRB              ##
+*
+*  Get a stack area
+*     Uses Registers 10-11
+*
+         ACALL GETSTAK                 Get a stack
+         IF    (R15,NZ),SCEXIT
+         LR    SPR,R1                  Set stack pointer
+*
+*  Obtain LOCAL lock
+*
+*GEN
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=USE,               *
+               RELATED=(SCCLSL)
+*
+*  Obtain CMS lock
+*
+         SETLOCK OBTAIN,TYPE=CMS,MODE=UNCOND,REGS=USE,RELATED=(SCCLSC)
+*NOGEN
+*
+*  Remove the PCB from the ACTIVE CHAIN
+*
+         LA    R1,PCB                  PCB pointer
+         ACALL CLOSEPCB
+*
+*  Free the PCB/SRB
+*
+         LA    R1,PCB
+         ACALL FREEPCB
+*
+*  Release the CMS lock
+*
+*GEN
+         SETLOCK RELEASE,TYPE=CMS,REGS=USE,RELATED=(SCCLSC)
+*
+*  Release LOCAL lock
+*
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=USE,RELATED=(SCCLSL)
+*NOGEN
+*
+*  Free the stack and return to caller
+*     Uses Registers 10-12
+*
+         LR    R1,SPR
+         ACALL FREESTAK
+SCEXIT   LABEL ,
+         BR    R4
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+         TITLE 'SUZAN SVC --  Resource Manager Termination Routine'
+*******************************************************************
+*                                                                 *
+*  Resource Manager Termination Routine                           *
+*    Called from Address Space/Task termination                   *
+*                                                                 *
+*        Registers on entry from MVS:                             *
+*              R0  - Undefined                                    *
+*              R1  - Parameter pointer                            *
+*              R2 - R12 - Undefined                               *
+*              R13 - 72 byte save area                            *
+*              R14 - Return address                               *
+*              R15 - Entry point address                          *
+*                                                                 *
+*        Entry is in Supervisor state, Key 0 with no locks        *
+*                                                                 *
+*******************************************************************
+         SPACE 2
+*
+*  Resource Manager Termination Routine
+*
+SCOMRMTR LABEL ,
+         SAVE  (14,12)                 Save registers
+         BASE  BR
+         LR    R2,R13                  Preserve save area pointer
+         L     R12,@R1                 RMPL pointer
+         USING RMPL,R12
+*
+*  Obtain Local and CMS locks
+*
+*GEN
+         SETLOCK OBTAIN,TYPE=LOCAL,MODE=UNCOND,REGS=USE,RELATED=(SCRML)
+         SETLOCK OBTAIN,TYPE=CMS,MODE=UNCOND,REGS=USE,RELATED=(SCRMC)
+*NOGEN
+*
+*  Get a stack area
+*     Uses Registers 10-11
+*
+         ACALL GETSTAK                 Get a stack
+         IF    (R15,NZ),RMEXIT
+         LR    SPR,R1                  Set stack pointer
+*
+*  Find Suzan control table
+*
+         LOOP BEGIN
+         L     R15,CVTPTR
+         WITH  (CVT,R15),'L  R15,CVTUSER'      SCIP CVT
+         IF    (R15,Z),EXIT                    No SCIP CVT
+         WITH  (SCV,R15),'L  R15,SCVSUZAN'     Suzan table
+         IF    (R15,Z),EXIT                    No Suzan Table
+
+*
+*  Set up for PCB scan
+*
+         WITH  (SCT,R15),'LA  PCBR,SCTCHAIN'
+         SH    PCBR,=Y(PCBNEXT-PCB)
+         WITH  (PCB,PCBR)
+         WITH  (SRB,PCBSRB)
+         L     R1,RMPLASCB             ASCB of ending address space
+         L     R15,RMPLTCBA            TCB of ending task
+*
+*  Check each PCB
+*
+         LOOP  BEGIN
+         IF    ('LT  PCBR,PCBNEXT',Z),GOBACK
+*
+*  Check ASCB address
+*
+         IF    (R1,NE,SRBASCB),NEXT    Not in RIGHT NEIGHBORHOOD
+*
+*  If the ASCB pointers match but the ASIDs do not
+*     an address space went away without cleanup.
+*     Might as well do it now.
+*
+         IF    (SRBPASID,NE,RMPLASID),EXIT   Something wrong
+*
+*  Check TCB Address
+*
+         IF    (R15,Z),EXIT            TCB not relevant
+         IF    (R15,EQ,SRBPTCB),EXIT    Found one
+         END   ,
+*
+*  A candidate has been found - close the path
+*
+         LA    R1,PCB                  PCB pointer
+         ACALL CLOSEPCB                SAY GOOD NIGHT GRACIE
+*
+*  If my SRB has been scheduled we can't free the PCB here
+*
+         L     R1,SRBPARM              CURRENT PARM FIELD
+         IF    (R1,NZ),'SET  PCBFSRBFREE'    Mark close in progress
+*
+*  Otherwise, free the PCB/SRB
+*
+         LA    R1,PCB
+         IF    (PCBFSRBFREE,AND,PCBFUNLFREE),'CLEAR R1' Not here
+         ELSEIF (PCBFSRBFREE,OR,PCBFUNLFREE),BEGIN Defered free
+         TS    PCBFREE
+         IF    Z,'CLEAR R1'              Last one gets to do it
+         END   ,
+         IF    (R1,NZ),'ACALL FREEPCB'   Free it here
+         END   ,
+*
+*
+*  Free the stack
+*     Uses Registers 10-12
+*
+GOBACK   LABEL ,
+         LR    R1,SPR
+         ACALL FREESTAK
+*
+*  Release the CMS and local locks
+*
+RMEXIT   LABEL ,
+*GEN
+         SETLOCK RELEASE,TYPE=CMS,REGS=USE,RELATED=(SCRMC)
+         SETLOCK RELEASE,TYPE=LOCAL,REGS=USE,RELATED=(SCRML)
+*NOGEN
+         SPACE 2
+         LR    R13,R2                  Retrieve save area pointer
+         RETURN (14,12),RC=0           Restore registers
+         SPACE 2
+         DROP  ,
+         SPACE 2
+         LTORG
+*
+         END   .
+//*KED.SYSLMOD  DD  DSN=SYS1.NUCLEUS(IGC251),DISP=SHR,
+//*            UNIT=DISK,VOL=SER=OS02AD       SYSA SYSA
+//*KED.SYSLMOD  DD  DSN=SYS1.NUCLEUS(IGC251),DISP=SHR,
+//*            UNIT=DISK,VOL=SER=OSD2AD       SYSD SYSD
+//LKED.SYSLMOD DD DSN=WYL.GG.DFF.OBJ(IGC251),DISP=OLD

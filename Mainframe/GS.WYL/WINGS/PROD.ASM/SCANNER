@@ -1,0 +1,873 @@
+SCANNER  TITLE 'Wings Scanner'
+*** %%Module: wings asm scanner
+*box
+*
+*        Orvyl Scanner  --  4/88
+*
+*        Modified to run in 24-bit or
+*        31-bit mode ("CLRHI" statements added).
+*
+SCANNER  HIBAL
+         IDENT 9001
+*
+         REGS  FSR,,,,,,,BR,WAR,,,,LSR,SPR,RAR
+*
+         MACRO
+&L       XENTER &R,&S,&SZ
+.*  ADAPTED FOR ORVYL 5/15/76
+         AIF   ('&L' EQ '').NEP
+         ENTRY &L
+.NEP     ANOP
+&L       ST    14,0(,13)
+         STM   &R,&S,4(13)
+         LR    8,13
+         AIF   ('&SZ' EQ '').NWA
+         AIF   ('&SZ' EQ '*').MIN
+         LA    13,(&SZ+3)/4*4(,13)
+         AGO   .NWA
+.MIN     ANOP
+         LA    13,(&S+2-(&R)+16*((&R)/(&S+1))/((&R)/(&S+1)))*4(,13)
+.NWA     ANOP
+         BASE
+         MEND
+         EJECT
+* SAVE AREA
+*
+SA       RECORD BEGIN
+         DS    F
+         DS    (12-2+1)F
+WORD     DS    2F
+SV15     DS    F
+CPSAVE   DS    2F
+TEMPD    DS    3F                      DWORD WORK AREA
+PCNT     DS    H
+FL       DS    X
+*
+FSQS     EQU   X'80'                   SINGLE QUOTED STRING
+FDQS     EQU   X'40'                   DOUBLE QUOTED STRING
+FPS      EQU   X'20'                   PARENED STRING
+FISOL    EQU   X'01'                   STRING ISOLATION
+         ORG   FL
+FL2FL    FLAG  ,
+         FLAG  FLFSQS
+         FLAG  FLFDQS
+         FLAG  FLFPS
+         FLAG  (FLFISOL,X'01')
+         ORG   ,
+         DS    0F
+SASIZ    EQU   *-SA
+         END   ,
+         SPACE ,
+FTBLE    EQU   X'F8'                   LAST/POP/PUSH
+FLAST    EQU   X'FF'                   END
+FPARM    EQU   X'80'                   PARM
+FLINNO   EQU   X'60'                   LINE NO. CONV
+FINTEG   EQU   X'40'                   INTEGER 0 OR GTR
+FINTEGP  EQU   X'20'                   INTEGER GTR 0
+FCMSET   EQU   X'10'                   SET 3 COMMAND CHARS
+FLIMIT   EQU   X'10'                   LIMIT
+FABBREV  EQU   X'08'                   ABBREVIATION
+         SPACE 2
+PRTSTACK RECORD BEGIN                  PUSH/POP STACK
+PRTSTP   DS    A                       STACK POINTER (RELATIVE)
+         DS    A                       STACK (UNKNOWN LENGTH)
+         END   ,
+         SPACE ,
+*GEN
+SCANCB   RECORD BEGIN
+         SCANCB PFX=
+         END   ,
+*NOGEN
+         EJECT ,
+*BOX
+*
+*   SCINIT - INITIALIZE SCANNER CONTROL BLOCK
+*
+         SPACE ,
+SCINIT   XPROC TRACE=NO
+         WITH  (SCANCB,R15)        ADDRESSABILITY TO SCANCB
+         LA    R1,@R1              CLEAR HIGH ORDER BYTE/BIT
+         STM   R0,R1,LEN             SAVE LOCATION AND LENGTH OF STR
+         XC    CLT,CLT                 RESET SCAN TYPE
+         PEND  ,                         RETURN TO CALLER
+         SPACE 4
+*BOX
+*
+*  SCTELL - RETURN LOCATION AND LENGTH OF SCAN AND THE SCAN TYPE
+*
+*    - SCAN TYPE IS 0, 1, OR 2
+*
+         SPACE 2
+SCTELL   XPROC TRACE=NO
+         WITH  (SCANCB,R15)        ADDRESSABILITY TO SCANCB
+         L     R1,CLT              RETREIVE CURRENT SCAN TYPE
+         SRL   R1,2                  SHIFT DOWN FOR (0-3)
+         ST    R1,VAL                  RETURN IN THE SCANCB VAL
+         LM    R0,R1,LEN                 RETURN CURRENT LOC,LENGTH
+         PRETURN (R0,R1)                   RETURN REGISTERS TO USER
+         PEND  ,
+         SPACE 3
+*BOX
+*
+*  SCTYPE - SET SCAN TYPE
+*
+*    - SCAN TYPE IS 0, 1, 2, OR 3
+*
+         SPACE 2
+SCTYPE   XPROC TRACE=NO
+         WITH  (SCANCB,R15)        ADDRESSABILITY TO SCANCB
+         SLL   R1,2                SHIFT NEW SCAN TYPE
+         ST    R1,@R13               SAVE NEW SCAN TYPE IN STACK
+         L     R1,CLT                  RETRIEVE LAST SCAN TYPE
+         SRL   R1,2                      SHIFT DOWN TO (0-3)
+         MVC   CLT,@R13                    SET NEW SCAN TYPE
+         PRETURN (R1)              RETURN OLD SCAN-TYPE
+         PEND  ,                   RETURN TO CALLER
+         EJECT ,
+         USING SA,WAR                  ##
+         USING PRTSTACK,R13            ##  KEYWORD TABLE STACK
+SCAN     XENTER R2,R12,SASIZ
+BASE     DS    0H
+         LR    R10,R15             SET SCAN WORK AREA ADDRESS
+         USING SCANCB,R10          ##
+         DROP  R15                     ##
+         ST    R14,RA                  RETURN ADDR
+         ST    R1,PRT                  ROUTING TABLE
+         SR    R4,R4
+SCANTOK  LM    R5,R6,LEN               PICK UP LOC AND LEN
+         MVI   FL,0                    CLEAR FLAGS
+         CLC   CLT,=A(4)               STRING ISOLATION?
+         BNE   SCANON                  NO
+         SET   (FLFISOL,EQ)        SET FOR STRING ISOLATION
+SCANON   LA    R1,@R6(R5)
+         LTR   R5,R5                   ANY LEFT?
+         BNP   DONE                    BR IF NOT
+         SR    2,2                     CLEAR TRT REGS
+         L     R15,CLT
+         L     R15,CLTS(R15)
+         BCTR  R5,0
+         EX    R5,TRT
+         B     *+4(2)                  BR ON DELIM CODE
+         B     EOS                     0  END OF STRING
+         B     BLKCOM                  4  BLANK-COMMA
+         B     SQUOTE                  8  SINGLE QUOTE
+         B     DQUOTE                  12 DOUBLE QUOTE
+         B     LPAR                    16 LEFT PAREN
+         B     RPAR                    20 RIGHT PAREN
+         B     SLASH                    24 SLASH
+         B     SEMI                    28 SEMI-COLON
+TRT      TRT   @R6(*-*),@R15           SCAN
+         EJECT ,
+*
+*  PROCESS END OF STRING
+*
+EOS      LABEL ,
+         IF    (FLFSQS+FLFDQS+FLFPS,Z),TOKEN
+ILLSTR   SR    R5,R5                   UPDATE PTR
+         LR    R6,R1
+         LR    R0,R1                   COMPUTE STRING PTR
+         L     R1,LOC
+         SR    R0,R1
+         LCR   R0,R0                   INDICATE ILLEGAL STRING
+         B     RTN                  %% RETURN
+*
+* PROCESS BLANKS
+*
+BLKCOM   LABEL
+         IF    FLFSQS+FLFDQS+FLFPS,GOSTRING  STRING BEING COLLECTED?
+         C     R1,LOC                  BLANK AT START OF STRING?
+         BNE   TOKEN                   NO
+         LA    R6,@R1+1                SKIP OVER
+         STM   R5,R6,LEN               START OVER
+         B     SCANON
+*
+* PROCESS SEMI-COLON
+*
+SEMI     LABEL
+         IF    FLFSQS+FLFDQS+FLFPS,GOSTRING  STRING BEING COLLECTED?
+         LR    R5,R1
+         S     R5,LOC                  TRUNCATE REST OF SCAN
+         ST    R5,LEN
+         B     TOKEN
+         EJECT ,
+*  PROCESS SLASH
+*
+SLASH    LABEL
+         IF    FLFSQS+FLFDQS+FLFPS,GOSTRING  STRING BEING COLLECTED?
+         C     R1,LOC                   COMPUTE TOKEN SIZE
+         BNE   TOKEN                    TOKEN WON'T BE "/"
+         LA    R1,@R1+1                 LENGTH "/" TOKEN
+         B     TOKEN                    PROCESS
+*
+*  PROCESS SINGLE QUOTE
+*
+SQUOTE   LABEL
+         IF    FLFDQS+FLFPS,GOSTRING  STRING BEING COLLECTED?
+         TM    FL,FSQS                 OLD STRING?
+         BO    CSQ                     BR IF SO
+         C     R1,LOC                  COMPUTE TOKEN SIZE
+         BNE   TOKEN                  BR IF PREVIOUS TOKEN
+         OI    FL,FSQS                 SET STRING SCAN
+         B     GOSTRING
+*
+CSQ      AR    R5,R6                   BUMP PTR
+         SR    R5,R1
+         LA    R1,@R1+1                POINT PAST QUOTE
+         LR    R6,R1
+         BNP   TOKEN                   BR IF END
+         CLI   @R6,C''''               QUOTE?
+         BE    MVS
+ISOLAT   TM    FL,FISOL                STRING ISOLATING?
+         BZ    TOKEN                   END OF STRING
+         NI    FL,255-FSQS-FDQS-FPS    END OF STRING
+         B     SCANON                  KEEP GOING
+MVS      BCTR  R5,0                    ELIMINATE 2ND QUOTE
+         LA    R6,@R6+1
+         B     SCANON
+         EJECT ,
+*
+*  PROCESS DOUBLE QUOTE
+*
+DQUOTE   LABEL
+         TM    FL,FSQS+FPS             'STRING'?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FDQS                 OLD STRING?
+         BO    CDQ                     BR IF SO
+         C     R1,LOC                  PASSED OVER TOKEN?
+         BNE   TOKEN
+         OI    FL,FDQS                 SET STRING SCAN
+         B     GOSTRING
+*
+CDQ      AR    R5,R6                   UPDATE PTR
+         SR    R5,R1
+         LA    R1,@R1+1                POINT PAST QUOTE
+         LR    R6,R1
+         BNP   TOKEN                   BR IF END
+         CLI   @R6,C'"'                QUOTE?
+         BE    MVS                     BR IF SO
+         B     ISOLAT                  MAKE ISOLATION CHECK
+*
+*  PROCESS LEFT PAREN
+*
+LPAR     LABEL
+         TM    FL,FSQS+FDQS            QUOTED STRING?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FPS                  PAREN STRING?
+         BO    INP                     BR IF SO
+         C     R1,LOC                  PREVIOUS TOKEN?
+         BE    LPAR1ST                 NO
+         TM    FL,FISOL                ISOLATING STRING?
+         BZ    TOKEN                   NO
+*
+LPAR1ST  OI    FL,FPS                  SET PAREN SCAN
+         LA    R2,1
+         STH   R2,PCNT
+         B     GOSTRING
+*
+INP      LH    R2,PCNT                 PAREN COUNT
+         LA    R2,@R2+1
+         STH   R2,PCNT
+         B     GOSTRING
+         EJECT ,
+*
+*  PROCESS RIGHT PAREN
+*
+RPAR     LABEL
+         TM    FL,FSQS+FDQS            QUOTED STRING?
+         BNZ   GOSTRING                BR IF SO
+         TM    FL,FPS                  PAREN STRING?
+         BZ    ILLPS                   BR IF NOT
+         LH    R2,PCNT                 DECR COUNT
+         BCTR  R2,0
+         STH   R2,PCNT
+         LTR   R2,R2
+         BNZ   GOSTRING
+         AR    R5,R6                   UPDATE PTR
+         SR    R5,R1
+         LA    R1,@R1+1                POINT PAST QUOTE
+         LR    R6,R1
+         B     ISOLAT                  ALL PARENS MATCHED
+GOSTRING SR    R5,R1                   UPDATE STRING PTRS
+         AR    R5,R6
+         LA    R6,@R1+1
+         B     SCANON
+*
+ILLPS    L     R0,LOC                  COMPUTE -LENGTH
+         SR    R0,R1
+         L     R1,LOC                  LOC OF TOKEN
+         AR    R5,R0                   DECR LENGTH
+         LA    R6,@R1+1
+         SR    R6,R0                   BUMP PTR
+         B     RTN                  %%
+         EJECT ,
+*
+*  PROCESS A TOKEN
+*
+TOKEN    LABEL
+         LM    R5,R6,LEN               OLD LOC AND LENGTH
+         ST    R1,LOC                  NEXT NOKEN
+         SR    R1,R6                   LENGTH
+         BZ    DONE
+         SR    R5,R1                   REDUCE REMAINING LENGTH
+         ST    R5,LEN
+         LR    R0,R1                   TOKEN LENGTH
+         LR    R1,R6                   TOKEN START
+         LR    R15,R0
+         MVI   KW,C' '                 CLEAR KW AREA
+         MVC   KW+1(7),KW
+         XC    PRTSTP,PRTSTP           CLEAR PUSH/POP STACK
+         TM    FL,FSQS+FDQS+FPS+FISOL  QUOTE OR PAREN STRING?
+         BNZ   PRKW                    BR IF QUOTE OR PAREN STRING
+         LR    R2,R0                   COUNT
+         LR    R3,R1                   PTR
+MRECH    OI    @R3,X'40'               CAPITAL BIT
+         LA    R3,@R3+1                MOVE PTR
+         BCT   R2,MRECH                MORE?
+         IF    (R15,GT,8),'LA R15,8'   RESET TO MAXIMUM LENGTH
+         BCTR  R15,0
+         EX    R15,MVT                 MOVE KW
+PRKW     LTR   R4,R4                   ROUTINE?
+         BNZ   SETSR                   BR IF SO
+         L     R2,PRT                  ROUTING TABLE
+         LTR   R2,R2
+         BNZ   KWSRCH                  BR IF ONE
+         L     R4,RA
+         B     GORTN
+*
+KWNEX    LA    R2,@R2+5(R3)            TRY NEXT
+KWSRCH   TM    @R2,FTBLE               TABLE END/PUSH/POP?
+         BO    KWFND                   BR IF SO
+         IC    R3,@R2                  EXTRACT (LEN-1)
+         N     R3,=X'00000007'
+         TM    FL,FSQS+FDQS+FPS        QUOTE OR PAREN STRING?
+         BNZ   NXTRY                   BR IF QUOTE OR PAREN STRING
+         LTR   R3,R3                   TEST TOKEN LEN
+         BNZ   COMPOK                  USER KW EXISTS
+         CLI   @R2+4,C' '              BLANK?
+         BE    KWFND                   YES
+COMPOK   CR    R3,R15                  LEN OK?
+         BNE   QABBRV                  ABBREV?
+         EX    R3,CLC                  COMPARE KEYWORDS
+         BE    KWFND                   BR IF FOUND
+QABBRV   TM    @R2,FABBREV             TRY ABBREVIATION?
+         BZ    NXTRY                   NO
+         CH    R0,=Y(3)                3-CHARS?
+         BL    NXTRY                   MUST BE AT LEAST 3
+         EX    R15,CLC                 EQUAL TO GIVEN LENGTH?
+         BE    KWFND                   BR IF FOUND
+NXTRY    TM    @R2,FLIMIT              LIMIT?
+         BZ    KWNEX                   NO
+         TM    @R2,FINTEG+FINTEGP      INTEGER?
+         BNM   KWNEX                   NO
+         LA    R2,@R2+9(R3)            TRY NEXT
+         B     KWSRCH
+         EJECT ,
+KWFND    NI    FL,255-FSQS-FDQS-FPS    RESET STRING SCAN
+         MVC   TEMPD(4),@R2            TO TEMP BOUND
+         L     R4,TEMPD                ROUTINE
+         TM    @R2,FTBLE               END/PUSH/POP?
+         BO    TSTLAST                 BR IF SO
+         TM    @R2,FPARM               PARM?
+         BZ    GORTN                   BR IF NOT
+         STM   R2,R3,WORD              SAVE SR/TR VALUES
+         B     SCANTOK                 FIND PARM
+*
+TSTLAST  TM    @R2,255-FTBLE           IS IT LAST
+         BO    GORTN                   ALL ON, YES
+         BM    GOPOP                   MIXED, GO POP UP ONE LEVEL
+*
+* PUSH DOWN CURRENT SCAN TABLE POINTER
+*
+         LA    R2,@R2+4                SET FOR NEXT AFTER POP
+         LA    R4,@R4                  FORM ADDRESS AND CHECK
+         LTR   R4,R4                   BR IF ADDRESS
+         BZ    KWSRCH                  BR IF NO TABLE TO PUSH TO
+GOPUSH1  L     R14,PRTSTP              STACK POINTER
+         LA    R14,@R14+4              NEXT ENTRY
+         ST    R14,PRTSTP              REPLACE STACK COUNT
+         ST    R2,PRTSTACK(R14)        SAVE CURRENT PRT POINTER
+         LR    R2,R4                   SET NEW PRT ADDRESS
+         B     KWSRCH                  GO SEARCH THIS TABLE
+*
+* POP UP A SAVE SCAN TABLE POINTER -- IGNORE IF AT TOP LEVEL
+*
+GOPOP    LABEL
+         L     R14,PRTSTP              GET CURRENT STACK POINTER
+         S     R14,=A(4)               POP
+         BM    NXTRY1                  IGNORE IF TOP LEVEL
+         ST    R14,PRTSTP              PUT BACK STACK POINTER
+         L     R2,PRTSTACK+4(R14)      PICK UP OLD PRT POINTER
+         B     KWSRCH                  BR TO CONTINUE SEARCH
+*
+NXTRY1   LA    R2,@R2+1                STEP PAST IGNORED POP
+         B     KWSRCH                  CONTINUE IN SAME TABLE
+         EJECT ,
+SETSR    LM    R2,R3,WORD              RESET SR/TR VALUES
+GORTN    CLRHI R4                  XA: CLEAR HI BYTE
+         LTR   R14,R4                  TEST EP
+         BZ    SCANTOK                 BR IF NONE
+         STM   R0,R1,CPSAVE            SAVE PTRS
+         ST    R15,SV15                SAVE 15
+         CLRHI R2                  XA: Clear high order byte
+         LTR   R2,R2                   ROUTING TABLE?
+         BZ    NTCMV                   NO
+         CLI   @R2,FLAST               END?
+         BE    NTCMV                   BR IF SO
+         TM    @R2,FLINNO              INTEGER OR LINE NO CONV?
+         BO    LINNOCV                 LINE NO. CONV
+         BM    INTGRCV                 INTEGER CONV
+NTCMV    DS    0H
+         LA    R15,KW                  KW PTR
+NOTKWPS  DS    0H
+         ST    R15,VAL                 SAVE VALUE
+         LR    R15,R10             RESTORE R15
+         USING SCANCB,R15              ##
+         DROP  R10                 ##
+         LR    R14,R4                  SET EP
+         LR    R13,8                   RESTORE STACK
+         LM    R2,R12,4(R13)
+         MVI   PRT,X'FF'               SET OLD PRT
+         CLRHI R14                 XA: Clear high order byte
+         LTR   R0,R0                   SET CC
+         BALR  R14,R14                 GO TO PARM ROUTINE
+* RETURN TO R14 TO CONTINUE SCAN
+* RETURN TO 4(R14) TO CONTINUE SCAN WIH NEW KWRT
+         MVI   PRT,0                   SET TO USE OLD PRT
+         XENTER R2,R12,SASIZ                 SAVE
+         L     7,=A(BASE)              RESTORE BASE
+         USING BASE,7                  ##
+         LR    R10,R15             SET SCAN WORK AREA
+         DROP  R15                     ##
+         USING SCANCB,R10          ##
+         SR    R4,R4                   NO ROUTINE
+         TM    PRT,X'FF'               USE OLD PRT?
+         BZ    SCANTOK                 YES
+         ST    R1,PRT                  NEW PRT SPECIFIED
+         B     SCANTOK                 CONTINUE SCAN
+         EJECT ,
+*
+* DECIMAL TO BINARY CONV RTN FOR SCAN
+*
+INTGRCV  BAL   R14,DOINT               GO DO CV
+         TM    @R2,FINTEGP             POS INT?
+         BZ    ANYI                    NO
+         LTR   R0,R0                   TEST INTEG
+         BNP   BOO                     NG
+ANYI     TM    @R2,FLIMIT              LIMIT?
+         BZ    NTRSET                  NO
+         ST    R0,TEMPD                FOR CLC
+         LA    R6,@R2+5(R3)            PT AT LIMIT
+         CLC   TEMPD(4),@R6            CHECK LIMIT
+         BNH   NTRSET                  OK
+         B     BOO                     NG
+         EJECT ,
+LINNOCV  DS    0H
+         LTR   R0,R0                   ANY STRING TO CONVERT?
+         BZ    NTRSET                  CALLER CAN TELL FROM CC
+         CL    R0,=A(9)                MAX LEN IS 8
+         BH    BOO                     TOO BIG
+         SR    R15,R15                 ZERO COUNTER
+         LR    R6,R1                   PTR
+CHKMR    CLI   @R6,C'.'                PERIOD?
+         BE    HVPRD                   YES
+         LA    R15,@R15+1              KICK COUNTER
+         LA    R6,@R6+1                KICK PTR
+         BCT   R0,CHKMR                MORE?
+         B     WHOL                    INTEGER LINE NO
+*
+HVPRD    BCT   R0,CHKFR                FRACTION?
+WHOL     LTR   R0,R15                  INTEG COUNT
+         BNP   BOO                     "." NOT LEGAL
+         SR    R15,R15                 ZERO FRACTION
+WHOLDO   CL    R0,=A(5)                4 IS MAX
+         BH    BOO
+         BAL   R14,DOINT               CONV
+         MH    R0,=H'1000'             SET INTEGER VALUE
+         AR    R0,R15                  ADD FRACTION
+NTRSET   LR    R15,R0                  SET RETURN VALUE INTO R15
+         LM    R0,R1,CPSAVE            RESET PTRS
+         B     NOTKWPS                 READY TO RETURN
+*
+CHKFR    CL    R0,=A(4)                3 IS MAX
+         BNL   BOO                     NG
+         MVC   TEMPD+1(2),=C'00'       PUT ZEROS
+         LR    R14,R0                  COUNT
+         BCTR  R14,0                   FOR EX
+         EX    R14,MVFR                MVC   TEMP(0),1(PR)
+         LA    R0,3                    CV COUNT
+         LA    R1,TEMPD                 PTR
+         BAL   R14,DOINT               CV
+         LTR   R5,R15                  ANY INTEG COUNT?
+         BNP   NTRSET                  FIN
+         LR    R15,R0                  SAVE FRAC
+         LR    R0,R5                   INTEG COUNT
+         L     R1,CPSAVE+4             RESET START PTR
+         B     WHOLDO                  INTEGER LINE NO
+*
+MVFR     MVC   TEMPD(0),@R6+1
+         EJECT ,
+DOINT    DS    0H
+         LTR   R0,R0                   ANY STRING TO CONVERT?
+         BZ    NTRSET                  CALLER CAN TELL FROM CC
+         CL    R0,=A(10)               MAX LEN IS 9
+         BNL   BOO                     NG
+         LR    R5,R0                   COUNT
+         LR    R6,R1                   PTR
+CHNEXT   CLI   @R1,C'0'                TOO SMALL?
+         BL    BOO                     YES
+         CLI   @R1,C'9'                TOO BIG?
+         BH    BOO                     YES
+         LA    R1,@R1+1                NEXT
+         BCT   R0,CHNEXT               MORE?
+         LA    R1,TEMPD+7              GET A DOUBLEWORD
+         N     R1,=F'-8'               ROUND UP
+         BCTR  R5,0                    REDUCE FOR EX OF PACK
+         EX    R5,CHPACK               PACK
+         CVB   R0,@R1                  TO DOUBLEWORD TEMP
+         BR    R14                     RETURN
+*
+CHPACK   PACK  @R1(8),@R6(*-*)         PACK NUMBER
+         EJECT ,
+BOO      DS    0H
+         SR    R4,R4                    UNSET ROUTINE
+         LM    R5,R6,LEN                SET LOC AND LEN
+         LM    R0,R1,CPSAVE             PTRS
+         TM    @R2,FPARM                PARM?
+         L     R15,SV15                SET 15
+         BZ    NXTRY                    NO
+         LCR   R0,R0                    NEG
+         SR    R5,R5                    FIN LINE
+         B     RTN                  %%
+         EJECT ,
+*
+*  TERMINAL PROCESSING
+*
+DONE     DS    0H
+         TM    FL,FSQS+FDQS+FPS        COLLECTING STRING?
+         BNZ   ILLSTR                  ERROR IF SO
+         SR    R0,R0                   ZOT LOC AND LEN
+         SR    R1,R1
+         MVI   KW,C' '                 CLEAR KW
+         MVC   KW+1(7),KW
+         TM    FL,FISOL                ISOLATING STRING?
+         BZ    DON1
+         LM    R0,R1,LEN               USE LAST POINTERS
+DON1     LTR   R4,R4                   PARM MISSING?
+         BNZ   SETSR                %% BR IF SO
+RTN      STM   R5,R6,LEN               SAVE STRING PTR
+         L     R14,RA                  RETURN ADDR
+         CLRHI R14                 XA: Clear high order byte
+         LA    R15,KW
+         ST    R15,VAL                 SAVE RETURN VALUE
+         LR    R15,R10             RESTORE R15
+         LR    R13,8                   RESTORE STACK
+         LM    R2,R12,4(R13)
+         LTR   R0,R0
+         BR    R14
+         EJECT ,
+*  CONSTANTS
+*
+MVT      MVC   KW(0),@R1               MOVE TOKEN
+CLC      CLC   KW(0),@R2+4             COMPARE KEYWORDS
+         DROP  R10,WAR,R13         ##
+         EJECT ,
+*BOX
+*
+*  DOUBLE QUOTE SCAN
+*
+*  ON ENTRY:   R0  - CONTAINS THE LENGTH OF THE STRING
+*              R1  - CONTAINS THE STRING ADDRESS
+*
+*  ON EXIT:    R0  - CONTAINS THE UPDATED STRING LENGTH
+*              R1  - CONTAINS THE START OF THE STRING ADDRESS
+*
+         SPACE ,
+DQSCAN   XPROC ,TRACE=NO
+         BCTR  R0,0                    STRIP OFF OUTER QUOTES
+         BCTR  R0,0                      AND ADJUST STRING LENGTH
+         LR    R4,R1                       REMEMBER KIND OF QUOTE
+         LA    R1,@R1+1                      POINT TO START OF STR
+         LR    R6,R1                           SAVE ADDRESS OF STR
+         LR    R5,R0                             SAVE LENGTH OF STR
+         SPACE ,
+         IF    (R0,POS),BEGIN
+         LOOP  BEGIN                   LOOP THROUGH ENTIRE STRING
+         CLC   @R6(1),@R4          HAVE WE FOUND A QUOTE?
+         IF    EQ,BEGIN            YES - MOVE THE STRING OVER
+         BCTR  R5,0                    DECREMENT STRING LENGTH
+         BCTR  R0,0                    DECREMENT RETURNED LENGTH
+         LR    R2,R5                   COPY LENGTH FOR EXECUTE
+         DEX   R2,'MVC @R6(0),@R6+1'   ELIMINATE 2ND QUOTE
+         END   ,
+         LA    R6,@R6+1            BUMP TO NEXT CHARACTER IN STRING
+         UNTIL (BCT,R5),END
+         LTR   R0,R0                   COURTESY
+         END
+         ELSE  BEGIN (R0,NP)
+         CLEAR R0
+         END
+*
+         PRETURN (R0,R1)
+         PEND  ,
+         EJECT ,
+*  TRANSLATE TABLES
+*
+*    LOWER TO UPPER CASE
+*
+LCUCT    DC    256AL1(*-LCUCT)
+         ORG   LCUCT+X'81'
+         DC    C'ABCDEFGHI'
+         ORG   LCUCT+X'91'
+         DC    C'JKLMNOPQR'
+         ORG   LCUCT+X'A2'
+         DC    C'STUVWXYZ'
+         ORG
+*
+*    CLASS TABLES
+*
+CLTS     DC    A(CLT0,CLT1,CLT2,CLT3)
+*
+*    NORMAL SCAN TABLE
+*
+*        00 - END OF STRING
+*        04 - BLANK-COMMA
+*        08 - SINGLE QUOTE
+*        12 - DOUBLE QOUTE
+*        16 - LEFT PAREN
+*        20 - RIGHT PAREN
+*        24 - SLASH
+*        28 - SEMI-COLON
+*
+CLT0     DC    256AL1(4)
+         ORG   CLT0+X'81'
+         DC    9X'00'
+         ORG   CLT0+X'91'
+         DC    9X'00'
+         ORG   CLT0+X'A2'
+         DC    8X'00'
+         ORG   CLT0+C'A'
+         DC    9X'00'
+         ORG   CLT0+C'J'
+         DC    9X'00'
+         ORG   CLT0+C'S'
+         DC    8X'00'
+         ORG   CLT0+C'0'
+         DC    10X'00'
+         ORG   CLT0+C'.'
+         DC    X'00'
+         ORG   CLT0+C'$'
+         DC    X'00'
+         ORG   CLT0+C'@'
+         DC    X'00'
+         ORG   CLT0+C'#'
+         DC    X'00'
+         ORG   CLT0+C'&&'
+         DC    X'00'
+         ORG   CLT0+C'_'
+         DC    X'00'
+         ORG   CLT0+C'+'
+         DC    AL1(24)
+         ORG   CLT0+C'-'
+         DC    AL1(24)
+         ORG   CLT0+C'|'
+         DC    AL1(24)
+         ORG   CLT0+C'/'
+         DC    AL1(24)
+         ORG   CLT0+C'~'
+         DC    AL1(24)
+         ORG   CLT0+C'['
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT0+C']'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT0+C'{'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT0+C'}'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT0+C'\'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT0+C'`'
+         DC    X'00'                   MAKE IT A PRINGING CHAR
+         ORG   CLT0+C'^'               CENT SIGN OR CARAT
+         DC    X'00'
+         ORG   CLT0+C'!'               EXCLAMATION POINT
+         DC    X'00'
+         ORG   CLT0+C'<'
+         DC    X'00'
+         ORG   CLT0+C'>'
+         DC    X'00'
+         ORG   CLT0+C':'
+         DC    X'00'
+         ORG   CLT0+C'%'
+         DC    X'00'
+         ORG   CLT0+C'?'
+         DC    X'00'
+         ORG   CLT0+C'*'
+         DC    X'00'
+         ORG   CLT0+C' '               A SPACE
+         DC    AL1(4)                   IS
+         ORG   CLT0+C','                 A COMMA
+         DC    AL1(4)                     IS
+         ORG   CLT0+C'='                   AN EQUALS
+         DC    AL1(4)                       SIGN
+         ORG   CLT0+C''''
+         DC    AL1(8)
+         ORG   CLT0+C'"'
+         DC    AL1(12)
+         ORG   CLT0+C'('
+         DC    AL1(16)
+         ORG   CLT0+C')'
+         DC    AL1(20)
+         ORG   CLT0+C';'
+         DC    AL1(28)
+         ORG
+*
+*  SCAN TABLE FOR ISOLATING STRING (BOUNDED BY BLANK OR COMMA)
+*
+CLT1     DC    256AL1(0)
+         ORG   CLT1+C' '
+         DC    AL1(4)
+         ORG   CLT1+C','
+         DC    AL1(4)
+         ORG   CLT1+C'='
+         DC    AL1(4)
+         ORG   CLT1+C''''
+         DC    AL1(8)
+         ORG   CLT1+C'"'
+         DC    AL1(12)
+         ORG   CLT1+C'('
+         DC    AL1(16)
+         ORG   CLT1+C')'
+         DC    AL1(20)
+         ORG   CLT1+C';'
+         DC    AL1(28)
+         ORG
+*
+*  TABLE FOR SCANNING EXPRESSIONS
+*
+CLT2     DC    256AL1(24)
+         ORG   CLT2+X'81'
+         DC    9X'00'
+         ORG   CLT2+X'91'
+         DC    9X'00'
+         ORG   CLT2+X'A2'
+         DC    8X'00'
+         ORG   CLT2+C'A'
+         DC    9X'00'
+         ORG   CLT2+C'J'
+         DC    9X'00'
+         ORG   CLT2+C'S'
+         DC    8X'00'
+         ORG   CLT2+C'0'
+         DC    10X'00'
+         ORG   CLT2+C'.'
+         DC    X'00'
+         ORG   CLT2+C'$'
+         DC    X'00'
+         ORG   CLT2+C'@'
+         DC    X'00'
+         ORG   CLT2+C'#'
+         DC    X'00'
+         ORG   CLT2+C'_'
+         DC    X'00'
+         ORG   CLT2+C''''
+         DC    AL1(8)
+         ORG   CLT2+C'"'
+         DC    AL1(12)
+         ORG   CLT2+C';'
+         DC    AL1(28)
+         ORG
+*-
+*-       MAKE () PART OF A NORMAL STRING
+*-
+CLT3     DC    256AL1(4)
+         ORG   CLT3+X'81'
+         DC    9X'00'
+         ORG   CLT3+X'91'
+         DC    9X'00'
+         ORG   CLT3+X'A2'
+         DC    8X'00'
+         ORG   CLT3+C'A'
+         DC    9X'00'
+         ORG   CLT3+C'J'
+         DC    9X'00'
+         ORG   CLT3+C'S'
+         DC    8X'00'
+         ORG   CLT3+C'0'
+         DC    10X'00'
+         ORG   CLT3+C'.'
+         DC    X'00'
+         ORG   CLT3+C'$'
+         DC    X'00'
+         ORG   CLT3+C'@'
+         DC    X'00'
+         ORG   CLT3+C'#'
+         DC    X'00'
+         ORG   CLT3+C'&&'
+         DC    X'00'
+         ORG   CLT3+C'_'
+         DC    X'00'
+         ORG   CLT3+C'+'
+         DC    AL1(24)
+         ORG   CLT3+C'-'
+         DC    AL1(24)
+         ORG   CLT3+C'|'
+         DC    AL1(24)
+         ORG   CLT3+C'/'
+         DC    AL1(24)
+         ORG   CLT3+C'~'
+         DC    AL1(24)
+         ORG   CLT3+C'['
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT3+C']'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT3+C'{'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT3+C'}'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT3+C'\'
+         DC    X'00'                   MAKE IT A PRINTING CHAR
+         ORG   CLT3+C'`'
+         DC    X'00'                   MAKE IT A PRINGING CHAR
+         ORG   CLT3+C'^'               CENT SIGN OR CARAT
+         DC    X'00'
+         ORG   CLT3+C'!'               EXCLAMATION POINT
+         DC    X'00'
+         ORG   CLT3+C'<'
+         DC    X'00'
+         ORG   CLT3+C'>'
+         DC    X'00'
+         ORG   CLT3+C':'
+         DC    X'00'
+         ORG   CLT3+C'%'
+         DC    X'00'
+         ORG   CLT3+C'?'
+         DC    X'00'
+         ORG   CLT3+C'*'
+         DC    X'00'
+         ORG   CLT3+C' '               A SPACE
+         DC    AL1(4)                   IS
+         ORG   CLT3+C','                 A COMMA
+         DC    AL1(4)                     IS
+         ORG   CLT3+C'='                   AN EQUALS
+         DC    AL1(4)                       SIGN
+         ORG   CLT3+C''''
+         DC    AL1(8)
+         ORG   CLT3+C'"'
+         DC    AL1(12)
+         ORG   CLT3+C'('           NORMAL STRING FOR "("
+         DC    AL1(00)
+         ORG   CLT3+C')'           NORMAL STRING FOR ")"
+         DC    AL1(00)
+         ORG   CLT3+C';'
+         DC    AL1(28)
+         ORG
+*
+         LTORG
+*
+         DC    0D'0'
+         ENTRY SYMSCANN
+SYMSCANN DC    CL8'SCANNER'
+         DC    A(SCANNER)
+         DC    A(SCANNERX)
+SCANNERX EQU   *-SCANNER
+         END   .

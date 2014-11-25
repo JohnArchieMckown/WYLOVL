@@ -1,0 +1,555 @@
+; WYL.GS.WYL.NET#UTILNETP - UTIL NETPRINT exec file
+;
+; Network printer utility exec, uses BSD Unix remote printer protocol
+; to access network printer servers.
+;
+; Modifications
+;   05/26/93  jws  Initial version
+;   06/14/93  jws  Purge changes, fix bug
+;   06/24/97  jws  Fixes for LPRng
+;   06/01/98  jws  Changes for new LPRng version
+;   03/16/99  jws  Better LPRng message filtering
+;
+
+xproc () begin
+
+   x.maint = '(netexec-maint)'            ; Mail list for exec error info
+
+   ; Groups/accounts that can purge any job
+   x.purge_auth = 'gg gq ge gr ga.mcl'
+
+   x.lpc_hosts = 'lindy icarus goddard sherpa'    ; Systems that accept lpc command
+
+   dcl str x.printer               ; Printer name
+   dcl str x.rhost                 ; Remote host name
+   dcl str x.rname                 ; Remote printer name
+   dcl num x.netp                  ; Network connection id
+   dcl str rc
+
+   x.origact = actno
+   open
+   x.workact = actno
+
+   on attn cmd='xexit finish'
+   if (xacct ne 'GG.JWS') \
+      on error cmd = 'pcall exec_error'
+
+   set exec auth
+
+   first_time = true
+
+; Send initial message and ask for printer name
+
+   comm
+   comm UTIL NETPRINT - network printer access utility
+   comm
+   comm Type HELP for more information about network printers.
+   comm
+   comm Enter the DEST name of the printer you want to access.
+
+get_printer:
+   x.printer = ''
+   try x.printer = low(input('Printer name? '))
+   pcall check_quit(x.printer)
+   if (x.printer eq 'quit' or x.printer eq '') \
+      goto finish
+
+   if (x.printer eq 'help' or x.printer eq 'h' or x.printer eq '?') begin
+      if (first_time) begin
+         first_time = false
+         quiet try del all
+         copy from util.netprint.help public
+         comm
+         list unn nopause
+      end
+
+      comm
+      comm Enter the 1-8 character name that you use to identify the printer when you
+      comm print to it from the Forsythe system.  This is the 'DEST' name assigned to
+      comm the printer.
+      comm
+
+      goto get_printer
+   end
+
+   pcall get_pinfo (rc)
+   if (rc ne 'OK') begin
+      comm &(rc)
+      goto get_printer
+   end
+
+; Get processing option
+
+get_option:
+   comm
+   comm UTIL NETPRINT options are:
+   comm  1  Display printer status and job queue
+   comm  2  Purge a job from the printer queue
+   comm  3  Restart a printer which appears to be hung
+   comm
+   comm Enter option number (press RETURN to exit)
+
+   x.option = ''
+   try x.option = input ('Option? ')
+
+   pcall check_quit(x.option)
+   if (x.option eq '' or x.option eq 'quit') \
+      goto finish
+
+   if (match ('help',x.option,'c') or \
+         x.option eq '?') begin
+      comm
+      comm Enter the number of the processing option (1-3)
+      goto get_option
+   end
+
+; Process request
+
+   cases begin
+      case (x.option eq '1') begin
+         comm
+         comm Jobs for the '&(x.printer)' printer are queued on the '&(x.rhost)' system.
+         if (x.printer ne x.rname) \
+            comm The '&(x.printer)' printer is called '&(x.rname)' on &(x.rhost).
+         comm
+         pcall get_queue('list',rc)
+      end
+
+      case (x.option eq '2') begin
+         pcall delete_job
+      end
+
+      case (x.option eq '3') begin
+         pcall restart_printer
+      end
+
+      case (true) begin
+         comm Invalid option, enter the number of the processing option (1-3)
+      end
+   end
+
+   comm
+   goto get_option
+
+finish:
+   comm Exiting from UTIL NETPRINT
+
+   pcall do_close
+
+   pick &(x.workact)
+   close
+   pick &(x.origact)
+
+end
+
+;
+; GET_PINFO -- Get printer information
+;
+;  On entry:
+;     x.printer contains printer dest name
+;
+;  On exit:
+;     rc = 'OK' or error message
+;     x.rhost     = remote host name
+;     x.rname    = remote printer name
+;
+
+proc get_pinfo (rc) begin
+
+   quiet try del all
+   quiet try cop '&(x.printer) '1 from wyl.gs.net.netprint.printers
+   if (lines ne 1) begin
+      rc = '&(x.printer) is not a network printer dest name'
+      return (rc)
+   end
+
+   stemp = sub(line(f),size(x.printer)+2)
+
+   syscall scan (x.rhost,stemp)
+   syscall scan (x.rname,stemp)
+
+   rc = 'OK'
+   return (rc)
+end
+
+;
+; GET_QUEUE -- Retrieve and display printer queue
+;
+;  On entry:
+;     opt = 'list' or 'nolist'
+;
+;  On exit:
+;     rc = 'OK' or error msg
+;
+
+proc get_queue (opt,rc) begin
+
+   quiet try del all
+
+; Open connection to remote host
+
+   pcall do_open (rc)
+   if (rc ne 'OK') \
+      return (rc)
+
+; Send queue display query to remote host and read response
+; LPD code is '4' (x'37' in EBCDIC)
+
+   syscall net_write \
+      (x.netp, 'wait=10', s'37'||x.rname||s'25', rc)
+   if (rc ne 'OK') \
+      return(rc)
+
+   ntemp = 0
+   syscall net_readfile \
+      (x.netp, 'wait=10', ntemp, rc)
+
+   pcall do_close
+
+   if (rc ne 'END OF FILE') begin
+      comm Error reading response from &(x.rhost): &(rc)
+   end
+   elseif (lines eq 0) begin
+      rc = 'No response'
+      comm No response lines received from &(x.rhost)
+   end
+   else begin
+      rc = 'OK'
+      if (opt eq 'list') begin
+         quiet num fro 1 by 1
+
+         ; Clean up confusing Appletalk status info, where 'active' job
+         ;  is not the job shown in the printer status info
+
+         if (sub(line(1),1,4) eq 'job:' and \
+               sub(line(2),8,5) eq 'Owner' and \
+               sub(line(3),1,6) eq 'active') begin
+            utemp = strip(sub(line(3),8,8))
+            if (ind(line(1),utemp) eq 0) \
+               ch 'active'1 in 3 to 'ready ' nol
+         end
+
+         ; Delete meaningless ready message
+         if (rmatch(line(1),'is ready and printing')) \
+            del f
+
+         ; Delete LPRng status lines
+         quiet try del 'Status:'1/9 or c'Filter_status'2
+
+         if (lines eq 1 and line(1) eq 'no entries') begin
+            comm Printer is idle and has no jobs queued.
+         end
+         else begin
+            comm Printer status and queue information received from &(x.rhost):
+            comm
+            list unn mix
+         end
+      end
+   end
+
+   return (rc)
+end
+
+
+;
+; DELETE_JOB -- Delete job(s) from remote queue
+;
+
+proc delete_job () begin
+
+   dcl str rank, uid, class, jnum, jname, stemp, rc
+
+; Get current printer queue
+
+get_delqueue:
+   comm
+   pcall get_queue('list',rc)
+   if (rc ne 'OK') \
+      return
+
+   quiet p 'Rank'1/5(1) n
+   if (* lt 1) begin
+      comm
+      comm No jobs found in the queue on &(x.rhost) for this printer.
+      rc = ''
+      return
+   end
+
+; Prompt for job to be deleted
+
+get_jobno:
+   comm
+   comm Enter the number of the job to be purged from the queue.
+   comm
+   comm The job number is shown under the 'Job' column.
+   comm
+
+   jobno = ''
+   try jobno = input('Job number? ')
+
+   pcall check_quit(jobno)
+   if (jobno eq '' or jobno eq 'quit') \
+      return
+
+   if (jobno eq '?' or match('help',jobno,'c')) begin
+      comm
+      comm The queue display shows the jobs queued on the &(x.rhost) system,
+      comm which is the print server for this printer.  The 'Job' column of
+      comm the queue display gives the job numbers on the print server.
+
+      goto get_delqueue
+   end
+
+   if (verify(jobno,'0123456789') ne 0) begin
+      comm Invalid job number, type HELP for more information
+      goto get_jobno
+   end
+
+   if (jobno lt 1 or jobno gt 999) begin
+      comm Invalid job number, type HELP for more information
+      goto get_jobno
+   end
+
+; Scan queue list for matching job
+
+   ln = 0
+next_line:
+   syscall line_next (ln, stemp)
+   syscall scan(rank, stemp)
+   syscall scan(uid,stemp)
+   n = ind(uid,'@')
+   if (n gt 1) uid = sub(uid,1,n-1)
+   syscall scan(class,stemp)
+   syscall scan(jnum,stemp)
+   syscall scan(jname,stemp)
+   if (jnum ne jobno) begin
+      if (ln eq last) begin
+         comm
+         comm Job &(jobno) not in the &(x.printer) queue.
+         comm Type HELP for more information.
+         goto get_jobno
+      end
+      goto next_line
+   end
+
+;  Allow purge if one of the following conditions is true:
+;    - job account matches user account
+;    - job group matches user group
+;    - user group or user account is in the x.purge_auth list
+
+   uacct = lower(xacct)
+
+   if (uacct ne uid) begin
+
+      if (sub(uid,1,3) ne sub(uacct,1,3) and \
+            ind(' &(x.purge_auth) ',' &(uacct) ') eq 0 and \
+            ind(' &(x.purge_auth) ',' &(low(group)) ') eq 0) begin
+         comm Job &(jobno) &(jname) belongs to &(upp(uid)).  You cannot purge jobs
+         comm outside of group &(group) from your account.
+         return
+      end
+
+      comm
+      comm Job &(jobno) &(jname) belongs to &(upp(uid)).  Do you want to purge it anyway?
+      try stemp = yesno('Purge job? ')
+      if (stemp eq 'YES') begin
+         uacct = 'root'
+      end
+      else \
+         return
+   end
+
+; Send lpd delete command to remote host
+;   (EBCDIC '2d' byte code will be translated to ASCII '05')
+
+   pcall do_open(rc)
+   if (rc ne 'OK')  return
+
+   if (uacct eq 'root') begin
+      comm Sending notification to &(upp(uid))
+      quiet try send &(uid) Purging your job &(upp(jname)) \
+         from the &(upp(x.printer)) printer queue
+   end
+
+   comm
+   comm Sending purge command to &(x.rhost)
+
+   syscall net_write \
+      (x.netp, 'wait=10', s'2d'||x.rname||' '||uacct||' '||jobno||s'25', rc)
+
+   if (rc ne 'OK') begin
+      comm Error sending command: &(rc)
+      return
+   end
+
+   ntemp = 0
+   quiet try del all
+   syscall net_readfile \
+      (x.netp, 'wait=10', ntemp, rc)
+
+   pcall do_close
+
+   if (rc ne 'END OF FILE') begin
+      comm Error reading response from &(x.rhost): &(rc)
+   end
+
+   if (lines eq 0) begin
+      comm No response lines received from &(x.rhost)
+   end
+
+   quiet try count ~'dequeued'
+   if (count gt 0 and lines gt 0) begin
+      comm
+      comm Below is the response received from &(x.rhost).
+      comm
+      list unn mix
+   end
+
+   pcall get_queue('nolist',rc)
+
+   try p' &(uid) ' and ' &(jname) ' and ' &(jobno) ' nol
+   if (rc eq 'OK' and * lt 0) begin
+      comm Job &(jobno) &(jname) purged from the queue
+   end
+   else begin
+      comm Purge command may not have succeeded.  Here is the current
+      comm queue display for the printer:
+      comm
+      list unn mixed attn=purge_attn
+purge_attn:
+   end
+
+; Add message to log file if purging another user's job
+
+   if (uacct ne uid) \
+      pcall log_msg('&(sub(upp(x.printer),1,8)) &(xacct)  \
+      Purged job &(upp(jname)) account &(upp(uid))' )
+end
+
+
+;
+; RESTART_PRINTER -- Do 'lpc abort' on remote host
+;
+
+proc restart_printer () begin
+
+   if (ind(' &(x.lpc_hosts) ', ' &(x.rhost) ') eq 0) begin
+      comm
+      comm Printer &(x.printer) cannot be restarted from Forsythe.
+      comm The print server system for this printer is '&(x.rhost)'.
+      comm Contact the system manager at &(x.rhost) to restart the printer.
+      comm
+
+      if (x.printer ne x.rname) begin
+         comm Note: this printer is called '&(x.rname)' on &(x.rhost).
+         comm
+      end
+
+      return
+   end
+
+   comm Sending restart command to &(x.rhost).  If the printer does not
+   comm start you may also need to reset the printer by turning the power
+   comm off and back on again.
+   comm
+
+   try on &(x.rhost) as guest: lpc abort &(x.rname)
+   if (tryerror) return
+   wait 1
+   try on &(x.rhost) as guest: lpc start &(x.rname)
+
+end
+
+;
+; DO_OPEN -- Open lpd connection
+;
+
+proc do_open (rc) begin
+
+   syscall net_open \
+      (x.netp, 'host=&(x.rhost) priv port=515 out=lf wait=10', rc)
+
+   if (rc ne 'OK') begin
+      comm Error connecting to &(x.rhost): &(rc)
+   end
+
+   return (rc)
+end
+
+;
+; DO_CLOSE -- Close lpd connection
+;
+
+proc do_close () begin
+
+   rc = ''
+   if (x.netp ne 0) begin
+      try syscall net_close (x.netp, rc)
+      x.netp = 0
+   end
+end
+
+
+;
+; LOG_MSG -- Add message to UTIL NETPRINT log file
+;
+
+proc log_msg (msg) begin
+
+   if (~orvyl_up) return
+
+   asave = actno
+   open
+   putend &(sub(date,10,8)) &(sub(date,1,5)) &(msg)
+
+   comm
+   comm Updating UTIL NETPRINT command log
+   quiet try put util.netprint.log public app
+
+   close
+   pick &(asave)
+end
+
+
+;
+; CHECK_QUIT -- Check for 'quit' response
+;
+
+proc check_quit (text) begin
+
+   if (match('quit',text,'c') or \
+         low(text) eq 'exit' or \
+         low(text) eq 'end') begin
+      text = 'quit'
+   end
+
+   return(text)
+end
+
+
+;
+; EXEC_ERROR -- Entered after an exec error.
+;
+
+proc exec_error() begin
+
+;  Mail debugging information to maintenance people.
+
+   open
+   putend UTIL NETPRINT exec file error
+   putend
+   putend  errmsg = &(errmsg)
+   putend  errinfo = &(errinfo)
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type err
+   dump vars type err
+   putend
+
+   try mail to &(x.maint) title 'UTIL NETPRINT exec error'
+   close
+
+   xexit finish
+end

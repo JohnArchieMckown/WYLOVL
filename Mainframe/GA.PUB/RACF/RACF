@@ -1,0 +1,954 @@
+;EXEC ID:  WYL.GA.PUB.RACF#RACF
+;
+;AUTHOR:   Bill Bauriedel
+;
+;DATE:     05/01/88
+;
+;VERSION:  1.0
+;
+;REMARKS:  This EXEC receives control from Wylbur and processes all
+;          RACF ADDGROUP, DELGROUP, LISTGRP, CONNECT, REMOVE and
+;          LISTUSER commands.
+;
+;          In addition to these six functions, the RACF command has
+;          two other functions named HOLD and RELEASE.  The RACF HOLD
+;          command will create JCL and  RACF commands, but won't
+;          run them until the RACF RELEASE command is issued.  The
+;          purpose of these two commands is to prevent a job from
+;          running for each RACF or SET PROTECT command.  It batches
+;          all the RACF and SET PROTECT commands for running as a
+;          single job at the end.  To the extent that one RACF or
+;          SET PROTECT step depends upon the completion of another
+;          this technique may produce undesired results in some
+;          situations.
+;
+;          Unless RACF HOLD is in effect, this EXEC program edits
+;          the RACF command, processes it by running a batch job and
+;          then displays the results of the command on the screen.
+;          The program only processes one RACF command at a time.
+;          The full syntax for the command is detailed in the HELP
+;          RACF command.
+;
+;          A new ACTIVE file is opened to build and run the JCL.
+;          RACF commands are added at the end of the JCL for each
+;          RACF command that is issued.  New JCL is built every time
+;          ses.racf_jcl is either undefined or has been set to -1.
+;
+;          Other ACTIVE areas are opened temporarily to fetch RACF
+;          output, to process errors and to post group adds and
+;          deletes to orv.gb.sec.racf.commands.
+;
+;          The program is organized into its eight main functions;
+;          addgroup, delgroup, connect, remove, listgrp, listuser, hold &
+;          release.
+;
+;          The uplow convention used in this program is to use upper
+;          case for all Wylbur, JCL and RACF command syntax and lower
+;          case for everything else (labels, variables, proc names, etc.)
+;
+;          For further details on RACF commands please refer to the
+;          IBM document SC28-0733-5 MVS Resource Access Control Facility
+;          (RACF) Command Language Reference Version 1 Release 7.
+;
+;          This program uses several session variables defined as
+;          follows:
+;
+;              ses.racf_debug     = TRUE to enable debugging info.
+;
+;              ses.racf_hold      = TRUE if JCL to be held.  When
+;                                   set to TRUE, ses.racf_jcl is also
+;                                   set to -1 so new JCL will be
+;                                   built the next time either a
+;                                   SET PROTECT or RACF command is
+;                                   issued.
+;
+;              ses.racf_jcl       = the active number for the JCL.
+;                                   This session variable is either
+;                                   -1 which indicates there is no
+;                                   pending JCL to be run or it is
+;                                   the active number where RACF
+;                                   commands are being collected.
+;                                   After running the JCL this
+;                                   variable is set to -1 to start
+;                                   the process over.
+;
+;              ses.racf_test      = TRUE if WYLBUR = 'TESTWYL'.  This
+;                                   variable should be used to execute
+;                                   new code within the TESTWYL
+;                                   environment, but not in production
+;                                   WYLBUR.
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          05/01/88  WJB    Initial Installation.
+;
+;<.page>
+;*******************************************************************
+;                                                                  *
+; This mainline section first initializes all session and global   *
+; variables.  It then parses and edits the incoming command.  If   *
+; the edit is successful then the JCL is run and finally the output*
+; is displayed if either the command expects it (LISTGRP or        *
+; LISTUSER) or there was an error in the job.                      *
+;                                                                  *
+;*******************************************************************
+
+XPROC () BEGIN
+
+;********** Activate error and attention routines
+
+   IF (VARTYPE('ses.racf_debug') EQ 'UNDEFINED') \
+      ses.racf_debug = FALSE
+
+   IF (NOT ses.racf_debug) BEGIN
+      ON ERROR CMD 'PCALL errorexit'
+      ON ATTN  CMD 'PCALL attnexit'
+   END
+
+;**********  Set up test environment.  New features testable from TESTWYL
+
+   ses.racf_test = TRUE
+   IF (WYLBUR EQ 'WYLBUR') BEGIN
+      ses.racf_test = FALSE
+   END
+
+;********** Set Global Variables
+
+   x.hold     = FALSE             ; initialize to no hold
+   x.maint    = 'gb.sec@forsythe.stanford.edu'     ; one or more accounts
+   IF (MACHINE EQ 'RLG') x.maint    = 'bp.acc@rlg' ; one or more accounts
+   x.origact  = ACTNO             ; original active number
+   x.origparm = PARM_STRING
+   x.parm     = PARM_STRING
+   x.pgm      = 'RACF'            ; program name to be displayed in
+   x.commands_active = 0
+   x.erract_active = 0
+   x.output_active = 0
+;                                   error messages.
+
+   DECLARE STRING x.command x.racfcmnd x.group x.id x.auth x.descrip
+   DECLARE STRING x.racfcmn2
+
+;********** Set the ses.racf_hold variable if undefined.
+
+   IF (VARTYPE('ses.racf_hold') EQ 'UNDEFINED') ses.racf_hold = FALSE
+   x.hold = ses.racf_hold
+
+;********** If debug on, then write trace info
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'INIT      pgm      : '||x.pgm
+      WRITE '          command  : '||x.parm
+   END
+
+;********** Parse & Edit Parm
+
+   PCALL parse
+
+
+;********** If JCL active not currently open, then open it.
+
+   IF (VARTYPE('ses.racf_jcl') EQ 'UNDEFINED') ses.racf_jcl = -1
+   IF (ses.racf_jcl LE 0) BEGIN
+      OPEN racf ; alias jcl (racf is name for SHOW ACTIVES)
+      ses.racf_jcl = ACTNO
+   END
+
+;********** Build and Process RACF commands
+
+;
+;********** X.racf_jcl = ACTNO for jcl active number.  It is almost
+;********** the same as ses.racf_jcl except taht ses.racf_jcl is set
+;********** to -1 until right before the last instruction.  In the
+;********** event that a break is encountered then ses.racf_jcl will
+;********** be -1 and will not cause the prompt "Active nnn cleared
+;********** Do you want to pick it anyway?" to appear when a fresh
+;********** SET PROTECT or RACF command is issued.
+
+   x.racf_jcl = ses.racf_jcl ; set same as ses variable for later use
+   PICK &(ses.racf_jcl)
+   ses.racf_jcl = -1 ; reset in case break hit
+
+   PCALL process
+
+;********** Is there anything to display?  (I.e. either LISTGRP or LISTUSER)
+;********** Bypass if nothing to display (e.g. SET PROTECT LOG PROTECT)
+
+   IF (END EQ x.begin_racf) BEGIN  ; could happen with SET PROT LOG PROTECT
+      PCALL cleanup('')
+   END
+
+   IF (NOT x.hold) BEGIN
+      CLOSE ; jcl
+      x.racf_jcl = -1 ; Avoid closing ACTIVE:jcl twice
+      ses.racf_jcl=-1 ; reset for next SET PROTECT command
+      OPEN output TEMP
+      x.output_active = ACTNO
+      PCALL output
+      CLOSE ; output
+   END
+
+
+;********** Wrapup and return
+
+   PCALL cleanup('')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; parse -- This PROC processes the unedited RACF command.          *
+;     The SCAN function parses the command one word at a time      *
+;     starting from the left.  x.parm is used up by the SCAN       *
+;     function.  x.origparm remains intact and may be used         *
+;     anywhere to display or further process the original parm.    *
+;                                                                  *
+;     After the scanning is completed, the individual parts are    *
+;     edited.  If errors are found, the &(errid) and &(errmsg)     *
+;     variables are passed as parameters in the error PCALL's.     *
+;                                                                  *
+;     This PROC scans for and returns the following variables:     *
+;                                                                  *
+;          x.command     = RACF command code                       *
+;          x.racfcmnd    = full racf command                       *
+;          x.group       = RACF group name                         *
+;          x.id          = RACF user-id (Wylbur account)           *
+;          x.auth        = RACF authority within the group         *
+;          x.descrip     = RACF group description                  *
+;                                                                  *
+;*******************************************************************
+
+PROC parse () BEGIN
+
+;********** General syntax is:
+;********** RACF { {ADDGROUP  |AG}        groupname description |
+;**********        {DELGROUP  |DG}        groupname             |
+;**********        {CONNECT   |CO} gg.uuu groupname [authority] |
+;**********        {DISCONNECT|DC} gg.uuu groupname             |
+;**********        {LISTGROUP |LG}        groupname             |
+;**********        {LISTUSER  |LU} gg.uuu options               |
+;**********        {HOLD      |HO}                              |
+;**********        {RELEASE   |RE}                    }
+;**********
+
+   token      = ''                ; local scan variable
+
+   IF (x.parm EQ '') BEGIN
+      PCALL error('RACFNPRM','No RACF option specified.  Type QuOtEHELP \
+         RACFQuOtE for a list of options.')
+   END
+
+   SYSCALL SCAN(token, x.parm)
+
+   token = UPPER(token)
+
+   CASES BEGIN
+
+      CASE (ABBREV('HOLD',token,2)) BEGIN
+         IF (ses.racf_jcl GT 0) BEGIN
+            PCALL error('RACFHOLD', 'JCL already held.  No action taken')
+         END
+         x.command='HO'
+         ses.racf_hold = TRUE
+         RETURN
+      END
+
+      CASE (ABBREV('RELEASE',token,2)) BEGIN
+         IF (ses.racf_jcl LE 0) BEGIN
+            PCALL error('RACFREL', 'Nothing to release.  No action taken.')
+         END
+         x.command='RL'
+         ses.racf_hold=FALSE
+         RETURN
+      END
+
+      CASE ((ABBREV('ADDGROUP',token,4)) OR (token EQ 'AG')) BEGIN
+         x.command='AG'
+      END
+
+      CASE ((ABBREV('DELGROUP',token,2)) OR (token EQ 'DG')) BEGIN
+         x.command='DG'
+      END
+
+      CASE ((ABBREV('LISTGROUP',token,5)) OR (token EQ 'LG')) BEGIN
+         x.command='LG'
+      END
+
+      CASE ((ABBREV('LISTUSER',token,5)) OR (token EQ 'LU')) BEGIN
+         x.command='LU'
+      END
+
+      CASE (ABBREV('CONVERT',token,4)) BEGIN
+         x.command='CV'
+      END
+
+      CASE (ABBREV('CONNECT',token,2)) BEGIN
+         x.command='CO'
+      END
+
+      CASE ((ABBREV('DISCONNECT',token,3)) OR (token EQ 'DC')) BEGIN
+         x.command='DC'
+      END
+
+      CASE (TRUE) BEGIN
+         PCALL error('RACFUNKN', token||' unrecognized RACF command')
+      END
+
+   END
+
+;********** Depending on command go to appropriate subroutine
+
+   PCALL &(x.command)
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; ag  --  Edit and build ADDGROUP function                         *
+;                                                                  *
+;*******************************************************************
+
+PROC ag() BEGIN
+
+   IF (x.parm EQ '') PCALL error('RACFMISG','Missing group name.')
+
+   SYSCALL SCAN(x.group,x.parm)
+
+   x.group = UPPER(x.group)
+
+   x.descrip = x.parm
+
+   PCALL editgroup
+
+   x.racfcmnd = ' AG &(x.group) SUPGROUP(&(GROUP)) OWNER(&(GROUP)$&(USER)) +'
+   x.racfcmn2 = "  DATA('&(x.descrip) ')"
+
+   COMM Your request to add a new group has been forwarded to the Information Security
+   COMM Office.  You will be notified within 24 hours that you can begin to use this
+   COMM new name in other RACF group commands.
+
+   OPEN commands TEMP
+   x.commands_active = ACTNO
+   PUTEND &(x.racfcmnd)
+   PUTEND &(x.racfcmn2)
+   IF (MACHINE NE 'RLG') PUT orv.gb.sec.racf.commands APPEND QUIET
+   TRY MAIL TO (&(x.maint)) TITLE 'ADDGROUP &(x.group)' QUIET
+   CLOSE ; commands
+   x.commands_active = 0
+   x.output_active = 0
+
+   XRETURN
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; dg  --  Edit and build DELGROUP function                         *
+;                                                                  *
+;*******************************************************************
+
+PROC dg() BEGIN
+
+   IF (x.parm EQ '') PCALL error('RACFMISG','Missing group name.')
+
+   SYSCALL SCAN(x.group,x.parm)
+
+   x.group = UPPER(x.group)
+
+   PCALL editgroup
+
+   IF (x.parm NE '') BEGIN
+      x.parm=STRIP(x.parm)
+      IF (SUB(x.parm,1,1) NE ';') BEGIN
+         PCALL error('RACFLONG','&(x.parm) invalid for DELGROUP.')
+      END
+   END
+
+   x.racfcmnd = ' DG &(x.group) '
+
+   OPEN commands TEMP
+   x.commands_active = ACTNO
+   PUTEND &(x.racfcmnd)
+   IF (MACHINE NE 'RLG') PUT orv.gb.sec.racf.commands APPEND QUIET
+   TRY MAIL TO (&(x.maint)) TITLE 'DELGROUP &(x.group)' QUIET
+   CLOSE ; commands
+   x.commands_active = 0
+
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; lg  --  Edit and build LISTGRP function                          *
+;                                                                  *
+;*******************************************************************
+
+PROC lg() BEGIN
+
+   IF (x.parm EQ '') PCALL error('RACFMISG','Missing group name.')
+
+   SYSCALL SCAN(x.group,x.parm)
+
+   x.group = UPPER(x.group)
+
+   PCALL editgroup
+
+   IF (x.parm NE '') BEGIN
+      x.parm=STRIP(x.parm)
+      IF (SUB(x.parm,1,1) NE ';') BEGIN
+         IF ((UPPER(x.parm) EQ 'COLLECT') OR (UPPER(x.parm) EQ 'ACTIVE')) BEGIN
+            x.parm = 'collect '||x.parm
+            TRY SYSCALL COLLECT_SCAN(x.parm)
+            IF (TRYATTN OR TRYERR) XRETURN
+         END
+         IF ((UPPER(x.parm) NE 'COLLECT') AND (UPPER(x.parm) NE 'ACTIVE')) BEGIN
+            PCALL error('RACFLONG','&(x.parm) invalid for LISTGRP.')
+         END
+      END
+   END
+
+   x.racfcmnd = ' LG &(x.group)'
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; co  --  Edit and build CONNECT function                          *
+;                                                                  *
+;*******************************************************************
+
+PROC co() BEGIN
+
+   IF (x.parm EQ '') PCALL error('RACFMISA','Missing account id.')
+
+   SYSCALL SCAN(x.id,x.parm)
+
+   x.id = UPPER(x.id)
+   IF (SUB(x.id,3,1) EQ '$') x.id = SUB(x.id,1,2)||'.'||SUB(x.id,4)
+
+   QUIET TRY SHO NAME &(x.id)
+   IF (TRYID NE 'OK') BEGIN
+      IF (IND(TRYMSG,'invalid.') GT 0) BEGIN
+         PCALL error ('&(TRYID)','&(x.id) invalid as user id.')
+      END
+      PCALL error ('&(TRYID)','&(TRYMSG)')
+   END
+
+   x.id = SUB(x.id,1,2)||'$'||SUB(x.id,4,3)
+
+   IF (x.parm EQ '') PCALL error('RACFMISG','Missing group name.')
+
+   SYSCALL SCAN(x.group,x.parm)
+
+   x.group = UPPER(x.group)
+
+   PCALL editgroup
+
+   x.auth = 'USE'  ; default
+   IF (x.parm NE '') BEGIN
+      SYSCALL SCAN(x.auth,x.parm)
+   END
+
+   x.auth = UPPER(x.auth)
+
+   IF ((x.auth NE 'USE') AND (x.auth NE 'CONNECT')) BEGIN
+      PCALL error('RACFAUTH','The group authority must be either USE or CONNECT.')
+   END
+
+   IF (x.parm NE '') BEGIN
+      x.parm=STRIP(x.parm)
+      IF (SUB(x.parm,1,1) NE ';') BEGIN
+         PCALL error('RACFLONG','&(x.parm) invalid for CONNECT.')
+      END
+   END
+
+   x.racfcmnd = ' CO &(x.id) GROUP(&(x.group)) AUTHORITY(&(x.auth)) UACC(NONE) NOADSP'
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; dc  --  Edit and build DISCONNECT function                       *
+;                                                                  *
+;*******************************************************************
+
+PROC dc() BEGIN
+
+   IF (x.parm EQ '') PCALL error('RACFMISA','Missing account id.')
+
+   SYSCALL SCAN(x.id,x.parm)
+
+   x.id = UPPER(x.id)
+
+   QUIET TRY SHO NAME &(x.id)
+   IF (TRYID NE 'OK') BEGIN
+      IF (IND(TRYMSG,'invalid.') GT 0) BEGIN
+         PCALL error ('&(TRYID)','&(x.id) invalid as user id.')
+      END
+      PCALL error ('&(TRYID)','&(TRYMSG)')
+   END
+
+   x.id = SUB(x.id,1,2)||'$'||SUB(x.id,4,3)
+
+   IF (x.parm EQ '') PCALL error('RACFMISG','Missing group name.')
+
+   SYSCALL SCAN(x.group,x.parm)
+
+   x.group = UPPER(x.group)
+
+   PCALL editgroup
+
+   IF (x.parm NE '') BEGIN
+      x.parm=STRIP(x.parm)
+      IF (SUB(x.parm,1,1) NE ';') BEGIN
+         PCALL error('RACFLONG','&(x.parm) invalid for DISCONNECT.')
+      END
+   END
+
+   x.racfcmnd = ' REMOVE &(x.id) GROUP(&(x.group))'
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; lu  --  Edit and build LISTUSER function                         *
+;                                                                  *
+;*******************************************************************
+
+PROC lu() BEGIN
+
+   IF (x.parm EQ '') x.parm = SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3)
+
+   SYSCALL SCAN(x.id,x.parm)
+
+   x.id = UPPER(x.id)
+   IF (SUB(x.id,3,1) EQ '$') x.id = SUB(x.id,1,2)||'.'||SUB(x.id,4)
+
+   QUIET TRY SHO NAME &(x.id)
+   IF (TRYID NE 'OK') BEGIN
+      IF (IND(TRYMSG,'invalid.') GT 0) BEGIN
+         PCALL error ('&(TRYID)','&(x.id) invalid as user id.')
+      END
+      PCALL error ('&(TRYID)','&(TRYMSG)')
+   END
+
+   x.id = SUB(x.id,1,2)||'$'||SUB(x.id,4,3)
+
+   x.racfcmnd = ' LU &(x.id) &(x.parm) '
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; cv  --  Display date of default profile conversion to RACF       *
+;                                                                  *
+;*******************************************************************
+
+PROC cv() BEGIN
+
+   IF (x.parm EQ '') x.parm = GROUP||'.'||USER ; default
+
+   SYSCALL SCAN(x.id,x.parm)
+
+   x.id = UPPER(x.id)
+   IF (SUB(x.id,3,1) EQ '$') x.id = SUB(x.id,1,2)||'.'||SUB(x.id,4)
+
+   QUIET TRY SHO NAME &(x.id)
+   IF (TRYID NE 'OK') BEGIN
+      IF (IND(TRYMSG,'invalid.') GT 0) BEGIN
+         PCALL error ('&(TRYID)','&(x.id) invalid as user id.')
+      END
+      PCALL error ('&(TRYID)','&(TRYMSG)')
+   END
+
+   x.id  = SUB(x.id,1,2)||'$'||SUB(x.id,4,3)
+   gguuu = SUB(x.id,1,2)||'.'||SUB(x.id,4,3)
+
+   IF (x.parm NE '') BEGIN
+      x.parm=STRIP(x.parm)
+      IF (SUB(x.parm,1,1) NE ';') BEGIN
+         PCALL error('RACFLONG','&(x.parm) invalid for CONVERT.')
+      END
+   END
+
+   IF (DSNPROT('WYL.&(gguuu).LIB') NE 'RACF') BEGIN
+      WRITE 'This account has not been converted to RACF yet.'
+      XRETURN
+   END
+
+   x.racfcmnd = " LISTDSD DATASET ('&(x.id).*') GENERIC ALL"
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; editgroup -- This routine edits for valid group names            *
+;                                                                  *
+;*******************************************************************
+
+PROC editgroup () BEGIN
+
+   IF (MACHINE EQ 'RLG') RETURN    ; No further editing by Wylbur for RLG
+
+   IF (x.command NE 'AG') BEGIN
+      COUNT '&(x.group)'1 FROM wyl.gb.sec.racf.groups QUIET
+      IF (COUNT GE 1) RETURN
+      IF (SUB(x.group,1,1) EQ '@') RETURN
+   END
+
+   IF (x.command EQ 'AG') BEGIN
+      COUNT '&(x.group)'1 FROM wyl.gb.sec.racf.groups QUIET
+      IF (COUNT EQ 0) BEGIN
+         IF (SIZE(x.group) GT 8) GOTO groupname_error
+         IF (SIZE(x.group) NE 6) RETURN
+         IF ((SUB(x.group,3,1) NE '.') AND (SUB(x.group,3,1) NE '$')) RETURN
+      END
+
+   END
+
+groupname_error:
+   PCALL error('RACFGRPX','&(x.group) invalid RACF group name')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; process -- Build RACF JCL, run it, wait for completion and then  *
+;     fetch it.                                                    *
+;                                                                  *
+;*******************************************************************
+
+PROC process() BEGIN
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'PROCESS   command  : '||x.command
+      WRITE '          group    : '||x.group
+      WRITE '          acct     : '||x.id
+      WRITE '          authority: '||x.auth
+      WRITE '          descrip. : '||x.descrip
+   END
+
+;********** Build job and run it.
+
+   IF (LAST LE 0) BEGIN
+      PUTLINE 1 //&RACF JOB ,CLASS=F
+      PUTLINE 2 /*JOBPARM JCL=NO,LOG=NO
+      PUTLINE 3 //RACF     EXEC PGM=IKJEFT01
+      PUTLINE 4 //SYSTSPRT DD  SYSOUT=A
+      PUTLINE 5 //SYSPRINT DD  SYSOUT=A
+      PUTLINE 6 //PRINTER  DD  SYSOUT=A
+      PUTLINE 7 //SYSUT1   DD  UNIT=VIO,SPACE=(CYL,(10,05))
+      PUTLINE 8 //SYSTSIN    DD  *
+   END
+
+;********** Build RACF profiles and permits
+
+   POINT 'SYSTSIN' NOL
+   x.begin_racf = *
+   PUTEND  &(x.racfcmnd)
+   IF (x.command EQ 'AG') PUTEND &(x.racfcmn2)
+
+
+;********** Run JCL if there are any RACF commands (e.g. LOG PROTECT
+;********** doesn't require any JCL.
+
+   IF (LAST GE x.begin_racf) BEGIN
+
+      IF (ses.racf_debug) BEGIN
+         LIST &(x.begin_racf)/L NON
+      END
+
+      stop=FALSE
+
+      IF (NOT x.hold) BEGIN
+         XCALL racf#runwait (x.pgm,'&(USER)RACF','RUN HOLD QUIET NONOTIFY',stop) PUB
+      END
+
+      IF (stop) BEGIN
+
+         IF (NOT x.hold) BEGIN
+            CLOSE ; jcl
+            x.racf_jcl = -1 ; Avoid closing ACTIVE:jcl twice
+            ses.racf_jcl = -1
+         END
+
+         PCALL cleanup('')
+
+      END
+
+   END
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; output -- Format and display results of RACF job.                *
+;                                                                  *
+;*******************************************************************
+
+PROC output () BEGIN
+
+;********** Job finished.  Now get it.
+
+   FETCH * NOM APPEND
+   PURGE * QUIET
+
+;********* Eliminate redundant and non-essential lines
+
+   DEL 'READY '1 OR 'END '1
+   DEL 'NO VALID TSO USERID, DEFAULT USER ATTRIBUTES USED'
+   CH 'NOT AUTHORIZED TO ' TO 'Insufficient authority to ' nol
+
+;********** Handle LISTGRP and LISTUSER (and LISTDSD for RACF CONVERT)
+
+   IF (x.command EQ 'CV') BEGIN
+      POINT 'CREATION DATE  LAST REFERENCE DATE' NOL
+      IF (* LE 0) BEGIN
+         WRITE 'Your account has been partially converted to RACF.'
+         WRITE 'You do not yet have a DEFAULT profile'
+         WRITE 'Type HELP SET PROTECT DEFAULT for further information.'
+         RETURN
+      END
+      create_date = ''
+      READ STR create_date USING *+3 COL 3/11
+      DEL F/L
+      create_date = SUB(create_date,8,2)||'.'||SUB(create_date,1,3)
+      WRITE 'This account was converted to RACF on &(create_date)'
+      RETURN
+   END
+
+   IF (x.command EQ 'LG') BEGIN
+      DEL ~'Insufficient' AND ~'$' AND ~'ERROR' AND ~'ICH' AND ~'IKJ' AND ~'INSTALLATION' AND ~'USER(S)=' AND ~'CONNECT ATTRIBUTES' AND ~'USE'21 AND ~'CONNECT'21 AND ~'JOIN'21 AND ~'CREATE'21
+      DEL 'CONNECT ATTRIBUTES=NONE'
+      CH '$' TO '.' NOL
+      CH 'USER(S)=' TO '  ID----' NOL
+      CH 'ACCESS=' TO '  Authority' NOL
+      CH 30/80 TO '' IN '.'9 NOL
+      CH 30/80 TO '' IN 'ID----' NOL
+      CH 30/80 TO '' IN 'USE'21 NOL
+      CH 30/80 TO '' IN 'CONNECT'21 NOL
+      CH 30/80 TO '' IN 'CREATE'21 NOL
+      CH 30/80 TO '' IN 'JOIN'21 NOL
+      CH 'INSTALLATION DATA' TO 'Group Description' NOL
+      CH '   OWNER' TO 'Group Owner' NOL
+      CH 'SUPERIOR GROUP' TO 'Superior Group' NOL
+      CH 'NO ' TO 'No ' NOL
+      CH 'CONNECT ATTRIBUTES' TO 'Group Privileges' NOL
+      CH '=Connect' TO '=CONNECT' N
+      CH 'LIST BASE INFORMATION FOR GROUP' TO 'list base information for group' NOL
+      CH 1/10 to '' IN 'ICH'1 N ; Remove IBM error message
+      CH 1/10 to '' IN 'IKJ'1 N ; Remove IBM error message
+      LIST UNN
+      RETURN
+   END
+
+   IF (x.command EQ 'LU') BEGIN
+      DEL ~'GROUP' AND ~'ERROR' AND ~'ICH' AND ~'IKJ' AND ~'CONNECTS' AND ~'LAST-ACCESS' AND ~'ATTRIBUTES' AND ~'DFP' AND ~'TSO' AND ~'ACCTNUM' AND ~'PROC' AND ~'SIZE' AND ~'MAXSIZE' AND ~'UNIT' AND ~'USERDATA' AND ~'-----'
+      DEL 'ATTRIBUTES=NONE' OR 'CONNECT=UNKNOWN' OR 'LAST-ACCESS'
+      CH 33/100 to '' in 'GROUP'3 NOL
+      CH ' UACC=NONE   ' TO '' NOL
+      CH 25/80 TO '' IN 'DEFAULT-GROUP' NOL
+      CH 'DEFAULT-GROUP' TO 'Default Group' NOL
+      CH 'ATTRIBUTES' TO 'Attributes' NOL
+      CH 'CONNECTS' TO 'Connects' NOL
+      CH 'LAST-CONNECT' TO 'Last Connect' NOL
+      CH 'CONNECT' to 'Connect' NOL
+      CH 'GROUP' TO 'Group' NOL
+      CH 'AUTH' TO 'Authority' NOL
+      CH '/' TO ' at ' NOL
+      CH 1/10 to '' IN 'ICH'1 N ; Remove IBM error message
+      CH 1/10 to '' IN 'IKJ'1 N ; Remove IBM error message
+      x.id = SUB(x.id,1,2)||'.'||SUB(x.id,4)
+      SHO NAME &(x.id)
+      LIST UNN
+      RETURN
+   END
+
+
+;********* See if there are any errors from the RACF job
+
+   IF (LAST GE 0) COUNT ~' '1 AND ~'' QUIET ;Test to see if any errors
+   IF (COUNT LE 0) RETURN ; Command successful
+
+;********** Error in RACF job.  Warn user and send error info to x.maint
+
+   TRY MAIL TO (&(x.maint)) TITLE '&(x.pgm) error.  RACF job failure.' QUIET
+   DEL '' OR ' '1 ; The DEL command resets COUNT
+
+   COUNT QUIET; Will always be greater than zero.  See previous logic.
+   IF (COUNT GT 1) BEGIN
+      CH 1/10 TO '' IN 'ICH'1 NOL; remove error msg. code
+      CH 1/10 TO '' IN 'IKJ'1 NOL; remove error msg. code
+      LIST UNN COL 11/80
+      errid='RACFMULT'
+      errmsg=''
+      CLOSE ; output
+      x.output_active = 0
+      SMF RACF "RACF ERR - RACF &(x.origparm)"
+      PCALL cleanup('errid=&(errid), errmsg="&(errmsg)"')
+   END
+
+   errid=''
+   errmsg=""
+   CH "'" TO "" IN F/L NOL
+   READ STR errid USING LAST COL 1/8
+   READ STR errmsg USING LAST
+   errmsg=SUB(errmsg,11) ;strip off errid
+   CLOSE ; output
+   x.output_active = 0
+   PCALL error('&(errid)','&(errmsg)')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  attnexit -- Attention exit.  This routine gets control if the   *
+;      user presses ATTN.   Actives are closed until the original  *
+;      active has been restored.                                   *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC attnexit() BEGIN
+
+   ON ATTN REENABLE
+   ON ATTN  CMD 'PCALL attnexit' NOINTERRUPT
+
+;********** Close any ACTIVE which is still open.
+
+   IF (x.output_active GT 0) BEGIN
+      PICK &(x.output_active)
+      CLOSE ; output
+   END
+
+   IF (x.commands_active GT 0) BEGIN
+      PICK &(x.commands_active)
+      CLOSE ; command
+   END
+
+   IF (x.erract_active GT 0) BEGIN
+      PICK &(x.erract_active)
+      CLOSE ; erract
+   END
+
+;********** Don't close the original or the JCL if x.hold = TRUE
+
+   IF ((NOT x.hold) AND (x.racf_jcl GT 0)) BEGIN
+      PICK &(x.racf_jcl)
+      CLOSE ; jcl
+      x.racf_jcl = -1 ; avoid closing ACTIVE:jcl twice
+      ses.racf_jcl=-1 ; avoid closing ACTIVE:jcl twice
+   END
+
+   ON ATTN  CMD 'PCALL attnexit' INTERRUPT
+   PCALL cleanup('')
+
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  errorexit -- Error exit.  This routine gets control if a command*
+;     fails unexpectedly.  Not much we can do but complain.        *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC errorexit() BEGIN
+
+   WRITE 'An error occurred in the ' || x.pgm || ' command.'
+   WRITE 'The systems programming staff has been notified.'
+
+   IF (ses.racf_debug) BEGIN
+      WRITE ''
+      WRITE 'Debugging information:'
+      WRITE '   errmsg: '||errmsg
+      WRITE '  errinfo: '||errinfo
+   END
+
+;**********  Mail debugging information to maintenance people.
+
+   OPEN erract TEMP
+   x.erract_active = ACTNO
+   PUTEND An error occurred in the &(x.pgm) command.
+   PUTEND
+   PUTEND Debugging information:
+   PUTEND
+   PUTEND command = &(x.origparm)
+   PUTEND errmsg = &(errmsg)
+   PUTEND errinfo = &(errinfo)
+   PUTEND
+   PUTEND ---
+   PUTEND
+   PUTEND >>> show vars type ses
+   dump vars type ses
+   PUTEND
+   PUTEND >>> show vars type x
+   dump vars type x
+   PUTEND
+   PUTEND >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   PUTEND
+   PUTEND End of dump.
+
+   TRY MAIL To (&(x.maint)) TITLE '&(x.pgm) error' QUIET
+   CLOSE ; erract
+   x.erract_active = 0
+
+;**********  Call it quits.
+
+   PCALL cleanup('')
+END
+
+
+
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  error -- Routine to quit command because of an error.           *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC error(errid, errmsg) BEGIN
+
+   SMF RACF "RACF ERR - RACF &(x.origparm)//ERRMSG=&(errmsg)"
+
+   CLEAR XDUMP
+
+   PCALL cleanup('errid=&(errid), errmsg="&(errmsg)"')
+
+END
+
+
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  cleanup -- Routine to do final command cleanup.                 *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+PROC cleanup(opt) BEGIN
+
+;********** Write SMF record
+
+   IF (opt EQ '') SMF RACF "RACF &(x.origparm)"
+
+   PICK &(x.origact)
+   IF (x.hold) ses.racf_jcl = x.racf_jcl ;set session var. for next cmd.
+   CLEAR XDUMP
+
+quote_loop:
+   IF (INDEX(opt,'QuOtE') GT 0) BEGIN
+      opt = SUB(opt,1,IND(opt,'QuOtE')-1)||"'"||SUB(opt,IND(opt,'QuOtE')+5)
+      GOTO quote_loop
+   END
+
+   XRETURN &(opt)
+
+END

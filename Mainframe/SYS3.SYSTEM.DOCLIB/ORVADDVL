@@ -1,0 +1,225 @@
+Adding an Orvyl file system volume to an existing Orvyl file system.
+(this is SYS3.SYSTEM.DOCLIB#ORVADDVL)
+
+These notes are current as of May 27, 1999 and were written during
+the process of adding an additional volume to the FIS file system.
+In this scenario we were asked to add additional blocks to the FIS
+file system to support Y2K testing.  In preparing to add a volume
+check the following table to determine the file system
+characteristics.  When running the volume initializations, data set
+allocations, and the Orvyl formatting account GW.DSK has the
+appropriate level of access authority.
+
+                Orvyl File Systems
+
+<.U+>Name\\\\\\ Key\\ Size\\ BCV\\ Accounts<.U->
+General\\\ Yes\\ 2K\\\\ Yes\\ All Others
+NSI\\\\\\\ Yes\\ 2K\\\\ Yes\\ AN, CD, CK
+Socrates\\ Yes\\ 2K\\\\ No\\\ EC, ED, EE
+ITS\\\\\\\ Yes\\ 2K\\\\ Yes\\ GA..GX, GZ..G1, G3..G9
+FIS\\\\\\\ Yes\\ 2K\\\\ Yes\\ AM, AP, AS
+OOD\\\\\\\ Yes\\ 2K\\\\ Yes\\ CT, CX, CY
+SDCACCT\\\ No\\\ 2K\\\\ No\\\ Z8
+InfAcc\\\\ No\\\ 2K\\\\ No\\\ JQ, KQ
+InfAcc3\\\ Yes\\ 2K\\\\ No\\\ KS
+Route66\\\ Yes\\ 2K\\\\ Yes\\ GY
+ITS4K\\\\\ No\\\ 4K\\\\ No\\\ G2
+
+1. When adding a volume to a SYSA Orvyl file system on the EMC 5430
+we are currently using 3390-2 type geometry with BCV mirroring for
+the majority of our file systems.
+* Select an available NEWxxx 3390-2 volume.
+* Select an available 3390-2 BCV volume address, preferably with the
+same control unit address.  (Currently we have no good way to
+dynamically determine whether a volume is a BCV candidate or not.
+Check with Parker for the time being.  This will change in the long
+run.)
+* Insure that the selected device addresses are offline to all
+LPAR's.
+
+In this example we have selected a standard 3390-2 NEW volume at
+device address 0E81 and paired it with the BCV volume at address
+0EC9.
+
+2. Check to insure that the selected BCV volume has not been
+established to any other volume within the complex.  The command
+used to determine the status of a BCV volume is the QUERY command
+and may be run safely from any LPAR against any BCV volume.  It is a
+non-disruptive command.  The following JCL segment from
+WYL.GW.DSK.DISKLIB(BCVQUE) may be used as a model to determine the
+current status of the selected BCV device.
+
+//query job gw.dsk,class=e,time=(,5)
+//tmfndr exec  pgm=emctf,region=4m
+//steplib  dd  dsn=wyl.gs.emc.tmfndr32.linklib,disp=shr
+//sysout   dd  sysout=a
+//sysin    dd  *
+QUERY 001,0EC9,1
+
+3. Check the Orvyl parameter library for the file system in which
+you are going to add the volume.  In this example we are adding a
+volume to the Orvyl FIS file system whose control stream member is:
+WYL.GG.ORV.ALPHA.STREAM(FIS).  By checking the Segment definitions
+we see that the next segment would be Segment 20.
+
+Segment 19
+    Start 11735179                 ;317167 * 37
+    Sequence 18
+      File WYL.GS.ORV.FIS.EMC.FILE36   ;Enabled 02/13/99 pjg
+      File WYL.GS.ORV.FIS.EMC.FILE37   ;Enabled 02/13/99 pjg
+Endseg;
+
+We can now determine from the system catalog that the next volume to
+be added would be XFIS20 and that the next two data sets would be
+FILE38 and FILE39.
+
+4. Initialize the new volume on address 0E81 to XFIS20 with the
+standard 3390-2 VTOC size of three tracks with no index.  Verify
+that the device address is offline to all other LPARs in the
+complex.  The following JCL example may be used as the model for the
+initialization.
+
+//INIT JOB GW.DSK,CLASS=B,TIME=(,15)
+//DSF    EXEC  PGM=ICKDSF,PARM='NOREPLYU'
+//SYSPRINT DD  SYSOUT=A
+//SYSIN    DD  *
+  INIT UNIT(0E81) NOINDEX VTOC(0,1,3) -
+       VERIFY(NEWE81) VOLID(XFIS20)
+
+After the volume initialization has completed successfully bring the
+volume online on SYSA and verify the volume table of content size.
+
+5. Allocate and format two new Orvyl file system data sets for the
+FIS file system. The parameters given the Orvyl format program are
+indicating that we will be formatting two file system data sets,
+that the data sets will have a hardware key, and that the Orvyl
+header size will be 20 bytes.  By default the Orvyl format program
+will create a 2K Orvyl file system data set.  The following JCL
+example may be used as a model:
+
+// job gw.dsk,class=b,time=(,15)
+//fmt    exec  pgm=orvfmt,parm='vols=2,key,hdr=20'
+//steplib  dd  dsn=wyl.gg.orv.linklib,disp=shr
+//file00   dd  dsn=wyl.gs.orv.fis.emc.file38,unit=disk,
+//             disp=(,catlg),
+//             space=(trk,16693,,contig),vol=ser=xfis20
+//file01   dd  dsn=wyl.gs.orv.fis.emc.file39,unit=disk,
+//             disp=(,catlg),
+//             space=(trk,16693,,contig),vol=ser=xfis20
+
+When the formatting job has completed map the volume to insure that
+all available space on the volume has been accounted for.
+
+6. Now it's time to return to the control file describing the FIS
+file system and update three portions to indicate the availability
+of the new volume and its associated business continuance volume.
+
+* Add the information describing the new segment and data sets at
+the end of FIS control stream input.  The segment number should be
+one greater than the last segment in the control stream as the
+sequence number specification.  The Start parameter informs the file
+dump process the Orvyl absolute block number of the first block it
+will read in this segment.  Insure that the Start parameter number
+is absolutely correct.  This information is imperative for the
+incremental restore process.
+
+Segment 20
+  Start 12369513                    ;317167 * 39
+  Sequence 19
+    File WYL.GS.ORV.FIS.EMC.FILE38  ;Enabled 05/27/99 *pjg*
+    File WYL.GS.ORV.FIS.EMC.FILE39
+Endseg;
+
+* Update the modification log
+* Update the BCV definition section for the new volume.  In this
+example we have added the definition for the pairing of XFIS20 with
+its third BCV volume mirror at address 0EC9.
+
+BCVdef;            ;Define BCV pairings
+   Volume=XFISXX    Device=0ECE
+   Volume=XFIS01    Device=0EAB
+   Volume=XFIS02    Device=0EAC
+   Volume=XFIS03    Device=0EAD
+   Volume=XFIS04    Device=0EAE
+   Volume=XFIS05    Device=0DAC
+   Volume=XFIS06    Device=0DAD
+   Volume=XFIS07    Device=0DAE
+   Volume=XFIS08    Device=0DAF
+   Volume=XFIS09    Device=0DB0
+   Volume=XFIS10    Device=0EAF
+   Volume=XFIS11    Device=0EB0
+   Volume=XFIS12    Device=0EB1
+   Volume=XFIS13    Device=0DB1
+   Volume=XFIS14    Device=0DB2
+   Volume=XFIS15    Device=0DB3
+   Volume=XFIS16    Device=0DB4
+   Volume=XFIS17    Device=0DB5
+   Volume=XFIS18    Device=0DB6
+   Volume=XFIS19    Device=0EB2
+   Volume=XFIS20    Device=0EC9
+EndDef;
+
+7. Build the generation data group necessary for the new file system
+segment.  We currently maintain three months of full backups for
+each of our production file systems.  A full dump is taken once per
+week.  This requires the retention of 12 generations.  Although it
+is not required; we do try and keep all of the FILSEG, IXRDUMP, and
+DIRDUMP generation data groups synchronized.  The current generation
+numbers may be found either by using the IDCAMS service utility or
+you can check the output from the last full file system dump under
+the VMNTPRT report.    The following JCL example may be used as a
+template:
+
+// job gw.dsk,class=e,time=(,15)
+//gdg    exec  pgm=idcams
+//sysprint dd  sysout=a
+//sysin    dd  *
+ /* Define the generation data group for .FILSEG20 */
+ DEFINE GDG(NAME(WYL.GS.ORV.FIS.FILSEG20) -
+        LIMIT(12) NOEMPTY SCRATCH)
+ /* Define the dummy placeholder to maintain synchronization */
+ DEFINE NVSAM(NAME(WYL.GS.ORV.FIS.FILSEG20.G0646V00) -
+        VOL(DUMMY) FSEQN(1) DEVT(3490))
+
+8. Perform the initial Establish between the newly created standard
+Orvyl file system volume and its paired business continuance volume.
+ This process requests that the EMC 5430 control unit create a
+mirrored copy of the standard volume on to the M3 volume.
+
+CAUTION: The following JCL segment from WYL.GW.DSK.DISKLIB(BCVEST)
+may be used, as a template, to perform the initial establish of the
+two volumes.  Be very sure to double check all of the parameters in
+that this process WILL overwrite existing data with no warning!
+
+//ofisest job gw.dsk,'FIS Establish',class=c,time=2
+//*
+//*  EMC TimeFinder 3.2
+//*      Establish Orvyl FIS BCV volumes on EMC 5430
+//*
+//$PAUSE EXEC  PGM=oscmd,PARM='VARY 0EC9,OFFLINE'
+//$PAUSE EXEC  PGM=oscmd,PARM='$WAIT 5'
+//tmfndr exec  pgm=emctf,region=4m
+//steplib  dd  dsn=wyl.gs.emc.tmfndr32.linklib,disp=shr
+//sysout   dd  sysout=a
+//sysin    dd  *
+  GLOBAL MAXRC=0                   Abort on the littlest thing!
+  QUERY 002,0EC9,1                 Query initial status
+  ESTABLISH 015,0EC9,0E81,WAIT     Full establish for XFIS20
+  QUERY 020,0EC9,1
+
+9. Check the TLMS auto-scratch/toss status record to insure that the
+newly created generation data groups are under the appropriate
+auto-scratch/toss control.  A sequential flat file description of
+the current auto-scratch file may be found in:
+SYS2.TLM.AST.DSNSMSTR.  By inspecting the entries corresponding to
+the FIS file system below we see that the newly created FILSEG20
+generation data group is covered by the first entry.  If you
+determine that the necessary auto-scratch/toss entries need to be
+added or updated you will need to either go through the tape
+librarian.  (If it was me doing this I'd go talk to the TLMS
+programmer)
+
+WYL.GS.ORV.FIS.           1100006140000211500041100000 A071587S
+WYL.GS.ORV.FIS.INCCAT.    1Parker J. Gillespie         A071587A
+WYL.GS.ORV.FIS.INCDATA.   1Parker J. Gillespie         A071587A
+WYL.GS.ORV.FIS.INCIXR.    1Parker J. Gillespie         A071587A

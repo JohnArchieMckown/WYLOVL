@@ -1,0 +1,310 @@
+; last revision 06/22/92--MCL
+; Revised 06/22/92 by MCL:  Build volume DD statements
+; revised 02/04/92 by MCL:  New variable names, various cleanups,
+; use CATFIX to recatalog the data sets
+; revised 05/15/84 by MCL to allow qualified newname (line 534)
+; revised 11/29/83 by Mark Lawrence (GA.MCL) to allow SYSn. or $dsn
+;
+; VARIABLE USAGE
+;
+;  S0    VARIOUS PROMPTS
+;  S1    USED BY CATALOG LOOKUP AND SYNTAX CHECK ROUTINES
+;  S2    USED BY SYNTAX CHECK ROUTINE
+;  NEWACC    NEW ACCOUNT AS GG.UUU
+;  OLDDSN    OLD DSNAME
+;  NEWDSN    NEW DSNAME
+;  VOLSER    VOLUME SERIAL
+;  VOLIST     (array) list of disk volumes to be accessed
+;  VOLCNT    count of vols in VOLIST
+;  S7
+;  UACC    USER'S ACCOUNT AS GG.UUU
+;  OLDESC    USER'S ESCAPE SYMBOL
+;  N0    USED BY SYNTAX CHECK ROUTINE
+;  N1
+;  N2    USED BY SYNTAX CHECK ROUTINE
+;  N3    FLAG:  -1=PARM, 0=PROMPT, 1/2=LIST OF NAMES IN ACTIVE
+;               1=PROMPT NEW NAME    2=MOD OLD NAME
+;               3=CHANGE ACCT. AND MOD OLD NAME
+;  SYNCHK    Flag for DSN check routine:  check dsn syntax
+;  ISCAT     Flag:  data set is cataloged
+;
+;  W0    USED BY CATALOG LOOKUP ROUTINE
+;  NAMPTR    CURRENT LINE IN USER'S LIST OF NAMES
+;  OLDACT    USER'S PREVIOUS ACTIVE FILE NUMBER
+;  NEXTH     Next line number in IEHPROGM input
+;  NEXTC     Next line number in CATFIX input
+;
+CLR VAR
+DECLARE STRING  NEWACC OLDDSN NEWDSN VOLSER UACC OLDESC VOLIST[100]
+DECLARE NUM  NAMPTR OLDACT LISTND NEXTH NEXTC VOLCNT I II
+DECLARE BOOLEAN  SYNCHK ISCAT
+OLDESC = ESC
+OLDACT = ACTNO
+IF (LINES EQ 0) OLDACT=0
+SET ESC &
+OPEN RENAME TITLE 'Work file for UTIL RENAME'
+UACC = '&(GROUP).&(USER)'
+NEWACC = UACC  ; NEW ACCT. SAME AS OLD SO FAR
+LISTND = 0
+NEXTH = 1
+NEXTC = 10000
+;  PARM CHECK
+S0 =  UPP(PARM)
+IF (S0 EQ '') EXE 40               ; NO PARM
+N3 =  -1                      ; SHOW "PARM" MODE
+EXE 300
+;
+COMM
+COMM RENAME  version of 02/04/92
+REA STR S0 UPP PRO 'Do you want instructions? '
+IF (S0 EQ '') EXE 50
+IF (SUB(S0,1,1) EQ 'N') EXE 50 ; NO
+LIST 4000/4099 EXE UNN ATTN=50
+; SET MODE
+REA STR S0 UPP PRO 'Specify PROMPT, LIST, MOD, or ACCT mode (RETURN=PROMPT): '
+IF (S0 EQ '?') LIST 4100/4199 EXE UNN ATTN=50
+THEN EXE 50
+IF (S0 EQ '') EXE 100 ; PROMPT IS DEFAULT
+IF (IND(S0,'PRO') NE 0) EXE 100 ; PROMPT
+IF (IND(S0,'LIS') NE 0) N3 =  1 ; LIST
+THEN EXE 100
+IF (IND(S0,'MOD') NE 0) N3 =  2 ; MOD
+THEN EXE 100
+IF (IND(S0,'ACC') NE 0) N3 =  3; ACCT
+ELSE EXE 70
+REA STR NEWACC UPP PRO 'New account: '
+IF (SUB(NEWACC,3,1) EQ '.') IF(SIZE(NEWACC) EQ 6) EXE 100 ; CRUDE ACCT. CHECK
+WRI NEWACC||':  ILLEGAL.  Account must be in form gg.uuu
+EXE 62
+WRI S0||':  ILLEGAL.'
+LIST 4100/4199 EXE UNN ATTN=50
+EXE 50
+
+;  initialize
+
+IF (N3 LE 0) EXE 300 ; PROMPT MODE, PROCEED
+COMM Place the list of data set names in your active file.
+COMM Type EXEC when you are ready to proceed.
+EXE PAU
+NUM BY 1 STA 1 QUI
+NAMPTR = FIRST
+LISTND = LAST
+
+; BUILD JCL
+PUTEND // JOB ,TIME=(,15)
+PUTEND //RENAME   EXEC IEHPROGM
+NEXTH = END
+PUTLINE 10000 // EXEC CATFIX,PARM='CAT,UCB,NODSCB'
+NEXTC = 10001
+;
+;  PROMPTING LOOP -- ASK FOR DSNAME
+COMM
+IF (N3 EQ 0) REA STR S0 UPP PRO'Name of next data set to be renamed (RETURN=quit): ' ATTN=2000
+ELSE IF (N3 GE 1) REA STR S0 UPP USI &(NAMPTR)
+IF (N3 NE 0) WRI 'Data set &S0'
+IF (S0 EQ '') EXE 2000 ; DONE
+SYNCHK = FALSE;    Flag:  don't check dsn syntax on old name
+EXE 3000 SAVE  ; CHECK NAME, STRIP BLANKS, ETC.
+IF (N0 NE 0) EXE 460 ; IF NAME IS GOOD
+IF (N3 LE 0) EXE 420 ; PROMPT MODE, REPROMPT IF BAD
+ELSE MOD &(NAMPTR)
+ELSE EXE 420
+S0 = DSNFORMAT(S0)
+OLDDSN = S0  ; SAVE NAME
+PUTLINE &(NEXTH)  RENAME DSNAME=&(OLDDSN),
+NEXTH=NEXTH+1
+CH 72 TO '*' IN * NOL NOLEN
+
+; NEW NAME
+IF (N3 LE 1) REA STR S0 UPP PRO'New dataset name: '
+THEN EXE 520
+PUTLINE 99999 &(OLDDSN)
+OLDDSN=DSNFORMAT(OLDDSN)
+IF (N3 GE 3) IF (SUB(OLDDSN,1,4) EQ 'WYL.') CH 5/10 TO '&(NEWACC)' IN 99999 NOL
+   THEN EXE 513
+PUTLINE 99999 &(OLDDSN)
+MOD 99999 UNN
+REA STR S0 UPP USI 99999 DEL
+SYNCHK = TRUE   ; Flag:  check syntax on new name
+EXE 3000 SAVE ; CHECK NAME
+IF (N0 EQ 0) EXE 500
+NEWDSN = DSNFORMAT(S0)
+PUTLINE &(NEXTH)                NEWNAME=&(NEWDSN),
+NEXTH=NEXTH+1
+CH 72 TO '*' IN * NOL NOLEN
+
+; Look up in catalog
+W0 =  END
+DUMP CAT LIK '&(OLDDSN)' INTERNAL VOL
+S7 =  ''                      ;  CATALOGED VOLUME:  NONE
+ISCAT = FALSE   ; TENTATIVE "NOT CATALOGED"
+IF (LAST LT W0) EXE 800 ; nothing found
+POI '&(OLDDSN) ' 3/46 (1) IN &W0/LAST NOL ; find name with trailing blank
+IF (* LT 0) DEL &W0/LAST ; not found
+  THEN EXEC 800
+REA STR VOLSER USI * COL 47/52   ; volser from catlg entry
+DEL &W0/LAST
+ISCAT = TRUE   ;  SHOW CATALOGED
+S7 =  VOLSER                      ;  REMEMBER CATALOGED VOL.
+REA STR VOLSER UPP PRO 'Volume on which it resides (RETURN = cataloged volume &S7): '
+EXE 830
+
+; VOLUME
+S7 =  VOLUME  ; SET VOLUME
+IF (S7 NE '') REA STR VOLSER UPP PRO'Volume on which it resides (RETURN=&S7): '
+ELSE REA STR VOLSER UPP PRO'Volume on which it resides: '
+; HERE FOR CATALOGED OR NOT CATALOGED
+IF (VOLSER EQ '') VOLSER = S7
+IF (VOLSER EQ '') EXE 600  ; NO VOL SET, REPROMPT
+IF(SIZE(VOLSER) EQ 6) EXE 900
+ELSE WRI '&(VOLSER):  Invalid.  Volume serial number must be six characters, e.g. PUB017'
+ELSE EXE 800
+;  GOT VOLUME
+IF (S7 NE '') IF (VOLSER NE S7) ISCAT = FALSE  ; CATLG'D ON ANOTHER VOL, DON'T UNCAT
+PUTLINE &(NEXTH)                VOL=SYSALLDA=&(VOLSER)
+NEXTH = NEXTH + 1
+IF (ISCAT)  PUTLINE &(NEXTH)  UNCATLG DSNAME=&(OLDDSN)
+PUTLINE &(NEXTC) &(NEWDSN)
+CHA 45 TO '&(VOLSER)' IN &(NEXTC) NOL
+NEXTC = NEXTC + 1
+EXEC 2100 SAVE ; add to volume list
+
+; END OF LOOP
+IF (N3 EQ -1) EXE 2000 ; PARM GIVEN, STOP AFTER 1 DS
+IF (N3 EQ 0) EXE 400 ; DO ANOTHER--PROMPT MODE
+; LIST/MOD MODE
+IF (NAMPTR GT LISTND) EXE 2000 ; END OF LIST, DONE
+POI &(NAMPTR)+.001(1) NOL
+IF (* LT 0) EXE 2000   ; NO SUCH LINE, DONE
+IF (* GT LISTND) EXE 2000  ; PAST END OF LIST, DONE
+NAMPTR = *           ; -->NEXT NAME
+EXE 400
+;  DONE
+; volume dd statements
+II=9000.0; starting line number
+I=1      ; loop counter
+II=II+1
+PUTLINE &(II) //DISK&(FORMAT(I+1000,3,0)) DD UNIT=SYSALLDA,DISP=OLD,VOL=SER=&(VOLIST[I])
+I=I+1
+IF (I LE VOLCNT) EXEC 2008; loop back
+
+IF (FIRST LE LISTND) DEL FIRST/&(LISTND) ; delete list
+COMM The job is in your active file and is ready to run.  List
+COMM and check for errors, then type RUN to run the job.
+IF (OLDACT NE 0) COMM Type PICK &(OLDACT) to restore your previous active file.
+COMM
+COMM RENAME done.
+SET ESC  &(OLDESC)
+CLE EXE
+; Subroutine to update list of volumes.  List is in array VOLIST.
+; New volume is in VOLSER.  Count is in VOLCNT.  Keep list in order,
+; avoid duplications.  Return via EXEC RETURN.
+
+IF (VOLCNT GT 0) EXEC 2110
+VOLIST[1]=VOLSER
+VOLCNT=1
+EXEC RETURN
+
+; VOLCNT>0
+I=0
+
+;LOOP
+I=I+1
+IF (I GT VOLCNT) EXEC 2130 ; end of array
+IF (VOLSER EQ VOLIST[I]) EXEC RETURN   ; new string is redundant
+IF (VOLSER GT VOLIST[I]) EXE 2113       ; try next element
+; new string goes just before this one
+   II=VOLCNT
+   VOLIST[II+1]=VOLIST[II]
+   II=II-1
+   IF (II GE I) EXEC 2120
+   VOLIST[I]=VOLSER
+   VOLCNT=VOLCNT+1
+   EXEC RETURN
+
+; new string goes at end
+VOLIST[VOLCNT+1]=VOLSER
+VOLCNT=VOLCNT+1
+EXEC RETURN
+; SUBROUTINE TO CLEAN UP A STRING--STRIP LEADING AND TRAILING BLANKS, ETC.
+;  S1, S2, N0, N2 USED
+; ON RETURN:  N0=1 IF NAME GOOD, N0=0 IF NAME BAD
+S0 =  UPPER(S0)
+; STRIP LEADING AND TRAILING BLANKS
+S0=STRIP(S0)
+IF(INDEX(S0,' ')GT 1) COMM &(SUB(S0,INDEX(S0,' ')+1)) - IGNORED
+THE S0 =  SUB(S0,1,INDEX(S0,' ')-1)
+IF (NOT SYNCHK) EXE 3400 ; skip syntax check?
+;  DSNAME SYNTAX CHECK
+S1 =  S0
+;
+; LOOP
+S2 =  SUB(S1,1,1)
+IF (IND('ABCDEFGHIJKLMNOPQRSTUVWXYZ#@$',S2) EQ 0) COMM ERROR:  First character "&S2" nonalphabetic
+THEN EXEC 3500
+N0 =  IND(S1,'.')
+IF (N0 EQ 0) N0 =  SIZE(S1)
+ELSE N0 =  N0-1
+S2 =  SUB(S1,1,N0)    ; NEXT QUALIFIER
+S1 =  SUB(S1,N0+2)   ; REMAINDER
+IF (N0 GT 8) COMM ERROR:  Name contains more than 8 characters between periods
+THEN EXEC 3500
+N2 =  VER(S2,'ABCDEFGHIJKLMNOPQRSTUVWXYZ0987654321$#@-')
+IF (N2 EQ 0) EXE 3340  ; OK
+COMM ERROR:  Illegal character '&(SUB(S2,N2,1))' in name
+EXE 3500
+IF (N0 EQ 0) COMM ERROR:  Two consecutive periods in name
+THEN EXEC 3500
+; IT'S OK.
+IF (S1 NE '') EXE 3180
+;
+; END OF LOOP...LAST INDEX LEVEL CHECKED
+N0 =  1
+EXE RETURN
+;
+; BAD DSN
+N0 =  0
+EXE RETURN
+;  TEXT FOR EXPLANATIONS
+This EXEC file sets up a batch job to rename data sets.  Cataloged
+data sets will be recataloged when they are renamed.  Uncataloged
+data sets will be cataloged when they are renamed.
+
+You can use RENAME to move data sets from one account to another.
+Invoke RENAME while logged on under the account that owns the data
+sets, and specify ACCT mode.
+
+You can specify a data set name as a PARM when invoking RENAME.  In
+that case, you will be prompted for the new name only.
+For renaming a single data set (and not changing account) it is easier
+to use the OSRENAME command in WYLBUR; exit this EXEC and type
+HELP OSRENAME for more information.
+
+If you are renaming data sets with illegal names, RENAME will require
+that the new name be legal.  If the old name contains lowercase letters,
+you will have to modify the commands generated by RENAME before you
+run the job.
+
+
+There are four modes of running RENAME:
+
+PROMPT   You will be prompted to supply the name of the data set to
+         be renamed, then prompted for the new name to be assigned.
+         This cycle will be repeated for as many data sets as you
+         wish to rename.
+
+LIST     The list of data set names must be in your active file.
+         Each name will be displayed by RENAME, then you will be
+         prompted for a new name.  This cycle will be repeated for
+         each data set name in your active file.
+
+MOD      Similar to LIST, except that instead of prompting you for a
+         new name, RENAME will display the old name and prompt for
+         MODS as with a MODIFY command.  You can then modify the old
+         name, using all MODIFY command features, to get the new
+         name.
+
+ACCT     For changing accounts.  Like MOD, except the new account
+         will be inserted in the name before you are prompted for
+         mods.
+

@@ -1,0 +1,389 @@
+;
+;;  SHOWLTRC -- This is the SHOW LTRACE command.
+;;
+;;  The command displays the terminal I/O trace from a MILTEN session.
+;;
+;;  Command syntax is:
+;;    show ltrace [line-number] [LIKE name] [MONITOR] [collect options]
+;;
+;;
+;;  Created, 5/91, Jim Nisbet
+;;
+;;  Modifications:
+;;     5/25/91  Niz   Initial version.
+;;     5/29/91  Niz   Minor cleanup; add MONITOR and INTERVAL.
+;
+
+xproc () begin
+   ;
+   ;  General initialization.
+   ;
+   x.origact = actno
+   x.attn = 0                      ; attn counter (see attnexit)
+   x.noattn = false                ; allow ATTNs
+
+   x.pgm = 'SHOW LTRACE'           ; our program name
+   x.maint = '(gg.jdn)'            ; maintenance people
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit'
+
+   ;
+   ;  Authorization required to get trace information from Milten.
+   ;
+   set exec auth
+
+   ;
+   ;  Initialize command options.
+   ;
+   if (vartype('ses.ltrace_line') eq 'UNDEFINED') \
+      ses.ltrace_line = -1
+   if (vartype('ses.priv_ltrace_acct') eq 'UNDEFINED') \
+      ses.priv_ltrace_acct = ''
+   x.old_colinfo = ''
+   x.opt_line = -1
+   x.opt_name = ''
+   x.opt_monitor = false
+   x.opt_all = false
+   x.milcmd = 'MILTEN'
+   if (milten ne 'MILTEN') x.milcmd = 'TESTMIL'
+   x.interval = 5
+   x.lastid = 0
+
+   open LTRACE title 'SHOW LTRACE info' temp
+   x.ouract = actno
+
+   ;
+   ;  Process SHOW LTRACE options.
+   ;
+   pcall command_options(parm_string)
+
+   ;
+   ;  Set up communications path.
+   ;
+   pcall open_trace()
+
+   ;
+   ;  Do the SHOW TRACE display.
+   ;
+   pcall show_trace()
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+; command_options -- Scan the SHOW LTRACE options and set the
+;   appropriate global variables.
+;
+proc command_options(opts) begin
+   dcl str token, ttype, dummystr
+
+   ;
+   ;  Handle "collect options".
+   ;
+   pick &(x.origact)
+   try syscall collect_scan(opts, dummystr, x.old_colinfo)
+   ; if not ok to clear, cleanup and exit
+   if (tryattn or tryerr) begin
+      try write 'No action taken.'
+      pcall cleanup('error')
+   end
+   x.origact = actno         ; "collect keep" could change actno
+
+   pick &(x.ouract)
+
+   ;
+   ;  Scan command options.
+   ;
+   while (opts ne '') begin
+      syscall scan_parm(token, opts, ttype)
+      token = upper(token)
+
+      cases begin
+         case (abbrev('HELP', token, 3)) begin
+            pcall help(opts)
+            pcall cleanup('')
+         end
+
+         case (abbrev('MONITOR', token, 3)) begin
+            x.opt_monitor = true
+         end
+
+         case (abbrev('INTERVAL', token, 3)) begin
+            syscall scan_parm(token, opts, ttype)
+            if (ttype eq 'NUMBER') x.interval = token
+            else begin
+               write token ||': invalid numeric interval.'
+               pcall cleanup('')
+            end
+         end
+
+         case (token eq 'ALL') begin
+            x.opt_all = true
+         end
+
+         case (token eq 'MILTEN') begin
+            x.milcmd = 'MILTEN'
+         end
+
+         case (token eq 'TESTMIL') begin
+            x.milcmd = 'TESTMIL'
+         end
+
+         case (ttype eq 'NUMBER') begin
+            x.opt_line = token
+         end
+
+         case (abbrev('LIKE', token, 3)) begin
+            syscall scan_parm(token, opts, ttype)
+            x.opt_name = upper(token)
+         end
+
+         case (true) begin
+            write token ||': unrecognized SHOW LTRACE option.'
+            pcall cleanup('')
+         end
+      end
+   end
+
+   ;
+   ;  Set up defaults if no options given.
+   ;
+   if (x.opt_line eq -1 and x.opt_name eq '') begin
+      x.opt_line = ses.ltrace_line
+      if (x.opt_line eq -1) begin
+         pcall cleanup('errmsg "Missing MILTEN line-number \
+            or line-name on SHOW LTRACE."')
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  help -- Give informaiton about available options.
+;
+
+proc help(opts) begin
+   write 'SHOW LTRACE syntax is:'
+   write ''
+   write '    SHOW LTRACE [n|name] [ALL] [MONITOR]'
+   write ''
+   write 'The ALL options includes an I/O header line with a timestamp.'
+   write 'The monitor command will continue to watch the line for new'
+   write 'informaiton.'
+end
+
+
+
+; <.page>
+;
+;  open_trace -- This routine opens the Milten communications path.
+;
+
+proc open_trace() begin
+   dcl str token, toktype, lasttag, rc
+
+   pick &(x.ouract)
+   try quietly delete f/l
+   try &(x.milcmd) show lines collect
+   try quietly delete ~'|'1 nolist
+
+   ;
+   ;  Match on session name.
+   ;
+   if (x.opt_name ne '') begin
+      x.opt_line = -1
+      try quietly sort descending
+      if (lasttag eq '') begin
+         wkline = substr(line(first),2)
+         syscall scan_parm(token, wkline, toktype, '|', '|')  ; tag
+         lasttag = token
+      end
+
+      while (x.opt_line eq -1) begin
+         pcall wait(x.interval, 'Waiting for ' || x.opt_name || ' session...')
+
+         try quietly delete f/l
+         try &(x.milcmd) show lines collect
+         try quietly delete ~'|'1 nolist
+         try quietly sort descending
+         p c'&(x.opt_name)' and '|T' (1) nolist
+         if (* ge 0) begin
+            wkline = substr(line(*),2)
+            syscall scan_parm(token, wkline, toktype, '|', '|')  ; tag
+            if (token ge lasttag) begin
+               syscall scan_parm(token, wkline, toktype, '|', '|')  ; lineno
+               x.opt_line = token
+               show line &(x.opt_line)
+            end
+         end
+      end
+   end
+
+   ;
+   ;  Session number.
+   ;
+   if (x.opt_line ne -1) begin
+      ses.ltrace_line = -1
+
+      point '|&(x.opt_line)|'18 (1) nolist
+      if (* lt 0) begin
+         pcall cleanup('errmsg "Line &(x.opt_line) is not logged on."')
+      end
+
+      llno = *
+      change ';                                    ' to '|' in &(llno) nolist
+      wkline = substr(line(llno),2)
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; tag
+      tag = token
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; lineno
+      tline = token
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; account
+      tacct = token
+      syscall scan_parm(token, wkline, toktype, '|', '|')  ; name
+      tname = token
+
+      ;
+      ;  Check for the correct password the first time through.
+      ;
+      if (tacct ne ses.priv_ltrace_acct) begin
+         ses.priv_ltrace_acct = ''
+         msg = 'Line ' || tline || ' ' || tacct
+         if (tname ne '') msg = msg || ' ' || tname
+         try write msg || ' is not yours.'
+         try rc = rf_pw_prompt('',tacct)
+         if (tryerr or rc ne 'OK') pcall cleanup('')
+         ses.priv_ltrace_acct = tacct
+      end
+
+      ;
+      ;  Save the line-number being traced so that it will be
+      ;     the default if no line is specifed on subsequent calls.
+      ;
+      ses.ltrace_line = tline
+   end
+end
+
+
+; <.page>
+;
+;  show_trace -- This routine displays the trace.
+;
+
+proc show_trace() begin
+   ;
+   ;  Main display loop.
+   ;
+retry_trace:
+   try quietly delete f/l
+   &(x.milcmd) show ltrace &(x.opt_line) after &(x.lastid) collect
+   if (not x.opt_all) begin
+      try quietly delete p'<nn>:'1 nolist
+   end
+
+   wkline = line(last)
+   if (match(wkline, 'Highest trace id = ')) begin
+      delete last
+      x.lastid = substr(wkline,size('Highest trace id =')+1)+0
+   end
+
+   if (lines ne 0) \
+      list unn
+
+   if (x.opt_monitor) begin
+      pcall wait(x.interval, x.pgm||' waiting for ' || x.interval || ' seconds... ')
+      goto retry_trace
+   end
+end
+
+
+;
+;  wait -- Routine to wait the specified number of seconds.
+;
+
+proc wait(nsec, msg) begin
+   cr = s'0d'
+
+   ;
+   ;  Give "waiting" message, wait, and then erase it.
+   ;
+   try write left(time,5) || ' ' \
+      || msg nonl
+   try wait &(nsec)
+   if (tryattn) begin
+      try write cr || copies(' ',size(msg)+6) || cr nonl
+      pcall cleanup('')
+   end
+
+   try write cr || copies(' ',size(msg)+6) || cr nonl
+end
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   if (x.old_colinfo ne '') begin
+      syscall collect_set_info(&(x.old_colinfo))
+      x.old_colinfo = ''
+   end
+
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end
+
+
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   if (not x.noattn) begin
+      x.attn = x.attn + 1
+      write 'BREAK interrupted the ' || x.pgm || ' command.'
+      pcall cleanup('')
+   end
+end
+
+
+
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    Right now all we do is log the error information.
+;
+
+proc errorexit() begin
+   write '----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+   write ''
+   write '--> show vars type error'
+   try show vars type error
+
+   write ''
+   write '--> show vars type x'
+   try show vars type error
+
+   write ''
+   write '--> show vars type ses'
+   try show vars type error
+
+   write ''
+   write 'End of diagnostics.'
+
+   pcall cleanup('error')
+end

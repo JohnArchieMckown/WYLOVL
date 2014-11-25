@@ -1,0 +1,219 @@
+xproc () begin
+
+;;;on error  cmd = 'pcall error'
+   on attn   cmd = 'pcall finish' int
+
+   x.origact = actno
+   x.temp_act = 0
+   x.pno = 0
+   x.save_height = height
+
+   if (vartype('ses.amycmd_path') eq 'UNDEFINED') begin
+      ses.amycmd_path = 'AMELIA'
+      if (mach eq 'SYSD') ses.amycmd_path = 'TESTAMY'
+   end
+
+   rc = ''
+   rcount = 0
+   stemp = ''
+   cmd = 'quit'
+   oldcmd = 'quit'
+   callparm = parm_string
+   if (callparm ne '') begin
+      x.pathname = ses.amycmd_path
+   end
+   else begin
+      x.pathname = strip(input('Path name (CR=&(ses.amycmd_path))? ', \
+         'upper'))
+      if (x.pathname eq '') \
+         x.pathname = ses.amycmd_path
+   end
+   ses.amycmd_path = x.pathname
+
+next_cmd:
+   on attn cmd='pcall finish' int reenable
+   on error cmd = 'xexit next_cmd' reenable
+   if (sub(oldcmd,1,3) eq 'MON') \
+      pcall close
+   if (callparm ne '') begin
+      if (callparm eq 'quit') pcall finish
+      cmd = callparm
+      callparm = 'quit'
+   end
+   else begin
+      cmd = input ('Amelia command? ','attn')
+      if (ioresult eq 'ATTN') pcall finish
+   end
+
+   if (cmd eq '') \
+      cmd = oldcmd
+
+   if (sub(cmd,1,1) eq '@') begin
+      try &(sub(cmd,2))
+      goto next_cmd
+   end
+
+   cmd = upper(strip(cmd))
+   oldcmd = cmd
+
+   if (sub(cmd,1,3) eq 'MON') \
+      set term height 0
+   else \
+      set term height &(x.save_height)
+
+   if (cmd eq '?' or cmd eq 'H' or sub(cmd,1,3) eq 'HEL') begin
+      pcall cmd_help
+      goto next_cmd
+   end
+
+   if (cmd eq sub('QUIT',1,siz(cmd))) \
+      pcall finish
+
+   ctemp = cmd
+   if (ind(cmd,':') eq 0) \
+      ctemp = 'COMMAND:'||cmd
+
+   ;;;quiet try send gg.jes &(ses.amycmd_path) &(cmd)
+
+   pcall sendcmd (ctemp)
+
+   pcall pick_active (cmd)
+
+read:
+   on attn cmd='goto read_attn' int reenable
+   while (true) begin
+      oldend = end
+      if (sub(cmd,1,3) eq 'MON') \
+         readopt = 'wait=1'
+      else \
+         readopt = 'wait=6 eof=$END'
+      syscall path_readfile(x.pno, readopt, rcount, rc)
+      if (last ge oldend and sub(cmd,1,3) ne 'DUM') begin
+         if (sub(cmd,1,3) ne 'MON' or ttype eq 'VIRTUAL') \
+            list &(oldend)/last unn mix
+         else begin
+;;;;;;;     list ~' '1 or '0000'5 in &(oldend)/last unn mix
+            p 'Received packet:' or 'Sent packet:' in &(oldend)/last unn
+         end
+         oldend = end
+         if (line(last) eq '$END') rc = 'EOF'
+      end
+
+      if (rc eq 'EOF') goto next_cmd
+      if (rc ne 'TIMEOUT') begin
+         comm path_readfile rc=&(rc)
+         goto next_cmd
+      end
+   end
+
+read_attn:
+;; if (oldend le last and sub(cmd,1,3) ne 'DUM') begin
+;;    list &(oldend)/last unn mix
+;; end
+
+   goto next_cmd
+end
+
+proc error () begin
+   comm &(errinfo)
+   pcall finish ('xpause')
+end
+
+proc finish (exitcmd) begin
+
+   set height &(x.save_height)
+
+   if (x.temp_act ne 0) begin
+      pick &(x.temp_act)
+      close
+   end
+
+   pick &(x.origact)
+   pcall close
+   if (parm_count eq 0)  xreturn
+   &(exitcmd)
+end
+
+proc cmd_help () begin
+   comm
+   comm Amelia commands are:
+   comm   ADDHOST ipaddr name ...
+   comm   HOSTLOAD
+   comm   KILL tcpid
+   comm   LOOKUP hostname [SERVER hostid] [TYPE MX|A]
+   comm   MONITOR [protocol] [NODATA] [NOBROAD] [EXTERNAL] [HOST name|ipaddr]
+   comm         where protocol = ARP|IP|TCP|ICMP|UDP|PROT=n|PROT=0xxxx
+   comm   WRITELOG  Write Amelia log so Wylbur can FETCH it
+   comm   SET NS  name-server ...
+   comm   SET TCPTRACE  LENGTH=n  COUNT=n
+   comm   SHOW CORE [AMELIA|hexaddr] [+val] [length] [ASCII] [OFFSET]
+   comm   SHOW HOST [ipaddr|name]
+   comm   SHOW HOSTS
+   comm   SHOW INFO [ALL]
+   comm   SHOW LOG
+   comm   SHOW NS
+   comm   SHOW PATHS
+   comm   SHOW TCP tcpid [FULL|ALL]
+   comm   SHOW TCPTRACE
+   comm   SHOW VERSION
+   comm
+   comm   DUMP ...  (same as SHOW)
+   comm
+end
+
+proc pick_active (cmd) begin
+
+; If DUMP command, pick original active file
+
+   if (sub(cmd,1,3) eq 'DUM') begin
+      pick &(x.origact)
+      return
+   end
+
+; If not MONITOR command, use temp active file
+
+   if (sub(cmd,1,3) ne 'MON') begin
+      if (x.temp_act eq 0) begin
+         open amycmd title 'Amelia command response' temp
+         x.temp_act = actno
+      end
+      pick &(x.temp_act)
+      if (lines gt 0) del all
+      return
+   end
+
+; Get active file for MONITOR command output
+
+   open amymon title 'Amelia monitor output'
+   putline 1 Amelia monitor output
+   putend
+
+   x.origact = actno               ;So end up here at exit
+end
+
+
+proc sendcmd (cmd) begin
+
+   rc = ''
+   if (x.pno eq 0) begin
+      syscall path_open (x.pno,'yourtag=&(x.pathname) bufsize=128000',rc)
+      if (rc ne 'OK') begin
+         comm Open failed  rc = &(rc)
+         pcall finish
+      end
+   end
+
+   syscall path_write (x.pno, 'wait 60', cmd, rc)
+   if (rc ne 'OK') begin
+      comm Write failed  rc = &(rc)
+      pcall finish
+   end
+end
+
+proc close () begin
+   if (x.pno ne 0) begin
+      rc = ''
+      try syscall path_close (x.pno,'',rc)
+      x.pno = 0
+   end
+end

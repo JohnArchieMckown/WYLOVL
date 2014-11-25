@@ -1,0 +1,721 @@
+MEMSERV  TITLE 'ORVYL''s Memory Services'
+         COPY  HEADER
+CTL      REG   RS
+LAS      REG   RA
+CUR      REG   RB
+SCUR     REG   RJ
+NEW      REG   RK
+SNEW     REG   RVR
+         SPACE 2
+MEMSERV  MODULE
+         SPACE 2
+MEMSERV  CSECT
+         SPACE 2
+         GBLB  &SIMU
+&SIMU    SETB  0                       THIS IS NOT A SIMULATION.
+         SPACE 2
+CPAGE    EQU   4096                    CONSTANT SIZE OF PAGE
+CMAX     EQU   4                       DEFAULT MAXIMUM PAGE SIZE/BLOCK
+CINC     EQU   1                       DEF GETMAIN INCREMENT (PAGES)
+NIL      EQU   -1                      END OF LIST POINTER
+LLIMIT   EQU   32,,C'N'                MINIMUM SIZE OF ALLOC BLOCK
+LPLIMIT  EQU   4096,,C'N'              MINIMUM SIZE FOR PAGE BNDRY
+PGALIGN  EQU   X'7FFFF000'             MASK TO ALIGN TO A PAGE BNDRY
+NOHIBYT  EQU   X'7FFFFFFF'             MASK OUT HIGH ORDER BIT
+USERR    EQU   4                       ERROR: OVER POOL-SIZE LIMIT
+MEMERR   EQU   8                       ERROR: GETTING-MEMORY CODE
+FIXERR   EQU   12                      ERROR: FIXING-MEMORY CODE
+MINSIZER EQU   16                      ERROR: INVALID MIN ALLOC SIZE
+NOXSIZER EQU   20                      ERROR: SIZ OF NO-PAGE-X REQ > 4K
+MEMNINIT EQU   24                      ERROR: NOT INITIALIZED
+FRELENER EQU   28                      ERROR: LENGTH ON RELEASE
+FREADDER EQU   32                      ERROR: ADDRESS ON RELEASE
+FREOVER  EQU   36                      ERROR: REL OVERLAPS AVAIL MEM
+         EJECT ,
+         MACRO
+*********************************************************************
+*        ROUND THE VALUE IN REGISTER &REG UP TO THE NEXT MULTIPLE   *
+* OF &VAL.  &VAL MUST BE A POWER OF TWO                             *
+*********************************************************************
+         RNDUP &REG,&VALLOC,&TREG=
+*        VPUSH &TREG,,*
+         A     &REG,&VALLOC            ADD TO FORCE ROUND-UP
+         DECR  &REG                    |
+         L     &TREG,&VALLOC           LOAD POWER OF 2 MASK
+         LCR   &TREG,&TREG             |
+         NR    &REG,&TREG              ROUND UP
+*        VPOP  &TREG,,*
+         MEND
+         EJECT ,
+         COPY  RTCB
+         USING RTCB,RTCBR
+         EJECT ,
+         COPY  CBAT
+         EJECT ,
+         COPY  POOLPARM
+         TITLE 'Memory management sub-pool control table'
+*
+*  Individual pool management control table
+*
+MEMCTL   RECORD BEGIN
+         CHAIN PFX=HEAD
+MEMPLOCK DS    A                       Address of pool lock word
+MEMSIZ   DS    F                       SIZE OF MEMORY FOR THIS BLOCK
+MEMFRE   DS    F                       TOTAL FREE MEMORY AVAIL
+MEMINC   DS    F                       INCR IN WHICH TO GET MORE MEM
+MEMLOW   DS    F                       MINIMUM SIZE OF ALLOC BLOCK
+MEMPOOLN DS    H                       MEMORY SUB_POOL NUMBER
+         ORG   MEMPOOLN+1
+MEMFPOOL FLAG  ,                       Sub-Pool type
+         FLAG  (POOLGLOB,MEMTGLOB)     | Global pool
+         FLAG  (POOL16M,MEMTA16M)      | Above 16M
+         FLAG  (POOL4K,MEMTPAGE)       | ON 4K BOUNDARY
+         FLAG  (POOLFIX,MEMTFIX)       | FIXED
+         ORG   ,
+MEMFL    FLAG  ,                       TYPE OF BLOCK USING FLAGS
+         FLAG  FIX                     FIX PAGES IN MEMORY
+         FLAG  BDPAGE                  NO PAGE CROSSING
+         FLAG  FRECALL                 Called from MEMFREE
+         FLAG  GETCALL                 Called from MEMGET
+         FLAG  MEMFGINC                FRAGMENT GE INCR TO BE REL
+STATBEG  DS    0H                      -S>BEGINNING OF STATS BLOCK
+REQUEST  DS    F                       -S>NUMBER OF MEMORY REQUESTS
+REQSRCH  DS    F                       -S>CELLS SEARCHED ON REQUESTS
+MEMREL   DS    F                       -S>NUMBER OF MEMORY RELEASES
+SYSINC   DS    F                       -S>NUM OF SUB-POOL INCREMENTS
+USEFRE   DS    F                       -S>NUM OF USER FREE ATTEMPTS
+SYSFRE   DS    F                       -S>NUM OF SYSTEM MEMORY FREES
+DEPTH    DS    F                       -S>CURRENT DEPTH OF POOL BLOCKS
+MAXDEP   DS    F                       -S>MAXIMUM DEPTH OF POOL BLOCKS
+MAXSIZ   DS    F                       -S>LARGEST THAT BLOCK EVER GOT
+MAXFRAG  DS    F                       -S>SIZE OF LARGEST FRAGMENT
+STATSIZ  EQU   *-STATBEG               -S>SIZE OF STATISTICS BLOCK
+MEMNEXT  DS    0A                      Next control block address
+         END   ,
+         TITLE 'Memory management control table'
+MEMTABLE RECORD BEGIN                           MASTER TABLE RECORD
+MEMX1ST  DS    7A                               1ST sub-ctl blk addr
+MEMXLAST DS    A                                | and last
+MEMCTL1  DS    (8*L'MEMCTL)X                    Sub-control blocks
+         END   ,                                OF TABLE RECORD
+         SPACE 2
+         COPY  MEMPARM
+         TITLE 'Lock parameters'
+         COPY  LOCKPARM
+         TITLE 'Trace paramters'
+         COPY  TRCEPARM
+         TITLE 'Internal link parameters'
+@LINK    RECORD BEGIN                  PARAMETERS
+@LNKCTL  DS    A                       Control block address
+@LNKLL   DS    D                       Location/Length
+         ORG   @LNKLL
+@LNKLOC  DS    A                       Location
+@LNKLEN  DS    A                       Length
+@LNKLAS  DS    A                       Proc element on chain (first)
+@LNKNEW  DS    A                       Next element on chain (first)
+         END   ,                       OF PARAMETERS
+         TITLE 'Internal memory allocation from OS'
+@MIGET   RECORD BEGIN                  Internal-Get parameters
+@MIGCTL  DS    A                       Address of control block
+@MIGLL   DS    D                       Location/Length of Return
+         ORG   @MIGLL
+@MIGLOC  DS    A                       Address
+@MIGLEN  DS    A                       Optional increment
+         ORG   ,
+         END   ,                       OF Internal-Get parameters
+         TITLE 'ORVYL Memory Management'
+LAST     RECORD BEGIN
+         CHAIN PFX=LAS
+         END   ,
+         SPACE 2
+CURRENT  RECORD BEGIN
+         CHAIN PFX=CUR
+         END   ,
+         SPACE 2
+NEWCHAIN RECORD BEGIN
+         CHAIN PFX=NEW
+         END   ,
+         SPACE 2
+RXCHAIN  RECORD BEGIN
+         CHAIN PFX=RX
+         END   ,
+         EJECT ,
+MEMSERV  CSECT
+         SPACE 2
+         USING LAST,LAS
+         USING CURRENT,CUR
+         USING NEWCHAIN,NEW
+         USING RXCHAIN,RX
+         TITLE 'Initializing Routine'
+FIXINC   EQU   1*4096                           FIX POOL INCREMENT
+NFIXINC  EQU   3*4096                           NON-FIX POOL INC
+         SPACE 2
+*********************************************************************
+*                   Memory Control Initialization                   *
+*                                                                   *
+*   Input - @MEMINIT                                                *
+*                                                                   *
+*  Output - RTCBMEM or CBATMEM (depending on local or global        *
+*           initialization) points to a valid control block         *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+MEMINIT  PROC  @MEMINIT,SCOPE=GLOBAL
+*        TRCE  MEMINIT
+*-----------------------------------------------
+*  Get memory for contrlol blocks
+*-----------------------------------------------
+         PSET  @MEMORY                          GET CONTROL BLOCK
+         IF    MIGLOBAL,'SET MEMTGLOB'          | GLOBAL CONTROL BLK
+         SET   MEMTA16M                         | ABOVE 16M
+         MVC   @MEMLEN,=A(L'MEMTABLE)           |
+         VCALL POOLGET                          |
+         SPACE 2
+         L     RS,@MEMLOC                       CONTROL BLOCK LOC
+         IF    MIGLOBAL,BEGIN                   | Global case
+         L     RA,RTCBCBAT                      |
+         WITH  (CBAT,RA),'ST RS,CBATMEM '       |
+         END   ,                                | OF Global case
+         ELSE  'ST RS,RTCBMEM '                 |
+         SPACE ,
+*-----------------------------------------------
+*  Loop through pool control blocks
+*-----------------------------------------------
+         WITH  (MEMTABLE,RS),BEGIN
+         LA    RA,L'MEMXLAST                    Loop thru sub-ctls
+         LA    RB,MEMXLAST                      | Last sub-block index
+         LA    RJ,MEMCTL1                       | 1st sub-ctl blk addr
+         CLEAR (RK)                             | Pool-type index
+         END   ,                                OF With
+         LA    RX,LOCKNAMS                      Address of lock names
+         SPACE ,
+         WITH  (MEMCTL,RJ),BEGIN                Addr to sub-ctl block
+MILOOP   LABEL ,                                Initialize sub pools
+         ST    RJ,@RS                           Set index pointer
+*  Set pool type
+         IF    (MIGLOBAL),BEGIN                 Global pool
+         SET   POOLGLOB                         | Pool type
+         PSET  @LOCKCRE                         | Create lock
+         MVC   @LOCKNAM,0(RX)                   | | name from table
+         VCALL LOCKCRE                          |
+         ST    RVR,MEMPLOCK                     | Save lock-id
+         END   ,                                OF Global pool
+         SET   POOL4K                           Always use MVS 4K
+         STC   RK,@MIWFLAG                      Pool # tells type
+         IF    (MIWPAGE),BEGIN                  Allocation boundary
+         MVC   MEMLOW,=A(LPLIMIT)               |
+         END   ELSE,BEGIN                       Not page boundary
+         MVC   MEMLOW,=A(LLIMIT)                |
+         END   ,                                OF Allocation boundary
+         IF    (MIWFIX),BEGIN                   Fixed allocation
+         SET   FIX
+         SET   POOLFIX
+         MVC   MEMINC,=A(FIXINC)                Incr for more memory
+         END   ELSE,BEGIN                       Unfixed allocation
+         MVC   MEMINC,=A(NFIXINC)
+         END   ,                                Of fixed/unfixed
+         IF    (MIWA16M),'SET POOL16M'
+*  Flags FRECALL and GETCALL default to 'OFF'
+*  Initialize chains
+         ST    RJ,HEADFFWD             PNT TO SELF, EMPTY LIST
+         ST    RJ,HEADFBAC             |
+         ST    RJ,HEADBFWD             |
+         ST    RJ,HEADBBAC             |
+         SPACE 2
+*  Initialize next sub-control block
+         LA    RK,0(RK,RA)                      Next index
+         LA    RJ,MEMNEXT                       Next control block
+         BXLE  RS,RA,MILOOP                     |
+         END   ,                                OF Addr to sub-ctl blk
+         PEND  ,
+         EJECT ,
+LOCKNAMS DC    CL16'MEM^16M^FIX^PAGE'
+         DC    CL16'MEM^16M^FIX PAGE'
+         DC    CL16'MEM^16M FIX^PAGE'
+         DC    CL16'MEM^16M FIX PAGE'
+         DC    CL16'MEM 16M^FIX^PAGE'
+         DC    CL16'MEM 16M^FIX PAGE'
+         DC    CL16'MEM 16M FIX^PAGE'
+         DC    CL16'MEM 16M FIX PAGE'
+         TITLE 'Memget'
+*********************************************************************
+*               ORVYL memory management - get memory                *
+*                                                                   *
+*    Input - @MEMGET                                                *
+*                                                                   *
+*   Output - @MEMGET                                                *
+*            RVR  contains memory address                           *
+*            Memory is cleared                                      *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+MEMWORK  RECORD BEGIN
+LOWADD   DS    F                       LOW SEG OF BLOCK ADDR
+LOWLEN   DS    F                       LOW SEG OF BLOCK LEN
+HIADD    DS    F                       HIGH SEG OF BLOCK ADDR
+HILEN    DS    F                       HIGH SEG OF BLOCK LEN
+INDICATE FLAG  ,
+         FLAG  MLOW                    SECTION IN LOW SEG OF BLOCK
+         FLAG  MHIGH                   SECTION IN HIGH SEG OF BLOCK
+         FLAG  ALL                     ALL OF BLOCK IS ALLOCATED
+         END   ,
+         SPACE 2
+MEMGET   PROC  @MEMGET,MEMWORK,SCOPE=GLOBAL
+*        TRCE  MEMGET
+         IF    MGGLOB,BEGIN                     GLOBAL REQUEST
+         L     CTL,RTCBCBAT                     | CBAT ADDR
+         WITH  (CBAT,CTL),'L CTL,CBATMEM '      | MEMORY POOL
+         END   ELSE,BEGIN                       LOCAL REQUEST
+         L     CTL,RTCBMEM                      | MEMORY POOL
+         END   ,                                OF GLOBAL/LOCAL
+         LH    RX,@MGTYPE                       POOL INDEX
+         N     RX,=A(L'MGA16M+L'MGFIX+L'MGPAG)  | from these flags
+         L     CTL,@CTL(RX)                     |
+         USING MEMCTL,CTL                       ADDR FOR CONTROL BLOCK
+         SPACE ,
+         IF    ^FRECALL,BEGIN                   Not releasing to OS
+         INCR  CUR,REQUEST                      -S>ONE MORE REQUEST
+         IF    MGGLOB,BEGIN                     Get global lock
+         LOCKOB MEMPLOCK                        |
+         END   ,                                OF Get global lock
+         END   ,                                OF Not releasing to OS
+         L     SNEW,@MGLEN                      LENGTH OF REQUEST
+         RNDUP SNEW,MEMLOW,TREG=CUR    ROUND UP TO MINIMUM ALLOC SIZE
+         IF   ((FIX+BDPAGE,AND,(SNEW,GT,CPAGE)),OR,(SNEW,ZERO)),BEGIN
+         BAS   RAR,MEMKAPUT            NON-PAGE-CROSS TOO LARGE
+*                                      | or zero length
+         END   ,
+         EJECT ,
+         LR    CUR,CTL                 LIST HEAD POINTER
+LOOK     CLEAR (RX)                    | CLEAR LOOP COUNTER
+         LOOP  BEGIN                   LOOK FOR RIGHT BLOCK
+         INCR  RX                      | One more cell searched
+         LR    LAS,CUR                 INCREMENT, POINTER STYLE
+         L     CUR,LASFFWD             POINT TO NEXT ELEMENT
+         IF    MGBEST,'L CUR,LASBFWD'  |
+         IF    (CURSIZ,ZERO),BEGIN     END OF LIST
+*-----------------------------------------------
+*  End of memory list - if releasing to OS, quit
+*-----------------------------------------------
+         IF    FRECALL,BEGIN           SPECIAL ACTION FOR RELEASE MODE
+         CLEAR @MGLOC                  SET RET - NO PAGE AVAILABLE
+         B     MEMGETX                 EXIT ROUTINE
+         END   ,
+*-----------------------------------------------
+*  Get more memory from OS
+*-----------------------------------------------
+         AL    RX,REQSRCH              UPDATE DEPTH FOR THIS REQUEST
+         ST    RX,REQSRCH              |
+         ST    SNEW,@MGLEN             Save request length
+*
+         PSET  @MIGET                  GET MEMORY: MAX(MEMINC,REQST)
+         ST    SNEW,@MIGLEN            | Optional length
+         ST    CTL,@MIGCTL             | Control block
+         LCALL INTGET                  |
+         MVC   HIADD(L'@MIGLL),@MIGLL  Location/Length of new mem
+*
+         SET   GETCALL                 LINK BLOCK - CALLED FROM GETMEM
+         PSET  @MEMFREE                |
+         MVC   @MFLL,HIADD             | Loc/Len
+         MVC   @MFTYPE,@MGTYPE         | Pool type (number)
+         LCALL MEMFREE                 |
+*
+         CLEAR GETCALL                 BACK TO NORMAL MODE
+         L     CUR,@MFLOC              CUR POINTS TO MOST RECENT BLOCK
+         L     SNEW,@MGLEN             | Restore request length
+         CLEAR (RX)                    RESET DEPTH FOR SEARCH REMAINDER
+         END   ,                       OF END OF LIST
+*-----------------------------------------------
+*  END of Get more memory from OS
+*-----------------------------------------------
+         L     SCUR,CURSIZ             GET SIZE(CURRENT)
+         UNTIL (SCUR,GE,SNEW),END      OF LOOK FOR RIGHT BLOCK
+         AL    RX,REQSRCH              Update number of cells srched
+         ST    RX,REQSRCH              |
+         CLEAR ALL*MLOW*MHIGH          RESET FLAGS
+         IF   (SCUR,EQ,SNEW),'SET ALL' ALL SPACE IS TAKEN
+         SPACE ,
+         IF    (FIX+BDPAGE),BEGIN      CHECK PAGE XING IF NECESSARY
+         LR    RX,CUR                  Compute 1st & last bytes
+         AR    RX,SCUR                 | if alloc @ end of block
+         LR    RY,RX                   |
+         DECR  RX                      | last byte
+         SR    RY,SNEW                 | 1st byte
+         LR    NEW,RY                  | NEW = ADDR, SNEW = LENGTH
+         N     RY,=A(PGALIGN)          | start page
+         N     RX,=A(PGALIGN)          | stop page
+         IF    (RX,EQ,RY),BEGIN        ALLOC AT HIGH END OF BLOCK
+         IF    ALL,EXIT                DON'T LINK IF BLOCK ALL TAKEN
+         SET   MLOW                    MEM LEFT AT LOW END OF BLOCK
+         LR    RX,SCUR                 Size remaining after alloc
+         SR    RX,SNEW                 |
+         ST    RX,LOWLEN               | save size
+         ST    CUR,LOWADD              |  and address for link
+         END   ELSE,BEGIN              LOOK TO RESERVE MEM AT LOW END
+         LR    NEW,CUR                 NEW = ADDR, SNEW = LENGTH
+         LR    RX,CUR                  First and last bytes if alloc
+         LR    RY,CUR                  | at low end of block
+         AR    RY,SNEW                 | Address to link will be
+         ST    RY,HIADD                |  1 past last byte
+         DECR  RY                      | last byte
+         N     RX,=A(PGALIGN)          | start page
+         N     RY,=A(PGALIGN)          | stop page
+         IF    (RX,EQ,RY),BEGIN        ALLOC AT LOW END OF BLOCK
+         SET   MHIGH                   MEM LEFT AT HIGH END OF BLOCK
+         LR    RX,SCUR                 Length remaining to link
+         SR    RX,SNEW                 |
+         ST    RX,HILEN                |
+         END   ELSE,BEGIN              LOOK IN THE MIDDLE OF A BLOCK
+         LR    RX,CUR                  Round up to next page boundary
+         A     RX,=A(CPAGE-1)          |
+         N     RX,=A(PGALIGN)          |
+         LR    NEW,RX                  | NEW = ADDR, SNEW = LENGTH
+         AR    RX,SNEW                 | last byte+1
+         ST    RX,HIADD                | potential high addr to link
+         LR    RY,CUR                  | last byte+1 of current seg
+         AR    RY,SCUR                 |
+         IF    (RX,LE,RY),BEGIN        SPACE FOUND IN MIDDLE OF BLOCK
+         SET   MHIGH                   High end space to link
+         SR    RY,RX                   | save size
+         ST    RY,HILEN                |  (addr already saved)
+         SET   MLOW                    Low end space to link
+         ST    CUR,LOWADD              | save address
+         LR    RX,NEW                  | and length
+         SR    RX,CUR                  |
+         ST    RX,LOWLEN               |
+         END   ELSE,LOOK               NO ALLOC POSSIBLE, KEEP LOOKING
+         END   ,
+         END   ,
+         END   ELSE,BEGIN              END OF PAGE CROSSING CHECK
+         IF    ALL,'LR NEW,CUR'        NEW=ADDR, SNEW=LEN; DON'T LINK
+         ELSE  BEGIN                   LINK MEMORY LEFT OVER
+         SET   MLOW                    MEM REMAINS AT LOW END OF BLOCK
+         LR    RX,SCUR                 COMPUTE SIZE OF LEFT OVER
+         SR    RX,SNEW                 |
+         ST    RX,LOWLEN               |
+         ST    CUR,LOWADD              ADDRESS OF LEFT OVER BLOCK
+         LR    NEW,CUR                 COMPUTE ADDRESS OF ALLOC BLOCK
+         AR    NEW,SCUR                |
+         SR    NEW,SNEW                NEW = ADDR, SNEW = LENGTH
+         END   ,
+         END   ,
+         ST    NEW,@MGLOC              Here's the memory (Location)
+         ST    SNEW,@MGLEN             | Length
+*
+         L     RX,MEMFRE               GET AMT OF FREE MEM REMAINING
+         SR    RX,SNEW                 SUBTRACT CUR ALLOCATED AMOUNT
+         ST    RX,MEMFRE               STORE ADJUSTED VALUE
+*
+*  Delete BEST-FIT link
+         L     LAS,CURBBAC             BEST-FIT PREV ELEM
+         L     NEW,CURBFWD             BEST-FIT NEXT ELEM
+         ST    NEW,LASBFWD             LAST NOW POINTS TO NEXT
+         ST    LAS,NEWBBAC             NEXT NOW POINTS TO LAST
+*
+*  Delete FIRST-FIT link now
+         L     LAS,CURFBAC             FIRST-FIT PREV ELEM
+         L     NEW,CURFFWD             FIRST-FIT NEXT ELEM
+         ST    NEW,LASFFWD             LAST NOW POINTS TO NEXT
+         ST    LAS,NEWFBAC             NEXT NOW POINTS TO LAST
+         IF    ALL,'DECR RX,DEPTH'     ONE LESS FRAGMENT
+         ELSEIF MLOW*MHIGH,'INCR RX,DEPTH'      ONE MORE FRAGMENT
+         IF    MLOW,BEGIN              IF LOW BLOCK LEFT OVER, LINK IT
+         PSET  @LINK                   | Parameters
+         ST    CTL,@LNKCTL             | Control block address
+         MVC   @LNKLL,LOWADD           | Loc/Len
+         ST    LAS,@LNKLAS             | Previous cell
+         ST    NEW,@LNKNEW             | Next cell
+         LCALL LINK                    |
+         L     LAS,LOWADD              | Becomes LASt for HIADD block
+         END   ,
+         IF    MHIGH,BEGIN             IF HIGH BLK LEFT OVER, LINK IT
+         PSET  @LINK                   | Parameters
+         ST    CTL,@LNKCTL             | Control block address
+         MVC   @LNKLL,HIADD            | Loc/Len
+         ST    LAS,@LNKLAS             | Previous cell
+         ST    NEW,@LNKNEW             | Next cell
+         LCALL LINK                    |
+         END   ,
+         IF    ^FRECALL,BEGIN          NOT RELEASING MEMORY TO OS
+         L     RX,@MGLOC               DEST ADDRESS
+         L     RY,@MGLEN               DEST LENGTH
+         CLEAR (RB)                    SOURCE LEN & PAD
+         MVCL  RX,RA                   CLEAR IT
+*  Do statistics
+         L     RX,DEPTH                -S>SAVE CURRENT DEPTH COUNT
+         STMAX RX,MAXDEP               -S>SAVE MAXIMUM DEPTH TOO
+         L     RX,MEMSIZ               -S>CUR SIZE OF CONTROL BLOCK
+         STMAX RX,MAXSIZ               -S>SAVE MAX SIZE OF CTL BLOCK
+         L     LAS,HEADBBAC            -S>LAST FRAGMENT IS LARGEST
+         MVC   MAXFRAG,LASSIZ          -S>
+         IF    (MAXFRAG,LT,MEMINC),'CLEAR MEMFGINC'    -S>NONE >= INC
+*--------------------------------------
+*   Release lock if global transaction
+*--------------------------------------
+         IF    MGGLOB,BEGIN            Release global lock
+         LOCKRL MEMPLOCK               |
+         END   ,                       OF Release global lock
+         END   ,                       OF NOT RELEASING MEMORY TO OS
+         L     RVR,@MGLOC
+MEMGETX  PEND  ,
+         DROP  MEMCTL
+         TITLE 'Internal Link w/out Collapse'
+*********************************************************************
+*                   Internal memory link routine                    *
+*                                                                   *
+*   Input - @LINK                                                   *
+*                                                                   *
+*  Output - @LINK:                                                  *
+*           @LNKLOC points to the start of the block that was just  *
+*           linked (after possible collapse)                        *
+*********************************************************************
+         SPACE ,
+LINK     PROC  @LINK
+         L     CUR,@LNKLOC             Current
+         MVC   CURSIZ,@LNKLEN          Save size in block
+*  Link first-fit
+         L     LAS,@LNKLAS             Previous
+         L     NEW,@LNKNEW             Next
+         ST    LAS,CURFBAC             CUR POINTS BACK TO LAST
+         ST    NEW,CURFFWD             CUR POINTS FWD TO NEW
+         ST    CUR,NEWFBAC             NEW POINTS BACK TO LAST
+         ST    CUR,LASFFWD             LAST POINTS FWD TO CUR
+*  Link best-fit
+         L     NEW,@LNKCTL             Header is 1st block ptr
+         LOOP  BEGIN
+         LR    LAS,NEW                 ADVANCE POINTER
+         L     NEW,LASBFWD             NEXT IN BEST FIT LIST
+         L     SNEW,NEWSIZ             GET SIZE
+*  If sized are equal, then sort by address, highest first.
+*    Because the size in the header chain is zero, SCUR won't equal
+*    SNEW if SNEW is the anchor of the chains
+         UNTIL (((SCUR,EQ,SNEW),AND,(CUR,GT,NEW)),OR,                  *
+               (SCUR,LT,SNEW),OR,(SNEW,ZERO)),END
+*  Insert CUR between LAS and NEW if @ end of list, or in sorted pos
+         ST    NEW,CURBFWD             CUR POINTS FWD TO NEW
+         ST    CUR,NEWBBAC             NEW POINTS BACK TO CUR
+         ST    LAS,CURBBAC             CUR POINTS BACK TO LAS
+         ST    CUR,LASBFWD             LAS POINTS FWD TO CUR
+         PEND  ,
+         TITLE 'Memfree'
+*********************************************************************
+*               ORVYL memory management - free memory               *
+*                                                                   *
+*   Input - @MEMFREE                                                *
+*                                                                   *
+*  Output - @MEMFREE:                                               *
+*           @MFLOC points to block just linked                      *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+MEMFREE  PROC  @MEMFREE,SCOPE=GLOBAL
+*        TRCE  MEMFREE
+*  Choose proper pool
+         IF    MFGLOB,BEGIN            Global request
+         L     CTL,RTCBCBAT            | Memory control location
+         WITH  (CBAT,CTL),'L CTL,CBATMEM'
+         END   ELSE,BEGIN              Local request
+         L     CTL,RTCBMEM             |
+         END   ,                       OF Local request
+         LH    RX,@MFTYPE              Index into pool type
+         N     RX,=A(L'MFA16M+L'MFFIX+L'MFPAG)
+         L     CTL,@CTL(RX)            |
+         USING MEMCTL,CTL
+*
+         IF    ^GETCALL,BEGIN          Not an internal call
+         INCR  RX,MEMREL               -S> ONE MORE RELEASE
+         IF    MFGLOB,BEGIN            Get global lock
+         LOCKOB MEMPLOCK               |
+         END   ,                       OF Get global lock
+         END   ,                       OF Not an internal call
+         INCR  RX,DEPTH                ANOTHER FRAGMENT
+         L     RX,MEMSIZ               COMPUTE SIZ OF ALLOC MEM
+         S     RX,MEMFRE               |
+         L     SNEW,@MFLEN             Released length
+         IF    ((SNEW,NPOS),OR,(^GETCALL,AND,(SNEW,GT,RX))),BEGIN
+         BAS   RAR,MEMKAPUT
+         END   ,
+         RNDUP SNEW,MEMLOW,TREG=CUR    ROUND UP TO MINIMUM ALLOC SIZE
+         L     NEW,@MFLOC              NEW BLOCK IS ONE TO BE LINKED
+         LR    RY,NEW                  CHECK FOR ADDRESS BOUNDARY
+         L     CUR,MEMLOW              |
+         LCR   CUR,CUR                 |
+         NR    NEW,CUR                 |
+         IF    ((NEW,NE,RY),OR,(NEW,NPOS)),BEGIN
+         BAS   RAR,MEMKAPUT
+         END   ,
+         LR    CUR,CTL                 FIRST BLOCK IS HEADER
+         LOOP  BEGIN
+         LR    LAS,CUR                 ADVANCE POINTER BY ONE LINK
+         L     CUR,LASFFWD             UPDATE POINTER TO CURRENT LINK
+         UNTIL ((NEW,LT,CUR),OR,(CURSIZ,ZERO)),END
+         IF    (CURSIZ,NZ),BEGIN       ONLY CHECK IF NON-NIL CHAIN
+*   If the block being freed starts before the previous free block
+* ends, or ends after the next free block starts, then it is an
+* error.
+         LR    RX,LAS
+         A     RX,LASSIZ
+         IF    (NEW,LT,RX),BEGIN       BLK STARTS BEFORE PREV ENDS
+         BAS   RAR,MEMKAPUT
+         END   ,                       OF BLK STARTS BEFORE PREV ENDS
+         LR    RY,CUR                  Check: blk end after nxt start
+         LR    RX,NEW                  |
+         AR    RX,SNEW                 |
+         IF    (RX,GT,RY),BEGIN        BLK ENDS AFTER START OF NEXT
+         BAS   RAR,MEMKAPUT            MEMOVER
+         END   ,                       OF BLK ENDS AFTER START OF NEXT
+         END   ,                       OF ONLY CHECK IF NON-NIL CHAIN
+*
+*  INSERT IF BEFORE CURRENT ADDRESS OR IF AT END OF LIST
+         ST    CUR,NEWFFWD             NEW NOW POINTS AHEAD TO CUR
+         ST    NEW,CURFBAC             CUR POINTS BACK TO NEW
+         ST    NEW,LASFFWD             LAST NOW POINTS FWD TO NEW BLK
+         ST    LAS,NEWFBAC             NEW POINTS BACK TO LAS
+         ST    SNEW,NEWSIZ             STORE SIZE OF BLOCK IN BLOCK
+         LR    CUR,NEW                 NOW IT'S INSERTED AND CUR BLOCK
+         LR    RX,SNEW                 TOTAL UP AMOUNT OF FREE MEMORY
+         A     RX,MEMFRE               | add to this block
+         ST    RX,MEMFRE               | save in ctl block
+*  TEST TO COLLAPSE LOW END
+         LR    RX,LAS                  ADDRESS OF LAST BLOCK
+         A     RX,LASSIZ               ADD SIZE OF BLOCK
+         IF    (RX,EQ,CUR),BEGIN       BLOCKS ADJACENT, COLLAPSE
+         DECR  RY,DEPTH                ONE LESS FRAGMENT
+         MVC   LASFFWD,CURFFWD         LAST POINTS TO NEXT
+         L     RX,CURFFWD              GET ADDRESS OF NEXT BLOCK
+         ST    LAS,RXFBAC              NEXT BLK POINTS BACK PAST MERGE
+         L     RX,LASSIZ               SIZE OF LAST
+         A     RX,CURSIZ               ADD SIZE OF CUR TO GET TOTAL
+         ST    RX,LASSIZ               STORE SIZE IN BLOCK
+*  DELETE THIS LINK FROM BEST-FIT LIST
+         L     RX,LASBBAC              PREVIOUS ELEM IN BEST-FIT LIST
+         MVC   RXBFWD,LASBFWD          LAST NOW POINTS TO NEXT
+         L     NEW,LASBFWD             BEST-FIT NEXT ELEM
+         MVC   NEWBBAC,LASBBAC         NEXT NOW POINTS TO LAST
+         LR    CUR,LAS                 AFTER COLLPSE CUR IS OLD LAST
+         END   ,                       OF BLOCKS ADJACENT, COLLAPSE
+*  TEST TO COLLAPSE HIGH END
+         LR    NEW,CUR                 GET ADDRESS OF CURRENT
+         A     NEW,CURSIZ              ADD SIZE OF CUR (ADDR OF ADJ)
+         L     RX,CURFFWD              LOAD POINTER TO NEXT
+         IF    (NEW,EQ,RX),BEGIN       BLOCKS ADJACENT, COLLAPSE
+         DECR  RY,DEPTH                ONE LESS FRAGMENT
+         MVC   CURFFWD,NEWFFWD         CUR BLOCK POINTS PAST NEXT
+         L     RX,NEWFFWD              ADDRESS OF ELEM PAST MERGE
+         ST    CUR,RXFBAC              NEXT BLK POINTS BACK PAST MERGE
+         L     SCUR,CURSIZ             GET SIZE OF CUR
+         A     SCUR,NEWSIZ             ADD SIZE OF NEXT
+         ST    SCUR,CURSIZ             SAVE SIZE OF BLOCK IN BLOCK
+*  DELETE THIS BLOCK FROM BEST-FIT LIST
+         L     LAS,NEWBBAC             BEST-FIT PREV ELEM
+         MVC   LASBFWD,NEWBFWD         LAST NOW POINTS TO NEXT
+         L     RX,NEWBFWD              BEST-FIT NEXT ELEM
+         MVC   RXBBAC,NEWBBAC          NEXT NOW POINTS TO LAST
+         END   ,                       OF BLOCKS ADJACENT, COLLAPSE
+*  INSERT BLOCK IN BEST FIT LIST
+         L     SCUR,CURSIZ             GET SIZE OF BLOCK
+         LR    NEW,CTL                 SET POINTER TO HEAD OF LIST
+         LOOP  BEGIN                   LOOK TO INSERT
+         LR    LAS,NEW                 ADVANCE POINTER
+         L     NEW,LASBFWD             NEXT IN BEST FIT LIST
+         L     SNEW,NEWSIZ             GET SIZE
+*  If sized are equal, then sort by address, highest first.
+*    Because the size in the header chain is zero, SCUR won't equal
+*    SNEW if SNEW is the anchor of the chains
+         UNTIL (((SCUR,EQ,SNEW),AND,(CUR,GT,NEW)),OR,                  *
+               (SCUR,LT,SNEW),OR,(SNEW,ZERO)),END
+*  Insert CUR between LAS and NEW if @ end of list, or in sorted pos
+         ST    NEW,CURBFWD             CUR POINTS FWD TO NEW
+         ST    CUR,NEWBBAC             NEW POINTS BACK TO CUR
+         ST    LAS,CURBBAC             CUR POINTS BACK TO LAS
+         ST    CUR,LASBFWD             LAS POINTS FWD TO CUR
+         ST    CUR,@MFLOC              RETURN RECENTLY LINKED MEMORY
+         EJECT ,
+         IF    ^GETCALL,BEGIN          LOOK TO RELEASE TO OS
+*-----------------------------------------------
+*  Release memory to OS
+*-----------------------------------------------
+         L     SCUR,CURSIZ             CHECK FOR FRAGMENT BIG ENOUGH
+         IF    (SCUR,GE,MEMINC),'SET MEMFGINC'  |
+         IF    (NOT,MEMFGINC),EXIT     DON'T LOOK TO RELEASE
+         L     RY,MEMFRE               AMOUNT OF FREE MEM REMAINING
+         L     RX,MEMINC               GET FETCH INCREMENT
+         MH    RX,=Y(10)               | MULTIPLY BY 10
+         SRA   RX,2                    | DIVIDE BY 4 = 2.50*INCR
+         IF    (RY,GE,RX),BEGIN        IF FREE >= 2.50*INC RELEASE MEM
+         S     RY,MEMINC               NUMBER OF PAGES TO FREE
+         N     RY,=A(PGALIGN)          |
+         SET   FRECALL*BDPAGE          PUT IN RELEASE MODE/PAGE ALIGN
+         LOOP  BEGIN                   GET MEM FOR RELEASE
+         INCR  RX,USEFRE               -S>SHOW ATTEMPT TO FREE MEM
+         PSET  @MEMGET                 GET GEM FROM POOL FOR OS RET
+         MVC   @MGTYPE,@MFTYPE         | set pool number/type
+         MVC   @MGLEN,=A(CPAGE)        |
+         ACALL MEMGET                  LOOK FOR MEMORY
+         LM    RA,RB,@MGLL             Location/Length for OS free
+         IF    (RA,ZERO),EXIT          NONE TO RETURN TO SYS
+*
+         PSET  @MEMORY                 RELEASE PAGE
+         ST    RA,@MEMLOC              | Location
+         ST    RB,@MEMLEN              | Length
+         MVC   @MEMPOOL,MEMFPOOL       | Memory Pool
+         VCALL POOLFREE                |
+         INCR  RX,SYSFRE               -S>INDICATE SYSTEM FREE MEM
+         L     RX,MEMSIZ               BLOCK IS ONE PAGE SMALLER NOW
+         S     RX,=A(CPAGE)            |
+         ST    RX,MEMSIZ               |
+         S     RY,=A(CPAGE)            CHECK FOR MORE TO RELEASE
+         UNTIL (RY,NPOS),END           OF GET MEM FOR RELEASE
+         CLEAR FRECALL*BDPAGE*MEMFGINC NO LONGER IN RELEASE MODE
+         END   ,                       END OF RELEASE MEMORY SECTION
+         END   ,                       OF DON'T RELEASE TO SYS NOW
+         IF    ^GETCALL,BEGIN          Not an internal call
+         L     RX,DEPTH                -S>SAVE CURRENT DEPTH COUNT
+         STMAX RX,MAXDEP               -S>SAVE MAXIMUM DEPTH TOO
+         L     LAS,HEADBBAC            -S>LAST FRAGMENT IS THE BIGGEST
+         MVC   MAXFRAG,LASSIZ          -S>|
+         SPACE ,
+*--------------------------------------
+*  Release global lock
+*--------------------------------------
+         IF    MFGLOB,BEGIN            Release global lock
+         LOCKRL MEMPLOCK               |
+         END   ,                       OF Release global lock
+         END   ,                       OF Not an internal call
+         PEND  ,
+         DROP  MEMCTL
+         SPACE 2
+MEMKAPUT KAPUT MEMKAPUT
+         TITLE 'System Memory Allocate'
+*********************************************************************
+*                                                                   *
+*                Internal memory allocation from OS                 *
+*                                                                   *
+*   Input - @MIGET                                                  *
+*                -ACTUAL INCREMENT = MAX(MEMINC,PGALIGN(MIGLEN)     *
+*                                                                   *
+*  Output - @MIGET                                                  *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+INTGET   PROC  @MIGET,SCOPE=LOCAL
+         L     RA,@MIGCTL              Control block address
+         USING MEMCTL,RA
+         INCR  RS,SYSINC               -S>USER CHECK TO INC MEM POOL
+         L     RVR,@MIGLEN             SIZE OF INCREMENT
+         IF    (MEMINC,GT,RVR),'L RVR,MEMINC '  USE MAX OF TWO
+         A     RVR,=A(CPAGE-1)         ROUND UP INCREMENT TO NEXT PAGE
+         N     RVR,=A(PGALIGN)         |
+         PSET  @MEMORY                 GET OS MEMORY
+         ST    RVR,@MEMLEN             | LENGTH
+         MVC   @MEMPOOL,MEMFPOOL       | SET POOL TYPE
+         VCALL POOLGET                 |
+         L     RB,@MEMLEN              GET SIZE OF AREA
+         ST    RB,@MIGLEN              |
+         A     RB,MEMSIZ               ADD PREVIOUS SIZE
+         ST    RB,MEMSIZ               STORE NEW SIZE OF BLOCK
+         MVC   @MIGLOC,@MEMLOC         NEW ADDRESS
+         PEND  ,
+         DROP  MEMCTL
+         LTORG ,
+         END   .

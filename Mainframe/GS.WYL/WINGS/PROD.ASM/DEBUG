@@ -1,0 +1,2764 @@
+DEBUG    TITLE 'Debugging stuff'
+********************************************************************
+*** %%Module: wings asm debug;                                    *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- DEBUG stuff                                          *
+***                                                                *
+***    This module contains code to process debugging commands.    *
+***    Current code in progress.                                   *
+***                                                                *
+***    Created, 11/28/90, CH                                       *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***    11/01/91  CH   Initial version.                             *
+***                                                                *
+***                                                                *
+***                                                                *
+********************************************************************
+DEBUG    HIBAL ASSOC=YES
+         REGS  FSR,,,,,,,BR,WAR,,,TVTR,(GVTR,LSR),SPR,RAR
+*
+         SYSDEFN
+*
+SEGCB    RECORD 'SEGCB'
+*
+SUX      RECORD BEGIN              Seg User Extension (^SEGCBUSR)
+SUXFLAG  FLAG
+         FLAG  SUXFNOSTAMP         - No timestamp
+SUXCC    DS    C                   Next CC char to use
+SUXDCBP  DS    A                   DCB ptr
+         END
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+         PUSH  DSECTS              Common DSECTS
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+         POP   DSECTS
+*
+         COPY  SYMTAB
+*
+EPIE     RECORD BEGIN
+EPIEID   DS    F                   'EPIE' ID
+EPIEPARM DS    F                   USER SUPPLIED PARM LIST
+EPIEREGS DS    16F                 USER REGESTERS AT INTERRUPTION
+EPIEPSW  DS    2F                  USER PSW AT INTERRUPTION
+EPIECC   EQU   EPIEPSW+1,1         PSW CC
+EPIEIA   EQU   EPIEPSW+4,4         PSW INSTRUCTION ADDRESS
+EPIEILC  DS    H                   INSTRUCTION LENGTH CODE
+EPIEIC   DS    H                   INTERRUPTION CODE
+* FOLLOWED BY RESERVED FIELDS.
+         END
+*
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+*
+         TITLE 'Local Macros'
+         SPACE 2
+*-
+*-       INSTR MACRO,  CREATES ENTRY IN INSTRUCTION TABLE
+*-
+         MACRO
+&L       INSTR &NAME,&TYPE,&OPCD
+&L       DC    XL1'&OPCD',AL1(L'I&TYPE),CL6'&NAME'
+         MEND
+*
+*
+IRECORD  RECORD BEGIN             INSTRUCTION TABLE ENTRY
+IOPCD    DS    X
+ITYPE    FLAG  ,
+         FLAG  IRR                RR INSTRUCTION
+         FLAG  IRX                RX INSTRUCTION
+         FLAG  IRS                RS INSTRUCTION
+         FLAG  ISI                SI INSTRUCTION
+         FLAG  ISS                SS INSTRUCTION
+         FLAG  IBCR               BCR INSTRUCTION
+         FLAG  IBC                BC INSTRUCTION
+         FLAG  IOTHER             OTHER INSTRUCTION
+INAME    DS    CL6                NAME OF INSTRUCTION
+INEXT    EQU   *
+         END
+*
+*
+         MACRO
+&L       SETIA &RX,&PSW
+         N     &RX,=X'7FFFFFFF'
+         NC    &PSW+4(4),=X'80000000'
+         O     &RX,&PSW+4
+         ST    &RX,&PSW+4
+         MEND
+*
+*
+         MACRO
+&L       SYMNEXT &R1,&R2
+&L       L     &R1,SYMNEXT-SYMENTRY(&R2)
+         MEND
+*
+         MACRO
+&L       SYMNAME &R1,&R2
+&L       LA    &R1,SYMNAME-SYMENTRY(&R2)
+         MEND
+*
+         MACRO
+&L       SYMADDR &R1,&R2
+&L       L     &R1,SYMLOC-SYMENTRY(&R2)
+         MEND
+*
+         MACRO
+&L       SYMLEN  &R1,&R2
+&L       L     &R1,SYMLEN-SYMENTRY(&R2)
+         MEND
+*
+         MACRO
+&L       SCANSTOP &DUMMY
+&L       CLEAR DBSCNLEN
+         MEND
+*
+* ADJUSTMENT FOR OLD SCANNER, IT SCANS PAST 1 TRAILING BLANK
+*
+         MACRO
+&L       SCNR1FIX &DUMMY
+*        BCTR  R1,0                OLD SCANNER
+&L       BALR  0,0                 NEW SCANNER
+         MEND
+         TITLE 'Local Macros'
+*
+*  2 macros to push and pop SCANNER state as expected
+*  by monitors version of the scanner.  We must push
+*  the return address and the scancb pointer (r15).
+*  we do not normally push the loc,len... as we want
+*  that part to continue to increment as stuff is
+*  scanned off.  essentially we just want to be able
+*  to continue a scan in a scan routine.  so ...
+*
+*  NOTE: ARGS TO SCPUSH, SCPOP ARE IGNORED.
+*
+*  NOTE, CAUTION !! AHHHGG !!::
+*  IT IS TRUE THOUGH I CAN NOT BELIEVE IT !!
+*  R15 MUST BE SET TO SCANCB POINTER FOR A ROUTINE
+*  TO RETURN TO THE SCANNER! YUCK.  IT IS PUSHED
+*  AND POPPED BY SCPUSH,SCPOP !!
+*
+*  ** FREE REGISTER R15 **
+*
+*  OPPRESSIVE USAGE BY ORVYL SCANNER IS TERRIBLE.
+*
+*
+         MACRO
+&L       SCPUSH &M,&N
+&L       ST    R15,@R13
+         MVC   @R13+4(4),DBSCNRA
+         LA    R13,8(R13)
+         MEND
+*
+*
+         MACRO
+&L       SCPOP &M,&N
+         S     R13,=A(8)
+         L     R15,@R13
+         MVC   DBSCNRA,@R13+4
+         MEND
+*
+         TITLE 'DEBUG stuff'
+DEBUG    CSECT
+         DC    C'DEBUG (&SYSDATE) (&SYSTIME)'
+*
+*  VARIOUS DEBUG WORK AREAS
+*
+DBWA     RECORD BEGIN
+DBCMDLOC DS    A
+DBCMDLEN DS    F
+DBSEGCB  DS    A
+DBSYMS   DS    A
+DBREGS   DS    A
+DBCURADR DS    A
+DBDVWAP  DS    A
+DBFLAGS  FLAG  ,
+         FLAG  DBFSCNERR
+         FLAG  DBFASCII
+*
+         SCANCB PFX=DBSCN
+         END
+*
+         SEGDEF L:DBSEGCB
+*
+         TITLE 'SC - show core'
+*box
+*
+*
+*  SC - show core
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+*
+SHOWC    XPROC DBWA
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN           EVALUATE ADDRESS EXPRESSION
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing address expression.'
+         B     SCEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid address expression.'
+         B     SCEXIT
+         END
+         LR    R2,R1              R2 - ADDR TO START SHOWING
+         LR    R4,R1              R4 - ADDR TO START SHOWING
+*
+         ACALL EVALXPRN           EVALUATE LENGTH EXPRESSION
+         IF    (R15,EQ,4),' LA R1,64 '     DEFAULT LENGTH IS 64
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid length expression.'
+         B     SCEXIT
+         END
+         LR    R3,R1              R3 - LENGTH TO DISPLAY
+*
+*                                  SCAN OPTIONS ..
+         SCAN  SCPRT,DBSCNCB
+         IF    NEG,BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         B     SCEXIT
+         END
+         IF    DBFSCNERR,SCEXIT
+*
+         LR    R1,R2              NOW R1,R0 - ADDR, LEN TO SHOW
+         LR    R0,R3                    R15 - ADDR TO PRINT
+         LR    R15,R2
+         ACALL DISPCORE           DISPLAY MEMORY
+*
+SCEXIT   LABEL ,
+         PEND
+         SPACE 5
+*-
+*-       SHOW CORE PRINT OPTIONS
+*-
+SCPRT    LABEL ,
+         SCKW  ASCII,SCASCII,A
+         SCKW  ,INVALID
+*
+SCASCII  PROC
+         SET   DBFASCII            Set ASCII translate flag
+         PEND
+*
+INVALID  PROC
+         SCPUSH
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         SCANSTOP                  clear scan len, ie. terminate scan
+         SET   DBFSCNERR
+         SCPOP
+         PEND
+         DROP  R6
+         TITLE 'SG - show registers'
+*box
+*
+*
+*  SG - show general purpose registers
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+SHOWG    XPROC DBWA
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         SCINIT (R1),(R0),DBSCNCB
+*
+         IF    (DBREGS,Z),BEGIN
+         SEGWR 'Unable to access register values.'
+         B     SGEXIT
+         END
+*
+         ACALL EVALXPRN           EVALUATE 1ST REG SPECIFICATION
+         IF    (R15,EQ,4),BEGIN   IF NO REG SPECIFICATION, ,,,
+         LA    R0,14                 SHOW REGS 14 THRU 1
+         LA    R1,1
+         ACALL DISPREGS              DISPLAY R14 THRU R1
+         B     SGEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid register specification.'
+         B     SGEXIT
+         END
+         IF    ((R1,NEG),OR,(R1,GT,15)),BEGIN
+         SEGWR 'Invalid register specification.'
+         B     SGEXIT
+         END
+         LR    R2,R1              R2 - FIRST REGISTER TO SHOW
+*
+         ACALL EVALXPRN           EVALUATE LAST REG SPECIFICATION
+         IF    (R15,EQ,4),BEGIN
+         LR    R1,R2
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid register specification for 2nd register.'
+         B     SGEXIT
+         END
+         IF    ((R1,NEG),OR,(R1,GT,15)),BEGIN
+         SEGWR 'Invalid register specification for 2nd register.'
+         B     SGEXIT
+         END
+*
+         LR    R0,R2              NOW R0,R1 - 1ST, LAST REGISTER
+*
+         ACALL CKCMDEND
+         BNZ   SGEXIT
+*
+         ACALL DISPREGS           DISPLAY REGISTERS
+*
+SGEXIT   LABEL ,
+         PEND
+         DROP  R6
+*
+         QLTORG
+         TITLE 'DISASM - disassemble memory'
+*box
+*
+*
+*   DISASM - disasemble memory into 370 instructions
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+DISASMC  XPROC DBWA
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN           EVALUATE ADDRESS EXPRESSION
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing address expression.'
+         B     DISEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid address expression.'
+         B     DISEXIT
+         END
+         LR    R2,R1              R2 - ADDR TO START SHOWING
+*
+         ACALL EVALXPRN           EVALUATE LENGTH EXPRESSION
+         IF    (R15,EQ,4),' LA R1,64 '     DEFAULT LENGTH IS 64
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid length expression.'
+         B     DISEXIT
+         END
+         LR    R3,R1              R3 - LENGTH TO DISPLAY
+*
+         ACALL CKCMDEND
+         BNZ   DISEXIT
+*
+         LR    R1,R2              NOW R1,R0 - ADDR, LEN TO SHOW
+         LR    R0,R3                    R15 - ADDR TO PRINT
+         LR    R15,R4
+         ACALL DISPASM            DISPLAY DISASSEMBLED MEMORY
+*
+DISEXIT  LABEL ,
+         PEND
+*
+         DROP  R6
+         TITLE 'SA - show WYLBUR address'
+*box
+*
+*
+*  SA - show wylbur address
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+SHOWA    XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address expression.'
+         B     SAEXIT
+         END
+         LR    R2,R1               R2 - ADDRESS
+*
+         ACALL CKCMDEND
+         BNZ   SAEXIT
+*
+         SEGDC (R2)
+         SEG   '   0'
+         IF    (R2,NZ),BEGIN
+         SEGHX (R2)
+         END
+         SEG  ' '
+         LR    R1,R2
+         ACALL DSEGSYM              IF SYMBOLIC FORM, PRINT IT TOO
+         SEGWR
+SAEXIT   LABEL ,
+         PEND
+         DROP  R6
+         TITLE 'SS - show symbols'
+*box
+*
+*
+*  SS - show symbols
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+SHOWS    XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+*
+*                                  WRITE ALL SYMBOLS
+         L     R2,DBSYMS
+         WHILE (R2,NZ),BEGIN       LOOP THRU SYMBOLS
+         SYMADDR R3,R2
+         SEGHX (R3),8
+         SEG   ' '
+         SYMNAME R1,R2
+         SEGT  (R1),L'SYMNAME
+         SEGWR
+         SYMNEXT R2,R2
+         END
+*
+         PEND
+         TITLE 'PC - patch core'
+PCWA     RECORD BEGIN
+PCFLAG   FLAG
+         FLAG  PCSYS              SYSTEM (NO YES/NO PROMPT) OPTION
+PCTLEN   DS    H                  LENGTH OF REPLACEMENT TEXT
+PCTEXT   DS    CL256              REPLACEMENT TEXT
+PCVLEN   DS    H                  VERIFICATION TEXT LENGTH
+PCVTXT   DS    CL256              VERIFICATION TEXT
+PCDBWA   DS    XL(L'DBWA)         DBWA
+         END
+         SPACE 2
+*box
+*
+*
+*  PC - patch wylbur core
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*
+*
+PATCHC   XPROC PCWA
+*
+         LA    R5,PCWA
+         USING PCWA,R5
+         CLEAR PCWA
+*
+         LA    R6,PCDBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN           EVALUATE ADDRESS EXPRESSION
+         LR    R2,R1                RETURNS R1 - ADDRESS
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing address expression.'
+         B     PCEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid address expression.'
+         B     PCEXIT
+         END
+*
+         SCAN  ,DBSCNCB
+         IF    (R0,Z),BEGIN
+         SEGWR 'Missing patch value.'
+         B     PCEXIT
+         END
+         LA    R15,PCTEXT
+         VCALL DEQSTR             DEQOUTE TEXT
+         IF    NEG,BEGIN          NOT A STRING...
+         LA    R15,PCTEXT
+         VCALL HEXSTR             CHECK FOR HEX
+         IF    NEG,BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': invalid hex digits'
+         B     PCEXIT
+         END
+         END
+         CEIL  R0,L'PCTEXT
+         STH   R0,PCTLEN
+*
+*                                  SCAN OPTIONS ..
+         SCAN  PCPRT,DBSCNCB
+         IF    NEG,BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         B     PCEXIT
+         END
+         IF    DBFSCNERR,PCEXIT
+*
+         LR    R1,R2               CHECK IF OK TO STORE AT ADDR
+         LH    R0,PCTLEN
+         ACALL CHKSADDR
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address.'
+         B     PCEXIT
+         END
+*
+         SEG   'Old data was '
+         LR    R3,R2               R3,R4 OLD DATA LOC LEN
+         LH    R4,PCTLEN
+         CEIL  R4,24
+         FLOOR R4,4
+         WHILE (R4,POS),BEGIN
+         L     R1,@R3
+         SEGHX (R1),8
+         SEG   ' '
+         LA    R3,4(R3)
+         S     R4,=A(4)
+         END
+*
+         IF    ('LTH R15,PCVLEN',NZ),BEGIN
+         CMPR  R15,@R2,PCVTXT     COMPARE TEXT
+         IF    NE,BEGIN
+         SEGWR 'Verify failed.'
+         B     PCEXIT
+         END
+         END
+*
+*        IF    ~PCSYS,BEGIN
+*        SETMSG 'Patch'
+*        VCALL YESREQ
+*        END
+*
+         IF    ('LTH R15,PCTLEN',NZ),BEGIN
+         MOVE  R15,@R2,PCTEXT     REPLACE TEXT
+         END
+*
+         SEGWR 'Done.'
+*
+PCEXIT   LABEL ,
+         PEND
+         SPACE 2
+PCPRT    SCKW  VERIFY,PCVER,(A,P)
+         SCKW  SYSTEM,PCSETSYS,A
+         SCKW  ,INVALID
+*
+PCSETSYS PROC
+         SET   PCSYS
+         PEND
+*
+PCVER    PROC
+         SCPUSH
+         LA    R15,PCVTXT
+         VCALL DEQSTR             DEQUOTE TEXT
+         IF    NEG,BEGIN          NOT A STRING...
+         LA    R15,PCVTXT
+         VCALL HEXSTR             CHECK FOR HEX
+         IF    NEG,BEGIN
+         SEG  (R1),(R0)
+         SEGWR ': invalid hex digits'
+         SET  DBFSCNERR
+         SCANSTOP
+         B     PCVERXIT
+         END
+         END
+         CEIL  R0,L'PCVTXT
+         STH   R0,PCVLEN
+PCVERXIT LABEL ,
+         SCPOP
+         PEND
+*
+         DROP  R5
+         DROP  R6
+*
+         QLTORG
+         EJECT
+*box
+*
+*  PATCHG - patch general purpose register
+*
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*  R5 - dvwa, debug break work area (traps)
+*
+*
+PATCHG   XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+*                                  GET REGISTER NUMBER
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+*                                  RETURNS R1 - ADDRESS,  R15 - CC
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing operands.'
+         B     PATGEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid register specification.'
+         B     PATGEXIT
+         END
+         LR    R2,R1               R2 - REGISTER # TO PATCH
+*
+*                                  GET REGISTER VALUE
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+*                                  RETURNS R1 - ADDRESS,  R15 - CC
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing patch value.'
+         B     PATGEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid patch value.'
+         B     PATGEXIT
+         END
+*                                  R1 - PATCH VALUE
+*
+*                                  NO MORE OPTIONS ALLOWED
+         ACALL CKCMDEND
+         BNZ   PATGEXIT
+*
+*                                  PATCH REGISTER
+         L     R3,DBREGS
+         IF    (R3,Z),BEGIN
+         SEGWR 'Unable to access register values.'
+         B     PATGEXIT
+         END
+         SLL   R2,2
+         ST    R1,0(R3,R2)         PATCH REGISTER
+*
+PATGEXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*box
+*
+*  PATCHIA -  patch instruction address
+*
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*  R5 - dvwa, debug break work area (traps)
+*
+*  ON EXIT:
+*  R15=0, PATCH ADDRESS OK
+*  R15=NZ, PATCH ADDRESS INVALID
+*
+PATCHIA  XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+*                                  GET REGISTER NUMBER
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+*                                  RETURNS R1 - ADDRESS,  R15 - CC
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Missing address.'
+         LA    R15,4
+         B     PATIAXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid address.'
+         LA    R15,4
+         B     PATIAXIT
+         END
+         ACALL CHKRADDR
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address.'
+         LA    R15,4
+         B     PATIAXIT
+         END
+         ACALL CHKIADDR
+         IF    NZ,BEGIN
+         SEGWR 'Invalid instruction address.'
+         LA    R15,4
+         B     PATIAXIT
+         END
+*
+         L     R5,DBDVWAP
+         WITH  (DVWA,R5),BEGIN
+         L     R4,DVEPIEP
+         WITH  (EPIE,R4),BEGIN
+         SETIA R1,EPIEPSW
+         SET   DVFNEWIA
+         END
+         END
+         CLEAR R15
+*
+PATIAXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*box
+*
+*  SETT - set trap
+*
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*  R5 - dvwa, debug break work area (traps)
+*
+*
+SETT     XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+*                                  RETURNS R1 - ADDRESS,  R15 - CC
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Trap specification missing.'
+         B     SETTEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid trap address.  Command ignored.'
+         B     SETTEXIT
+         END
+*
+*                                  NO OPTIONS ALLOWED
+         ACALL CKCMDEND
+         BNZ   SETTEXIT
+*
+*                                  SEE IF TRAP ALREADY EXISTS
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         LA    R3,1
+         WHILE ((R1,NE,TPADDR),AND,(TPADDR,NZ)),BEGIN
+         LA    R4,TPNEXT
+         LA    R3,1(R3)
+         END
+         IF    (R3,GT,TPMAXCNT),BEGIN
+         SEGWR 'Too many traps set,, sorry you are hosed.'
+         B     SETTEXIT
+         END
+         IF    ((TPADDR,NZ),AND,~TPFOFF),BEGIN
+         SEGWR 'Trap already there, command ignored.'
+         B     SETTEXIT
+         END
+         END , DROP TPENTRY (R4)
+*
+*                                  CHECK TRAP ADDR, R1 - TRAP ADDR
+         ACALL CHKSADDR            CHECK ADDRESS (FOR STORE)
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address, command ignored.'
+         B     SETTEXIT
+         END
+         ACALL CHKIADDR            CHECK IF INSTRUCTION ADDRESS
+         IF    NZ,BEGIN
+         SEGWR 'Invalid instruction address, command ignored.'
+         B     SETTEXIT
+         END
+         CLI   0(R1),X'0A'         MAY NOT TRAP SVC'S
+         IF    E,BEGIN
+         SEGWR 'SVC can not be trapped.  Command ignored.'
+         B     SETTEXIT
+         END
+         CLI   0(R1),X'44'         MAY NOT TRAP EX INSTRUCTIONS
+         IF    E,BEGIN
+         SEGWR 'EX can not be trapped.  Command ignored.'
+         B     SETTEXIT
+         END
+*
+*                                  SET TRAP
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         LA    R3,1
+         WHILE ((R1,NE,TPADDR),AND,(TPADDR,NZ)),BEGIN
+         LA    R4,TPNEXT
+         LA    R3,1(R3)
+         END
+         IF    (R3,GT,TPMAXCNT),BEGIN
+         SEGWR 'Too many traps set,, sorry you are hosed.'
+         B     SETTEXIT
+         END
+         ST    R1,TPADDR
+         MVC   TPOPCODE,@R1
+         CLEAR TPFOFF
+         MVC   @R1(2),=AL2(TRAPCODE)
+*
+*                                  GIVE SET TRAP MESSAGE
+         LR    R2,R1               R2, R1 - INSTRUCTION ADDRESS
+*
+         SEG   'Trap '          'Trap n set at (hex) instruction'
+         SEGDC (R3)
+         SEG   ' set at ('
+         SEGHX LH:TPOPCODE,4          ASSUME INSTR LENGTH IS 2
+         IF    (@R2,GE,X'40'),BEGIN   IF INSTR LENGTH IS 4
+         SEG   ' '
+         SEGHX LH:@R2+2,4
+         END
+         IF    (@R2,GE,X'D0'),BEGIN   IF INSTR LENGTH IS 6
+         SEG   ' '
+         SEGHX LH:@R2+4,4
+         END
+         SEGWR ') instruction.'
+         LR    R1,R2                R1 - TRAP ADDRESS
+         END   , DROP TPENTRY (R4)
+*
+SETTEXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*box
+*
+*  SHOWT - show traps set
+*
+*
+*
+*  R1,R0 - command loc, len  (part after sts)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)  (not used)
+*  R4 - current address '*' (zero if none) (not used)
+*  R5 - dvwa, debug break work area (traps)
+*
+*
+SHOWTS   XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+*                                  NO OPTIONS ALLOWED
+         ACALL CKCMDEND
+         BNZ   SHOWTXIT
+*
+*                                  SEE IF TRAP ALREADY EXISTS
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         LA    R3,1
+         WHILE (TPADDR,NZ),BEGIN
+         IF    ~TPFOFF,BEGIN
+         SEG   '  '
+         SEGDC (R3),4
+         SEG   '  '
+         L     R1,TPADDR
+         ACALL DSEGADDR
+         SEG   '  ('
+         LH    R2,TPOPCODE
+         SEGHX (R2),4
+         SEGWR ')'
+         END
+         LA    R4,TPNEXT
+         LA    R3,1(R3)
+         END
+         END   , DROP TPENTRY (R4)
+*
+SHOWTXIT LABEL ,
+         PEND
+*
+         DROP  R6
+         EJECT
+*box
+*
+*  CLEART - clear trap
+*
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)
+*  R3 - register area (zero if none)
+*  R4 - current address '*' (zero if none)
+*  R5 - dvwa, debug break work area (traps)
+*
+*
+CLEART   XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+         ACALL EVALXPRN            EVALUATE ADDRESS EXPRESSION
+*                                  RETURNS R1 - ADDRESS,  R15 - CC
+         IF    (R15,EQ,4),BEGIN
+         SEGWR 'Trap specification missing.'
+         B     CLRTEXIT
+         END
+         IF    (R15,EQ,8),BEGIN
+         SEGWR 'Invalid trap address.  Command ignored.'
+         B     CLRTEXIT
+         END
+*
+*                                  NO OPTIONS ALLOWED
+         ACALL CKCMDEND
+         BNZ   CLRTEXIT
+*
+*                                  IF TRAP NUMBER
+         IF    ((R1,GE,1),AND,(R1,LT,TPMAXCNT)),BEGIN
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         BCTR  R1,0                INDEX TO CORRECT TRAP
+         MH    R1,=AL2(L'TPENTRY)
+         AR    R4,R1
+         IF    (TPADDR,Z),BEGIN
+         SEGWR 'Trap not set.'
+         B     CLRTEXIT
+         END
+         IF    TPFOFF,BEGIN
+         SEGWR 'Trap not set.'
+         B     CLRTEXIT
+         END
+         L     R1,TPADDR           RESET OPCODE
+         MVC   @R1(2),TPOPCODE
+         SET   TPFOFF              MARK TRAP OFF
+         SEGWR 'Trap cleared.'
+         B     CLRTEXIT
+         END   , DROP TPENTRY (R4)
+         END
+*
+*                                  FIND TRAP
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         LA    R3,1
+         WHILE ((R1,NE,TPADDR),AND,(TPADDR,NZ)),BEGIN
+         LA    R4,TPNEXT
+         LA    R3,1(R3)
+         END
+         IF    (TPADDR,Z),BEGIN
+         SEGWR 'Trap not found.'
+         B     CLRTEXIT
+         END
+         IF    TPFOFF,BEGIN
+         SEGWR 'Trap not found.'
+         B     CLRTEXIT
+         END
+         L     R1,TPADDR           RESET OPCODE
+         MVC   @R1(2),TPOPCODE
+         SET   TPFOFF              MARK TRAP OFF
+         SEGWR 'Trap cleared.'
+         END   , DROP TPENTRY (R4)
+*
+CLRTEXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*box
+*
+*  CLEARTS - clear all traps set
+*
+*
+*
+*  R1,R0 - command loc, len  (part after pc)
+*  R15 - SEGCB
+*  R2 - symbol table pointer (zero if none)  (not used)
+*  R3 - register area (zero if none)  (not used)
+*  R4 - current address '*' (zero if none)  (not used)
+*  R5 - dvwa, debug break work area (traps)
+*
+*
+CLEARTS  XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R1,DBCMDLOC
+         ST    R0,DBCMDLEN
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+         ST    R3,DBREGS
+         ST    R4,DBCURADR
+         ST    R5,DBDVWAP
+         SCINIT (R1),(R0),DBSCNCB
+*
+*                                  NO OPTIONS ALLOWED
+         ACALL CKCMDEND
+         BNZ   CLRTSXIT
+*
+*                                  LOOP THRU ALL TRAPS
+         L     R4,DBDVWAP
+         WITH  (DVWA,R4),'LA R4,DVTRAPS'
+         WITH  (TPENTRY,R4),BEGIN
+         LA    R3,1
+         WHILE (TPADDR,NZ),BEGIN   LOOP
+         L     R1,TPADDR           RESET OPCODE
+         MVC   @R1(2),TPOPCODE
+         SET   TPFOFF              MARK TRAP OFF
+         LA    R4,TPNEXT
+         LA    R3,1(R3)
+         END
+         SEGWR 'All traps cleared.'
+         END   , DROP TPENTRY (R4)
+*
+CLRTSXIT LABEL ,
+         PEND
+         DROP  R6
+         EJECT
+*box
+*
+*  SEGSYMAD - SEG symbolic address
+*             gives MODULE+OFFSET or ADDRESS
+*
+*
+*  R1 - address to seg
+*  R2 - symbol table pointer (zero if none)  (not used)
+*  R15 - SEGCB
+*
+*
+SEGSYMAD XPROC DBWA
+*
+         LA    R6,DBWA
+         USING DBWA,R6
+*
+         CLEAR DBWA
+         ST    R15,DBSEGCB
+         ST    R2,DBSYMS
+*
+         ACALL DSEGADDR
+*
+         PEND
+         DROP  R6
+         EJECT
+         QLTORG
+         USING DBWA,R6             Universal for Debug Subroutines
+         TITLE 'Debug Subroutines - Evaluate ...'
+*box
+*
+*
+*       EVALXPRN - EVALUATE AN ADDRESS EXPRESSION
+*
+*       ON ENTRY: SCANNER IS SET UP TO POINT AT EXPRESSION
+*
+*       ON EXIT:  R1 - VALUE OF EXPRESSION
+*                 CC SET,  R15=0  OK
+*                          R15=4  NO EXPRESSION FOUND
+*                          R15=8  INVALID EXPRESSION
+*
+*
+*       NOTE: EXPRESSION MUST BE SIMPLE. PLUSES AND MINUSES,
+*             SYMBOLS, @REGISTERS, *, HEXIDCIMAL, AND DECIMAL
+*             VALUES ARE ALLOWED. NOTHING ELSE.
+*
+*
+*
+EVWA     RECORD BEGIN ,
+EVVALUE  DS    F                  VALUE OF EXPRESSION
+EVOPR    DS    X                  VALUE OF OPERATOR +/-
+         END   ,
+         SPACE 2
+*-
+*-       EVALUATE SIMPLE ADDRESS EXPRESSION
+*-
+*-
+EVALXPRN PROC  EVWA
+         CLEAR EVWA               INITIALIZE WORK AREA TO ZEROS
+*
+         SCAN  ,DBSCNCB           SCAN FIRST TERM OF EXPRESSION
+         IF    (R0,Z),NOEXPR
+         B     EVALTERM           EVALUATE IT
+         SPACE
+*-
+*-       LOOP THRU ALL TERMS IN EXPRESSION
+*-
+EVALLOOP LABEL ,
+         SCTELL DBSCNCB
+         IF    (R0,NP),EVALDONE          IF NO MORE TERMS, EXIT
+         SCNR1FIX                        ADJUST R1 TO END PREV SCAN
+         IF    (@R1,EQ,' '),EVALDONE     IF END OF EXPRESSION, EXIT
+         IF    (@R1,EQ,','),EVALDONE     IF END OF EXPRESSION, EXIT
+         IF    (@R1,EQ,'='),EVALDONE     IF END OF EXPRESSION, EXIT
+*
+         SCAN  ,DBSCNCB            SCAN NEXT TERM
+         IF    (R0,Z),EVALDONE     IF NO NEXT TERM, EXIT
+*
+*                                  EVALUATE EXPRESSION TERMS
+EVALTERM LABEL ,                   OH YEAH !!
+*
+         SPACE
+*-
+*-       PLUS SIGN
+*-
+         IF    (@R1,EQ,'+'),BEGIN
+         CLI   EVOPR,0
+         BNE   BADEXPR
+         MVI   EVOPR,C'+'         SET ADDITION OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       MINUS SIGN
+*-
+         IF    (@R1,EQ,'-'),BEGIN
+         CLI   EVOPR,0
+         BNE   BADEXPR
+         MVI   EVOPR,C'-'         SET SUBTRACT OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       @ REGISTER
+*-
+         IF    (@R1,EQ,'@'),BEGIN
+         IF    (DBREGS,Z),BADEXPR IF NO REGS, "@RX" NOT VALID
+         LA    R1,1(R1)           SKIP TO REGISTER NUMBER
+         S     R0,=F'1'
+         BNP   BADEXPR
+         IF    (@R1,EQ,'0'),' VCALL XTB '    CONVERT REG # TO BINARY
+         ELSE  'VCALL DTB '
+         IF    (R0,POS),BADEXPR
+         IF    ((R15,LT,0),OR,(R15,GT,15)),BADEXPR  0 <= REG # <= 15
+         SLL   R15,2
+         L     R1,DBREGS
+         L     R1,0(R1,R15)        R1 - REGISTER VALUE
+         L     R2,=X'FF000000'
+         NR    R2,R1
+         IF    (R2,NE,X'FF000000'),BEGIN
+         LA    R1,0(R1)
+         END
+         IF    (EVOPR,EQ,'-'),BEGIN
+         LCR   R1,R1
+         END   ,                  SUBTRACT OR ADD
+         A     R1,EVVALUE         ADD VALUE TO EXPRESSION
+         ST    R1,EVVALUE
+         MVI   EVOPR,0            CLEAR OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       *,  CURRENT INSTRUCTION ADDRESS
+*-
+         IF    ((@R1,EQ,'*'),AND,(R0,EQ,1)),BEGIN
+         IF    (DBCURADR,Z),BADEXPR IF NO CURRENT ADDRES, * NO GOOD
+         L     R1,DBCURADR        GET INSTRUCTION ADDR VALUE
+         IF    (EVOPR,EQ,'-'),BEGIN
+         LCR   R1,R1
+         END   ,                   SUBTRACT OR
+         A     R1,EVVALUE         ADD VALUE TO EXPRESSION
+         ST    R1,EVVALUE
+         MVI   EVOPR,0            CLEAR OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       HEX NUMBER
+*-
+         IF    (@R1,EQ,'0'),BEGIN
+         IF    (R0,LE,0),BADEXPR
+         VCALL XTB                CONVERT HEX TO BINARY
+         IF    (R0,POS),BADEXPR
+         LR    R1,R15             R1 - HEX VALUE
+         IF    (EVOPR,EQ,'-'),BEGIN
+         LCR   R1,R1
+         END   ,                  SUBTRACT OR,
+         A     R1,EVVALUE         ADD VALUE TO EXPRESSION
+         ST    R1,EVVALUE
+         MVI   EVOPR,0            CLEAR OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       DECIMAL NUMBER
+*-
+         IF    ((@R1,GE,'1'),AND,(@R1,LE,'9')),BEGIN
+         IF    (R0,LE,0),BADEXPR
+         VCALL DTB                CONVERT DEC TO BINARY
+         IF    (R0,POS),BADEXPR
+         LR    R1,R15             R1 - DECIMAL VALUE
+         IF    (EVOPR,EQ,'-'),BEGIN
+         LCR   R1,R1
+         END   ,                  SUBTRACT OR
+         A     R1,EVVALUE         ADD VALUE TO EXPRESSION
+         ST    R1,EVVALUE
+         MVI   EVOPR,0            CLEAR OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       SYMBOL
+*-
+         BEGIN
+         ACALL EVALSYM            EVALUATE SYMBOL, VALUE
+         BNZ   BADEXPR            R1 - SYMBOL VALUE
+         IF    (EVOPR,EQ,'-'),BEGIN
+         LCR   R1,R1
+         END   ,                  SUBTRACT OR ,,
+         A     R1,EVVALUE         ADD VALUE TO EXPRESSION
+         ST    R1,EVVALUE
+         MVI   EVOPR,0            CLEAR OPERATOR
+         B     EVALLOOP
+         END
+*-
+*-       GOT EVALUATED ADDRESS, CHECK IT
+*-
+EVALDONE LABEL ,
+         CLI   EVOPR,0            NO HANGING OPERATORS
+         BNE   BADEXPR
+         L     R1,EVVALUE         RETURN VALUE, CC=0
+         SR    R15,R15
+         B     EVALEXIT
+*
+NOEXPR   LABEL ,                  NO EXPRESSION
+         SR    R1,R1
+         LA    R15,4
+         B     EVALEXIT
+*
+BADEXPR  LABEL ,                  INVALID EXPRESSION
+         SR    R1,R1
+         LA    R15,8
+         B     EVALEXIT
+*
+EVALEXIT LABEL ,
+         PRETURN (R1)
+         PEND
+         TITLE 'Debug Subroutines - Evaluate ...'
+*box
+*
+*
+*  EVALSYM - find value of symbolic address
+*
+*  on entry:  r1 - location of symbol
+*             r0 - length of symbol
+*
+*  on exit:   r1 - symbol address
+*            r15 - CC=0 symbol found,  CC=NZ symbol not found (r1=0)
+*
+*
+*
+EVWA2    RECORD BEGIN ,           WORK AREA FOR SYMBOL, ADDR EVAL
+EV2SYM   DS    CL8                SYMBOL
+EV2ADDR  DS    F                  ADDR
+EV2OFF   DS    F                  OFFSET
+         END   ,
+         SPACE 2
+*-
+*-        EVALUATE SYMBOL
+*-
+*-
+EVALSYM  PROC  EVWA2
+         CLEAR EVWA2
+         MVC   EV2SYM,=CL(L'EV2SYM)' '  BLANK IT
+         IF    ((R0,LT,1),OR,(R0,GT,8)),BADSYM
+         LR    R2,R0
+         DEX   R2,' MVC EV2SYM(0),0(R1)'
+         OC    EV2SYM,=CL(L'EV2SYM)' '  POOR PERSONS UPPER CASE
+*-
+*-       CHECK SYMBOL TABLE
+*-
+         IF    (DBSYMS,Z),BADSYM
+         L     R2,DBSYMS
+         WHILE (R2,NZ),BEGIN       LOOP THRU SYMBOL TABLE
+         SYMNAME R3,R2
+         IF    (EV2SYM,EQ,@R3),BEGIN   IF SYMBOL FOUND, ,,,
+         SYMADDR R1,R2             R1 - ADDR, CC = 0
+         LA    R1,0(R1)
+         SR    R15,R15
+         B     ESYMEXIT
+         END
+         SYMNEXT R2,R2
+         END
+*
+BADSYM   LABEL ,                  BAD OR NO SYMBOL
+         SR    R1,R1                 R1 = 0, CC = NZ
+         LA    R15,4
+*
+ESYMEXIT LABEL ,
+         PRETURN (R1)
+         PEND
+         TITLE 'Debug Subroutines - Evaluate ...'
+*box
+*
+*
+*  EVALADDR - evaluate address into CSECT+OFFSET value
+*
+*  on entry:   r1 - address
+*
+*  on exit:    r1 - offset
+*              r15,r0 - csect name
+*              if r15=0, no csect found, r1 = address
+*
+*
+EVALADDR PROC  EVWA2
+         CLEAR EVWA2
+         ST    R1,EV2ADDR         INIT WORK AREA
+         LA    R1,0(R1)
+*-
+*-       CHECK SYMBOL TABLE
+*-
+         IF    (DBSYMS,Z),NOSYM
+         L     R2,DBSYMS
+         WHILE (R2,NZ),BEGIN
+         SYMADDR R3,R2
+         SYMLEN  R4,R2
+         AR    R4,R3
+         IF    ((R1,GE,R3),AND,(R1,LT,R4)),BEGIN
+         SYMNAME R5,R2
+         MVC   EV2SYM,@R5
+         SR    R1,R3
+         ST    R1,EV2OFF
+         B     EADREXIT
+         END
+         SYMNEXT R2,R2
+         END
+         SPACE 2
+*
+NOSYM    LABEL ,                  IF NO SYMBOL,
+         MVC   EV2OFF(4),EV2ADDR        OFFSET IS ADDRESS,
+         MVC   EV2SYM(8),=XL8'00000000' SYMBOL IS ZERO
+         SPACE
+*-
+*-       EXIT
+*-
+EADREXIT LABEL ,
+         LM    R15,R0,EV2SYM      RETURN SYMBOL, OFFSET
+         L     R1,EV2OFF
+         PRETURN (R0,R1)
+         PEND
+*
+         QLTORG
+         TITLE 'Debug Subroutines - Display ...'
+*box
+*
+*
+*  DISPCORE - DISPLAY CORE
+*
+*       ON ENTRY:
+*             R1  - ACTUAL ADDRESS OF MEMORY
+*             R0  - LENGTH OF MEMORY, 0 - DEFAULTS TO 64
+*             R15 - ADDRESS TO PRINT AS DISPLAY ADDR
+*
+*
+*
+DCWA     RECORD BEGIN ,
+DCSTART  DS    F                  ADDR TO START DISPLAYING
+DCPSTART DS    F                  ADDR TO PRINT AS START
+DCADDR   DS    F                  ADDR CURRENTLY DISPLAYING
+DCPADDR  DS    F                  ADDR TO PRINT AS WE DISPLAY
+DCEND    DS    F                  LAST ADDRESS TO DISPLAY
+DCLEN    DS    F                  LENGTH TO DISPLAY (0 MEANS ALL)
+DCTEMPLT DS    CL80               DISPLAY LINE TEMPLATE
+DCTPADDR EQU   DCTEMPLT           ADDRESS IN TEMPLATE
+DCTPHEX1 EQU   DCTEMPLT+10
+DCTPHEX2 EQU   DCTEMPLT+19
+DCTPHEX3 EQU   DCTEMPLT+28
+DCTPHEX4 EQU   DCTEMPLT+37
+DCTPCHAR EQU   DCTEMPLT+47
+DCTPMSG  EQU   DCTEMPLT+66
+         END
+         SPACE 5
+*box
+*
+*
+*       DISPLAY CORE
+*
+*
+DISPCORE PROC  DCWA
+*
+*        INITIALIZE WORK AREA
+*
+         CLEAR DCWA
+         LA    R1,0(R1)
+         LA    R15,0(R15)
+         ST    R1,DCSTART         SAVE START AND LENGTH TO DISPLAY
+         ST    R15,DCPSTART
+         ST    R0,DCLEN
+         IF    (R0,EQ,0),' LA R0,64'    R0=0, DEFAULTS TO 64
+         AR    R0,R1
+         ST    R0,DCEND
+         LR    R2,R15             ROUND ADDRESS TO NEAREST 16
+         SRL   R2,4
+         SLL   R2,4
+         SR    R2,R15             R2=ROUNDED ADDR-ADDR=
+         L     R1,DCSTART           =STARTING OFFSET (NEGATIVE)
+         AR    R1,R2
+         ST    R1,DCADDR
+         L     R15,DCPSTART
+         AR    R15,R2
+         ST    R15,DCPADDR
+*
+* LOOP DISPLAYING 16 BYTES AT A TIME
+*
+         WHILE (DCADDR,LT,DCEND),BEGIN
+         MVC   DCTEMPLT,TEMPLT    INITIALIZE TEMPLET
+         L     R2,DCADDR          R2 - ADDR OF CURRENT 16 BYTES
+         LR    R1,R2
+         LA    R0,16
+         ACALL CHKRADDR           CHECK ADDR (for read)
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address.'
+         B     DISPEXIT
+         END
+         L     R15,DCPADDR        OUTPUT 6 BYTES OF ADDRESS
+         LA    R1,DCTPADDR
+         LA    R0,8
+         VCALL BTX
+         L     R15,0(R2)          OUTPUT 1ST 4 BYTES OF HEX
+         LA    R1,DCTPHEX1
+         LA    R0,8
+         VCALL BTX
+         L     R15,4(R2)          OUTPUT 2ND 4 BYTES OF HEX
+         LA    R1,DCTPHEX2
+         LA    R0,8
+         VCALL BTX
+         L     R15,8(R2)          OUTPUT 3RD 4 BYTES OF HEX
+         LA    R1,DCTPHEX3
+         LA    R0,8
+         VCALL BTX
+         L     R15,12(R2)         OUTPUT 4TH 4 BYTES OF HEX
+         LA    R1,DCTPHEX4
+         LA    R0,8
+         VCALL BTX
+         MVC   DCTPCHAR(16),0(R2) OUTPUT 16 BYTES IN CHARACTER FORM
+         IF    DBFASCII,BEGIN
+         L     R1,=A(ATOETBL)      Point to ASCII->EBCIDIC table
+         TR    DCTPCHAR(16),@R1    Translate so I can read it
+         END
+         TR    DCTPCHAR(16),DOTMASK      MASK OUT UNPRINTABLES
+*-
+*-      IF BEFORE START ADDR,  BLANK OUT HEX, DOT OUT CHARACTER DATA
+*-            (OCCURS WHEN WE ROUND DOWN START ADDRESS)
+*-
+         IF    (DCADDR,LT,DCSTART),BEGIN
+         L     R15,DCPSTART       PRINT OFFSET START ADDRESS
+         LA    R1,DCTPADDR
+         LA    R0,8
+         VCALL BTX
+         L     R4,DCADDR          BLANK, DOT OUT CHARS AS NEEDED
+         L     R5,DCSTART
+         SR    R5,R4              R5,R4 - AMOUNT BEFORE START
+         LR    R4,R5
+         LR    R3,R5
+         SLL   R4,1                    TWO CHARS PER HEX BYTE
+         SRL   R3,2                    NUMBER OF HEX SEPARATORS
+         AR    R4,R3              R4 - AMOUNT PLUS HEX SEPARATORS
+*                                      THAT OCCUR EVERY 4 HEX BYTES
+         DEX   R5,' MVC DCTPCHAR(0),DOTMASK'   DOT OUT CHARACTERS
+         DEX   R4,' MVC DCTPHEX1(0),=CL32" "'  BLANK OUT HEX
+         END
+         IF    (DCADDR,LE,DCSTART),BEGIN
+         IF    (DCADDR,NE,DCPADDR),BEGIN  IF REAL ADDR IS DIFFERENT
+         MVC   DCTPMSG(4),=CL4'(RA='         PRINT OUT REAL ADDR
+         L     R15,DCSTART
+         LA    R1,DCTPMSG+4
+         LA    R0,8
+         VCALL BTX
+         MVC   DCTPMSG+12(1),=CL1')'
+         END
+         END
+*-
+*-       DISPLAY 16 BYTES OF MEMORY
+*-
+         SEGWR DCTEMPLT,80        DISPLAY LINE OF MEMORY
+*
+         BNZ   DISPEXIT           IF ATTN HIT, EXIT
+         L     R2,DCADDR
+         LA    R2,16(R2)          BUMP MEMORY, VIRTUAL ADDR BY 16
+         ST    R2,DCADDR
+         L     R2,DCPADDR
+         LA    R2,16(R2)
+         ST    R2,DCPADDR         AND LOOP
+         END
+*
+* EXIT
+*
+DISPEXIT LABEL ,
+         PEND
+         SPACE 5
+TEMPLT   DC    CL80' '
+         ORG   TEMPLT+46
+         DC    C'|'
+         ORG   TEMPLT+63
+         DC    C'|'
+         ORG   TEMPLT+L'TEMPLT
+*
+* DOTMASK,  TRANSLATE UNPRITABLES TO DOTS
+*
+DOTMASK  LABEL ,
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'404B4B4B4B4B4B4B4B4B4A4B4C4D4E4F'
+         DC    X'504B4B4B4B4B4B4B4B4B5A5B5C5D5E5F'
+         DC    X'60614B4B4B4B4B4B4B4B4B6B6C6D6E6F'
+         DC    X'4B4B4B4B4B4B4B4B4B797A7B7C7D7E7F'
+         DC    X'4B8182838485868788894B4B4B4B4B4B'
+         DC    X'4B9192939495969798994B4B4B4B4B4B'
+         DC    X'4B4BA2A3A4A5A6A7A8A94B4B4BAD4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4BBD4B4B'
+         DC    X'C0C1C2C3C4C5C6C7C8C94B4B4B4B4B4B'
+         DC    X'D0D1D2D3D4D5D6D7D8D94B4B4B4B4B4B'
+         DC    X'4B4BE2E3E4E5E6E7E8E94B4B4B4B4B4B'
+         DC    X'F0F1F2F3F4F5F6F7F8F94B4B4B4B4B4B'
+         TITLE 'Debug Subroutines - Display ...'
+*box
+*
+*
+*  DISPREGS - display registers
+*
+*  on entry:  r0 - first register to display
+*             r1 - last register to display
+*  sample:
+*     R0 = 0000034F             R1 = 001C00A3 TERM+0F2E
+*     R2 = 001C00A3 TERM+0F2E   R3 = 00000000
+*
+*
+*  note: r15 wraps to r0
+*
+DISPREGS PROC
+*
+         IF    (DBREGS,Z),BEGIN
+         SEGWR 'Unable to access register values.'
+         B     DISREXIT
+         END
+*
+         LR    R4,R0              R4 - FIRST REG, USED AS INDEX
+         LR    R5,R1              R5 - LAST REG, USED AS TEST
+         SRL   R4,1               FIRST IS EVEN REG, LAST IS ODD
+         SLL   R4,1
+         SRL   R5,1
+         SLL   R5,1
+         LA    R5,1(R5)
+         IF    (R4,GT,R5),BEGIN   IF REGISTERS WRAP, ,,,
+         LA    R3,15
+         WHILE (R4,LT,R3),BEGIN      SHO REGS FIRST THRU R15
+         LR    R1,R4
+         ACALL DISPPAIR              DISPLAY REGISTER PAIR
+         LA    R4,2(R4)
+         END
+         SR    R4,R4
+         END
+         WHILE (R4,LT,R5),BEGIN  IF REGISTERS DO NOT WRAP ,,,
+         LR    R1,R4
+         ACALL DISPPAIR             DISPLAY REGISTER PAIR
+         LA    R4,2(R4)
+         END
+*
+DISREXIT LABEL ,
+         PEND
+         TITLE 'Debug Subroutines - Display ...'
+*box
+*
+*
+*  DISPPAIR - display register pair
+*
+*  on entry:  r1 - even register number
+*
+*
+DISPPAIR PROC
+         LR    R4,R1              R4 - EVEN REGISTER NUMBER
+         IF    (R4,LE,9),BEGIN    OUTPUT EVEN REGISTER
+         SEG   ' '
+         END
+         SEG   ' R'
+         SEGDC (R4)
+         SEG   ' = '
+         LR    R3,R4
+         SLL   R3,2
+         L     R2,DBREGS
+         L     R2,0(R2,R3)            R2 - REGISTER VALUE
+         SEGHX (R2),8
+         SEG   ' '
+         LR    R1,R2
+         ACALL DSEGSYM                IF SYMBOLIC FORM, TYPE IT
+         SEGCOL 30                START ODD REG IN COL 30
+         LA    R4,1(R4)           R4 - ODD REGISTER
+         IF    (R4,LE,9),BEGIN    OUTPUT ODD REGISTER
+         SEG   ' '
+         END
+         SEG   ' R'
+         SEGDC (R4)
+         SEG   ' = '
+         LR    R3,R4
+         SLL   R3,2
+         L     R2,DBREGS
+         L     R2,0(R2,R3)            R2 - REGISTER VALUE
+         SEGHX (R2),8
+         SEG   ' '
+         LR    R1,R2
+         ACALL DSEGSYM                IF SYMBOLIC FORM, TYPE IT
+         SEGWR
+         PEND
+         EJECT
+         QLTORG
+         TITLE 'Debug Subroutines - Display ...'
+DMWA     RECORD BEGIN
+DMSTART  DS    F                  START OF MEMORY TO DISPLAY
+DMLEN    DS    F                  LENGTH OF MEMORY TO DISPLAY
+DMADDR   DS    F                  ADDR OF MEMORY DISPLAYING
+DMEND    DS    F                  END OF MEMORY TO DISPLAY
+         END
+         SPACE 2
+*box
+*
+*
+*  DISPASM - display disassembled memory
+*
+*       on entry:  r1 - address
+*                  r0 - length (defaults to 64 if 0)
+*
+*
+*
+*
+DISPASM  PROC  DMWA
+         CLEAR DMWA
+         LA    R1,0(R1)           SAVE MEMORY POINTERS
+         SLL   R1,1               MUST BE EVEN ADDRESS
+         SRL   R1,1
+         IF    (R0,Z),' LA R0,64 '
+         ST    R1,DMSTART
+         ST    R1,DMADDR
+         AR    R1,R0
+         ST    R1,DMEND
+         ST    R0,DMLEN
+*
+         WHILE (DMADDR,LT,DMEND),BEGIN   LOOP DISPLAYING
+         L     R1,DMADDR
+         LA    R0,8               MAX (INSTR LEN, DATA LEN)
+         ACALL CHKRADDR           CHECK ADDR
+         IF    NZ,BEGIN
+         SEGWR 'Invalid address.'
+         B     DAEXIT
+         END
+         L     R1,DMADDR
+         ACALL CHKINST            CHECK FOR INSTR/DATA
+         IF    Z,BEGIN            IF INSTRUCTION,  DISPLAY IT
+         L     R1,DMADDR
+         ACALL DISPINST
+         ST    R1,DMADDR
+         END
+         ELSE  BEGIN ,            IF DATA, DISPLAY IT
+         L     R1,DMADDR
+         ACALL DISPDATA
+         ST    R1,DMADDR
+         END
+         END   ,                  LOOP DISPLAYING MEMORY
+*
+DAEXIT   LABEL ,
+         PEND
+         TITLE 'Debug Subroutines - Display ...'
+*box
+*
+*
+*  DISPDATA - display up to 8 bytes of data
+*
+*       on entry:  r1 - data address
+*       on exit:   r1 - address updated
+*
+*
+*  notes: data is displayed in simi-assembler format.  address
+*  in r1 must be even, and may not point at valid opcode.  if
+*  a valid opcode occurrs before 8 bytes,  then only data will
+*  be written out.
+*
+*
+*
+DISPDATA PROC
+         LR    R5,R1              R5 - DATA ADDRESS
+*-
+*-       FIND LENGTH OF DATA TO PUT (UP TO 8 BYTES)
+*-
+*                                 R1,R0 - START, END OF DATA TO PUT
+         LA    R0,8(R1)
+         S     R1,=F'2'
+         WHILE (NZ,AND,(R1,LT,R0)),BEGIN   LOOK FOR NEXT INSTR.
+         LA    R1,2(R1)
+         ACALL CHKINST
+         END
+         SR    R1,R5              R1 - LENGTH OF DATA TO PUT
+         LR    R4,R1              R4 - LENGTH OF DATA TO PUT !!
+         IF    (R4,Z),DDEXIT      IF NO DATA, NO DISPLAY
+*-
+*-       WRITE OUT LINE OF DATA
+*-
+         SEG   ' '
+         LR    R1,R5              DATA ADDRESS
+         ACALL DSEGADDR
+         SEGCOL 16
+         SEGHX LH:0(R5),4
+         IF    (R4,GT,2),BEGIN    PUT OUT DATA IN HEX
+         SEGHX LH:2(R5),4
+         END
+         SEG   ' '
+         IF    (R4,GT,4),BEGIN
+         SEGHX LH:4(R5),4
+         END
+         IF    (R4,GT,6),BEGIN
+         SEGHX LH:6(R5),4
+         END
+         SEGCOL 38
+         SEG   'DC'               PUT 'DC'
+         SEGCOL 66
+         SEG   ''''
+         XPUSH ,,8,PTR=R1
+         MVC   0(8,R1),0(R5)      PUT DATA IN CHAR FORM
+         L     R2,=A(DOTMASK)     DOT OUT UNPRINTABLES
+         TR    0(8,R1),0(R2)
+         SEG   0(R1),(R4)
+         XPOP  ,,8
+         SEG   ''''
+         SEGWR ,                  TERMINATE LINE WITH <CR>
+*
+*
+DDEXIT   LABEL ,
+         LR    R1,R5              R1 - UPDATE MEMORY ADDRESS
+         AR    R1,R4
+         PRETURN (R1)
+         PEND
+         TITLE 'Debug Subroutines - Display Instruction'
+*box
+*
+*
+*  DISPINST - display one instruction
+*
+*       on entry: r1 - address
+*
+*       on exit:  r1 - address of next instruction (data)
+*
+*
+*
+*
+DISPINST PROC
+         LA    R5,0(R1)           R5 - INSTRUCTION ADDRESS
+         LA    R4,2               R4 - INSTRUCTION LENGTH
+         IF    (@R5,GE,X'40'),' LA R4,4 '
+         IF    (@R5,GE,X'D0'),' LA R4,6 '
+*
+         SEG   ' '
+         LR    R1,R5              WRITE ADDRESS
+         ACALL DSEGADDR
+         SEGCOL 16
+         SEGHX LH:0(R5),4
+         IF    (R4,GT,2),BEGIN    INSTRUCTION IN HEX
+         SEG   ' '
+         SEGHX LH:2(R5),4
+         END
+         IF    (R4,GT,4),BEGIN
+         SEG   ' '
+         SEGHX LH:4(R5),4
+         END
+*
+         SEGCOL 38
+*-
+*-       LOOK UP INSTRUCTION NEMONIC
+*-
+         SR    R2,R2              R2 - INSTRUCTION OP CODE
+         IC    R2,0(R5)
+         LA    R3,INSTTAB         R3 - INSTRUCTION TABLE
+         WITH  (IRECORD,R3),BEGIN
+         WHILE ((R2,NE,IOPCD),AND,(IOPCD,NE,0)),BEGIN
+         LA    R3,INEXT
+         END
+*                                 R3 - INSTRUCTION TABLE ENTRY
+*-
+*-       FORMAT INSTRUCTION
+*-
+         IF    (IOPCD,EQ,0),BEGIN IF UNRECOGNIZED OPCODE
+         SEG   '???   ???'
+         B     DISPIRET
+         END
+*
+         IF    IRR,BEGIN          IF RR INSTRUCTION,
+         SEG   INAME,6
+         SEG   'R'
+         L     R1,0(R5)
+         N     R1,=X'00F00000'
+         SRL   R1,20
+         SEGDC (R1)
+         SEG   ',R'
+         L     R1,0(R5)
+         N     R1,=X'000F0000'
+         SRL   R1,16
+         SEGDC (R1)
+         B     DISPIRET
+         END
+*
+         IF    IRX,BEGIN          IF RX INSTRUCTION
+         SEG   INAME,6
+         SEG   'R'
+         L     R1,0(R5)
+         N     R1,=X'00F00000'
+         SRL   R1,20
+         SEGDC (R1)
+         SEG   ','
+         L     R1,0(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         L     R1,0(R5)
+         N     R1,=X'000FF000'
+         IF    NZ,BEGIN
+         SEG   '(R'
+         L     R1,0(R5)
+         N     R1,=X'000F0000'
+         SRL   R1,16
+         IF    (R1,NZ),BEGIN
+         SEGDC (R1)
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         IF    NZ,BEGIN
+         SEG   ','
+         END
+         END
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         IF    (R1,NZ),BEGIN
+         SEGDC (R1)
+         END
+         SEG   ')'
+         END
+         B     DISPIRET
+         END
+*
+         IF    IRS,BEGIN          IF RS INSTRUCTION,
+         SEG   INAME,6
+         SEG   'R'
+         L     R1,0(R5)
+         N     R1,=X'00F00000'
+         SRL   R1,20
+         SEGDC (R1)
+         SEG   ',R'
+         L     R1,0(R5)
+         N     R1,=X'000F0000'
+         SRL   R1,16
+         SEGDC (R1)
+         SEG   ','
+         L     R1,0(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         SEG   '(R'
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         SEGDC (R1)
+         SEG   ')'
+         B     DISPIRET
+         END
+*
+         IF    ISI,BEGIN          IF SI INSTRUCTION,
+         SEG   INAME,6
+         L     R1,0(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         SEG   '(R'
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         SEGDC (R1)
+         SEG   '),X'''
+         L     R1,0(R5)
+         N     R1,=X'00FF0000'
+         SRL   R1,16
+         SEGHX (R1),2
+         SEG   ''''
+         B     DISPIRET
+         END
+*
+         IF    ISS,BEGIN          IF SS INSTRUCTION,,,
+         SEG   INAME,6
+         L     R1,0(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         SEG   '('
+         L     R1,0(R5)
+         N     R1,=X'00FF0000'
+         SRL   R1,16
+         LA    R1,1(R1)
+         SEGDC (R1)
+         SEG   ',R'
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         SEGDC (R1)
+         SEG   '),'
+         L     R1,2(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         SEG   '(R'
+         L     R1,2(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         SEGDC (R1)
+         SEG   ')'
+         B     DISPIRET
+         END
+*
+         IF    IBCR,BEGIN         IF BCR, BEGIN
+         L     R1,0(R5)
+         N     R1,=X'00F00000'
+         SRL   R1,20
+         LR    R2,R1
+         IF    (R2,EQ,0),BEGIN
+         SEG   'NOPR  '
+         END
+         IF    (R2,EQ,1),BEGIN
+         SEG   'BOR   '
+         END
+         IF    (R2,EQ,2),BEGIN
+         SEG   'BHR   '
+         END
+         IF    (R2,EQ,4),BEGIN
+         SEG   'BLR   '
+         END
+         IF    (R2,EQ,7),BEGIN
+         SEG   'BNER  '
+         END
+         IF    (R2,EQ,8),BEGIN
+         SEG   'BER   '
+         END
+         IF    (R2,EQ,11),BEGIN
+         SEG   'BNLR  '
+         END
+         IF    (R2,EQ,13),BEGIN
+         SEG   'BNHR  '
+         END
+         IF    (R2,EQ,15),BEGIN
+         SEG   'BR    '
+         END
+         SEG   'R'
+         L     R1,0(R5)
+         N     R1,=X'000F0000'
+         SRL   R1,16
+         SEGDC (R1)
+         B     DISPIRET
+         END
+*
+         IF    IBC,BEGIN          IF BC, BEGIN
+         L     R1,0(R5)
+         N     R1,=X'00F00000'
+         SRL   R1,20
+         LR    R2,R1
+         IF    (R2,EQ,0),BEGIN
+         SEG   'NOP   '
+         END
+         IF    (R2,EQ,1),BEGIN
+         SEG   'BO    '
+         END
+         IF    (R2,EQ,2),BEGIN
+         SEG   'BH    '
+         END
+         IF    (R2,EQ,3),BEGIN
+         SEG   'BH-   '
+         END
+         IF    (R2,EQ,4),BEGIN
+         SEG   'BL    '
+         END
+         IF    (R2,EQ,5),BEGIN
+         SEG   'BL-   '
+         END
+         IF    (R2,EQ,6),BEGIN
+         SEG   'BNE-  '
+         END
+         IF    (R2,EQ,7),BEGIN
+         SEG   'BNE   '
+         END
+         IF    (R2,EQ,8),BEGIN
+         SEG   'BE    '
+         END
+         IF    (R2,EQ,9),BEGIN
+         SEG   'BE-   '
+         END
+         IF    (R2,EQ,10),BEGIN
+         SEG   'BNL-  '
+         END
+         IF    (R2,EQ,11),BEGIN
+         SEG   'BNL   '
+         END
+         IF    (R2,EQ,12),BEGIN
+         SEG   'BNH-  '
+         END
+         IF    (R2,EQ,13),BEGIN
+         SEG   'BNH   '
+         END
+         IF    (R2,EQ,14),BEGIN
+         SEG   'BNO   '
+         END
+         IF    (R2,EQ,15),BEGIN
+         SEG   'B     '
+         END
+         L     R1,0(R5)
+         N     R1,=X'00000FFF'
+         SEGDC (R1)
+         L     R1,0(R5)
+         N     R1,=X'000FF000'
+         IF    NZ,BEGIN
+         SEG   '(R'
+         L     R1,0(R5)
+         N     R1,=X'000F0000'
+         SRL   R1,16
+         IF    (R1,NZ),BEGIN
+         SEGDC (R1)
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         IF    NZ,BEGIN
+         SEG   ','
+         END
+         END
+         L     R1,0(R5)
+         N     R1,=X'0000F000'
+         SRL   R1,12
+         IF    (R1,NZ),BEGIN
+         SEGDC (R1)
+         END
+         SEG   ')'
+         END
+         B     DISPIRET
+         END
+*
+         IF    IOTHER,BEGIN       IF NONE OF THE ABOVE,,,
+         SEG   INAME,6
+         SEG   'OPERAND(S)'
+         END
+         END   , WITH (IRECORD,R3)
+*
+DISPIRET LABEL ,
+         SEGWR ,
+         LR    R1,R5              R1 - INSTRUCTION ADDRESS
+         AR    R1,R4              R1 - NEXT INSTRUCTION ADDRESS
+         PRETURN (R1)
+         PEND
+         EJECT
+         QLTORG
+         TITLE 'Debug Subroutines'
+*box
+*
+*
+*   Instruction table
+*
+*
+*
+INSTTAB  LABEL ,
+         INSTR AR,RR,1A
+         INSTR A,RX,5A
+         INSTR AH,RX,4A
+         INSTR ALR,RR,1E
+         INSTR AL,RX,5E
+         INSTR NR,RR,14
+         INSTR N,RX,54
+         INSTR NC,SS,D4
+         INSTR NI,SI,94
+         INSTR BALR,RR,05
+         INSTR BAL,RX,45
+         INSTR BASR,RR,0D
+         INSTR BAS,RX,4D
+         INSTR BASSM,RR,0C
+         INSTR BSM,RR,0B
+         INSTR BCR,BCR,07
+         INSTR BC,BC,47
+         INSTR BCTR,RR,06
+         INSTR BCT,RX,46
+         INSTR BXH,RS,86
+         INSTR BXLE,RS,87
+         INSTR B2OP,OTHER,B2
+         INSTR CR,RR,19
+         INSTR C,RX,59
+         INSTR CS,RS,BA
+         INSTR CDS,RS,BB
+         INSTR CH,RX,49
+         INSTR CLR,RR,15
+         INSTR CL,RX,55
+         INSTR CLC,SS,D5
+         INSTR CLI,SI,95
+         INSTR CLM,RS,BD
+         INSTR CLCL,RR,0F
+         INSTR CVB,RX,4F
+         INSTR CVD,RX,4E
+         INSTR DR,RR,1D
+         INSTR D,RX,5D
+         INSTR XR,RR,17
+         INSTR X,RX,57
+         INSTR XC,SS,D7
+         INSTR XI,SI,97
+         INSTR EX,RX,44
+         INSTR IC,RX,43
+         INSTR ICM,RS,BF
+         INSTR IPM,OTHER,B2
+         INSTR LR,RR,18
+         INSTR L,RX,58
+         INSTR LA,RX,41
+         INSTR LTR,RR,12
+         INSTR LCR,RR,13
+         INSTR LH,RX,48
+         INSTR LM,RS,98
+         INSTR LNR,RR,11
+         INSTR LPR,RR,10
+         INSTR MC,SI,AF
+         INSTR MVC,SS,D2
+         INSTR MVI,SI,92
+         INSTR MVCL,RR,0E
+         INSTR MVN,SS,E1
+         INSTR MVO,SS,F1
+         INSTR MVZ,SS,D3
+         INSTR MR,RR,1C
+         INSTR M,RX,5C
+         INSTR MH,RX,4C
+         INSTR OR,RR,16
+         INSTR O,RX,56
+         INSTR OC,SS,D6
+         INSTR OI,SI,96
+         INSTR PACK,SS,F2
+         INSTR SPM,OTHER,04
+         INSTR SLDA,RX,8F
+         INSTR SLDL,RX,8D
+         INSTR SLA,RX,8B
+         INSTR SLL,RX,89
+         INSTR SRDA,RX,8E
+         INSTR SRDL,RX,8C
+         INSTR SRA,RX,8A
+         INSTR SRL,RX,88
+         INSTR ST,RX,50
+         INSTR STC,RX,42
+         INSTR STCM,RS,BE
+         INSTR STCK,OTHER,B2
+         INSTR STH,RX,40
+         INSTR STM,RS,90
+         INSTR SR,RR,1B
+         INSTR S,RX,5B
+         INSTR SH,RX,4B
+         INSTR SLR,RR,1F
+         INSTR SL,RX,5F
+         INSTR SVC,OTHER,0A
+         INSTR TS,OTHER,93
+         INSTR TM,SI,91
+         INSTR TR,SS,DC
+         INSTR TRT,SS,DD
+         INSTR UNPK,SS,F3
+         INSTR ???,OTHER,00       END OF LIST
+         EJECT
+         QLTORG
+         AGO   .NOSYMLEN
+         TITLE 'Debug Subroutines'
+*box
+*
+*  SYMLEN
+*
+*
+DBSYMLEN PROC  ,
+*
+         LR    R2,R15
+         WITH  (SYMBOL,R2)
+         IF    SYMFEND,BEGIN
+         LA    R15,256
+         END
+         ELSE  BEGIN
+         L     R0,SYMBOL
+         N     R0,=X'00FFFFFF'
+         LA    R2,SYMNEXT
+         L     R1,SYMBOL
+         N     R1,=X'00FFFFFF'
+         IF    (R1,Z),' LR R1,R0'
+         SR    R1,R0
+         LR    R15,R1
+         END
+*
+         PEND
+.NOSYMLEN ANOP
+*box
+*
+*
+*  CKCMDEND - check for invalid junk at end of cmd
+*
+*  on entry:  scancb points to end of cmd string, if any
+*
+*  on exit:  R15 = ZERO, if no junk
+*            R15 = NZ, if junk, error msg is SEGWR'd
+*
+*
+*
+CKCMDEND PROC
+*
+         SCAN  CKCMDPRT,DBSCNCB
+         IF    NEG,BEGIN
+         SEG   (R1),(R0)
+         SEGWR ': invalid.'
+         LA    R15,4
+         END
+         ELSEIF DBFSCNERR,BEGIN
+         LA    R15,4
+         END
+         ELSE  BEGIN
+         CLEAR R15
+         END
+*
+         PEND
+*
+*
+*
+CKCMDPRT SCKW  ,INVALID
+         EJECT
+*box
+*
+*
+*  CHKRADDR - see if address is valid for read
+*
+*  on entry:   r1 - address to check
+*              r0 - length to check  (<256)
+*
+*  on exit:   r15 - CC=0  valid address,  CC=NZ invalid address
+*
+*
+CHKRWA   RECORD BEGIN
+CHKRLOC  DS    F
+CHKRLEN  DS    F
+CHKRINFO DS    F
+         END
+*
+*
+CHKRADDR PROC  CHKRWA
+*
+         CLEAR CHKRWA
+         ST    R1,CHKRLOC
+         ST    R0,CHKRLEN
+*
+*                                  CATCH ADDRESSING EXCEPTION
+         ESPIE SET,CHKASPIE,((1,15)),PARAM=BADRADDR
+         ST    R1,CHKRINFO         PREVIOUS ESPIE INFO
+*
+         L     R1,CHKRLOC         R1,R2 - LOC, LEN TO CHECK
+         L     R2,CHKRLEN
+         CEIL  R2,256
+         FLOOR R2,2
+         EX    R2,' CLC 0(0,R1),0(R1)'  TEST ADDRESS
+         SR    R15,R15
+         B     CHKREXIT
+*
+*
+BADRADDR LABEL ,
+         LA    R15,4
+         QSNAP 'BADRADDR'
+         B     CHKREXIT
+*
+*
+CHKREXIT LABEL ,
+         XPUSH R15
+         L     R1,CHKRINFO         PREVIOUS SPIE INFO
+         ESPIE RESET,(1)           RESTORE PREVIOUS ESPIE
+         XPOP  R15
+         PEND
+         TITLE 'Debug Subroutines'
+*box
+*
+*
+*  CHKSADDR - see if address is valid for store
+*
+*  on entry:   r1 - address to check
+*              r0 - length to check  (<256)
+*
+*  on exit:   r15 - CC=0  valid address,  CC=NZ invalid address
+*
+*
+CHKSWA   RECORD BEGIN
+CHKSLOC  DS    F
+CHKSLEN  DS    F
+CHKSINFO DS    F
+         END
+*
+*
+CHKSADDR PROC  CHKSWA
+*
+         CLEAR CHKSWA
+         ST    R1,CHKSLOC
+         ST    R0,CHKSLEN
+*
+*                                  CATCH ADDRESSING EXCEPTION
+         ESPIE SET,CHKASPIE,((1,15)),PARAM=BADSADDR
+         ST    R1,CHKSINFO         PREVIOUS ESPIE INFO
+*
+         L     R1,CHKSLOC         R1,R2 - LOC, LEN TO CHECK
+         L     R2,CHKSLEN
+         CEIL  R2,256
+         FLOOR R2,2
+         EX    R2,' MVC 0(0,R1),0(R1)'  TEST ADDRESS
+         SR    R15,R15
+         B     CHKSEXIT
+*
+*
+BADSADDR LABEL ,
+         QSNAP 'BADSADDR'
+         LA    R15,4
+         B     CHKSEXIT
+*
+*
+CHKSEXIT LABEL ,
+         XPUSH R15
+         L     R1,CHKSINFO         PREVIOUS SPIE INFO
+         ESPIE RESET,(1)           RESTORE PREVIOUS ESPIE
+         XPOP  R15
+         PEND
+         EJECT
+*box
+*
+* ESPIE ROUTINE
+*
+* We just return to the PARAM address, simple simon.
+*
+*
+* NOTE: no PROC no PEND, we are in OSLAND toto!
+*
+*
+CHKASPIE LABEL ,
+         WITH  (*,R15),BEGIN
+         WITH  (EPIE,R1),BEGIN
+         NC    EPIEIA,=X'80000000' KEEP ADDRESSING MODE THE SAME
+         OC    EPIEIA,EPIEPARM
+         QSNAP 'CHKASPIE'
+         QSNAP (R14)
+         BR    R14
+         END
+         TITLE 'Debug Subroutines'
+         SPACE 2
+*box
+*
+*
+*  CHKIADDR - see if address is an instruction address,
+*             we check for valid opcode, and check a bit to
+*             see if the address is in the program, not data area
+*
+*  on entry:   r1 - address to check
+*
+*  on exit:   r15 - CC=0  valid address,  CC=NZ invalid address
+*
+*
+CHKIWA   RECORD BEGIN
+CHKINAME DS    CL8
+         END
+*
+*
+CHKIADDR PROC  CHKIWA
+         CLEAR CHKIWA
+*                                 R1 - ADDRESS TO CHECK
+         LA    R0,2
+         ACALL CHKRADDR           CHECK ADDR FOR READ, WEAK CHECK
+         IF    NZ,BADIADDR
+         LR    R2,R1              CHECK FOR EVEN ADDRESS
+         SRL   R2,31
+         IF    (R2,NZ),BADIADDR
+         SR    R2,R2              CHECK FOR INSTRUCTION OP CODE
+         IC    R2,0(R1)
+         IC    R2,INSTTYPE(R2)
+         IF    (R2,NZ),BADIADDR
+         SR    R15,R15            IF NOT BAD, THEN IT MUST BE OK
+         B     CHKIEXIT
+*
+*
+BADIADDR LABEL ,
+         LA    R15,4
+         B     CHKIEXIT
+*
+*
+CHKIEXIT LABEL ,
+         PEND
+         EJECT
+*box
+*
+*
+*   INSTRUCTION TYPE TABLE  (370-XA)
+*
+*     0 - GENERAL INSTRUCTION
+*     4 - INVALID OPCODE
+*     8 - DECIMAL
+*    12 - FLOATING POINT
+*    16 - CONTROL
+*    20 - I/O AND MORE (B2 OPCODE)
+*
+*
+*               0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+INSTTYPE DC    X'04040404000000000404000000000000'   0
+         DC    X'00000000000000000000000000000000'   1
+         DC    X'0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C'   2
+         DC    X'0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C'   3
+         DC    X'00000000000000000000000000000000'   4
+         DC    X'00040404000000000000000000000000'   5
+         DC    X'0C0404040404040C0C0C0C0C0C0C0C0C'   6
+         DC    X'0C040404040404040C0C0C0C0C0C0C0C'   7
+         DC    X'10041010040400000000000000000000'   8
+         DC    X'00000000000000000010040404040404'   9
+         DC    X'04040404040404040404040410101000'   A
+         DC    X'04101404040410100404000004000000'   B
+         DC    X'04040404040404040404040404040404'   C
+         DC    X'04000000000000000410101000000808'   F
+         DC    X'04040404041004040404040404040404'   E
+         DC    X'08000000040404040808080808080404'   F
+         TITLE 'Debug Subroutines'
+         SPACE 2
+*box
+*
+*
+*  CHKINST - Check if instruction or data
+*
+*       on entry:  r1 - address
+*
+*       on exit:   r15=0 - yes,  r15=NZ - not instruction
+*
+*
+*  This routine makes an attemp to determine whether we are
+*  looking at an instruction or data.  We make a number of
+*  tests none are always right,,,  we try to error in favor
+*  of the instruction.
+*
+*
+CKINWA   RECORD BEGIN
+CKINTEMP DS    CL8
+         END
+*
+*
+CHKINST  PROC  CKINWA
+         CLEAR CKINWA
+*
+         LA    R4,4               CHECK FOR 4 INSTRUCTIONS
+         WHILE (R4,NZ),BEGIN      LOOP THRU 4 INSTRUCTIONS
+*
+         L     R3,=A(INSTTYPE)    CHECK FOR VALID OPCODE
+         SR    R2,R2
+         IC    R2,0(R1)
+         IC    R2,0(R3,R2)
+         IF    (R2,NZ),NOTINST
+*
+         IF    (@R1,EQ,X'05'),GOTINST    CHECK FOR BRANCH OPCODES
+         IF    (@R1,EQ,X'07'),GOTINST
+         IF    (@R1,EQ,X'0B'),GOTINST
+         IF    (@R1,EQ,X'0C'),GOTINST
+         IF    (@R1,EQ,X'0D'),GOTINST
+         IF    (@R1,EQ,X'45'),GOTINST
+         IF    (@R1,EQ,X'47'),GOTINST
+         IF    (@R1,EQ,X'4D'),GOTINST
+*
+         IF    (@R1,EQ,'    '),NOTINST   CHECK FOR BLANKS, LETTERS
+         SR    R0,R0
+         LR    R2,R1
+         LA    R3,6
+         WHILE (R3,POS),BEGIN     CHECK FOR 6 UPPER CASE LETTERS
+         IF    ((@R2,LE,X'C0'),AND,(@R2,NE,X'40')),' LA R0,1 '
+         LA    R2,1(R2)
+         BCTR  R3,0
+         END
+         IF    (R0,Z),NOTINST
+         SR    R0,R0
+         LR    R2,R1
+         LA    R3,8
+         WHILE (R3,POS),BEGIN     CHECK FOR 8 LOWER CASE LETTERS
+         IF    ((@R2,LE,X'80'),AND,(@R2,NE,X'40')),' LA R0,1 '
+         LA    R2,1(R2)
+         BCTR  R3,0
+         END
+         IF    (R0,Z),NOTINST
+*
+         LA    R2,2                      CHECK NEXT INSTRUCTION
+         IF    (@R1,GE,X'40'),' LA R2,4 '      GET INSTRUCTION LEN
+         IF    (@R1,GE,X'D0'),' LA R2,6 '
+         LA    R1,0(R2,R1)
+         BCTR  R4,0
+         END   ,                  LOOP CHECKING NEXT INSTRUCTION
+         B     GOTINST            FALL THRU INDICATES WE HAVE INSTR.
+*
+GOTINST  LABEL ,
+         CLEAR R15,R15
+         B     CKINEXIT
+*
+NOTINST  LABEL ,
+         LA    R15,4
+         B     CKINEXIT
+*
+CKINEXIT LABEL ,
+         PEND
+         EJECT
+*
+*  FINDTRAP -
+*
+*  ON ENTRY:
+*        R0 - DVWA
+*        R1 - INSTURCTION ADDRESS (OR ZERO)
+*
+*  ON EXIT:
+*        R0 - TRAP NUMBER (STARTS AT 1)
+*        R1 - TRAP ADDRESS
+*        R15=0 - TRAP FOUND
+*        R15=NZ - TRAP NOT FOUND
+*
+FINDTRAP XPROC
+*
+         LR    R5,R0
+         USING DVWA,R5
+         LA    R4,DVTRAPS          TRAP NDX
+         USING TPENTRY,R4
+*
+*                                  FIND TRAP
+         LA    R1,@R1
+         LA    R3,1
+         WHILE ((R1,NE,TPADDR),AND,(TPADDR,NZ)),BEGIN
+         LA    R4,TPNEXT
+         INCR  R3
+         END
+*
+*                                  SET RETURNS
+         IF    (R1,EQ,TPADDR),BEGIN TRAP FOUND
+         LR    R1,R4
+         LR    R0,R3
+         PRETURN (R0,R1)
+         CLEAR R15
+         END
+         ELSE  BEGIN               NOT FOUND
+         LA    R15,4
+         END
+*
+         PEND
+         DROP  R5
+         DROP  R4
+*
+         QLTORG
+         TITLE 'Debug Subroutines'
+DSEGWA   RECORD BEGIN
+DSEGNAME DS    CL8
+         END
+*box
+*
+*
+*  DSEGADDR - seg an address,
+*             gives MODULE+OFFSET, or ADDRESS
+*
+*   on input, R1 - ADDRESS
+*
+*
+DSEGADDR PROC  DSEGWA
+         CLEAR DSEGWA
+         ACALL EVALADDR           GET MODULE+OFFSET REPRESENTATION
+         STM   R15,R0,DSEGNAME    MODULE NAME
+         LR    R2,R1              OFFSET  (OR ADDR)
+         IF    (R15,NZ),BEGIN     IF MODULE NAME,
+         SEGT  DSEGNAME           MODULE+
+         IF    (R2,NZ),BEGIN
+         SEG   '+0'                      0HHHEX
+         SEGHX (R2)
+         END
+         END
+         ELSE  BEGIN ,            IF NO MODULE NAME, JUST GIVE ADDR
+         SEGHX (R2),8
+         END
+         PEND
+         EJECT
+*box
+*
+*
+*  DSEGSYM - seg symbolic form of address if there is one
+*            gives MODULE+OFFSET, or nothing
+*
+*  on entry: r1 - address
+*
+*
+*
+DSEGSYM  PROC  DSEGWA
+         CLEAR DSEGWA
+         ACALL EVALADDR
+         IF    NZ,BEGIN           IF SYMBOLIC FORM, PRINT IT
+         STM   R15,R0,DSEGNAME    SYMBOL
+         LR    R2,R1              OFFSET
+         SEGT  DSEGNAME
+         IF    (R2,NZ),BEGIN
+         SEG   '+0'
+         SEGHX (R2)
+         END
+         END
+         PEND
+         TITLE 'Debug Subroutines'
+*box
+*
+* ETOATBL -- Translate table for EBCDIC to ASCII conversion.
+*       Modified 11/85 to be a 1-to-1 translation by Dick Guertin.
+*
+         SPACE
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+ETOATBL  DC    X'000102038009817F8283840B0C0D0E0F'   0
+         DC    X'1011121385860887181988891C1D1E1F'   1
+         DC    X'8A8B8C8D8E0A171B8F90919293050607'   2
+         DC    X'94951696979899049A9B9C9D14159E1A'   3
+         DC    X'20A9A1A2A3A4A5A6AAA85E2E3C282B7C'   4
+         DC    X'26D1D2D3D4D5D6D7D8D921242A293B7E'   5
+         DC    X'2D2FB1B2B3B4B5B6B8EE9F2C255F3E3F'   6
+         DC    X'EACEE8CFE2E7F0E6E9603A2340273D22'   7
+         DC    X'D0616263646566676869E0ACBCCCCACB'   8
+         DC    X'DE6A6B6C6D6E6F707172DFADBDCDABA0'   9
+         DC    X'E5E3737475767778797AAFBEBF5BA7B7'   A
+         DC    X'C0C1C2C3C4C5C6C7C8C9BABBDC5DEDFE'   B
+         DC    X'7B414243444546474849DADBDDF9B0F1'   C
+         DC    X'7D4A4B4C4D4E4F505152F8B9FAFBF2F3'   D
+         DC    X'5CE1535455565758595AF4F5E4AEF7EF'   E
+         DC    X'30313233343536373839EBECFCFDF6FF'   F
+         SPACE 2
+*box
+*
+*  ATOETBL -- Translate table for ASCII to EBCDIC conversion.
+*       Modified 11/85 to be a 1-to-1 translation by Dick Guertin.
+*
+*
+         SPACE
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+ATOETBL  DC    X'00010203372D2E2F1605250B0C0D0E0F'   0
+         DC    X'101112133C3D322618193F271C1D1E1F'   1
+         DC    X'405A7F7B5B6C507D4D5D5C4E6B604B61'   2
+         DC    X'F0F1F2F3F4F5F6F7F8F97A5E4C7E6E6F'   3
+         DC    X'7CC1C2C3C4C5C6C7C8C9D1D2D3D4D5D6'   4
+         DC    X'D7D8D9E2E3E4E5E6E7E8E9ADE0BD4A6D'   5
+         DC    X'79818283848586878889919293949596'   6
+         DC    X'979899A2A3A4A5A6A7A8A9C04FD05F07'   7
+         DC    X'040608090A1415171A1B202122232428'   8
+         DC    X'292A2B2C30313334353638393A3B3E6A'   9
+         DC    X'9F424344454647AE4941489E8B9BEDAA'   A
+         DC    X'CE626364656667AF68DBBABB8C9CABAC'   B
+         DC    X'B0B1B2B3B4B5B6B7B8B98E8F8D9D7173'   C
+         DC    X'80515253545556575859CACBBCCC909A'   D
+         DC    X'8AE174A1ECA07775727870FAFBBE69EF'   E
+         DC    X'76CFDEDFEAEBFEEEDACDDCDDFCFDBFFF'   F
+         SPACE 2
+         TITLE 'Debug Subroutines'
+*-
+*-       FUTURE ROUTINES
+*-
+         EJECT
+*
+         SEGDEF DUMMY              (Neatness)
+*
+         QLTORG
+DEBUGX   EQU   *-DEBUG             Module length
+*
+         DC    0D'0'               FORCE OUT TO DOUBLE WORD
+         ENTRY SYMDEBUG            DEFINE SYMBOL ENTRY FOR DUMPER
+SYMDEBUG DC    CL8'DEBUG',A(DEBUG),A(DEBUGX)
+         DC    A(0)                End of symbols
+         END   .

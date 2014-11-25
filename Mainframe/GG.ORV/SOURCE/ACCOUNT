@@ -1,0 +1,415 @@
+ACCOUNT  TITLE 'User Resource Accounting Routines'
+         COPY  HEADER
+         EJECT ,
+ACCOUNT  MODULE TRCNUM=10
+         EJECT ,
+         COPY  PZERO
+         USING PZERO,R0
+         EJECT ,
+         COPY  MAT
+         EJECT ,
+         COPY  ASB
+         EJECT ,
+         COPY  ACCTPARM
+         EJECT ,
+         COPY  VMPARM
+         EJECT ,
+         COPY  PARMPARM
+         EJECT ,
+*****************************************************************
+*                                                               *
+*     ACCT --  Global accounting information table              *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACCT     RECORD BEGIN
+         DC    C'ACCT'       Control Block ID
+*
+*  CPU charging factor
+*
+ACFACTOR DS    D             CPU charging factor
+         END   ,
+         SPACE 3
+         COPY  AIB
+         EJECT ,
+*****************************************************************
+*                                                               *
+* ACCTINIT --  This is the Accounting initialization routine.   *
+*              It is called once at system initialization time. *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACIWORK  RECORD BEGIN
+ACIFACT  DS    D
+ACIPARM  DS    XL(L'PARMIN)
+ACIKEYS  DS    3CL8
+         END
+         SPACE 2
+ACCTINIT PROC  ,ACIWORK,SCOPE=GLOBAL
+*
+*  First create the ACCT
+*
+         VMGET L'ACCT,LOC=GLOBHI
+         IF    ('LTR  RY,RVR',Z),'ABORT NOACCT'
+         WITH  (ACCT,RY)
+*
+*  Clear it and set the id
+*
+         LA    R1,L'ACCT
+         CLEAR R15
+         MVCL  R0,R14                  Clear it
+         MVC   ACCT(4),=CL4'ACCT'       and set the id
+*
+*  Connect the ACCT to the MAT
+*
+         L     RA,PZMATP               MAT pointer
+         WITH  (MAT,RA),'ST  RY,MATACCT'   ACCT pointer
+*
+*  Set the defaults
+*
+         MVC   ACFACTOR,=D'1'          Charges to CPU used are 1:1
+*
+*  Get the factor from the parm file
+*
+         WITH  (PARMIN,ACIPARM)
+         GETPARM2 ACIFACT,,TYPE=FLOAT,KEY=(ACCOUNT,FACTOR),            *
+               REGS=(R0,R14)           Read in the parms
+         IF    Z,'ST  R0,ACFACTOR'     The factor was specified
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  ACLOGON --  This routine is called to initialize the         *
+*              accounting info for a user.                      *
+*                                                               *
+*   Input  --  @ACLOGON                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACLOGON  PROC  @ACLOGON,SCOPE=GLOBAL
+*
+* Get our bearings
+*
+         L     RX,@ACLASB              Get the ASB address
+         WITH  (ASB,RX)
+         IF    (ASB,NE,'ASB '),'ABORT BADASB'
+         LT    RY,ASBAIB
+         WITH  (AIB,RY)
+         IF    NZ,BEGIN                Already logged on
+         MVC   AIBPRIVS,@ACLUPR        Update privs only
+         END   ELSE,BEGIN
+*
+* Get an AIB
+*
+         VMGET L'AIB,LOC=GLOBHI
+         IF    (RVR,Z),EXIT
+         LR    RY,RVR                  Copy the Address
+         CLEAR AIB
+         MVC   AIB(4),=C'AIB '         Move in the ID
+*
+* Fill in the AIB
+*
+         ST    RX,AIBASB               Save the ASB address
+         MVC   AIBUSER,@ACLUID         User ID
+         MVC   AIBPRIVS,@ACLUPR        Privs
+         MVC   AIBLOT,@ACLLOT          Logon time
+         MVC   AIBTID,@ACLTID          Terminal id
+         VCALL DISPCPTA                Find out where the CPU time is
+         ST    RVR,AIBCPUTA            Save the location
+         VCALL PAGPIOA                 Find out where paging info is
+         ST    RVR,AIBPIOSA            Save the location
+*
+* Put the AIB address in the ASB
+*
+         ST    RY,ASBAIB               Save the AIB address
+         END   ,
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* ACLOGOFF --  This routine is called to terminate accounting   *
+*              for a user.                                      *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACLOGOFF PROC  SCOPE=GLOBAL
+*
+* Get our bearings
+*
+         L     RX,PZCURASB             Get the ASB address
+         WITH  (ASB,RX)
+         LT    RY,ASBAIB
+         IF    Z,EXIT                  No AIB here
+         WITH  (AIB,RY)
+         IF    (AIB,NE,'AIB '),'ABORT BADAIB'
+*
+* Free the AIB
+*
+         CLEAR AIB                     Give it a blank look
+         VMFREE L'AIB,A=(RY),LOC=GLOBHI
+         CLEAR ASBAIB                  clear the pointer to it
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  ACAINFO --  This routine returns information about the       *
+*              account associated with the given ASB.           *
+*                                                               *
+*   Input  --  @ACAINFO                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACAINFO  PROC  @ACAINFO,SCOPE=GLOBAL
+*
+* Find out who they want to know about
+*
+         L     RX,@ACAASB              Get the ASB address
+         WITH  (ASB,RX)
+         IF    (ASB,NE,'ASB '),'ABORT BADASB'
+         LT    RY,ASBAIB               Get the AIB address
+         IF    Z,EXIT                  No accounting info here
+         WITH  (AIB,RY)
+*
+* Fill in the response
+*
+         MVC   @ACAUID,AIBUSER
+         MVC   @ACAUPR,AIBPRIVS
+         MVC   @ACALOT,AIBLOT
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   ACINFO --  This routine returns information about the       *
+*              resources used by the given ASB.                 *
+*                                                               *
+*   Input  --  @ACINFO                                          *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACINFO   PROC  @ACINFO,SCOPE=GLOBAL
+*
+* Find out who they want to know about
+*
+         L     RX,@ACIASB              Get the ASB address
+         WITH  (ASB,RX)
+         IF    (ASB,NE,'ASB '),'ABORT BADASB'
+         LT    RY,ASBAIB               Get the AIB address
+         IF    Z,EXIT                  No accounting info here
+         WITH  (AIB,RY)
+*
+* Calculate the connect time
+*
+         STCK  @ACICON                 Save current time
+         LM    RA,RB,@ACICON           Get the value
+         ADL   RA,PZTZOFF              Add time zone offset
+         SDL   RA,AIBLOT               Less the logon time
+         STM   RA,RB,@ACICON           Gives the connect time
+*
+* Move in the rest of the info
+*
+         L     RS,AIBCPUTA             Location of the CPU time
+         MVC   @ACICPU,@RS             CPU time
+         MVC   @ACIIOS,AIBDIOS         I/Os
+         MVC   @ACITID,AIBTID          Terminal id
+         MVC   @ACIPGNM,AIBPGNM        Program name
+         MVC   @ACIORG,AIBORG          Shared program address
+*
+*  Get pointer to Account information table
+*
+         L     RM,PZMATP               MAT POINTER
+         WITH  (MAT,RM),'L  RM,MATACCT'   ACCT POINTER
+         WITH  (ACCT,RM)
+*
+*  Calculate the charge time factor
+*
+         IF    (ACFACTOR,NE,=D'1'),BEGIN
+         MVI   @ACICPU,X'4E'           Add exponent to make CPU time
+         LD    0,@ACICPU                into a floating point value
+         MD    0,ACFACTOR              CPU factor
+         AW    0,=X'4E00000000000000'  Scale the result
+         STD   0,@ACICPU                and save it back
+         MVI   @ACICPU,0               Remove exponent
+         END
+         PEND  ,                       Return to the caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   ACPNFO --  This routine sets certain program specific       *
+*              information in AIB.                              *
+*                                                               *
+*   Input  --  @ACPINFO                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACPINFO  PROC  @ACPINFO,SCOPE=GLOBAL
+*
+* Find out who they want to know about
+*
+         L     RX,@ACPASB              Get the ASB address
+         WITH  (ASB,RX)
+         IF    (ASB,NE,'ASB '),EXIT
+         LT    RY,ASBAIB               Get the AIB address
+         IF    Z,EXIT                  No accounting info here
+         WITH  (AIB,RY)
+         MVC   AIBPGNM,@ACPPGNM        Set program name
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   ACSPNFO -- This routine sets certain shared program         *
+*              specific information in AIB.                     *
+*                                                               *
+*   Input  --  @ACPINFO                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACSPINF  PROC  @ACSPINF,SCOPE=GLOBAL
+*
+* Find out who they want to know about
+*
+         L     RX,@ACSPASB              Get the ASB address
+         WITH  (ASB,RX)
+         IF    (ASB,NE,'ASB '),EXIT
+         LT    RY,ASBAIB               Get the AIB address
+         IF    Z,EXIT                  No accounting info here
+         WITH  (AIB,RY)
+         MVC   AIBORG,@ACSPORG         Set Shared program address
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  ACDSKIO --  This routine is called to signal the completion  *
+*              of chargable disk I/O.                           *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACDSKIO  PROC  SCOPE=GLOBAL
+*
+* Get our bearings
+*
+         L     RX,PZCURASB             Get the current ASB address
+         WITH  (ASB,RX)
+         LT    RY,ASBAIB               Get the AIB location
+         IF    Z,EXIT                  Don't count it
+         WITH  (AIB,RY)
+*
+* Add this Disk I/O to the count
+*
+         L     RA,AIBDIOS
+         LOOP  BEGIN
+         LR    RS,RA
+         A     RS,=A(1)                Add this I/O
+         CS    RA,RS,AIBDIOS           Update the count
+         UNTIL Z,END
+         PEND  ,                       Then return
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  ACPUCHG --  This routine returns the CPU charges for this    *
+*              Address space in FPR 0.  The CPU charge is the   *
+*              CPU time times charge factor and is in the form  *
+*              of an unnormalized TOD value.                    *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  FPR 0 contains the address space CPU charges     *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ACPWORK  RECORD BEGIN
+ACPTIME  DS    D
+         END
+         SPACE 2
+ACPUCHG  PROC  ,ACPWORK,SCOPE=GLOBAL
+*
+*  First get CPU time from dispatcher
+*
+         VCALL ACPUTIME
+*
+*  Get pointer to Account information table
+*
+         L     RM,PZMATP               MAT POINTER
+         WITH  (MAT,RM),'L  RM,MATACCT'   ACCT POINTER
+         WITH  (ACCT,RM)
+*
+*  Now apply the factor to it
+*
+         IF    (ACFACTOR,NE,=D'1'),BEGIN
+         STD   0,ACPTIME               CPU time returned by dispatch
+         MVI   ACPTIME,X'4E'           Add exponent to make CPU time
+         LD    0,ACPTIME                into a floating point value
+         MD    0,ACFACTOR              CPU factor
+         AW    0,=X'4E00000000000000'  Scale the result
+         STD   0,ACPTIME                and store it to
+         MVI   ACPTIME,0                remove exponent
+         LD    0,ACPTIME               Provide caller with charges
+         END
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  TCPUCHG --  This routine returns the CPU charges for this    *
+*              task in FPR 0.  The CPU charge is the CPU time   *
+*              times charge factor and is in the form           *
+*              of an unnormalized TOD value.                    *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  FPR 0 contains the task CPU time                 *
+*                                                               *
+*****************************************************************
+         SPACE 2
+TCPWORK  RECORD BEGIN
+TCPTIME  DS    D
+         END
+         SPACE 2
+TCPUCHG  PROC  ,TCPWORK,SCOPE=GLOBAL
+*
+*  First get CPU time from dispatcher
+*
+         VCALL TCPUTIME
+*
+*  Get pointer to Account information table
+*
+         L     RM,PZMATP               MAT POINTER
+         WITH  (MAT,RM),'L  RM,MATACCT'   ACCT POINTER
+         WITH  (ACCT,RM)
+*
+*  Now apply the factor to it
+*
+         IF    (ACFACTOR,NE,=D'1'),BEGIN
+         STD   0,TCPTIME               CPU time returned by dispatch
+         MVI   TCPTIME,X'4E'           Add exponent to make CPU time
+         LD    0,TCPTIME                into a floating point value
+         MD    0,ACFACTOR              CPU factor
+         AW    0,=X'4E00000000000000'  Scale the result
+         STD   0,TCPTIME                and store it to
+         MVI   TCPTIME,0                remove exponent
+         LD    0,TCPTIME               Provide caller with charges
+         END
+         PEND  ,
+         EJECT
+         XTRCDATA                      Generate the trace info
+         END   .

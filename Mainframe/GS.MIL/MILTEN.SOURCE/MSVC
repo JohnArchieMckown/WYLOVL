@@ -1,0 +1,185 @@
+MSVC     TITLE 'MILTEN''s MILSERV SVC Processing'                               
+*******************************************************************             
+*                                                                 *             
+*     MILTEN/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+MILMSVC  CSECT                                                                  
+MSVC     IDENT 2047                10:16:24 02/16/02  (SLP)                     
+         REGS  ,,FSR,,,,,,BR,SCBR,PDBR,LSR,CVR,SPR,RAR                          
+*                                                                               
+         PUSH  DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+         CVT   DSECT=YES                                                        
+         EJECT                                                                  
+USERCVT  RECORD 'USERCVT'                                                       
+         EJECT                                                                  
+CVDSECT  DSECT                                                                  
+         COPY  CV                                                               
+         EJECT                                                                  
+SCB      RECORD BEGIN                                                           
+         COPY  SCB                                                              
+         END                                                                    
+         EJECT                                                                  
+PDB      RECORD 'PDB'                                                           
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+NENTRIES EQU   25                  No. of milserv queue entries                 
+         SPACE 2                                                                
+         MILQ                                                                   
+         SPACE 2                                                                
+         COPY  MILSERVD                                                         
+         TITLE 'MILSERV SVC Processing'                                         
+*box                                                                            
+*                                                                               
+*  SERVINIT -- Routine to initialize MILSERV SVC interface.                     
+*    (Called during MILTEN initialization.)                                     
+*                                                                               
+SERVINIT XPROC                                                                  
+         IF    CVFTEST,EXIT        Only for production                          
+*                                                                               
+         L     R11,CVTPTR                                                       
+         WITH  (CVT,R11)           ##                                           
+         LT    R10,CVTUSER         Scip cvt ptr                                 
+         IF    Z,EXIT              None, scram                                  
+         WITH  (USERCVT,R10)       ##                                           
+         IF    (USERCVT,NE,'SCIP'),EXIT                                         
+*                                                                               
+         LM    R2,R3,USEMACTQ      Queue head ptrs                              
+         IF    ((R2,NZ),OR,(R3,NZ)),EXIT  already have buffers, scram           
+*                                                                               
+         VCALL KEYZERO             ********                                     
+         L     R0,=A(NENTRIES*L'MILQ)  length of buffers                        
+         ICM   R0,8,=AL1(241)      Subpool number (csa)                         
+         GETMAIN R,LV=(0)          Get storage                                  
+         LR    R7,R1                                                            
+         LR    R6,R1                                                            
+         LA    R2,NENTRIES                                                      
+         WHILE (R2,POS),BEGIN                                                   
+         WITH  (MILQ,R6)           ##                                           
+         CLEAR MILQ                                                             
+         MVC   MILQID,=C'FREQ'                                                  
+         LA    R3,MILQ+L'MILQ                                                   
+         IF    (R2,GT,1),'ST R3,MILQLINK'  link to next                         
+         MVC   MILQEND,=C'QEND'                                                 
+         LR    R6,R3                                                            
+         DECR  R2                                                               
+         END                                                                    
+         ST    R7,USEMFREQ         Save free queue head ptr                     
+*                                                                               
+         VCALL KEYNZERO            ********                                     
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SERVDO -- Routine to process requests from the MILSERV SVC.                  
+*    (Called from the MILTEN dispatcher.)                                       
+*                                                                               
+SERVDO   XPROC                                                                  
+         L     R11,CVTPTR                                                       
+         WITH  (CVT,R11),'L R11,CVTUSER'                                        
+         IF    (R11,Z),EXIT        No user cvt                                  
+         WITH  (USERCVT,R11)       ##                                           
+         IF    (USERCVT,NE,'SCIP'),EXIT  no scip cvt!                           
+*                                                                               
+SERVDLP  LT    R7,USEMACTQ         Active queue head ptr                        
+         IF    Z,EXIT              Nothing, scram                               
+         WITH  (MILQ,R7)           ##                                           
+         IF    (MILQID,NE,'MILQ'),SERVDEQ                                       
+         IF    (MILQEND,NE,'QEND'),SERVDEQ                                      
+*                                                                               
+         IF    (MILQOPT,EQ,2),BEGIN  option 2 (send message)...                 
+         LA    R15,MILQTEXT+1      Account                                      
+         LA    R1,MILQTEXT+6       Message text                                 
+         LH    R0,MILQLEN                                                       
+         SH    R0,=H'6'                                                         
+         LCALL SENDMSG             Send account the message                     
+         END                                                                    
+*                                                                               
+SERVDEQ  VCALL KEYZERO             ********                                     
+         L     R2,MILQLINK                                                      
+         CS    R7,R2,USEMACTQ      De-queue active entry                        
+         IF    NZ,BEGIN            Something changed...                         
+         VCALL KEYNZERO            ********                                     
+         B     SERVDLP             Go back, try again                           
+         END                                                                    
+*                                                                               
+* now add to free queue...                                                      
+         CLEAR MILQ                                                             
+         MVC   MILQID,=C'FREQ'                                                  
+         MVC   MILQEND,=C'QEND'                                                 
+         LOOP  BEGIN                                                            
+         L     R2,USEMFREQ         Free queue head                              
+         ST    R2,MILQLINK                                                      
+         CS    R2,R7,USEMFREQ      Add our entry to free q head                 
+         UNTIL Z,END                                                            
+         VCALL KEYNZERO            ********                                     
+*                                                                               
+         B     SERVDLP                                                          
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SENDMSG -- Routine to send an asynchronous message to an                     
+*    account.                                                                   
+*                                                                               
+*    On entry:                                                                  
+*      R15 - address of account (uuugg)                                         
+*      R1,R0 - message loc, len                                                 
+*                                                                               
+SENDMSG  PROC                                                                   
+         LR    R6,R15              Account ptr                                  
+         LR    R5,R1               Msg ptr                                      
+         LR    R4,R0               Msg len                                      
+*                                                                               
+         LA    SCBR,CVSCBQH-(SCBLINK-SCB)  dummy first entry                    
+         LOOP  BEGIN                                                            
+         WITH  SCB                 ##                                           
+         WHILE ('LT SCBR,SCBLINK',NZ)                                           
+         IF    (SCBACCT,EQ,@R6),BEGIN  matched account...                       
+         IF    SCBFLGF,EXIT        Skip if logging off                          
+         IF    SCBSFPS,EXIT        Ignore pseudo-sessions                       
+         IF    SCBFNMSG+SCBFNCOM,EXIT  can't send a msg                         
+         L     PDBR,CVPDBP                                                      
+         WITH  PDB                 ##                                           
+         CLEAR PDBHDR                                                           
+         PUSH  L'SEGCB,PTR=R7                                                   
+         WITH  (SEGCB,R7),BEGIN                                                 
+         SEGINIT PDBTEXT,512,SEGCB                                              
+         SEG   X'2F15'             Bell, nl                                     
+         VCALL LOCALTOD            Current time                                 
+         PUSH  11,PTR=R15          l'hh:mm:ss.hh                                
+         VCALL FMTTIME                                                          
+         SEGB  (R1),5              "hh:mm"                                      
+         POP   11                                                               
+         SEGT  (R5),(R4)           Message                                      
+         SEG   X'1515'                                                          
+*                                                                               
+         MVI   PDBCMD,MILAWR                                                    
+         SET   PDBMODB.MODBDWAT                                                 
+         L     R15,SEGCBLENF                                                    
+         STH   R15,PDBWC                                                        
+         LA    R15,L'PDBHDR+@R15                                                
+         STH   R15,PDBLENG                                                      
+         END                                                                    
+         POP   L'SEGCB                                                          
+*                                                                               
+         LA    R1,SCB                                                           
+         LA    R15,PDB                                                          
+         VCALL ASYNWRIT            Queue write                                  
+         END                                                                    
+         END                                                                    
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+         END   .                                                                

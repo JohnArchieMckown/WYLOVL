@@ -1,0 +1,250 @@
+;
+;  run script job
+;
+;  this exec is very simple example of a jcl file.  it ignores
+;  several important features of production execs. it has no help.
+;  it does not allow the input to be in the active file. it does
+;  illustrate top-down programming, input verification,
+;  and techniques for active file preservation, using 'on attn'
+;  and 'on error' exits.
+;
+;  to use:
+;    xcall <xproc>/<script input file>, <script lib>, <run options>
+;    ( eg.   xcall <...>  / script.in acc gg.uuu, lib pub, hold )
+;
+;  note: as the input fields are separated by commas, so no commas
+;    should be present in each field.
+;
+;
+xproc () begin
+
+   ; ignore attentions during initialization
+   on attn cmd=' pcall ingnore_attn '
+   on error cmd=' pcall error '
+
+   ; set up new active file
+   x.orig_act = actno
+   open
+
+   ; allow attentions
+   on attn cmd=' pcall attn '
+
+   ; declare local variables
+   dcl boolean valid
+   dcl string dsname,libname,run_opts
+
+   ; get and check input
+   pcall scan_cmd(parm_count,parm_string,dsname,libname,run_opts)
+   pcall check_dsn(dsname,valid)
+   if (not valid) pcall get_script_dsn(dsname)
+   if (strip(libname) ne '') begin
+      pcall check_lib(libname,valid)
+      if (not valid) pcall get_script_lib(libname)
+   end
+
+   ; fix jcl
+   pcall get_jcl
+   pcall fix_jcl(dsname,libname)
+
+   ; run jcl
+   try run &(run_opts)
+
+   ; restore active file
+   pcall cleanup
+
+end
+
+
+;  ignore_attn
+;
+;  ignore attentions during initialization, cleanup
+;
+proc ignore_attn () begin
+   clear attn
+   on attn reenable
+end
+
+
+;  attn
+;
+;  attention routine, give message, clean up and exit
+;
+proc attn () begin
+   if (attnid ne 'MSGGIVEN') begin
+      comm Command stopped.
+   end
+   pcall cleanup
+   xreturn attn attnid=MSGGIVEN
+end
+
+
+;  error
+;
+;  error routine, give message, clean up and exit
+;
+proc error () begin
+   if (errid ne 'MSGGIVEN') begin
+      comm &(errinfo)
+   end
+   pcall cleanup
+   xreturn error errid=MSGGIVEN  errmsg=''   ;optional
+end
+
+
+;  cleanup
+;
+;  close new (jcl) active file, and restore original active file
+;
+proc cleanup () begin
+   ; ignore attentions during cleanup, we are going to exit anyway
+   on attn cmd = 'pcall ignore_attn '
+   ; close temp (jcl) active file. restore original active.
+   close
+   pick &(x.orig_act)
+end
+
+
+;
+;  scan_command
+;
+;  we have xcall <...> / <dsn> , <lib>, <run options>
+;
+proc scan_cmd(pcnt,pstr,dsname,libname,run_opts) begin
+
+   ; initialize variables
+   dcl string token,type;
+   dsname = ''
+   libname = ''
+   run_opts = ''
+
+   ; if no parm_string
+   if (pcnt ne -1) return(dsname,libname,run_opts)
+
+   ;scan command
+   syscall scan(dsname,pstr,type,' ',',')
+   if (dsname eq ',') dsname = ''
+   else pstr = substr(pstr,2) ; skip ',' if any
+   syscall scan(libname,pstr,type,' ',',')
+   if (libname eq ',') libname = ''
+   else pstr = substr(pstr,2) ; skip ',' if any
+   run_opts = pstr
+
+   return(dsname,libname,run_opts)
+end
+
+
+;
+; check data set name,
+;
+;  input:
+;    dsname - data set name (eg. #member use uuu )
+;
+;  returns:
+;    dsname - properly formated fully qualified name
+;    rc - return code, true if name ok, false otherwise
+;
+proc check_dsn (dsname,rc) begin
+   rc = false
+   try dsname = dsnformat(dsname)
+   if (tryerr) return(rc)
+   try status = dsnverify(dsname)
+   if (tryerr) return(rc)
+   if (status ne 'OK') return(rc)
+   rc = true
+   return(dsname,rc)
+end
+
+
+;
+; check library data set name,
+;
+;  input:
+;    dsname - data set name (eg. script.lib pub )
+;
+;  returns:
+;    dsname - properly formated fully qualified name
+;    rc - return code, true if name ok, false otherwise
+;
+proc check_lib (dsname,rc) begin
+   rc = false
+   try dsname = dsnformat(dsname)
+   if (tryerr) return(rc)
+   try status = dsnverify(dsname)
+   if (tryerr) return(rc)
+   if (status ne 'OK') return(rc)
+   try status = dsninfo(dsname)
+   if (tryerr) return(rc)
+   if (substr(status,69,2) ne 'PO') return(rc)
+   rc = true
+   return(dsname,rc)
+end
+
+
+;
+; prompt for script input file
+;
+proc get_script_dsn (dsname) begin
+   dcl boolean valid
+
+   ; loop until valid script input file
+   repeat begin
+      if (dsname ne '') comment '&(dsname)': invalid (unusable) data set.
+      dsname = input('script input file ? ')
+      pcall check_dsn(dsname,valid)
+   end
+   until (valid)
+
+   return(dsname)
+end
+
+
+;
+; prompt for script input file
+;
+proc get_script_lib (dsname) begin
+   dcl boolean valid
+
+   ; loop until valid script input file
+   repeat begin
+      if (dsname ne '') comm '&(dsname)': invalid (unusable) library.
+      dsname = input('script library file (cr=none) ? ')
+      if (dsname eq '') return (dsname)
+      pcall check_lib(dsname,valid)
+   end
+   until (valid)
+
+   return(dsname)
+end
+
+
+;
+;  get jcl into active file
+;
+proc get_jcl () begin
+
+   putend //   JOB
+   putend /*JOBPARM LINECT=0,FORMS=BOND
+   putend /*JOBPARM PFORMAT=L132,FCB=FULL   **for all except SCRIPT output**
+   putend /*OUTPUT BOND FORMS=BOND,DUPLEX=NO
+   putend /*OUTPUT BOND PFORMAT=SYST10
+   putend //*
+   putend //SCRIPT EXEC SCRIPTP,COPIES=1,PFORMAT=SYST10,FORMS=BOND,
+   putend // SOPT1='FFTO=1,CO=10,CPI=12,+FORMS=BOND PHOTO PROFILE'
+   putend //SYSLIB   DD  DSN=script.lib,DISP=SHR
+   putend //SYSIN  DD  DSN=script.input,DISP=SHR
+
+end
+
+
+;
+;  fix jcl w/substitutions
+;
+proc fix_jcl(dsname,libname) begin
+
+   change 'script.input' to '&(dsname)' nolist
+   if (strip(libname) ne '') begin
+   change 'script.lib' to '&(libname)' nolist
+   end
+   else delete 'script.lib'
+
+end

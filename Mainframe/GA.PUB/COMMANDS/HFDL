@@ -1,0 +1,526 @@
+XPROC () BEGIN
+; HFDL -- create and run a batch HFDL job.
+; New XPROC version 12/29/89
+
+  DECLARE STRING REVDATE   ; last revision date
+  REVDATE = '03/21/90'
+
+; Recent revision log --
+
+; 03/21/90 SYSC support
+; 02/15/90 correct forms checking logic, allow use of unknown form
+
+DECLARE STRING HELPDSN
+HELPDSN = 'WYL.GA.PUB.LIBDATA#HFDLHELP'
+
+DECLARE STRING FORMCODE INDSN MEMBER
+DECLARE STRING SX1 DSINFO PRINTER DEST
+DECLARE STRING DSNPARM
+DECLARE STRING S0 S1 S2 S3
+
+DECLARE NUM COPIES USERFILE WORKFILE JCLFILE
+
+DECLARE BOOLEAN DUPLEX B0 CONTINUE
+
+;
+;  COPIES      COPIES OPTION
+;  DSINFO      DSNINFO RETURN FROM DSN CHECKER
+;  FORMCODE    FORMS CODE
+;  INDSN       DATASET NAME
+;  JCLFILE     ACTIVE file number for JCL file
+;  MEMBER      Library MEMBER name, (cleaned up)
+;  N0          MISC. TEMPORARY
+;  DUPLEX      Flag to show duplex
+;  SX1         WORK VARIABLE FOR DSN CHECKER
+;  S0,S1,S2,S3 Misc. temporary
+;  USERFILE    Number of user's active file
+;  WORKFILE    ACTIVE file number of work file
+;
+;  CONSTANTS ---------------------------------------------------
+;
+;  List of allowable 4090 forms:
+DECLARE STRING FORM4090
+FORM4090  =  ' BOND 3HOL BLUE ARCB RAGB XL33 '
+
+; ------------------------- here's the code -----------------------
+
+SET ESC &
+WORKFILE = 0
+JCLFILE = 0
+USERFILE = ACTNO ; Save user's active file number
+COMM HFDL version of &(REVDATE) -- Create and run a batch HFDL job.
+COMM For help, reply '?' to any question.
+COMM
+
+DSNPARM = UPPER(SCAN_TOKEN(PARM_STRING))
+PARM_STRING=SCAN_SKIP(PARM_STRING) ; later we'll look for options
+;                                  ; in the remaining parm string
+IF(DSNPARM EQ '') GOTO INIT
+; DSN in PARM.
+; see if user gave dsn(member)
+M1=SCAN_TOKEN(PARM_STRING)  ; next token
+N1=SIZE(M1)
+IF (N1 GT 2) BEGIN;
+   IF (SUB(M1,1,1) EQ '(' AND SUB(M1,N1,1) EQ ')') BEGIN
+      DSNPARM=DSNPARM||M1  ; put member back (scan_token stripped it)
+      PARM_STRING=SCAN_SKIP(PARM_STRING)  ; and take it out of parm
+      END
+   END
+GOTO GOTPARM
+
+START:
+; here to restart
+DSNPARM  =  ''
+GOTO INIT
+
+GOTPARM:
+IF (DSNPARM EQ '*') BEGIN
+   IF (PREFIX EQ '') BEGIN ; * is undefined
+      WRI '* is undefined.'
+      DSNPARM=''
+      GOTO INIT
+      END
+   DSNPARM=PREFIX
+   MEMBER=STRIP(SYS.MEMBER)
+   MEMBER=STRIP(MEMBER,'B',S'00') ; WYLBUR bug, get binary zeros here
+   IF (MEMBER NE '') DSNPARM=DSNPARM||'#'||MEMBER
+   END
+COMM HFDL Input is &(DSNPARM)
+
+INIT:
+
+FORMCODE ='BOND' ; FORM
+DUPLEX = FALSE
+CONTINUE = FALSE
+IF (DSNPARM NE '') GOTO GOTDSN ; Got filename, don't ask for help
+TRY REA STR DSNPARM UPP PRO 'Do you want instructions? '
+IF (TRYATTN) GOTO QUIT
+IF (DSNPARM EQ '') GOTO GETDSN
+IF (INDEX('.YES.Y.OK.HELP.?.','.&(DSNPARM).') EQ 0) GOTO GETDSN
+TRY LIST 3800/3849 FRO &(HELPDSN) UNN ; INTRO
+WRI ' '
+GETDSN:
+TRY REA STR DSNPARM UPP PRO 'Dsname of HFDL input file: '
+IF (TRYATTN) GOTO QUIT
+DSNPARM = STRIP(DSNPARM)
+IF(DSNPARM EQ'') GOTO GETDSN
+GOTDSN:
+IF(INDEX('.HELP.?.','.&(DSNPARM).') EQ 0) GOTO GOODDSN1
+TRY LIST 3901/3950 FRO &(HELPDSN) UNN
+GOTO GETDSN
+BADDSN:
+WRI DSNPARM||' is not a legal input.'
+GOTO GETDSN
+GOODDSN1:
+IF (DSNPARM EQ '*') BEGIN
+   IF (PREFIX EQ '') BEGIN ; * is undefined
+      WRI '* is undefined.'
+      DSNPARM=''
+      GOTO GETDSN
+      END
+   DSNPARM=PREFIX
+   MEMBER=STRIP(SYS.MEMBER)
+   MEMBER=STRIP(MEMBER,'B',S'00') ; WYLBUR bug, get binary zeros here
+   IF (MEMBER NE '') DSNPARM=DSNPARM||'#'||MEMBER
+   END
+IF(INDEX(DSNPARM,'#') GT 0) GOTO ISLIB1
+IF(INDEX(DSNPARM,'(') GT 0) GOTO ISLIB2
+GOTO GOTDSN1
+
+;  here if library member
+ISLIB1:
+IF(SUB(DSNPARM,1,1) EQ'#') BEGIN
+   MEMBER =SUB(DSNPARM,2)
+   INDSN =LIBRARY
+   GOTO CHECKDSN1
+   END
+N0 = INDEX(DSNPARM,'#')
+INDSN =SUB(DSNPARM,1,N0-1)
+MEMBER =SUB(DSNPARM,N0+1)
+GOTO CHECKDSN1
+ISLIB2:
+IF(SUB(DSNPARM,1,1) EQ'(') BEGIN ; got (member)
+   MEMBER =SUB(DSNPARM,2)        ; strip (
+   IF(SUB(MEMBER,SIZ(MEMBER)) EQ')') MEMBER=SUB(MEMBER,1,SIZ(MEMBER)-1)  ; strip )
+   IF (SIZ(MEMBER) GT 8) GOTO BADDSN ; bad name, too long
+   INDSN =LIBRARY
+   GOTO CHECKDSN1
+   END
+N0 = INDEX(DSNPARM,'(')
+INDSN = SUB(DSNPARM,1,N0-1)
+MEMBER = SUB(DSNPARM,N0+1)
+IF(SUB(MEMBER,SIZ(MEMBER)) NE')') GOTO BADDSN
+MEMBER = SUB(MEMBER,1,SIZ(MEMBER)-1)
+GOTO CHECKDSN1
+GOTDSN1:
+INDSN = DSNPARM ; NO MEMBER
+CHECKDSN1:
+INDSN = DSNFORMAT(INDSN)
+PCALL DSNCHECK(INDSN,DSINFO)
+IF (DSINFO EQ '') BEGIN
+   DSNPARM = '' ; show no dsn
+   DSNPARM=''
+   GOTO INIT ; and try again
+   END
+IF(SUBSTR(DSINFO,69,2) EQ 'PO') GOTO LIBRARY; if library
+IF(MEMBER EQ'') GOTO NOTMEM
+COMM &(INDSN) is not a library; member name (&(MEMBER)) ignored.
+MEMBER =''
+GOTO NOTMEM
+LIBRARY:
+IF(MEMBER NE'')GOTO NOTMEM
+GETMEM:
+TRY WRI INDSN||' is a library; you must specify a member name.'
+TRY REA STR DSNPARM UPP PRO'Member name (CR=restart)? '
+IF (TRYATTN) GOTO START
+DSNPARM = STRIP(DSNPARM)
+IF(INDEX('.HELP.?.','.&(DSNPARM).') NE 0) BEGIN
+   COMM
+   COMM The dsname you have specified (&(INDSN)) is a library.
+   COMM Please specifiy which member of the library you wish to use. A member
+   COMM The name must be 8 characters or fewer.
+   COMM
+   S0 = YESNO('Do you want a listing of the directory of the library?')
+   IF (S0 EQ 'YES') TRY SHO DIR ALL IN &(INDSN)
+   GOTO GETMEM
+   END
+
+MEMBER =DSNPARM
+IF(MEMBER EQ'') GOTO INIT
+IF(SUB(MEMBER,1,1) EQ'#') MEMBER =SUB(MEMBER,2)
+NOTMEM:
+IF(MEMBER EQ'')GOTO MEMDONE
+IF(SIZ(MEMBER)GT 8) BEGIN ; Illegal membername
+   WRI MEMBER||' - Illegal member name.'
+   GOTO GETMEM
+   END
+
+DV=DSNVER('&(INDSN)(&(MEMBER))')  ; check for bad member etc.
+IF (DV NE 'OK') BEGIN ; Bad member or name
+   IF (DV EQ 'BAD MEMBER') BEGIN
+      WRI MEMBER||' is not a member of '||INDSN
+      END
+      ELSE BEGIN
+      WRI INDSN||'#'||MEMBER||':  '||DV
+      END
+   GOTO GETMEM
+   END
+
+MEMDONE:
+
+IF (ACTNO NE WORKFILE) BEGIN ; not in workfile, e.g. first pass thru
+   OPEN WORK1 TITLE 'work file for HFDL'
+   WORKFILE = ACTNO ; save this number
+   END
+ELSE BEGIN ; we've been thru before, already got a workfile
+   IF (LAST GT 0) DEL .001/LAST
+   END
+PUTLINE 0.0
+S0 = INDSN ; INPUT DSN
+IF (MEMBER NE '') S0 = S0||'#'||MEMBER  ; LIB#MEM
+
+
+PROCESS_OPTIONS: ;---------------Processing Options--------------
+
+GET_HFDL_OPTS:
+
+;  PRINTER TYPE, DUPLEX OPTION
+PRINT_OPTIONS:
+
+PRINTER = '4090'
+LANDSCAPE = FALSE
+
+GET_PRINT_OPTS:
+
+DUPLEX = FALSE
+WRI ' '
+XOPT='4090 simplex'
+S0 = ''
+TRY REA STR S0 UPP PRO'Printer options (CR=&(XOPT))? '
+   IF (TRYATTN) GOTO GET_HFDL_OPTS
+S0 = STRIP(S0)
+IF (S0 EQ '') GOTO GOT_PRINTER ; TAKE DEFAULT (ALREADY SET)
+IF(INDEX('.HELP.?.','.&(S0).') NE 0) BEGIN ; help
+   TRY LIST 4601/4699 FRO &(HELPDSN) UNN
+   GOTO GET_PRINT_OPTS
+   END
+
+IF (IND(S0,'DUPLEX=NO') NE 0 OR IND(S0,'SIMPLEX') NE 0) BEGIN
+   DUPLEX = FALSE
+   PRINTER = '4090'
+   GOTO GOT_4090
+   END
+IF (IND(S0,'DUPLEX') NE 0) BEGIN  ; 4090 DUPLEX
+   DUPLEX = TRUE
+   X4090 = TRUE
+   GOTO GOT_4090
+   END
+IF (IND(S0,'SIMPLEX') NE 0) DUPLEX = FALSE ; SIMPLEX, MAYBE 4090
+
+; IF (IND(S0,'3700') NE 0) BEGIN ; Xerox 3700
+;    PRINTER = '3700'
+;    GOTO GOT_PRINTER
+;    END
+; IF (IND(S0,'SELF') NE 0) BEGIN ; DEST=SELF
+;    PRINTER='3700'
+;    DEST='SELF'
+;    GOTO GOT_PRINTER
+;    END
+
+; here when unrecognized printer opts
+WRI S0||':  Invalid printer option(s)'
+GOTO GET_PRINT_OPTS
+
+
+GOT_4090:
+; Here if 4090 (simplex or duplex)
+IF (IND(S0,'LAND') NE 0) LANDSCAPE = TRUE
+
+GOT_PRINTER:
+IF (PRINTER NE '4090') BEGIN ; Not 4090
+   PDUPLEX=FALSE    ; only 4090 can duplex
+   END
+
+
+GET_FORM:
+; FORM
+
+DFORM = 'BOND' ; 4090 default form
+
+WRI ' '
+PROMPT_FORM:
+TRY REA STR S0 UPP PRO'Printer Form (CR=&(DFORM))? '
+IF (TRYATTN) GOTO PRINT_OPTIONS
+S0 = STRIP(S0)
+IF(S0 EQ '') BEGIN ; take default
+   FORMCODE = DFORM
+   GOTO GOT_FORMS
+   END
+IF(INDEX('.HELP.?.','.&(S0).') NE 0) BEGIN
+   WRI ' '
+   TRY LIST 4001/4050 FRO &(HELPDSN) UNN
+   GOTO PROMPT_FORM
+   END
+
+; GOT A FORM CODE
+IF (SIZE(S0) EQ 4 AND INDEX(FORM4090,S0) GT 0) FORMCODE = S0
+   ELSE BEGIN  ; bad form code
+   WRI ' '
+   WRI '<.b+>'||S0||'<.b-> is an unknown form code.  Standard 4090 form codes are:'
+   WRI FORM4090
+   IF (YESNO('Use it anyway? ') EQ 'NO') BEGIN
+      WRI 'Type <.b+>?<.b-> if you need more information.'
+      WRI ' '
+      GOTO PROMPT_FORM
+      END
+   FORMCODE=S0
+   END
+
+GOT_FORMS:
+; end of "get forms" code
+
+
+GET_COPIES:
+; PROMPT FOR COPIES OPTION
+WRI ' '
+TRY READ STRING S0 UPP PRO 'How many copies do you want (CR=default 1)? '
+IF (TRYATTN) GOTO GET_FORM
+S0 = STRIP(S0)
+IF (S0 NE '') BEGIN ; user specified something
+   IF(INDEX('.HELP.?.','.&(S0).') NE 0) BEGIN ; HELP
+      COMM
+      COMM For multiple copies of your HFDL output, enter the number
+      COMM of copies you want.
+      COMM
+      GOTO GET_COPIES
+      END
+   COPIES =NCONVERT(S0)
+   END
+
+; SETUP HFDL JOB JCL
+IF (ACTNO EQ WORKFILE) CLOSE ; we're in workfile, get new active
+IF (JCLFILE NE 0) BEGIN;  ; JCL file exists
+   IF (ACTNO NE JCLFILE) PICK &(JCLFILE)
+   DEL 0.0/LAST
+   END
+ELSE BEGIN ; No JCL file yet, make one
+  OPEN HFDL TITLE 'JCL generated by HFDL'
+  JCLFILE = ACTNO
+  END
+
+PUTEND //   JOB
+PUTEND /*JOBPARM FORMS=&(FORMCODE),PFORMAT=LAND,CHARS=TN13
+IF (MACHINE EQ 'SYSC') PUTEND /*JOBPARM SYSAFF=SYSA
+PUTEND //*
+IF (COPIES EQ 0) COPIES =1
+PUTEND //CONVERT EXEC IOPROGM
+; Form source input
+IF (MEMBER NE '') PUTEND //IN1  DD  DSN=&(INDSN)(&(MEMBER)),DISP=SHR
+   ELSE PUTEND //IN1  DD  DSN=&(INDSN),DISP=SHR
+; HFDL options input
+PUTEND //IN2 DD *
+PUTEND COPY &(COPIES),
+PUTEND //OUT1 DD DSN=&&FSL,DISP=(,PASS),UNIT=VIO,SPACE=(8000,(10,10)),
+PUTEND //        DCB=(RECFM=FB,LRECL=80)
+PUTEND //OUT2 DD DSN=&&OPTS,DISP=(,PASS),UNIT=VIO,SPACE=(80,50)
+PUTEND //HFDL EXEC HFDL,COND=(5,LT)
+PUTEND //CSSIN DD DSN=&&FSL,DISP=(OLD,DELETE)
+PUTEND //CSS03 DD DSN=&&FRM,DISP=(,PASS),UNIT=VIO,SPACE=(6356,10),
+PUTEND //         DCB=(RECFM=VBA,LRECL=154,BLKSIZE=6356)
+PUTEND //FT05F001 DD
+PUTEND //         DD DSN=&&OPTS,DISP=(OLD,DELETE)
+PUTEND //GO EXEC FIXHFDL,COND=(9,LT),FORMS=&(FORMCODE)
+;
+READY_TO_RUN:
+; GET READY TO RUN THE JOB
+;
+CONTINUE = FALSE
+WRI ' '
+TRY REA STR S0 UPP PRO 'Enter RUN Options, QUIT, PAUSE, or RESTART (CR=run): '
+IF (TRYATTN) GOTO RUN_ATTN
+S0 = STRIP(S0)
+IF (S0 EQ '') GOTO RUN
+IF (S0 EQ 'RUN') BEGIN
+   S0=''
+   GOTO RUN
+   END
+IF(INDEX('.HELP.?.','.&(S0).') EQ 0) GOTO PARSE_RUN
+COMM
+TRY LIST 4301/4350 FRO &(HELPDSN) UNN
+GOTO READY_TO_RUN
+
+RUN_ATTN:
+; ATTN exit from RUN
+GOTO GET_HFDL_OPTS
+;
+; Normal response (RUN, CONTINUE, etc.)
+;
+PARSE_RUN:
+S0 = S0||' '
+PCALL FWORD(S0,S0,'CONTINUE',CONTINUE,S1) ; look for CONTINUE
+IF (~CONTINUE) PCALL FWORD(S0,S0,'CONT',CONTINUE,S1) ; look for CONT
+IF (CONTINUE) GOTO END_RUN_OPTS
+
+IF(SUB(S0,1,3) EQ'RUN') BEGIN
+   S0=STRIP(SUB(S0,4))
+   END
+IF(SUB(S0,1,3) EQ'LIS') GOTO LIST_JCL
+IF(S0 EQ 'L') GOTO LIST_JCL
+IF(SUB(S0,1,3) EQ'PAU') GOTO PAUSE
+IF(SUB(S0,1,3) EQ'QUI') GOTO QUIT
+IF(SUB(S0,1,3) EQ'EXI') GOTO QUIT
+IF(SUB(S0,1,3) EQ'RES') BEGIN ; clean up
+   S0 = ''
+   DSNPARM=''
+   MEMBER=''
+   GOTO INIT
+   END
+END_RUN_OPTS:
+; fixup "hold=yes"
+PCALL FWORD(S0,S2,'HOLD=',B0,S1) ; look for HOLD=
+IF (B0) BEGIN ; Found HOLD= something
+   S1=UPPER(S1)
+   IF (S1 EQ 'Y' OR S1 EQ 'YES') BEGIN ; found HOLD=YES
+      S0=S2 ; remove from run options string
+      S0=STRIP(S0)||' HOLD ' ; put it back the right way
+      END
+   END
+
+RUN:
+WRI ' '
+TRY RUN NOTIFY &(S0)
+IF (~TRYERR) GOTO QUIT ; ran OK
+WRI S0||': Invalid RUN options.'
+GOTO READY_TO_RUN ; propmt for new RUN options
+LIST_JCL:
+
+LIST
+GOTO READY_TO_RUN
+PAUSE:
+COMM The HFDL JCL is in the active file.
+COMM Type XGO to resume.
+XPAUSE
+GOTO READY_TO_RUN
+
+QUIT:
+IF (ACTNO NE USERFILE) PICK &(USERFILE)
+IF (CONTINUE) BEGIN
+   DSNPARM=''
+   GOTO INIT
+   END
+COMM Exiting HFDL
+OUT:
+END
+
+; Data set checker subroutine  ------------------------------------
+; DSNAME INPUT IN CHECKDSN; DSNINFO RETURN IN DSINFO
+PROC DSNCHECK (CHECKDSN,DSINFO) BEGIN
+DECLARE STRING SX1
+SX1 = DSNVER(CHECKDSN)
+DSINFO = ''
+IF (SX1 EQ 'OK' OR SX1 EQ 'BAD MEMBER') DSINFO = DSNINFO(CHECKDSN)   ; OK
+   ELSE WRI 'Error:  Data set '||CHECKDSN||' is '||SX1  ; error
+RETURN(CHECKDSN,DSINFO)
+END
+
+;----------------- find and extract a word -----------------------
+PROC FWORD(IN,OUT,WORD,FLAG,VALUE) BEGIN
+;  IN is input string
+;  OUT is output string (with word removed)
+;  WORD is word to look for
+;  FLAG is TRUE if the word was found, else FALSE
+;  VALUE is the argument value found if WORD ended in = sign
+
+DECLARE STRING XIN
+DECLARE BOOLEAN EQF
+EQF=FALSE
+FLAG = FALSE
+VALUE=''
+XIN=' '||TRANSLATE(IN, ' ', ',')||' '  ; commas to blanks; pad
+WORD = ' '||STRIP(WORD) ; pad word so find only if delimited
+IF (SUBSTR(WORD,SIZE(WORD),1) NE '=') WORD=WORD||' ' ; pad on rt.
+   ELSE EQF=TRUE ; we have WORD= so look for argument
+OUT = IN
+WL = SIZE(WORD)
+IX = INDEX(XIN,WORD) ; find word
+IF (IX GT 0) BEGIN ; Found the word
+   FLAG = TRUE
+;  Remove word from string...
+   IF (IX EQ 1) F1=''             ;  word was first
+      ELSE F1=SUBSTR(IN,1,IX-1)   ;  part ahead of word
+   IF (SIZE(IN) LE IX+WL-2) F2='' ;  word was last
+      ELSE F2=SUBSTR(IN,IX+WL-1)  ;  part after word
+   IF (EQF) BEGIN ; this is word=value, get value
+   IX = FIND(F2,' ,') ; next delimiter
+   IF (IX EQ 0) BEGIN ; no more delims in line, take it all
+      VALUE=F2
+      F2=''
+      END
+      ELSEIF (IX EQ 1) BEGIN ; immediate delim, null arg
+         VALUE=''
+         IF (SIZE(F2) GT 1) F2=SUBSTR(F2,2)
+         ELSE F2=''
+         END
+      ELSE BEGIN ; some arg
+         VALUE=SUBSTR(F2,1,IX-1)
+         IF (SIZE(F2) GT IX) F2=SUBSTR(F2,IX+1)
+         ELSE F2=''
+         END
+      END
+   IF (F1 NE '' AND F2 NE '') BEGIN ; check for extra comma now
+      IF (SUBSTR(F1,SIZE(F1),1) EQ ',' AND SUBSTR(F2,1,1) EQ ',') F2=SUBSTR(F2,2)  ;  don't keep two commas
+      END
+;  Make sure some delimiter is left between parts
+   IF (F1 NE '' AND F2 NE '') BEGIN ; got two parts
+      S1=SUBSTR(F1,SIZE(F1),1) ; last of the first
+      S2=SUBSTR(F2,1,1)        ; first of the last
+      S1=S1||S2                ; trailing+leading delimiters
+      IF (FIND(S1,', ') EQ 0) F1=F1||' ' ; put in a blank
+      END
+   OUT=F1||F2
+   OUT=STRIP(OUT,'B',',')
+   OUT=STRIP(OUT)
+   OUT=STRIP(OUT,'B',',')
+   END
+RETURN(OUT,FLAG,VALUE)
+END

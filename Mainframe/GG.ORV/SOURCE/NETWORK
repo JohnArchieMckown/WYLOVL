@@ -1,0 +1,3325 @@
+NETWORK  TITLE 'Orvyl Network Manager'
+         COPY  HEADER
+NETWORK  MODULE TRCNUM=17
+         TITLE 'Global Control Blocks'
+         COPY  PZERO
+         USING (PZERO,R0)
+         EJECT ,
+         COPY  MAT
+         EJECT ,
+         COPY  ASB
+         EJECT ,
+         COPY  ACCTPARM
+         EJECT ,
+         COPY  DISPPARM
+         EJECT ,
+         COPY  LOCKPARM
+         EJECT ,
+         COPY  IOSPARM
+         EJECT ,
+         COPY  SIGPARM
+         EJECT ,
+         COPY  TIMEPARM
+         EJECT ,
+         COPY  VMPARM
+         EJECT ,
+         COPY  VMIPARM
+         EJECT ,
+         COPY  PAGEPARM
+         EJECT ,
+         COPY  XITPARM
+         EJECT ,
+         COPY  PARMPARM
+         EJECT ,
+         COPY  UNETPARM
+         EJECT ,
+         COPY  SCOMPARM
+SCOMPLEN EQU   L'#SCSR+20*8            Room for 20 Segments
+         TITLE 'Local Macros'
+         MACRO
+&L       FIX   &LOC,&LEN
+&L       PSET  @PAGE
+         PMOV  @PAGLOC,&LOC,OP=LA
+         PMOV  @PAGLEN,&LEN,OP=LA
+         VCALL PAGFIX
+         MEND
+         SPACE 2
+         MACRO
+&L       UNFIX &LOC,&LEN
+&L       PSET  @PAGE
+         PMOV  @PAGLOC,&LOC,OP=LA
+         PMOV  @PAGLEN,&LEN,OP=LA
+         VCALL PAGUFIX
+         MEND
+         SPACE 2
+         MACRO
+&L       ADDSG &LOC,&LEN,&PARM
+&L       PSET  @ADDSEG,CLEAR=NO
+         PMOV  @ADDSLOC,&LOC,OP=LA
+         PMOV  @ADDSLEN,&LEN,OP=LA
+         PMOV  @ADDSPA,&PARM,OP=LA
+         ACALL ADDSEG
+         MEND  ,
+         SPACE 2
+         MACRO
+&L       FREENB &BUF
+&L       PSET  @FREEBUF
+         PMOV  @FREBLOC,&BUF,OP=LA
+         ACALL FREENBUF
+         MEND  ,
+         SPACE 2
+         MACRO
+&L       CHECKNB &BUF
+&L       PSET  @CHEKBUF
+         PMOV  @CHKBLOC,&BUF,OP=LA
+         ACALL CHEKNBUF
+         MEND  ,
+         SPACE 2
+         MACRO
+&L       VALBUF &LOC,&LEN,&TYPE
+&L       PSET  @VALBUF
+         PMOV  @VALBLOC,&LOC,OP=L
+         PMOV  @VALBLEN,&LEN,OP=LH
+         PMOV  @VALBKEY,SKRKEY,OP=IC
+         AIF   ('&TYPE' NE 'W').NOWRT
+         SET   @VALBWRT
+.NOWRT   ANOP
+         ACALL VALBUF
+         MEND
+         EJECT ,
+*box
+*
+*                        Overview of Operation
+*
+* This module contains the processing network access in ORVYL.  It
+* allows Orvyl programs to initiate and maintain TCP/IP connections.
+* These connections are made through Amelia, a process that runs under
+* MVS and which opens SCOM (Suzan) paths to connect with clients.
+*
+* The processing takes place in two places:  the Network address space
+* and the user address space.
+*
+* Network Address Space Processing
+*
+* In the network address space there is a single task.  That task
+* opens the path to Amelia and endeavors to keep it open.  While it is
+* open, the task reads all the messages from Amelia.  These messages
+* are read directly into Network Buffer (NBUF) elements which live in
+* global storage.
+*
+* The task then looks into the buffer to determine which socket the
+* buffer should go to.  This determination is possible because Amelia
+* puts 'our' id in every communication.  When the connection is set
+* up, the value we set for 'our' id is the address of a control block
+* in global storage, the Network Socket Queue Element (NSQE).  These
+* represent the socket on a system wide basis.
+*
+* Once the task knows the address of the NSQE, it just adds the buffer
+* onto a list kept there.  If this is the first buffer in the list,
+* then the task sets a system task (SYSR) to wake up a processing task
+* in the address space which owns the socket.
+*
+* The Network address space also monitors the state of the path to
+* Amelia.  When the path closes, all sockets are notified.  Once it is
+* possible, the task opens up a new path.
+*
+* The only other action that the network address space takes is in
+* case detecting that a task got a full queue response from SCOM, it
+* wakes up the tasks which have been delayed.
+*
+* Caller Address Space Processing
+*
+*
+* Notes on Interlocking
+*
+* As in all multiprogramming and multiprocessing environments, the
+* locking of critical sections is of great importance.  Here we are
+* concerned that the access to the global areas is interlocked to
+* insure that a consistent view of the data is maintained and so that
+* no unexpected failures occur.
+*
+* The first global area protected is that list of NSQE's.  These
+* control blocks form the major avenue of communication between the
+* network address space and the calling address spaces.  Before any
+* modification of the list itself or of any data in the list,
+* GNCTLOCK must be held.  The major exception to this is that the
+* NSQENBUF field is updated using CS and the lock may or may not be
+* held for this update.
+*
+* Amelia Notes
+*
+*
+         TITLE 'Network Control Blocks'
+*box
+*
+*    GNCT  --  Global Network Control Table.  This is the main
+*              network control block for the system.  It is pointed
+*              to by the MAT.
+*
+         SPACE 2
+GNCT     RECORD BEGIN
+         DC    C'GNCT'       Control block ID
+GNCTASB  DS    A             Address of the NETWORK driver ASB
+GNCTLOCK DS    A             Lock ID for GNCT related resources
+GNCTNETC DS    A             Address of the NETCB
+GNCTNSQE DS    A             Chain of NSQE's
+GNCTNPCB DS    A             Chain of NPCB's
+*
+* Network Buffer Information.  These fields are controlled by
+* CS and not by any lock.
+*
+         DS    0D
+GNCTBFL  DS    A             Free list of the NBUFs
+         DS    A             Control word for the Free list
+GNCTBFC  DS    A             Count of the NBUFs on the free queue
+GNCTBTC  DS    A             Total Count of NBUFs obtained
+GNCTBSIZ DS    H             Size of Network Buffers
+         END   ,
+         EJECT ,
+*box
+*
+*  NPCB  --    Network path control block.  This control block
+*              lives in global storage and represents a path
+*              to amelia.  There will normally only be one of these
+*              but if the path to amelia gets closed, a new one is
+*              generated and placed at the head of the list.  NSQE's
+*              point at the NPCB they were attached with.
+*
+         SPACE 2
+NPCB     RECORD BEGIN
+         DC    C'NPCB'
+NPCBNEXT DS    A             Address of the next NPCB in the chain
+NPCBPATH DS    A             ID of the SCOM device
+NPCBREF  DS    A             Number of NSQE's using this path
+NPCBFLGS FLAG  ,
+         FLAG  NPCBOPEN      Other side has opened the path
+         FLAG  NPCBCLSD      Other side closed path
+         END   ,
+         SPACE 3
+*box
+*
+*  NSQE  --    Network Socket Queue Entry.  This control block lives
+*              in global storage.  Received buffers are queued here
+*              for retrieval by the address space for which they are
+*              destined.  The address of this control block is the
+*              Amelia session identifier.
+*
+         SPACE 2
+NSQE     RECORD BEGIN
+         DC    C'NSQE'
+NSQENEXT DS    A             Next NSQE in GNCT list
+NSQENPCB DS    A             Address of NPCB for this socket
+NSQENBUF DS    A        (CS) Network Buffer queue pointer
+NSQEASB  DS    A             Address of the owning ASB
+NSQESOCK DS    A             Address of the owning Socket
+NSQEFLGS FLAG  ,
+         FLAG  NSQEFULQ      FullQ received on SEND
+         FLAG  NSQEFQE       FullQ emptied
+         END   ,
+         EJECT ,
+*box
+*
+*    NBUF  --  Network I/O Buffer.
+*
+         SPACE 2
+NBUF     RECORD BEGIN
+         DC    C'NBUF'       Control block ID
+NBUFNEXT DS    A             Next NBUF in the list
+NBUFMAXL DS    H             Maximum length of the data
+NBUFLEN  DS    H             Actual length of the data
+NBUFDATA DS    0D            Start of the data
+         END   ,
+         SPACE 3
+*box
+*
+* TCPHDR  --   Format of an Amelia Header
+*
+         SPACE 2
+TCPHDR   RECORD BEGIN
+TCPTYPE  DS    CL16          Type Header
+TCPSID   DS    A             Session ID
+TCPDATA  DS    0X            Start of the data
+         END
+         EJECT ,
+*box
+*
+*   NETCB  --  Network Control Block.  This area contains information
+*              about the state of the TCP/IP Network Connection
+*              through AMELIA over the SCOM path interface.
+*
+         SPACE 2
+NETCB    RECORD BEGIN
+         DC    C'NETC'       Control block ID
+NETCONAM DS    CL8           Our name to Amelia
+NETCANAM DS    CL8           Her name to us
+NETCPASS DS    CL4           Password for the path
+*
+* Path I/O information
+*
+NETCIOPA DS    A             I/O parameter area
+NETCIOCB DS    A             I/O Control block
+*
+* Path status
+*
+NETCFLG  FLAG  ,             Path status flags (same as PATHFL)
+         FLAG  CLOSED          The path closed
+         FLAG  FULLQE          His full queue emptied
+         FLAG  NEWINFO         New information pending
+         FLAG  DISCPOST        Discretionary post
+         FLAG  OPENED          The partner opened his end
+         END   ,
+         EJECT ,
+*box
+*
+* SOCK -- Socket Control block.  This control block lives in
+*         local storage to the address space whose task creates
+*         it.
+*
+         SPACE 2
+SOCK     RECORD BEGIN
+         DC    C'SOCK'       Control Block ID
+SKNEXT   DS    A             Next Socket in list
+SKIOPA   DS    A             Address of the SCOM I/O parm area
+SKNSQE   DS    A             Address of NSQE entry for this socket
+SKNBUF   DS    A             Address of unprocessed NBUF's
+*
+* Local input buffer information.
+*
+SKICHAIN DS    A             Receive buffer chain
+SKICNT   DS    A             Total input bytes buffered
+SKIFREE  DS    A             LBUF free list
+SKISIZE  DS    H             Size of the receive buffers
+SKILOW   DS    H             Low water mark for hold
+SKIHIGH  DS    H             High water mark for hold
+*
+*  Local output buffer information. Used when data needs to be
+*  translated.
+*
+SKOBUF   DS    A             Address of the buffer
+SKOSIZ   DS    A             Size of the buffer
+*
+* Information about the Amelia side of the session
+*
+SKASID   DS    A             Amelia Session ID
+SKPORTS  DS    CL64          Amelia Port information
+SKAINFO  EQU   SKASID,*-SKASID,C'X'
+*
+* Session Control info
+*
+SKECB    DS    D             Event control block for processing task
+SKWFLG   FLAG  ,             Local Task flags
+         FLAG  IOCOMP           The notify request has completed
+         FLAG  DOHALT           A halt request has been issued
+         FLAG  TIMEUP           The timer expired
+         FLAG  TIMEST           Timer needs to be started
+         FLAG  TIMERUN          A timer is running
+         FLAG  RERUN            Execute local processing again
+SKSFLG   FLAG  ,             Socket Flags
+         FLAG  SKSTOP           Other side requested we stop sending
+         FLAG  SKHOLD           We asked the other side stop sending
+         FLAG  SKREOF           We received an EOF from the other side
+         FLAG  SKSEOF           We sent EOF to the other side
+         FLAG  SKRABORT         The receive connection aborted
+SKNSTATE FLAG  ,             Socket state
+         FLAG  (SKSINIT,00,EQ)  Initial State
+         FLAG  (SKSOSNT,01,EQ)  Open sent, waiting for info
+         FLAG  (SKSWCON,02,EQ)  Waiting for connect
+         FLAG  (SKSDTRN,03,EQ)  Data transfer
+         FLAG  (SKSABRT,04,EQ)  User aborting
+         FLAG  (SKSDONE,05,EQ)  Finished with all operations
+         FLAG  (SKSWCLS,06,EQ)  Waiting for Amelia to close
+         FLAG  (SKSCLSD,07,EQ)  Completely closed
+SKISTATE FLAG  ,             Mode 1 interface State
+         FLAG  SKIATCH          Successfully Attached
+         FLAG  SKIWRIT          Write operations allowed
+         FLAG  SKIREAD          Read operations allowed
+         FLAG  SKIDTCH          Detach completed
+*
+* Pre allocated Exit Routine ID's
+*
+SKATSK   DS    A             Task ID of the Attaching Task
+SKIOXID  DS    A             Exit request ID for I/O complete
+SKATXID  DS    A             Exit request ID for Attention
+SKTOXID  DS    A             Exit request ID for timeout
+*
+* Information about the current request
+*
+SKCRID   DS    A             Current Request ID
+SKCR01   DS    A             Request Register 1
+SKCR14   DS    A             Request Register 14
+SKCR15   DS    A             Request Register 15
+SKCTYPE  FLAG  ,                 Same as @M1NTYPE
+         FLAG  (IDLE,00,EQ)            No Active I/O on Work Task
+         FLAG  (SKTATCH,04,EQ)         Attach
+         FLAG  (SKTREAD,08,EQ)         Read
+         FLAG  (SKTWRIT,12,EQ)         Write
+         FLAG  (SKTCNTL,16,EQ)         Control
+         FLAG  (SKTHALT,20,EQ)         Halt
+         FLAG  (SKTDTCH,24,EQ)         Detach
+SKRFLGS  FLAG  ,                 Other Flags
+         FLAG  SKMWAIT                 Mode wait
+         FLAG  SKTRAN                  Translate to/from ASCII
+*
+SKRKEY   DS    X             Requestors PSW Key
+SKBUFLOC DS    A             Location of Requestors Buffer
+SKBUFLEN DS    A             Length of Requestors Buffer
+SKMINLEN DS    A             Minimum length requested
+*
+SKRR01   DS    A             Return Register 1
+SKRR14   DS    A             Return Register 14
+SKRR15   DS    A             Return Register 15
+*
+SKTOVAL  DS    D             Timeout Value
+SKTOID   DS    A             Timer ID
+SKEMSGL  DS    A             Length of the last error msg
+SKEMSG   DS    CL80          Space for the last error msg
+         END   ,
+         EJECT
+*box
+*
+* LBUF -- Local receive buffer. The received data is stored in a
+*         local buffer pool. These are allocated on an as needed
+*         basis from pageable memory.
+*
+         SPACE 2
+LBUF     RECORD BEGIN
+         DC    C'LBUF'
+LBCHAIN  DS    A             Address of the next buffer
+LBDLEN   DS    H             Size of the buffer
+LBOFF    DS    H             Offset to the first unread byte
+LBCNT    DS    H             Count of unread data in the buffer
+LBDATA   DS    0X            Data portion
+         END   ,
+         TITLE 'Local Routine Parameters'
+         SPACE 2
+@ADDSEG  RECORD BEGIN
+@ADDSPA  DS    A             Address of the parameter area
+@ADDSLOC DS    A             Location of the data to add
+@ADDSLEN DS    H             Length of the data to add
+         END   ,
+         SPACE 2
+@VALBUF  RECORD BEGIN
+@VALBLOC DS    A             Location of the buffer
+@VALBLEN DS    H             Length of the buffer
+@VALBKEY DS    X             Key under which to check buffers
+@VALBFL  FLAG  ,
+         FLAG  @VALBWRT      Need write access to the buffer
+         END   ,
+         SPACE 2
+@SENDTCP RECORD BEGIN
+@SNDSOCK DS    A             Address of the socket
+@SNDHDR  DS    CL(L'TCPHDR)  Amelia TCP Header
+@SNDFLGS FLAG
+         FLAG  @SNDSBUF      Send the user buffer too
+         END   ,
+         SPACE 2
+*
+* Work area for processing initialization parameters.
+*
+NIPARMS  RECORD BEGIN                  Network Init parms
+NITYPE   DS    XL(L'PARMIN)            Parameter Request Type
+NIKEY1   DS    CL8                     Keyword 1
+NIKEY2   DS    CL8                     Keyword 2
+NIKEY3   DS    CL8                     Keyword 3
+NIOUT    DS    CL12                    Output String area
+         END   ,
+         SPACE 2
+*
+* General Parameter area for passing useful info socket around
+*
+@SOCKP   RECORD BEGIN
+@SOCK    DS    A                       Socket Pointer
+@NBUF    DS    A                       Network Buffer pointer
+@SOCKF   FLAG  ,
+         FLAG  @SOCKM31
+         END   ,
+         SPACE 2
+*
+* Parm area for NPCB Deletion
+*
+@DELNPCB RECORD BEGIN
+@NPCB    DS    A             Address of the NPCB to free
+         END   ,
+         SPACE 2
+*
+* Network SYSR parm area
+*
+NSPARM   RECORD    BEGIN
+NSPSYSR  DS    A             ID of the current SYSR
+NSPNSQE  DS    A             NSQE of the associated socket
+         END   ,
+         TITLE 'Initialization'
+*box
+*
+* NETINIT --   This is entered from global initialization as
+*              a subroutine of the initialization task.  It
+*              allocates the global control blocks and starts
+*              up the network processing address space.
+*
+*   Input --   none
+*
+*  Output --   none
+*
+         SPACE 2
+NETINIT  PROC  SCOPE=GLOBAL
+         L     RM,MATPTR               Get the MAT pointer
+         WITH  (MAT,RM)
+*
+* First allocate our global control block
+*
+         VMGET L'GNCT,LOC=GLOBHI,FIX=YES
+         LR    RY,RVR                  Copy the address
+         WITH  (GNCT,RY)
+         CLEAR GNCT                    Zero it out
+         MVC   GNCT(4),=C'GNCT'        Move in the control block ID
+         LKCRE GNCTLOCK                Get a lock
+         ST    RVR,GNCTLOCK            Save the lock ID
+         ST    RY,MATGNCT              Save the GNCT address
+*
+* Start up the NETWORK server address space
+*
+         PSET  @ACREATE
+         MVC   @ACRPSW(4),=X'070C0000' Default location
+         OC    @ACRPSW+1(1),MATSKEY    System Key
+         MVC   @ACRPSW+4(4),=A(X'80000000'+NETWORKT)
+         VCALL ACREATE                 Create the address space
+         ST    RVR,GNCTASB             Save the ASB address
+         PEND  ,
+         TITLE 'Network Address Space Processing'
+*box
+*
+* NETWORKT --  This is the main task for the NETWORK service
+*              address space.  It initializes the interface to
+*              Amelia, and then just routes data from the path
+*              to the right address spaces for the local
+*              processing routines to manage.
+*
+*   Input --   none
+*
+*  Output --   none
+*
+*
+         SPACE 2
+NETWORKT PROC  SCOPE=LOCAL
+         L     RM,MATPTR               Get the MAT pointer
+         WITH  (MAT,RM),'L RM,MATGNCT' Address of the global CB
+         WITH  (GNCT,RM)
+*
+* Make sure that we get to run and that we are always in core
+*
+         VCALL DISPSHLD                Make us non-swapable
+         VCALL ASSYSTSK                Lock our priority very high
+*
+* Allocate our Local Network Control block
+*
+         VMGET L'NETCB,LOC=LOCSYS,FIX=YES
+         LR    RN,RVR
+         WITH  (NETCB,RN)
+         CLEAR NETCB                   Clear it out
+         MVC   NETCB(4),=C'NETC'       Control block id
+         ST    RN,GNCTNETC             Save its address
+*
+* Fill in default info
+*
+         L     RS,PZMATP               Get the MAT address
+         WITH  (MAT,RS),BEGIN
+         MVC   NETCONAM,MATSNAME       Our name
+         END   ,
+         MVC   NETCANAM,=CL8'AMELIA'
+         MVC   NETCPASS,=CL4'PROD'
+         MVC   GNCTBSIZ,=Y(2048)
+*
+* Check for specified parameters
+*
+         VMGET L'NIPARMS,LOC=LOCSYS
+         LR    RX,RVR
+         WITH  (NIPARMS,RX),BEGIN
+         WITH  (PARMIN,NITYPE)
+         CLEAR NIPARMS
+*
+*  See if they are telling us amelia's name
+*
+         GETPARM2 NIOUT,L'NETCANAM,KEY=(NETWORK,AMELIA),               *
+               TYPE=STRING,REGS=(RA,RJ)
+         IF    ZERO,BEGIN
+         MVC   NETCANAM,=CL8' '
+         CEIL  RB,L'NETCANAM
+         DEX   RB,'MVC NETCANAM(0),@RA' Move the data
+         END   ,
+*
+*  Are they telling us the password
+*
+         GETPARM2 NIOUT,L'NETCPASS,KEY=(,PASSWORD),                    *
+               TYPE=STRING,REGS=(RA,RJ)
+         IF    ZERO,BEGIN
+         MVC   NETCPASS,=CL4' '
+         CEIL  RB,4
+         DEX   RB,'MVC NETCPASS(0),@RA' Move the data
+         END   ,
+*
+*  Are they telling us the Buffer size
+*
+         GETPARM2 KEY=(,SIZE),TYPE=INT,REGS=(RA,RJ)
+         IF    ZERO,BEGIN
+         CEIL  RA,GNCTBSIZ
+         STH   RA,GNCTBSIZ
+         END   ,
+*
+* Free parameter work area
+*
+         VMFREE L'NIPARMS,A=LA:NIPARMS,LOC=LOCSYS
+         END   ,
+*
+* Allocate our I/O control blocks
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT               We can wait for it
+         VCALL IOSIDGET
+         ST    RVR,NETCIOCB            Save the I/O ID
+*
+         VMGET SCOMPLEN,LOC=LOCSYS,FIX=YES,ONEPAGE=YES
+         ST    RVR,NETCIOPA            Save the parm area address
+*
+* Open the path
+*
+         LCALL NETOPEN
+         EJECT ,
+*box
+*
+*          N E T W O R K   M A I N   L O O P
+*
+*
+         LOOP  BEGIN                   Loop forever
+         LCALL NETNOTFY                Find out what is happening
+         IF    NEWINFO,'LCALL NETREAD' Read any new information
+         IF    FULLQE,'LCALL NETFQE'   Tell folks we're ok now
+         IF    OPENED,BEGIN            Mark the NPCB opened
+         CLEAR OPENED                  Clear the flag
+         L     RA,GNCTNPCB             Get our NPCB address
+         WITH  (NPCB,RA),'SET NPCBOPEN'
+         END   ,
+         IF    CLOSED,BEGIN
+         LCALL NETCLOSE                Handle the fact that he closed
+         LCALL NETOPEN                 Open it up again
+         END   ,
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+* NETOPEN  --  This routine opens up the path to Amelia
+*
+*   Input  --  none
+*
+*  Output  --  none
+*
+         SPACE 2
+NETOPEN  PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+*
+* Allocate an NPCB
+*
+         VMGET L'NPCB,LOC=GLOBHI       Get the memory
+         IF    (RVR,Z),'ABORT NONOMEM' This is very unlikely
+         LR    RY,RVR                  Copy it
+         WITH  (NPCB,RY)
+         CLEAR NPCB
+         MVC   NPCB(4),=C'NPCB'        Set the ID
+*
+* Allocate a path device
+*
+         LA    RS,#IOUSCOM             SCOM device
+         SYSCTL RS,TYPE=ALLOC          Do the device allocation
+         ST    RS,NPCBPATH             Save it as the path ID
+*
+* Open the path to Amelia
+*
+         L     RX,NETCIOPA             Get an IO parm area
+         WITH  (#SCOPEN,RX)
+         CLEAR #SCOPEN
+         WITH  (#SCOMCMD,#SCOPEN),'MVC #SCCMD,=A(#SCCOPEN)'
+         MVC   #SCOME,NETCONAM         Move in our name
+         MVC   #SCOYOU,NETCANAM        And Amelia's name
+         MVC   #SCOPASS,NETCPASS       And the password
+         MVC   #SCOBUFL,=A(64*1024)    64k outstanding at one time
+*
+* Go ahead and do the I/O
+*
+         PSET  @IOSDOIO                Setup for the Call
+         MVC   @IOSPID,PZCURPID
+         PMOV  @IOSCP,LA:#SCOPEN       Channel program
+         PMOV  @IOSCHID,NPCBPATH       Device ID of the path
+         PMOV  @IOSID,NETCIOCB         I/O control block
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO                 Do the OPEN
+         IF    (RVR,NZ),'ABORT NETOPEN'
+*
+* Queue the NPCB up on the GNCT
+*
+         LKOB  GNCTLOCK                Get the lock
+         MVC   NPCBNEXT,GNCTNPCB       Chain it up
+         ST    RY,GNCTNPCB             Update the list
+         LKREL GNCTLOCK                Free up the lock
+         PEND  ,
+         EJECT ,
+*box
+*
+* NETCLOSE --  When Amelia closed the path, it leaves us hanging.
+*              So we mark the NPCB that the socket has closed
+*              and wake up everyone who is affected by it.
+*
+*    Input --  none
+*
+*   Output --  none
+*
+         SPACE 2
+NETCLOSE PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+         ORVSNAP 'NETGONE',MODE=LOG    Tell all our misfortune
+         XTRC  RM,RN,PATHCLS           Trace it for posterity
+*-
+*-       Mark the NPCB
+*-
+         LKOB  GNCTLOCK                     Lock up the GNCT
+         L     RY,GNCTNPCB                  Get the address
+         WITH  (NPCB,RY),'SET NPCBCLSD'     Mark it closed
+*-
+*-       Run through the NSQE's and wake everyone up
+*-
+         L     RS,GNCTNSQE             Get first one
+         WHILE (RS,NZ),BEGIN
+         WITH  (NSQE,RS)
+         LCALL NETWAKE                 Wake 'em up
+         L     RS,NSQENEXT             Go to the next one
+         END   ,
+         LKREL GNCTLOCK                Release the lock
+         PSET  @DELNPCB
+         PMOV  @NPCB,GNCTNPCB          Set up the address
+         LCALL DELNPCB                 Try to delete it
+         PEND  ,
+         EJECT ,
+*box
+*
+*  NETREAD --  This routine reads all it can from the path and
+*              queues the result off the NSQE's
+*
+*    Input --  none
+*
+*   Output --  none
+*
+         SPACE 2
+NETREAD  PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+         CLEAR NEWINFO                 Been here, done this
+*
+* Loop through, receiving buffers and handling each, until there
+* are no more to do.
+*
+RCVLOOP  LOOP  BEGIN                   Loop until we're done
+*
+* Get an I/O buffer
+*
+         ACALL GETNBUF                 Get an I/O buffer
+         LR    RY,RVR                  Pointer to the buffer
+         WITH  (NBUF,RY)
+         FIX   NBUFDATA,LH:NBUFMAXL    Fix the data area
+*
+* Set up the Read parameter area (already fixed)
+*
+         L     RX,NETCIOPA             Get the parm area
+         WITH  (#SCSR,RX)
+         CLEAR #SCSR                   Clear it out first
+         WITH  (#SCOMCMD,#SCSR),'MVC #SCCMD,=A(#SCCRECV)'
+         ADDSG NBUFDATA,LH:NBUFMAXL,#SCSR  Add the data description
+*
+* The parm area is filled in, do the I/O
+*
+         PSET  @IOSDOIO
+         MVC   @IOSPID,PZCURPID
+         L     RS,GNCTNPCB
+         WITH  (NPCB,RS),'MVC @IOSCHID,NPCBPATH' Device ID
+         MVC   @IOSID,NETCIOCB                   Request ID
+         ST    RX,@IOSCP                         Channel program
+         SET   @IOSFSYNC                         Synchronous style
+         L     RS,PZMATP
+         WITH  (MAT,RS),'MVC @IOSKEY,MATSKEY'    Read in system key
+         VCALL IOSDOIO                           Do the I/O
+*
+* Check the ending status
+*
+         LR    RA,RVR                  Copy the ending status
+         UNFIX NBUFDATA,LH:NBUFMAXL    Unfix the data area
+         IF    (RA,EQ,#SCESOK),BEGIN   Everything is cool
+         L     RS,#SCSRRLN             Get the length retrieved
+         IF    (RS,Z),BEGIN            Zero length, means no buffer
+         FREENB NBUF                   Free the buffer
+         EXIT  NETREAD                 All done
+         END   ,
+         STH   RS,NBUFLEN              Save length in the NBUF
+*-
+*-       We have to check for an Error message from amelia...
+*-
+         WITH  (TCPHDR,NBUFDATA),BEGIN
+         IF    (TCPTYPE,EQ,=CL16'ERROR_PREV_REQ:'),BEGIN
+         ORVSNAP   'Error reported by Amelia',MODE=LOG
+         ORVSNAP   NBUFDATA,80,MODE=LOG
+         FREENB NBUF
+         NEXT  RCVLOOP                           Trash it
+         END   ,
+         END   ,
+*-
+*-       We have the buffer now.  We have to queue it to the
+*-       NSQE.  During this time, we hold the GNCTLOCK to make
+*-       sure the NSQE doesn't go away.
+*-
+         LKOB  GNCTLOCK
+         WITH  (TCPHDR,NBUFDATA),'L RS,TCPSID'  Get the NSQE addr
+         WITH  (NSQE,RS)
+*-
+*-       RS should have a valid NSQE address.  Check it
+*-
+         IF    ((RS,Z),OR,(NSQE,NE,'NSQE')),BEGIN
+         ORVSNAP   'Bad Amelia ID value',MODE=LOG
+         ORVSNAP   TCPHDR,L'TCPHDR,MODE=LOG
+         FREENB NBUF
+         LKREL GNCTLOCK
+         NEXT  RCVLOOP
+         END   ,
+*-
+*-       Add this buffer to the NSQE queue
+*-
+         L     RA,NSQENBUF                       Current List Head
+         LOOP  BEGIN
+         ST    RA,NBUFNEXT                       Point this at it
+         CS    RA,RY,NSQENBUF                    Try to add it
+         UNTIL EQUAL,END
+*-
+*-       If there were no buffers there before, then we wake up
+*-       the address space
+*-
+         IF    (RA,Z),'LCALL NETWAKE'            Wake it up
+         LKREL GNCTLOCK                          Release the lock
+         END   ,
+*
+* There was some problem with the SCOM read request
+*
+         ELSE  BEGIN
+         IF    (RA,EQ,#SCESIBP),'ABORT NETPIBP'  Invalid buffer pointer
+         IF    (RA,EQ,#SCESIAD),'ABORT NETPIAD'  Invalid Address
+*
+* Anything else, we just log and ignore
+*
+         ORVSNAP 'Network error in SCOM',MODE=LOG
+         ORVSNAP (RA),MODE=LOG
+         FREENB NBUF                   Free the buffer, we got nothing
+         END   ,
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+*   NETFQE --  This routine handles the full queue emptied
+*              response from SCOM.  It runs the NSQE chain
+*              and wakes up all address spaces that have
+*              been suspended waiting on a full queue.
+*
+*    Input --  none
+*
+*   Output --  none
+*
+         SPACE 2
+NETFQE   PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+         LKOB  GNCTLOCK                Obtain the required lock
+         CLEAR FULLQE                  Clear the flag
+*-
+*-       Loop through the NSQE entries
+*-
+         L     RS,GNCTNSQE             First Entry in the list
+         WHILE (RS,NZ),BEGIN
+         WITH  (NSQE,RS)
+         IF    NSQEFULQ,BEGIN          This one is waiting
+         CLEAR NSQEFULQ                Clear the flag
+         SET   NSQEFQE                 Tell them why
+         ACALL NETWAKE                 Go wake em up
+         END   ,
+         L     RS,NSQENEXT             Go to the next one
+         END   ,
+         LKREL GNCTLOCK                Release the lock now
+         PEND  ,
+         EJECT ,
+*box
+*
+* NETNOTFY --  This routine does a notify to get the correct
+*              SCOM flags, and if no condition is pending,
+*              to wait.  It updates the flags in the NETCB.
+*
+*    Input --  none
+*
+*   Output --  none
+*
+         SPACE 2
+NETNOTFY PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+*
+* Get the notify parameter area  (already fixed)
+*
+         L     RX,NETCIOPA             Get the parameter area
+         WITH  (#SCNOTE,RX)
+         WITH  (#SCOMCMD,#SCNOTE),'MVC #SCCMD,=A(#SCCNOTE)'
+*
+* The parm area is filled in, do the I/O
+*
+         PSET  @IOSDOIO
+         MVC   @IOSPID,PZCURPID                  Process ID
+         L     RS,GNCTNPCB
+         WITH  (NPCB,RS),'MVC @IOSCHID,NPCBPATH' Device ID
+         MVC   @IOSID,NETCIOCB                   Request ID
+         ST    RX,@IOSCP                         Channel program
+         SET   @IOSFSYNC                         Synchronous style
+         VCALL IOSDOIO                           Do the I/O
+         STC   RVR,NETCFLG             Ending status is the flags
+         PEND  ,
+         EJECT ,
+*box
+*
+*  NETWAKE --  This routine wakes up the task associated
+*              with a given NSQE.  It schedules a system
+*              task to run in the other address space.
+*
+*    Input --  RS contains the address of the NSQE
+*
+*   Output --  none
+*
+         SPACE 2
+NETWAKE  PROC  SCOPE=LOCAL
+         L     RM,PZMATP               Get the MAT Address
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RM)
+         L     RN,GNCTNETC             Get the NETCB Address
+         WITH  (NETCB,RN)
+         WITH  (NSQE,RS)
+*
+* Get a new SYSR ID
+*
+         PSET  @SYSRNEW
+         VCALL SYSRNEW                 Get the ID
+         IF    (RVR,Z),'ABORT NONSYSR'
+         PSET  @SYSRDO
+         WITH  (NSPARM,@SYSRPRM)       Map the parm area
+         ST    RVR,@SYSRID             Store the ID
+         MVC   @SYSRASB,NSQEASB        Pointer to ASB
+         MVC   @SYSRLOC,=A(NETSYSR)    Location of the routine
+         ST    RVR,NSPSYSR             Pass the SYSR ID
+         ST    RS,NSPNSQE              And the NSQE address
+         VCALL SYSRDO                  Go wake 'em up
+         IF    (RVR,NZ),'ABORT NETBADSR'
+         PEND  ,
+         EJECT ,
+*box
+*
+*  NETSYSR --  This routine is run as a SYSR under the address
+*              space which is to be awakened.  It just finds
+*              socket ECB and posts it.  It then frees the SYSR ID
+*
+*   Input  --  @SYSRTN
+*
+*  Output  --  none
+*
+*
+         SPACE 2
+NETSYSR  PROC  @SYSRTN,SCOPE=LOCAL
+         WITH  (NSPARM,@SYSPARS)       Map our parameter area
+*
+* Find the Socket
+*
+         L     RX,NSPNSQE                  NSQE address
+         WITH  (NSQE,RX),'L RX,NSQESOCK'   Socket Address
+         WITH  (SOCK,RX)
+*
+* Post the ECB
+*
+         SIGNL SKECB
+*
+* Free the current SYSR
+*
+         PSET  @SYSRDEL
+         MVC   @SYSRDID,NSPSYSR        Move in the ID
+         VCALL SYSRDEL                 Delete that SYSR
+         PEND  ,
+         EJECT ,
+*box
+*
+*  DELNPCB --  This routine is called to free an NPCB.  It first
+*              checks to see whether there are any dependencies on
+*              the given NPCB.  It then closes the associated path,
+*              removes the NPCB from the GNCT queue, and frees the
+*              associated storage.
+*
+         SPACE 2
+DELNPCB  PROC  @DELNPCB,SCOPE=LOCAL
+         L     RB,@NPCB
+         WITH  (NPCB,RB)
+         L     RX,PZMATP
+         WITH  (MAT,RX),'L RX,MATGNCT' Get the GNCT Address
+         WITH  (GNCT,RX)
+         IF    (NPCB,NE,'NPCB'),'ABORT BADNPCB'
+*
+         LKOB  GNCTLOCK                Lock it up
+         IF    ((NPCBREF,NZ),OR,^NPCBCLSD),BEGIN           In Use
+         LKREL GNCTLOCK                Release the lock
+         EXIT  DELNPCB                 And blow this joint
+         END   ,
+*-
+*-       Find it in the queue
+*-
+         LA    RS,GNCTNPCB             Head of the queue
+         WHILE (RB,NE,@RS),BEGIN       Find pointer to ours
+         LT    RS,@RS                  Point at next NPCB
+         IF    Z,'ABORT REMNPCB'       Coundn't find it
+         LA    RS,NPCBNEXT-NPCB(,RS)   Point at next  pointer
+         END   ,
+         MVC   0(4,RS),NPCBNEXT        Remove ours from the list
+         LKREL GNCTLOCK                Release the lock
+*-
+*-       Allocate an I/O Parameter Area
+*-
+         VMGET SCOMPLEN,LOC=LOCSYS,ONEPAGE=YES  Get the IO parm area
+         IF    (RVR,Z),'ABORT NOMEM'
+         LR    RY,RVR
+         CLEAR (@RY,SCOMPLEN)          Clear it all out
+         WITH  (#SCCLOSE,RY)           Address it
+         CLEAR #SCCLOSE
+         WITH  (#SCOMCMD,RY),'MVC #SCCMD,=A(#SCCCLOS)'
+*-
+*-       Get an IOS ID
+*-
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT               We can wait
+         VCALL IOSIDGET                Go get us an ID
+         LR    RK,RVR                  Copy the ID
+         FIX   #SCCLOSE,L'#SCCLOSE     Fix the parm area
+*-
+*-       Send the parm area out on the path
+*-
+         PSET  @IOSDOIO
+         MVC   @IOSPID,PZCURPID
+         MVC   @IOSCHID,NPCBPATH       Path ID
+         ST    RK,@IOSID               I/O ID
+         PMOV  @IOSCP,LA:#SCCLOSE      Parm area address
+         SET   @IOSFSYNC               Syncronous
+         VCALL IOSDOIO                 Do the I/O
+*-
+*-       Free up the stuff we got
+*-
+         UNFIX #SCCLOSE,L'#SCCLOSE     Unfix the parm area
+         PSET  @IOSIDFRE
+         ST    RK,@IOSFID
+         VCALL IOSIDFRE                Free the IOS ID
+*
+         VMFREE SCOMPLEN,A=(RY),LOC=LOCSYS
+         IF    (RVR,NZ),'ABORT FREEIOPA'
+*-
+*-       Free the NPCB itself
+*-
+         MVC   NPCB(4),=C'npcb'        Dump the ID too
+         VMFREE L'NPCB,A=(RB),LOC=GLOBHI
+         PEND  ,
+         EJECT ,
+         LTORG ,
+         EJECT ,
+         TITLE 'Calling Address Space Processing'
+*box
+*
+*  NETLOCAL -- This routine is the local network processing
+*              task for each socket.  It handles the
+*              asynchronous nature of the network I/O.  It
+*              waits for things to happen and does what
+*              needs to be done.
+*
+*     Input -- @TENTRY
+*
+*    Output -- none
+*
+         SPACE 2
+NETLOCAL PROC  @TENTRY,SCOPE=LOCAL
+         L     RX,@TEPARM              The parm is our SOCK address
+         WITH  (SOCK,RX)
+*
+* Do the exit for the timer.
+*
+         PSET  @EXRADD
+         MVC   @EXRPSW(4),=X'070C0000'
+         MVC   @EXRPSW+4(4),=A(X'80000000'+PTTIMEX)
+         ST    RX,@EXRPARM             The SOCK is the parm
+         WITH  (XITMSKD,@EXRTYPE),BEGIN
+         SET   XITMRTC                 Real time timer
+         END   ,
+         SET   @EXRAFS
+         VCALL EXRADD                  Go do the actual adding
+*
+* Enable the exits
+*
+         PSET  @XITMSK
+         WITH  (XITMSKD,@XITMSK),BEGIN
+         SET   XITMRTC                 Real time clocks
+         END   ,
+         VCALL XITMASK                 Set the mask
+         EJECT ,
+*box
+*
+*        M A I N   S O C K E T   P R O C E S S I N G  L O O P
+*
+*
+         SPACE 2
+         SET   RERUN                   Force processing
+MLOOP    LABEL ,
+         IF    ^RERUN,BEGIN
+         AWAIT SKECB,LEN=LONG          Wait a while for the event
+         END   ,
+         CLEAR RERUN
+         CLEAR SKECB                   Clear it out
+         PSET  @SOCKP
+         ST    RX,@SOCK
+         LCALL DOSTATE                 Process states again
+         EJECT ,
+*-
+*-       Let's take care of the case when some I/O is active.
+*-
+IOACT    IF    ^IDLE,BEGIN             Some I/O is active
+*
+* If a halt request was received we terminate the I/O right now.
+*
+         IF    DOHALT,BEGIN
+         CLEAR DOHALT                  Clear the flag
+         CLEAR SKRR15
+         CLEAR SKRR01
+         CLEAR SKRR14                  All registers cleared.
+         B     ACTIOPST                Post it complete
+         END   ,
+*
+* If a timer needs to be started, we do that too.
+*
+         IF    TIMEST,BEGIN
+         CLEAR TIMEST                  Clear the flag
+         PSET  @SOCKP
+         ST    RX,@SOCK
+         ACALL DOTIME                  And start the timer
+         END   ,
+         EJECT
+*box
+*
+*              Attach Processing
+*
+*
+         IF    SKTATCH,BEGIN           An attach is in progress
+         IF    TIMEUP,BEGIN            No time left
+         CLEAR TIMEUP
+         MVC   SKRR15,=A(16)           Not yet opened return code
+         B     ACTIOPST                Post the user
+         END   ,
+*-
+*-       If the connection completed, for however brief a time
+*-       we mark it as attached.
+*-
+         IF    SKIATCH,BEGIN           We're all connected now
+         CLEAR SKRR15                  Good return
+         B     ACTIOPST                Post the I/O complete
+         END   ,
+*-
+*-       If the socket is closed, then there there is never
+*-       going to be an open connection and so we can just
+*-       tell him to give up now.
+*-
+         IF    SKSCLSD,BEGIN           Not going to attach
+         MVC   SKRR15,=A(-4)           Move in the return code
+         B     ACTIOPST                and post it complete
+         END   ,
+         EXIT  IOACT                   Otherwise, keep waiting
+         END   ,
+         EJECT ,
+*box
+*
+*              Read Processing
+*
+         IF    SKTREAD,BEGIN           A read is in progress
+*-
+*-       If we have received either an abort or an EOF, we
+*-       complete this read with either an error or whatever
+*-       data is currently in the buffer cause there isn't
+*-       going to be any more.
+*-
+         IF    (SKRABORT+SKREOF),BEGIN
+         IF    (SKICNT,Z),BEGIN
+         MVC   SKRR15,=A(-4)           Assume abort
+         IF    SKREOF,'MVC SKRR15,=A(-8)'   Oops, make it EOF
+         B     ACTIOPST                Post it complete
+         END   ,
+         CLEAR SKMINLEN                Send whatever is there
+         END   ,
+*-
+*-       See if there is enough data available.
+*-
+         IF    (SKMINLEN,LE,SKICNT),BEGIN
+         PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         ACALL MOVEOUT                 Move the data to the user
+         CLEAR SKRR15                  Good return code
+         B     ACTIOPST                Post the I/O complete
+         END   ,
+*
+*  Check for timeout
+*
+         IF    TIMEUP,BEGIN            The read timed out
+         CLEAR TIMEUP
+         MVC   SKRR15,=F'4'            No data yet
+         B     ACTIOPST                Post it complete
+         END   ,
+         EXIT  IOACT                   Have to wait a little longer
+         END
+         EJECT ,
+*box
+*
+*              Write Processing
+*
+         IF    SKTWRIT,BEGIN           A Write is in progress
+*
+         IF    ^SKIWRIT,BEGIN          We can't send any more
+         MVC   SKRR15,=A(-4)           So tell him that
+         B     ACTIOPST                Go post the return
+         END   ,
+*
+         IF    ^SKSTOP,BEGIN           He is allowing us to proceed
+         PSET  @SENDTCP
+         USING (TCPHDR,@SNDHDR)
+         MVC   TCPHDR,=CL16'TCP_WRITE:'
+         PMOV  TCPSID,SKASID           Session ID
+         SET   @SNDSBUF                Send his buffer too
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Attempt to send it
+         IF    (RVR,Z),BEGIN           It worked
+         CLEAR SKRR15                  Good Return Code
+         B     ACTIOPST                Go post the return
+         END   ,
+         END   ,
+*
+*  Check for timeout
+*
+         IF    TIMEUP,BEGIN            The write timed out
+         CLEAR TIMEUP
+         MVC   SKRR15,=A(4)            Not yet able to sent
+         B     ACTIOPST                Post it complete
+         END   ,
+         EXIT  IOACT                   Have to wait a bit longer
+         END   ,
+         EJECT ,
+*box
+*
+*              Control Processing
+*
+         IF    SKTCNTL,BEGIN
+         PSET  @SENDTCP
+         USING (TCPHDR,@SNDHDR)
+         MVC   TCPHDR,=CL16'TCP_EOF:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Attempt to send it
+         IF    (RVR,Z),BEGIN           It worked
+         SET   SKSEOF                  Mark it sent
+         CLEAR SKRR15                  Good Return Code
+         B     ACTIOPST                Post it complete
+         END   ,
+         END   ,
+         EJECT ,
+*box
+*
+*              Detach Processing
+*
+         IF    SKTDTCH,BEGIN           A detach is in progress
+         IF    SKSDTRN,BEGIN           We are in data transfer mode
+         IF    SKSEOF,'SET SKSDONE'    Move out of that state
+         ELSE  'SET SKSABRT'           Abort the connection
+         SET   RERUN                   Process W/O Waiting
+         END
+         ELSEIF SKSWCON,BEGIN          Waiting for the connection
+         SET SKSABRT
+         SET   RERUN
+         END   ,
+         ELSEIF (SKSCLSD,OR,SKSINIT),BEGIN    All closed up
+         SET   SKIDTCH                 Gone for good
+         CLEAR SKRR15                  Good Return Code
+         B     ACTIOPST                Go post the return
+         END   ,
+         END   ,
+         EXIT  IOACT                   Any others do nothing
+         EJECT ,
+ACTIOPST LABEL ,                       Post an active I/O complete
+         PSET  @SOCKP
+         ST    RX,@SOCK
+         SET   IDLE                    We are Idle now
+         IF    TIMERUN,BEGIN           If a timer is running...
+         PSET  @SOCKP
+         ST    RX,@SOCK
+         ACALL CANTIME                 Cancel it.
+         END   ,
+         PSET  @SOCKP                  Common control block
+         ST    RX,@SOCK                Tell it which one
+         ACALL IODONE                  Post the I/O complete
+         END   ,
+*
+* Handle the the cleanup processing if we are detached
+*
+         IF    SKIDTCH,BEGIN           Everything is finished
+         PSET  @SOCKP
+         ST    RX,@SOCK
+         ACALL DELSOCK                 Free the SOCK
+         VCALL TEXIT                   Then make the task go away
+         END   ,
+         B     MLOOP                   Continue
+         PEND  ,                       Return to the caller
+         EJECT ,
+*box
+*
+*  DOSTATE --  This routine processes the socket through the state
+*              table.  The routine branches on the state stored in
+*              the socket to the proper section of code for that
+*              state.
+*
+*    Input --  @SOCKP
+*
+*   Output --  none
+*
+         SPACE 2
+DOSDATA  RECORD BEGIN                  DOSTATE work area
+DOSFLAG  FLAG  ,
+         FLAG  DSFDONE                 No more work to do
+         END   ,
+         SPACE 2
+DOSTATE  PROC  @SOCKP,DOSDATA,SCOPE=LOCAL
+         L     RX,@SOCK                Socket pointer
+         WITH  (SOCK,RX)
+DOSHEAD  LABEL ,
+         EJECT ,
+*box
+*
+*  Capture any and all received buffers.  These are queued to
+*  the socket in the proper order for subsequent processing.
+*
+         LT    RB,SKNSQE               Get the NSQE pointer
+         IF    NZ,BEGIN
+         WITH  (NSQE,RB)
+*-
+*-       Check for path closure
+*-
+         L     RS,NSQENPCB
+         WITH  (NPCB,RS),BEGIN
+         IF    NPCBCLSD,'SET SKSCLSD'  Whole socket is closed
+         IF    ^NPCBOPEN,'SET SKSCLSD' Or hasn't opened yet
+         END   ,
+*-
+*-       First remove all the queued buffers from the NSQE
+*-
+         IF    ('LT RJ,NSQENBUF',Z),EXIT   Nothing to do
+         CLEAR RK
+         LOOP  BEGIN
+         CS    RJ,RK,NSQENBUF          Try to replace with zero
+         UNTIL Z,END
+*-
+*-       The list is in reverse order from when they arrived.  We
+*-       must turn the list around so that the earliest message is
+*-       first in the queue.
+*-
+         LOOP  BEGIN
+         WITH  (NBUF,RJ)
+         L     RS,NBUFNEXT
+         ST    RK,NBUFNEXT
+         IF    (RS,Z),EXIT
+         LR    RK,RJ                   Point at the previous
+         LR    RJ,RS                   Move to the next
+         END   ,
+*-
+*-       Add this list of messages to the end of the local queue.
+*-       Since there are normally no messages stored, this should
+*-       be easy.
+*-
+         LA    RK,SKNBUF               Pointer to the address
+         WHILE ('LT RS,@RK',NZ),BEGIN  Find the end
+         LA    RK,NBUFNEXT-NBUF(,RS)   Got the next one
+         END   ,
+         ST    RJ,@RK                  Add ours to the list
+         END   ,
+         EJECT ,
+*box
+*
+*  Determine the state and branch to it for processing.
+*
+*
+         SPACE 2
+         SET   DSFDONE                 Assume we need only go once
+         L     RY,SKNBUF               First received buffer
+*
+         LC    RS,SKNSTATE             Get the network state byte
+         SLL   RS,2                    Multiply by 4
+         L     RS,STAB(RS)             Get the state code address
+         BR    RS                      Go to it
+STAB     DS    0A
+         DC    A(DOSINIT)              SKSINIT
+         DC    A(DOSOSNT)              SKSOSNT
+         DC    A(DOSWCON)              SKSWCON
+         DC    A(DOSDTRN)              SKSDTRN
+         DC    A(DOSABRT)              SKSABRT
+         DC    A(DOSDONE)              SKSDONE
+         DC    A(DOSWCLS)              SKSWCLS
+         DC    A(DOSCLSD)              SKSCLSD
+         EJECT ,
+*box
+*
+* Initial state.  Here we just try to send off our connection
+* message.  We might not be able to since we may get a full queue
+* or closed status back. We do not process any messages.
+*
+*
+         SPACE 2
+DOSINIT  LABEL ,
+         PSET  @SENDTCP                Set the parameter area
+         WITH  (TCPHDR,@SNDHDR)
+         PMOV  TCPTYPE,=CL16'TCP_OPEN:'
+         PMOV  TCPSID,SKNSQE           Our Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         SET   @SNDSBUF                Send the users buffer too
+         ACALL SENDTCP                 Go ahead and send it
+         IF    (RVR,Z),BEGIN           We sent it...
+         SET   SKSOSNT                 Move to the next state
+         END   ,
+         B     DOSTAIL                 Finish up the state
+         EJECT
+*box
+*
+* Open Sent State.  In this state, the TCP Open has been sent. We
+* are waiting for the first message from Amelia, which should be
+* an OPEN-INFO message to give us the data we need to manage the
+* connection.  No other messages are processed here.
+*
+*
+         SPACE
+DOSOSNT  LABEL ,
+         IF    (RY,NZ),BEGIN           There is some buffer
+         WITH  (NBUF,RY)
+         MVC   SKNBUF,NBUFNEXT         So remove it
+         WITH  (TCPHDR,NBUFDATA)       Map the header
+         IF    (TCPTYPE,EQ,'TCP_OPEN_INFO:'),BEGIN
+         MVC   SKASID,TCPDATA          Move the Amelia ID in
+         SET   SKSWCON                 Move to the next state
+         END   ,
+         ELSE  BEGIN
+         ORVSNAP 'Unexpected message following open'
+         WITH  (TCPHDR,NBUFDATA)       Map the header
+         ORVSNAP TCPTYPE,L'TCPTYPE
+         END   ,
+         FREENB NBUF                   Now we can free the buffer
+         CLEAR DSFDONE                 There may be more to do
+         END   ,
+         B     DOSTAIL                 Finish the state
+         EJECT ,
+*box
+*
+* Waiting for Connect State.  In this state we are waiting to
+* receive either a CONNECT message or an ABORT message.
+*
+*
+         SPACE
+DOSWCON  LABEL ,
+         IF    (RY,NZ),BEGIN           There is some buffer
+         WITH  (NBUF,RY)
+         MVC   SKNBUF,NBUFNEXT         So remove it
+         WITH  (TCPHDR,NBUFDATA)       Map the header
+         IF    (TCPTYPE,EQ,'TCP_CONNECT:'),BEGIN
+         LH    RS,NBUFLEN              Get the total length
+         S     RS,=A(L'TCPHDR)         Don't count the header
+         CEIL  RS,L'SKAINFO            Not more than the max
+         DEX   RS,'MVC  SKAINFO(0),TCPDATA'   Move the info in
+         SET   SKSDTRN                 Move to the next state
+         SET   SKIATCH                 Interface is now attached
+         SET   SKIWRIT                 Writing is allowed
+         SET   SKIREAD                 Reading is allowed
+         END   ,
+         ELSEIF (TCPTYPE,EQ,'TCP_ABORT:'),BEGIN
+         LH    RS,NBUFLEN              Get the total length
+         S     RS,=A(L'TCPHDR)         Don't count the header
+         CEIL  RS,L'SKEMSG             Not more than the max
+         ST    RS,SKEMSGL              Save mesage length
+         DEX   RS,'MVC  SKEMSG(0),TCPDATA'   Move the info in
+         SET   SKSCLSD                 Nothing more to do here
+         END   ,
+         ELSE  BEGIN
+         ORVSNAP 'Unexpected message during connect'
+         ORVSNAP TCPTYPE,L'TCPTYPE
+         END   ,
+         FREENB NBUF                   Now we can free the buffer
+         CLEAR DSFDONE                 There may be more to do
+         END   ,
+         B     DOSTAIL                 Finish the state
+         EJECT ,
+*box
+*
+* Data transfer state.  We are sending and receiving data
+*
+*
+         SPACE
+DOSDTRN  LABEL ,
+         IF    (RY,NZ),BEGIN           There is a buffer
+         WITH  (NBUF,RY)
+         MVC   SKNBUF,NBUFNEXT         Remove it
+         WITH  (TCPHDR,NBUFDATA)
+         IF    (TCPTYPE,EQ,'TCP_DATA:'),BEGIN
+*
+*  Move in the new data
+*
+         PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         PMOV  @NBUF,LA:NBUF
+         ACALL MOVEIN                  Move the data
+         END   ,
+         ELSEIF (TCPTYPE,EQ,'TCP_STOP:'),'SET SKSTOP'
+         ELSEIF (TCPTYPE,EQ,'TCP_START:'),'CLEAR SKSTOP'
+         ELSEIF (TCPTYPE,EQ,'TCP_EOF:'),'SET SKREOF'
+         ELSEIF (TCPTYPE,EQ,'TCP_ABORT'),BEGIN
+         LH    RS,NBUFLEN              Get the total length
+         S     RS,=A(L'TCPHDR)         Don't count the header
+         CEIL  RS,L'SKEMSG             Not more than the max
+         ST    RS,SKEMSGL              Save mesage length
+         DEX   RS,'MVC  SKEMSG(0),TCPDATA'   Move the info in
+         SET   SKRABORT                Remember we received this
+         CLEAR SKIWRIT                 Don't allow any more writes
+         SET   SKSDONE                 This means we're done
+         CLEAR DSFDONE                 Continue processing
+         FREENB NBUF                   Free the buffer
+         B     DOSTAIL                 Skip the rest
+         END   ,
+         ELSE  BEGIN
+         ORVSNAP 'Unexpected message during data transfer'
+         ORVSNAP TCPTYPE,L'TCPTYPE
+         END   ,
+         FREENB NBUF                   Free the buffer
+         CLEAR DSFDONE                 May be more to do
+         END   ,
+*-
+*-       Handle flow control
+*-
+         IF    SKHOLD,BEGIN            We have asked him to stop
+         L     RS,SKICNT               Get the current count
+         IF    (RS,LT,SKILOW),BEGIN    Ok to let him go again
+         PSET  @SENDTCP
+         WITH  (TCPHDR,@SNDHDR)        Redirect the TCP header loc
+         MVC   TCPHDR,=CL16'TCP_START:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Send it off
+         IF    (RVR,Z),'CLEAR SKHOLD'  Clear it if send went ok
+         END   ,
+         END   ELSE,BEGIN              We have not asked him to stop
+         L     RS,SKICNT               Get the current count
+         IF    (RS,GT,SKIHIGH),BEGIN   Must try to stop him
+         PSET  @SENDTCP
+         WITH  (TCPHDR,@SNDHDR)        Redirect the TCP header loc
+         MVC   TCPHDR,=CL16'TCP_STOP:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Send it off
+         IF    (RVR,Z),'SET SKHOLD'    Mark held if send went ok
+         END   ,
+         END   ,
+*-
+*-       See if all transfers complete.  This is so if both sides
+*-       have signaled EOF and there is no more data to be processed
+*-       in the NBUF chain.  Data may remain in the user buffer.
+*-
+         IF    (SKREOF*SKSEOF,AND,(SKNBUF,Z)),BEGIN
+         SET   SKSDONE                 Set the new state
+         CLEAR DSFDONE                 Continue processing
+         END   ,
+         B     DOSTAIL                 Finish the state
+         EJECT ,
+*box
+*
+* Abort state.  Here we are trying to send an abort in order to
+* put ourselved in the done state.
+*
+*
+         SPACE 2
+DOSABRT  LABEL ,
+         PSET  @SENDTCP                Set the parameter area
+         WITH  (TCPHDR,@SNDHDR)
+         PMOV  TCPTYPE,=CL16'TCP_ABORT:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Go ahead and send it
+         IF    (RVR,Z),BEGIN           We sent it...
+         SET   SKSDONE                 Move to the next state
+         CLEAR DSFDONE                 Keep on processing
+         END   ,
+         B     DOSTAIL                 Finish up the state
+         SPACE 2
+*box
+*
+* Done state.  Here we just have to send amelia the close in order
+* to solicit her close response.
+*
+*
+         SPACE 2
+DOSDONE  LABEL ,
+         PSET  @SENDTCP                Set the parameter area
+         WITH  (TCPHDR,@SNDHDR)
+         PMOV  TCPTYPE,=CL16'TCP_CLOSE:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Go ahead and send it
+         IF    (RVR,Z),BEGIN           We sent it...
+         SET   SKSWCLS                 Move to the next state
+         CLEAR DSFDONE                 Keep on processing
+         END   ,
+         B     DOSTAIL                 Finish up the state
+         EJECT ,
+*box
+*
+* Waiting for Close State.  In this state we are waiting to
+* receive a CLOSE message from Amelia.
+*
+*
+         SPACE
+DOSWCLS  LABEL ,
+         IF    (RY,NZ),BEGIN           There is some buffer
+         WITH  (NBUF,RY)
+         MVC   SKNBUF,NBUFNEXT         So remove it
+         WITH  (TCPHDR,NBUFDATA)       Map the header
+         IF    (TCPTYPE,EQ,'TCP_CLOSE:'),BEGIN
+         SET   SKSCLSD                 Move to the next state
+         END   ,
+         ELSE  BEGIN
+         ORVSNAP 'Unexpected message during close'
+         ORVSNAP TCPTYPE,L'TCPTYPE
+         END   ,
+         FREENB NBUF                   Now we can free the buffer
+         CLEAR DSFDONE                 Continue processing
+         END   ,
+         B     DOSTAIL                 Finish the state
+         EJECT ,
+*box
+*
+* Closed State.  Here we just clean up the NSQE, if it has not
+* yet been done.
+*
+*
+         SPACE 2
+DOSCLSD  LABEL ,
+         IF    (SKNSQE,NZ),BEGIN
+         PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         LCALL DELNSQE                 Disconnect us from global
+         END   ,
+         SPACE 2
+DOSTAIL  IF    ^DSFDONE,DOSHEAD        Keep on trucking
+         PEND
+         EJECT
+*box
+*
+* NETLOGOF --  This routine is called from the address space master
+*              when the address space is going away.  It just
+*              frees the NSQE's for all open sockets.
+*
+         SPACE 2
+NETLOGOF PROC  SCOPE=GLOBAL
+*         ORVSNAP 'NETLOGOF Called',MODE=LOG
+         L     RA,PZCURASB
+         WITH  (ASB,RA),'L RA,ASBNET'
+         WHILE (RA,NZ),BEGIN
+*         ORVSNAP (RA),MODE=LOG
+         WITH  (SOCK,RA)
+         PSET  @SOCKP
+         ST    RA,@SOCK
+         LCALL DELNSQE                 Delete the NSQE
+         L     RA,SKNEXT               Point at the next one
+         END   ,
+         PEND  ,
+         EJECT
+*box
+*
+*  DELNSQE --  This routine frees the socket's NSQE.  It first
+*              removes it from the global chain.  It also updates
+*              the NPCB the socket is using.  If it is closed,
+*              we may also delete it.
+*
+*    Input --  @SOCKP
+*
+*   Output --  none
+*
+*
+         SPACE 2
+DELNSQE  PROC  @SOCKP,SCOPE=LOCAL
+         L     RX,@SOCK
+         WITH  (SOCK,RX)
+         LT    RY,SKNSQE
+         IF    Z,EXIT
+         WITH  (NSQE,RY)
+         L     RA,PZMATP
+         WITH  (MAT,RA),'L RA,MATGNCT'
+         WITH  (GNCT,RA)
+         L     RB,NSQENPCB
+         WITH  (NPCB,RB)
+*-
+*-       Remove our NSQE from the global queue
+*-
+         LKOB  GNCTLOCK                Lock up the world
+         LA    RS,GNCTNSQE             Head of the queue
+         WHILE (RY,NE,@RS),BEGIN       Find pointer to ours
+         LT    RS,@RS                  Point at next NSQE
+         IF    Z,'ABORT REMNSQE'       Couldn't find it
+         LA    RS,NSQENEXT-NSQE(,RS)   Point at next  pointer
+         END   ,
+         MVC   0(4,RS),NSQENEXT        Remove ours from the list
+         LKREL GNCTLOCK                Release the lock
+*-
+*-       Clean up any remaining queued buffers (probably none)
+*-       and then free the NSQE itself
+*-
+         WHILE ('LT RS,NSQENBUF',NZ),BEGIN
+         WITH  (NBUF,RS),'MVC NSQENBUF,NBUFNEXT' Remove it
+         FREENB (RS)
+         END   ,
+         VMFREE L'NSQE,A=(RY),LOC=GLOBHI,FIX=YES
+         CLEAR SKNSQE
+         DROP  RY
+*-
+*-       Reduce the use count on our path.
+*-
+         LKOB  GNCTLOCK                Lock up the queue
+         DECR  RS,NPCBREF              Reduce the count
+         LKREL GNCTLOCK
+         PSET  @DELNPCB
+         PMOV  @NPCB,LA:NPCB
+         ACALL DELNPCB                 Attempt to remove it
+         PEND
+         EJECT ,
+*box
+*
+*   MOVEIN --  This routine moves the data from an NBUF into the
+*              socket's input buffers.  If there is not enough
+*              room in the current buffer we chain another one.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR = 0 : Moved
+*
+*
+         SPACE 2
+MOVEIN   PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCK
+         WITH  (SOCK,RA)
+         L     RB,@NBUF                Get the buffer address
+         WITH  (NBUF,RB)
+*
+         LA    RX,NBUFDATA+L'TCPHDR    Address of the data
+         LH    RY,NBUFLEN              Length of the buffer
+         S     RY,=A(L'TCPHDR)         Length of the data
+*
+*  Lock the Sock
+*
+         VCALL ASLOCK                  Hold everything
+*
+*  Update the total count
+*
+         L     RS,SKICNT               Get the current count
+         AR    RS,RY                   Add length of this buffer
+         ST    RS,SKICNT               Current byte count
+*
+*  If chain is empty, get a new buffer
+*
+         L     RB,SKICHAIN             Current buffer
+         WITH  (LBUF,RB)
+         IF    (RB,Z),BEGIN
+         PSET  @GETLB
+         ST    RA,@GTLBSOC             SOCK address
+         ACALL GETLBUF                 Get one
+         LR    RB,RVR
+         ST    RB,SKICHAIN
+         END   ,
+*
+*  Find active (last) input buffer on the chain
+*
+         ELSE  BEGIN
+         WHILE (LBCHAIN,NZ),'L  RB,LBCHAIN'
+         END   ,
+*
+*  Now move all the data from the NBUF to the LBUF
+*
+         LOOP  BEGIN
+*
+*  First determine starting point in LBUF
+*
+         LH    RJ,LBOFF                Current position
+         AH    RJ,LBCNT                Skip Unread data
+*
+*  There is room in this LBUF
+*
+         IF    (RJ,LT,LBDLEN),BEGIN
+*
+*  Determine how much will fit
+*
+         LH    RK,LBDLEN               Maximum data length
+         SR    RK,RJ                   Count to the end
+         CEIL  RK,RY                   Not more than we have
+*
+*  Update data count
+*
+         LH    RS,LBCNT                Current used
+         AR    RS,RK                   New portion
+         STH   RS,LBCNT                New amount used
+*
+*  Move the data from NBUF to LBUF
+*
+         LA    RJ,LBDATA(RJ)           Data address in LBUF
+         MVCL  RJ,RX                   Move data
+         END   ,
+*
+*  If the NBUF is empty we're all done, otherwise get
+*    another LBUF and keep going
+*
+         IF    (RY,Z),EXIT             All done
+         PSET  @GETLB
+         ST    RA,@GTLBSOC             SOCK address
+         ACALL GETLBUF                 Get one
+         ST    RVR,LBCHAIN             Add new buffer to end
+         LR    RB,RVR
+         END   ,
+         DROP  RB
+*
+*  Unlock and we're done
+*
+         VCALL ASULOCK                 Then unlock everything
+         PEND  ,
+         EJECT ,
+         LTORG ,
+         EJECT ,
+         TITLE 'Mode 1 Network Interface'
+*box
+*
+*    M1NET --  This is the main entry point for the MODE 1
+*              network interface.  It is called directly from
+*              the SVC handler.
+*
+*
+         SPACE 2
+M1NET    PROC  @M1NET,SCOPE=GLOBAL
+*
+* Find the socket he wants, if it is an attach, get a new one
+*
+         IF    @M1NATCH,BEGIN
+         LCALL NEWSOCK                 Go get the new socket
+         LR    RA,RVR                  use the address
+         ST    RA,@M1NDVID             Save the device ID
+         END   ELSE,'L RA,@M1NDVID'    Use the one he passed
+         WITH  (SOCK,RA)               Setup Addressiblity
+         IF    (SOCK,NE,'SOCK'),'ABORT BADSOCK'
+*
+* Fill in the socket
+*
+         MVC   SKCRID,@M1NRQID         Request ID
+         MVC   SKCR01,@M1NR01
+         MVC   SKCR14,@M1NR14
+         MVC   SKCR15,@M1NR15
+         MVC   SKRKEY,@M1NPKEY
+         CLEAR SKRFLGS                 Clear request flags
+         IF    @M1NWAIT,'SET SKMWAIT'  Mode Wait
+         ELSE  'CLEAR SKMWAIT'
+*
+* Figure out what needs to be done
+*
+         PSET  @SOCKP
+         IF    @M1NM31,'SET @SOCKM31'
+         ST    RA,@SOCK
+         LC    RS,@M1NTYPE             Get the request type
+         IF    ((RS,Z),OR,(RS,GE,TTLEN)),'ABORT BADM1NTYPE'
+         ACALL NTTAB(RS)
+*
+* The return from these is our return, so we are done
+*
+         PEND  ,                       Return to the caller
+*
+NTTAB    DC    A(0)                    Invalid
+         DC    A(ATTACH)               Attach
+         DC    A(READ)                 Read
+         DC    A(WRITE)                Write
+         DC    A(CONTROL)              Control
+         DC    A(HALT)                 Halt
+         DC    A(DETACH)               Detach
+TTLEN    EQU   *-NTTAB                 length of the table
+         EJECT ,
+*box
+*
+*   ATTACH --  This handles the attach request.  It sends the
+*              stuff off to amelia using the global path.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+ATTACH   PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCK
+         WITH  (SOCK,RA)
+         MVC   SKRR01,=X'80000000'     Default is no return
+         MVC   SKRR14,=X'80000000'     Default is no return
+         MVC   SKRR15,=X'80000000'     Default is no return
+*
+* Validate the parms.  First the attach parameters
+*
+         IF    ^@SOCKM31,BEGIN
+         MVI   SKCR01,0                Only 24 bit addresses allowed
+         END   ,
+         L     RX,SKCR01               Get the buffer location
+         ST    RX,SKBUFLOC             Save the location
+         LH    RY,SKCR15+2             And the buffer length
+         IF    ((RY,NP),OR,(RY,GT,255)),ATTSPEC
+         ST    RY,SKBUFLEN             Save the length of the buffer
+         VALBUF (RX),(RY)              Make sure we can read it
+         IF    (RVR,NZ),ATTSPEC        Nope...spec 'im
+*
+* Validate the timeout
+*
+         LH    RY,SKCR15               Get the timeout value
+         IF    ((RY,NEG),OR,(RY,GT,6000)),ATTSPEC
+         CLEAR RX
+         M     RX,=FE6'1'              Convert to uS
+         SLDL  RX,12                   Convert to TOD format
+         STM   RX,RY,SKTOVAL           Save the timeout value
+*
+* Now we start up the task which will handle asynchronous events for
+* this path.
+*
+         IF    SKMWAIT,BEGIN
+         SET   SKTATCH                 Tell the task what to do
+         SET   TIMEST                  Start a timer if needed
+         END   ,
+         PSET  @TCREATE
+         MVC   @TCRPSW(4),=X'070C0000'
+         MVC   @TCRPSW+4(4),=A(X'80000000'+NETLOCAL)
+         MVC   @TCRPRIO,=A(10)         Higher priority
+         PMOV  @TCRPARM,LA:SOCK        Parm is the SOCK
+         SET   @TCRFSTK                It will need a stack
+         VCALL TCREATE                 Create the task
+*
+* If this was a mode wait request, the response will be from the
+* other task.  If not, we will just respond that the socket is not
+* yet open, and post the I/O complete.
+*
+         IF    ^SKMWAIT,BEGIN          Not mode wait
+         MVC   SKRR15,=A(16)           Signal socket not open yet
+         PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         ACALL IODONE                  And post the I/O complete
+         END   ,
+         EJECT ,
+*
+* We are done for now.  Setup the return code and return.
+*
+         CLEAR RVR                     Good return
+         B     ATTDONE                 The attach is done
+*
+* If there was some problem, we have to free the SOCK that was
+* created before we were entered.
+*
+ATTSPEC  PSET  @SOCKP
+         ST    RA,@SOCK                Move in the parameter
+         ACALL DELSOCK                 Free it up
+         LA    RVR,6                   Specification error
+*
+* All done, return to the caller
+*
+ATTDONE  PEND  ,
+         EJECT ,
+*box
+*
+*     READ --  This routine handles the read I/O requests.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+READ     PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCK
+         WITH  (SOCK,RA)
+*-
+*-       Check to see if we can even do the read
+*-
+         IF    ^SKIATCH,BEGIN          Not attached yet
+         MVC   SKRR15,=A(16)           Set return code
+         B     READPOST                Post the I/O complete
+         END   ,
+*
+         IF    ^SKIREAD,BEGIN          Not allowed to read
+         MVC   SKRR15,=A(-4)           No more data, ever
+         B     READPOST                Post the I/O complete
+         END   ,
+*-
+*-       Handle the termination conditions, where we have read
+*-       all the data, and there is either an EOF or abort
+*-       outstanding.
+*-
+         IF    (SKICNT,Z),BEGIN
+         IF    SKRABORT,BEGIN          They have aborted the stream
+         MVC   SKRR15,=A(-4)           Just tell him its over
+         CLEAR SKIREAD                 No more either
+         B     READPOST                The I/O is done now
+         END   ,
+         IF    SKREOF,BEGIN            There is no more coming
+         MVC   SKRR15,=A(-8)           Tell about the EOF
+         CLEAR SKIREAD                 No more data here either
+         B     READPOST                The I/O is done here too
+         END   ,
+         END   ,
+*-
+*-       Setup Return Registers
+*-
+         MVC   SKRR01,=X'80000000'     Default is no return
+         MVC   SKRR14,=X'80000000'     Default is no return
+         MVC   SKRR15,=X'80000000'     Default is no return
+*-
+*-       Check for mode=ascii
+*-
+         IF    ('LT  RX,SKCR01',NEG),BEGIN
+         LCR   RX,RX
+         ST    RX,SKCR01               Set the buffer location
+         SET   SKTRAN                  Mark translation active
+         END   ,
+*-
+*-       Validate the buffer location
+*-
+         L     RX,SKCR01               Get the location
+         IF    ^@SOCKM31,BEGIN
+         N     RX,=X'00FFFFFF'         Only 24 bit addresses
+         END   ,
+         ST    RX,SKBUFLOC             Save the location
+         LH    RY,SKCR15+2             Get the length of his buffer
+         IF    ((RY,NP),OR,(RY,GT,8192)),READSPEC
+         ST    RY,SKBUFLEN             Save the length of the buffer
+         VALBUF (RX),(RY),W            Make sure we can write it
+         IF    (RVR,NZ),READDONE       Can't... signal the exception
+*-
+*-       Validate the timeout.
+*-
+         LH    RY,SKCR15               Get the timeout value
+         IF    ((RY,NEG),OR,(RY,GT,6000)),READSPEC
+         CLEAR RX
+         M     RX,=FE6'1'              Convert to uS
+         SLDL  RX,12                   Convert to TOD format
+         STM   RX,RY,SKTOVAL           Save the timeout value
+*-
+*-       Validate the minimum read count
+*-
+         L     RY,SKCR14               Get the minimum length
+         IF    SKMWAIT,BEGIN
+         IF    ((RY,NPOS),OR,(RY,GT,SKBUFLEN)),READSPEC
+         END   ,
+         ELSE  'CLEAR RY'              Only valid in mode wait
+         ST    RY,SKMINLEN             Save the value
+*-
+*-       If there is enough data to satisfy the read, we handle it
+*-       here and now.
+*-
+         IF    (RY,LE,SKICNT),BEGIN    We have enough
+         PSET  @SOCKP
+         ST    RA,@SOCK
+         ACALL MOVEOUT                 Move the data to the user space
+         CLEAR SKRR15                  Clear the return code
+         B     READPOST                Then post the return code
+         END   ,
+*-
+*-       If there is not enough data, then we let the other task
+*-       handle it.
+*-
+         SET   SKTREAD                 Tell the task what to do
+         SET   TIMEST                  Start the timer if needed
+         SIGNL SKECB                   Start up the task
+         CLEAR RVR                     Clear the return code
+         B     READDONE                And we're done here
+*-
+*-       Now we go move the data and finish up.
+*-
+READPOST PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         ACALL IODONE                  Complete the I/O
+         CLEAR RVR                     Good return for the SVC
+         B     READDONE
+         SPACE
+*
+READSPEC LA    RVR,6                   Specification Panic Code
+READDONE PEND                          Return to the caller
+         EJECT ,
+*box
+*
+*    WRITE --  This routine handles the write I/O requests.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+WRITE    PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCK
+         WITH  (SOCK,RA)
+*-
+*-       Check to see if the connection is open
+*-
+         IF    ^SKIATCH,BEGIN          Not in the attached state
+         MVC   SKRR15,=A(16)           Set return code
+         B     WRITPOST                Post the I/O complete
+         END   ,
+*
+         IF    ^SKIWRIT,BEGIN          Not able to write any more
+         MVC   SKRR15,=A(-4)           Not ever
+         B     WRITPOST                Go post the I/O complete
+         END   ,
+*-
+*-       Setup return parameters
+*-
+         MVC   SKRR01,=X'80000000'     Default is no return
+         MVC   SKRR14,=X'80000000'     Default is no return
+         MVC   SKRR15,=X'80000000'     Default is no return
+*-
+*-       Check for mode=ascii
+*-
+         IF    ('LT  RX,SKCR01',NEG),BEGIN
+         LCR   RX,RX
+         ST    RX,SKCR01               Get the buffer location
+         SET   SKTRAN                  Mark translation active
+         END   ,
+*
+* Validate the parms.
+*
+         IF    ^@SOCKM31,BEGIN
+         MVI   SKCR01,0                Enforce 24 bit mode
+         END   ,
+         L     RX,SKCR01               Get the location
+         ST    RX,SKBUFLOC             Save the location
+         LH    RY,SKCR15+2             Get the length of his buffer
+         IF    ((RY,NP),OR,(RY,GT,8192)),WRITSPEC
+         ST    RY,SKBUFLEN             Save the length of the buffer
+         VALBUF (RX),(RY)              Make sure we can read it
+         IF    (RVR,NZ),WRITDONE       Can't... signal the exception
+*
+*  If translation (to ASCII) need to be performed we move the data
+*  to the local output buffer, do the translation, and update the
+*  pointer in the SOCK
+*
+         IF    SKTRAN,BEGIN
+         L     R14,SKOBUF              Output buffer
+         ST    R14,SKBUFLOC             Note the new location
+         LR    R15,RY                  Data length
+         MVCL  R14,RX                  Move the data
+*
+         PSET  @TOASC
+         PMOV  @TOASLOC,SKBUFLOC
+         PMOV  @TOASLEN,SKBUFLEN
+         ACALL TOASC                   Go translate
+         END   ,
+*
+* Validate the timeout.
+*
+         LH    RY,SKCR15               Get the timeout value
+         IF    ((RY,NEG),OR,(RY,GT,6000)),WRITSPEC
+         CLEAR RX
+         M     RX,=FE6'1'              Convert to uS
+         SLDL  RX,12                   Convert to TOD format
+         STM   RX,RY,SKTOVAL           Save the timeout value
+*-
+*-       Attempt to write out the data
+*-
+         IF    ^SKSTOP,BEGIN           He is allowing us to proceed
+         PSET  @SENDTCP
+         USING (TCPHDR,@SNDHDR)
+         MVC   TCPHDR,=CL16'TCP_WRITE:'
+         PMOV  TCPSID,SKASID           Session ID
+         SET   @SNDSBUF                Send his buffer too
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Attempt to send it
+         IF    (RVR,Z),BEGIN           It worked
+         CLEAR SKRR15                  Good Return Code
+         B     WRITPOST                Post it complete
+         END   ,
+*
+         IF    (RVR,NEG),BEGIN         The connection is closed
+         MVC   SKRR15,=A(-4)           Signal Return code
+         B     WRITPOST                I/O complete
+         END   ,
+         END   ,
+*-
+*-       We must have gotten a full queue or flow control
+*-
+WRITWT   IF    SKMWAIT,BEGIN           He wants to wait for it
+         SET   SKTWRIT                 Mark it for the other task
+         SET   TIMEST                  And start a timer if needed
+         SIGNL SKECB                   Signal the other task
+         CLEAR RVR                     Good return from the SVC
+         B     WRITDONE
+         END   ,
+*
+         MVC   SKRR15,=A(4)            Otherwise we just tell him
+*
+* All done here
+*
+WRITPOST PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         ACALL IODONE                  Post it complete
+         CLEAR RVR                     Good return for the SVC
+         B     WRITDONE                All done
+*-
+WRITSPEC LA    RVR,6
+WRITDONE PEND  ,                       Return to the caller
+         EJECT ,
+*box
+*
+*  CONTROL --  This routine handles the Control I/O requests.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+CONTROL  PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCKP
+         WITH  (SOCK,RA)
+*-
+*-       Check to see if the connection is open
+*-
+         IF    ^SKIATCH,BEGIN          Not in the attached state
+         MVC   SKRR15,=A(16)           Set return code
+         B     CNTLPOST                Post the I/O complete
+         END   ,
+*
+*-
+*-       Setup return parameters
+*-
+         MVC   SKRR01,=X'80000000'     Default is no return
+         MVC   SKRR14,=X'80000000'     Default is no return
+         MVC   SKRR15,=X'80000000'     Default is no return
+*
+         L     RX,SKCR01               Get the number
+*
+* Control 0 -- Set EOF.
+*
+*
+         IF    (RX,EQ,0),BEGIN         Control 0 -- Set EOF
+*-
+*- First see if it is already done
+*-
+         IF    SKSEOF,BEGIN            Already sent one
+         CLEAR SKRR15                  Everything is cool
+         B     CNTLPOST                Post the I/O Complete
+         END   ,
+*-
+*-       Attempt to write out the data
+*-
+         PSET  @SENDTCP
+         USING (TCPHDR,@SNDHDR)
+         MVC   TCPHDR,=CL16'TCP_EOF:'
+         PMOV  TCPSID,SKASID           Session ID
+         PMOV  @SNDSOCK,LA:SOCK        Socket Address
+         ACALL SENDTCP                 Attempt to send it
+         IF    (RVR,Z),BEGIN           It worked
+         SET   SKSEOF                  Mark it sent
+         CLEAR SKRR15                  Good Return Code
+         B     CNTLPOST                Post it complete
+         END   ,
+*
+         IF    (RVR,NEG),BEGIN         The connection is closed
+         MVC   SKRR15,=A(-4)           Signal Return code
+         B     CNTLPOST                I/O complete
+         END   ,
+*-
+*-       We must have gotten a full queue
+*-
+CNTLWT   IF    SKMWAIT,BEGIN           He wants to wait for it
+         SET   SKTCNTL                 Mark it for the other task
+         SIGNL SKECB                   Signal the other task
+         CLEAR RVR                     Good return from the SVC
+         B     CNTLDONE
+         END   ,
+*
+         MVC   SKRR15,=A(4)            Otherwise we just tell him
+         B     CNTLPOST                and post the I/O complete
+         END   ,
+*
+* Control 1 -- Read error message
+*
+*
+         IF    (RX,EQ,1),BEGIN         Control 1 -- Read error message
+*-
+*- If one is there, check the buffer and move it in
+*-
+         IF    (SKEMSGL,NZ),BEGIN      A message awaits
+*-
+*-       Validate the buffer location
+*-
+         L     RX,SKCR15               Get the location
+         N     RX,=X'00FFFFFF'         Only 24 bit addresses
+         LH    RY,SKCR14+2             Get the length of his buffer
+         IF    (RY,NP),CNTLSPEC        No good
+         VALBUF (RX),(RY),W            Make sure we can write it
+         IF    (RVR,NZ),CNTLDONE       Can't... signal the exception
+*-
+*-       The buffer's ok, move in the message
+*-
+         CEIL  RY,SKEMSGL              Don't move too much
+         DEX   RY,'MVC  @RX(0),SKEMSG'    Move it on in
+         CLEAR SKRR15                  Good Return Code
+         B     CNTLPOST                Post it complete
+         END   ,
+*
+         MVC   SKRR15,=A(4)            Otherwise we just tell him
+         B     CNTLPOST                and post the I/O complete
+         END   ,
+*
+*-
+*- Invalid control number
+*-
+         B     CNTLSPEC                Go Spec Him
+*
+* All done here
+*
+CNTLPOST PSET  @SOCKP
+         PMOV  @SOCK,LA:SOCK
+         ACALL IODONE                  Post it complete
+         CLEAR RVR                     Good return for the SVC
+         B     CNTLDONE                All done
+         SPACE 2
+*
+CNTLSPEC LA    RVR,6
+CNTLDONE PEND  ,                       Return to the caller
+         EJECT ,
+*box
+*
+*     HALT --  This routine handles the Halt I/O requests.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+HALT     PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCKP
+         WITH  (SOCK,RA)
+*-
+         IF    ^IDLE,BEGIN             Don't bother if task idle
+         SET   DOHALT                  Turn on the flag
+         SIGNL SKECB                   Wake it up
+         END   ,
+         CLEAR RVR                     Good return
+         PEND  ,                       Return to the caller
+         EJECT ,
+*box
+*
+*   DETACH --  This routine handles the Detach I/O requests.
+*
+*    Input --  @SOCKP
+*
+*   Output --  RVR contains panic code or zero.
+*
+*
+         SPACE 2
+DETACH   PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCKP
+         WITH  (SOCK,RA)
+*
+* Make the processing task clean up
+*
+         SET   SKTDTCH                 Set the detach request code
+         SIGNL SKECB                   Wake up the task
+         CLEAR RVR                     Good return code
+         PEND  ,                       Return to the caller
+         EJECT ,
+         LTORG ,
+         EJECT ,
+*box
+*
+*  MOVEOUT --  This routine moves data from one or more socket
+*              input buffers to the user area, freeing emptied
+*              buffers and updating buffer counts in remaining
+*              buffers. It also puts the total number of bytes
+*              moved into return register 1.
+*
+*    Input --  @SOCKP
+*
+*   Output --  none
+*
+*
+         SPACE 2
+MOVEOUT  PROC  @SOCKP,SCOPE=LOCAL
+         L     RA,@SOCK
+         WITH  (SOCK,RA)
+         CLEAR SKRR01                  Nothing moved yet
+*
+*  Lock the Sock
+*
+         VCALL ASLOCK                  Hold everything
+*
+         L     RX,SKBUFLOC             User's buffer
+         L     RK,SKBUFLEN              and length
+         WITH  (LBUF,RB)
+*
+*  Loop through input buffers
+*
+         WHILE ('LT RB,SKICHAIN',NZ),BEGIN
+         LH    RJ,LBOFF                First unread byte
+         LA    RJ,LBDATA(RJ)           Starting point in buffer
+         LH    RY,LBCNT                 And the unread count
+*
+*  The entire LBUF will be used
+*
+         IF    (RK,GE,RY),BEGIN
+*
+*  Update the amount moved
+*
+         L     RS,SKRR01               Update the total length moved
+         AR    RS,RY                   Amount being moved
+         ST    RS,SKRR01
+*
+*  Update the total count
+*
+         L     RS,SKICNT               Get the current count
+         SR    RS,RY                   Minus length of this buffer
+         ST    RS,SKICNT               Current byte count
+*
+*  Move the data
+*
+         MVCL  RX,RJ                   Move it in
+*
+*  Now unchain and free the buffer
+*
+         MVC   SKICHAIN,LBCHAIN
+         PSET  @FREELB
+         ST    RA,@FRLBSOC             SOCK address
+         ST    RB,@FRLBLOC             Buffer address
+         ACALL FREELBUF                Free the LBUF
+         END   ,
+*
+*  Update the LBUF counts
+*
+         ELSE  BEGIN
+         SR    RY,RK                   Bytes remaining in LBUF
+         STH   RY,LBCNT                 Update
+*
+         LH    RS,LBOFF                Offset of remaining data
+         AR    RS,RK                   Amount being taken
+         STH   RS,LBOFF                Update the offset
+*
+*  Update the amount moved
+*
+         L     RS,SKRR01               Update the total length moved
+         AR    RS,RK                   Amount being moved
+         ST    RS,SKRR01
+*
+*  Update the total count
+*
+         L     RS,SKICNT               Get the current count
+         SR    RS,RK                   Minus amount being moved
+         ST    RS,SKICNT               Current byte count
+*
+*  And move the data
+*
+         LR    RY,RK
+         MVCL  RX,RJ                   Do the copy
+         END   ,
+         UNTIL (RK,Z),END
+*
+*  If translation (from ASCII) needs to be performed we do that now
+*
+         IF    SKTRAN,BEGIN
+         PSET  @TOEBC
+         PMOV  @TOEBLOC,SKBUFLOC       Buffer pointer
+         PMOV  @TOEBLEN,SKRR01         Data length
+         ACALL TOEBC                   Go translate
+         END   ,
+*
+*  Unlock and we're done
+*
+         VCALL ASULOCK
+         PEND  ,
+         EJECT ,
+*box
+*
+*  SENDTCP --  This routine attempts to send a message out on
+*              the amelia path to the TCP/IP network.  The parm
+*              area contains the TCP header.  It also contains
+*              a flag to indicate whether the users buffer should
+*              also be sent.
+*
+*              To insure that we can recover from a full queue
+*              response, if a full queue is received from the
+*              first attempt to send the message, we enqueue on
+*              the global lock and try again.  If it still is full
+*              then we mark our NSQE and free the lock.  This makes
+*              sure that we will be on the list to be posted when
+*              the central task gets notified that the full queue
+*              condition is relieved.
+*
+*    Input --  @SENDTCP
+*
+*   Output --  RVR=0: OK; RVR < 0 : Path Closed; RVR > 0 : Full Queue
+*
+*
+         SPACE 2
+SENDTCP  PROC  @SENDTCP,SCOPE=LOCAL
+*         ORVSNAP 'SENDTCP',MODE=LOG
+*         ORVSNAP @SNDHDR,L'@SNDHDR,MODE=LOG
+         L     RA,@SNDSOCK
+         WITH  (SOCK,RA)
+*
+         IF    (SKNSQE,Z),BEGIN        The NSQE is already gone
+         L     RVR,=A(-1)
+         EXIT  SENDTCP
+         END   ,
+*-
+*-       Get an IOS ID
+*-
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT               We can wait
+         VCALL IOSIDGET                Go get us an ID
+         LR    RK,RVR                  Copy the ID
+*-
+*-       Format the I/O Parameter area
+*-
+         L     RY,SKIOPA               Get the I/O parm area
+         WITH  (#SCSR,RY)              Address it
+         CLEAR #SCSR
+         WITH  (#SCOMCMD,RY),'MVC #SCCMD,=A(#SCCSEND)'
+         FIX   @SNDHDR,L'@SNDHDR                 Fix Header
+         ADDSG @SNDHDR,L'@SNDHDR,#SCSR           Add to list
+         IF    @SNDSBUF,BEGIN                    We have a buffer too
+         FIX   L:SKBUFLOC,L:SKBUFLEN             Fix user area
+         ADDSG L:SKBUFLOC,L:SKBUFLEN,#SCSR       Add to list
+         END   ,
+         FIX   #SCSR,SCOMPLEN          Fix the parm area
+*-
+*-       Send it out
+*-
+         PSET  @IOSDOIO
+         MVC   @IOSPID,PZCURPID
+         L     RS,SKNSQE                         Get the NSQE addr
+         WITH  (NSQE,RS),'L RS,NSQENPCB'         Get the NPCB addr
+         WITH  (NPCB,RS),'MVC @IOSCHID,NPCBPATH' Path ID
+         ST    RK,@IOSID                         I/O ID
+         PMOV  @IOSCP,LA:#SCSR                   Parm area address
+         SET   @IOSFSYNC                         Syncronous
+         VCALL IOSDOIO                           Do the I/O
+         LR    RB,RVR                            Copy ending status
+         IF    (RB,EQ,#SCESFQ),BEGIN             We got a full queue
+*-
+*-       Lets try to send it out again
+*-
+         L     RX,PZMATP                         Mat address
+         WITH  (MAT,RX),'L RX,MATGNCT'           GNCT address
+         WITH  (GNCT,RX)
+         LKOB  GNCTLOCK                          Get the global lock
+         PSET  @IOSDOIO
+         MVC   @IOSPID,PZCURPID
+         L     RS,SKNSQE                         Get the NSQE addr
+         WITH  (NSQE,RS),'L RS,NSQENPCB'         Get the NPCB addr
+         WITH  (NPCB,RS),'MVC @IOSCHID,NPCBPATH' Path ID
+         ST    RK,@IOSID                         I/O ID
+         PMOV  @IOSCP,LA:#SCSR                   Parm area address
+         SET   @IOSFSYNC                         Syncronous
+         VCALL IOSDOIO                           Do the I/O
+         LR    RB,RVR                            Copy ending status
+         IF    (RB,EQ,#SCESFQ),BEGIN             Again Full
+         L     RS,SKNSQE
+         WITH  (NSQE,RS),BEGIN
+         SET   NSQEFULQ                          Set our flags
+         CLEAR NSQEFQE
+         END   ,
+         END   ,
+         LKREL GNCTLOCK                          Free the lock
+         END   ,
+*-
+*-       Free up the stuff we got
+*-
+         UNFIX #SCSR,SCOMPLEN          Unfix the parm area...
+         UNFIX @SNDHDR,L'@SNDHDR       The Header...
+         IF    @SNDSBUF,BEGIN          We have a buffer too
+         UNFIX L:SKBUFLOC,L:SKBUFLEN   Unfix user area
+         END   ,
+         PSET  @IOSIDFRE
+         ST    RK,@IOSFID
+         VCALL IOSIDFRE                Free the IOS ID
+*
+* Check the ending status
+*
+         IF    (RB,EQ,#SCESOK),BEGIN   Normal response
+         CLEAR RVR                     Good return code
+         EXIT  SENDTCP                 Return to the caller
+         END   ,
+*
+         IF    (RB,EQ,#SCESNP),BEGIN   No partner
+         L     RVR,=A(-4)              Get the return code
+         EXIT  SENDTCP
+         END   ,
+*
+         IF    (RB,EQ,#SCESFQ),BEGIN   Buffer too big
+         LA    RVR,4                   Full queue code
+         EXIT  SENDTCP
+         END   ,
+*
+         ABORT SENDTCP                 Any other...
+         PEND  ,
+         EJECT ,
+*box
+*
+*   IODONE --  Signal the I/O requestor that the I/O is
+*              complete.  It uses information from the SOCK.
+*
+*   Input  --  @SOCKP
+*
+*  Output  --  none
+*
+*
+         SPACE 2
+IODONE   PROC  @SOCKP,SCOPE=LOCAL
+         L     RX,@SOCK                Get the SOCK address
+         WITH  (SOCK,RX)
+         L     RS,SKRR15
+*
+* Schedule the I/O complete exit
+*
+         PSET  @XITDO
+         MVC   @XITRQID,SKIOXID        Move in the request ID
+         MVC   @XITTSK,SKATSK          Task ID
+         MVI   @XITTYPE,XITTIOCN       I/O complete
+         WITH  (@M1NIOCP,@XITPARM)     Map the parm area
+         MVC   @M1NICRQ,SKCRID         Current request ID
+         MVC   @M1NIR01,SKRR01         Register 1
+         MVC   @M1NIR14,SKRR14         Register 14
+         MVC   @M1NIR15,SKRR15         Register 15
+         VCALL XITDO                   Schedule the exit
+         IF    (RVR,NZ),'ABORT BADIOCPX'  Can't schedule the exit
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   DOTIME --  This routine sets a real time timer.             *
+*                                                               *
+*   Input  --  @SOCKP                                           *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+DOTIME   PROC  @SOCKP,SCOPE=LOCAL
+         L     RX,@SOCK                Get the SOCK address
+         WITH  (SOCK,RX)
+         IF    (SKTOVAL,Z),EXIT        Don't wait for no time
+*
+* Start the time
+*
+         PSET  @RTSET
+         MVC   @RTSCLK,SKTOVAL         Move in the time
+         SET   @RTSFINT                And it is an interval
+         MVC   @RTSXIT,SKTOXID         Move in the request ID
+         VCALL RTSET                   Schedule the exit
+         IF    (RVR,Z),'ABORT SETRT'   Bad timer ID returned
+         ST    RVR,SKTOID              Save the ID
+         SET   TIMERUN                 Indicate that a timer is running
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  CANTIME --  Cancel an outstanding timer.                     *
+*                                                               *
+*   Input  --  @SOCKP                                           *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+CANTIME  PROC  @SOCKP,SCOPE=LOCAL
+         L     RX,@SOCK                Get the SOCK address
+         WITH  (SOCK,RX)
+*
+* Schedule the I/O complete exit
+*
+         PSET  @RTCNCK
+         MVC   @RTCID,SKTOID           Move in the timer ID
+         VCALL RTCAN                   Schedule the exit
+         IF    (RVR,NZ),'ABORT RTCAN'  Bad cancel request
+         CLEAR TIMERUN
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  PTTIMEX --  This is the timer complete exit. It just wakes   *
+*              up the processing task.                          *
+*                                                               *
+*   Input  --  @XITDATA                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+PTTIMEX  PROC  @XITDATA,SCOPE=LOCAL
+*
+* Get the SOCK address and the new flags
+*
+         L     RS,@XITDSA              Get the Exit Status Area loc
+         WITH  (XITSAREA,RS),'L RX,XITSRPRM'  Get the SOCK address
+         WITH  (SOCK,RX)
+*
+* We now have to wake up the processing task
+*
+         SET   TIMEUP                  Tell it why
+         CLEAR TIMERUN                 Timer not running now
+         SIGNL SKECB                   Go to it
+         VCALL EXRDONE                 Then return from the exit
+         PEND  ,
+         EJECT ,
+*box
+*
+*
+*  NEWSOCK --  This routine allocates a new SOCK data structure
+*              and fills in some of the data areas.
+*
+*   Input  --  none
+*
+*  Output  --  RVR contains the SOCK address.
+*
+*
+         SPACE 2
+NEWSOCK  PROC  SCOPE=LOCAL
+*
+* Allocate the SOCK itself
+*
+         VMGET L'SOCK,LOC=LOCSYS,FIX=YES       Get the memory
+         IF    (RVR,Z),'ABORT NOMEM'           No memory here
+         LR    RX,RVR                          Copy the address
+         WITH  (SOCK,RX)
+*
+* Initialize some of it
+*
+         CLEAR SOCK                    Zero it out
+         MVC   SOCK(4),=C'SOCK'        Move in the ID
+         MVC   SKATSK,PZCURTSK         Task ID of the attacher
+         L     RA,PZCURASB             Get current ASB pointer
+         WITH  (ASB,RA),BEGIN
+         VCALL ASLOCK                  Make sure we're not interrupted
+         MVC   SKNEXT,ASBNET           Copy the address
+         ST    RX,ASBNET               Add to chain of Sockets
+         VCALL ASULOCK                 Unlock it
+         END   ,
+*
+* Get the Corresponding NSQE
+*
+         VMGET L'NSQE,LOC=GLOBHI,FIX=YES
+         IF    (RVR,Z),'ABORT NOMEM'
+         LR    RY,RVR                  Copy the address
+         ST    RY,SKNSQE               Save the address
+*
+* Initialize it
+*
+         WITH  (NSQE,RY),BEGIN
+         CLEAR NSQE                    Zero it out first
+         MVC   NSQE(4),=C'NSQE'
+         MVC   NSQEASB,PZCURASB        Mark it as ours
+         ST    RX,NSQESOCK             Associate the socket
+*
+* Add the NSQE to the global areas
+*
+         L     RA,PZMATP               Get the MAT pointer
+         WITH  (MAT,RA),'L RA,MATGNCT' Get the control table pointer
+         WITH  (GNCT,RA),BEGIN
+         LKOB  GNCTLOCK                Get the lock
+         MVC   NSQENPCB,GNCTNPCB       Use first on the list
+         MVC   NSQENEXT,GNCTNSQE       Point this at the list
+         ST    RY,GNCTNSQE             And add it to the head
+         LKREL GNCTLOCK                release the lock
+         END   ,
+         END   ,
+*
+* Initialize input buffer parameters
+*
+         MVC   SKISIZE,=AL2(2048)
+         MVC   SKILOW,=AL2(2048)
+         MVC   SKIHIGH,=AL2(4096)
+*
+* Allocate the output buffer
+*
+         VMGET L:=A(8192),LOC=LOCSYS,PAGE=YES
+         IF    (RVR,Z),'ABORT NETOBUF'
+         ST    RVR,SKOBUF              Save the pointer
+         MVC   SKOSIZ,=A(8192)         Save the buffer size
+*
+* Allocate some other control blocks
+*
+         VMGET SCOMPLEN,LOC=LOCSYS,ONEPAGE=YES  Get the IO parm area
+         IF    (RVR,Z),'ABORT NOMEM'
+         LR    RA,RVR
+         CLEAR (@RA,SCOMPLEN)          Clear it all out
+         ST    RA,SKIOPA               Save the address
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         ST    RVR,SKIOXID             Save the I/O XIT ID
+         PSET  @XITNEW
+         VCALL XITNEW
+         ST    RVR,SKATXID             And the Attention XIT ID
+         PSET  @XITNEW
+         VCALL XITNEW
+         ST    RVR,SKTOXID             And the Timer XIT ID
+         LA    RVR,SOCK                Return the SOCK pointer
+         PEND  ,
+         EJECT ,
+*box
+*
+*
+*  DELSOCK --  This routine frees a SOCK and any subsidiary
+*              control blocks associated with it.
+*
+*   Input  --  @SOCKP
+*
+*  Output  --  none
+*
+         SPACE 2
+DELSOCK  PROC  @SOCKP,SCOPE=LOCAL
+         L     RX,@SOCK                Get the SOCK address
+         WITH  (SOCK,RX)
+         IF    (SOCK,NE,=C'SOCK'),'ABORT BDELSOCK'
+*
+* Remove it from the address space list of sockets
+*
+         L     RA,PZCURASB             Current ASB pointer
+         WITH  (ASB,RA),'LA RA,ASBNET' Address of list head
+         WHILE (RX,NE,@RA),BEGIN       Loop finding it
+         LT    RA,@RA                  Get address of the next one
+         IF    Z,'ABORT REMSOCK'       It's not on the list
+         LA    RA,SKNEXT-SOCK(,RA)     Get address of next pointer
+         END   ,
+         MVC   0(4,RA),SKNEXT          Remove it from the list
+         MVC   SOCK(4),=C'sock'        Mark it as deleted
+*
+* Delete the associated control blocks
+*
+         VMFREE SCOMPLEN,A=SKIOPA,LOC=LOCSYS     Free the IO parm
+         IF    (RVR,NZ),'ABORT DELIOPA'
+*
+         PSET  @XITDEL
+         MVC   @XITDID,SKIOXID         I/O Complete XIT Id
+         VCALL XITDEL
+         PSET  @XITDEL
+         MVC   @XITDID,SKATXID         Attention XIT Id
+         VCALL XITDEL
+         PSET  @XITDEL
+         MVC   @XITDID,SKTOXID         Timer XIT Id
+         VCALL XITDEL
+*
+* Free the output buffer
+*
+         VMFREE L:SKOSIZ,A=L:SKOBUF,LOC=LOCSYS
+*
+* Free the available input buffers
+*
+         L     RA,SKIFREE              Free list
+         WHILE (RA,NZ),BEGIN
+         WITH  (LBUF,RA)
+         LR    RS,RA
+         L     RA,LBCHAIN              Next buffer on the chain
+         VMFREE LH:SKISIZE,A=(RS),LOC=LOCSYS
+         END   ,
+*
+* Free the in-use input buffers
+*
+         L     RA,SKICHAIN             In-use list
+         WHILE (RA,NZ),BEGIN
+         WITH  (LBUF,RA)
+         LR    RS,RA
+         L     RA,LBCHAIN              Next buffer on the chain
+         VMFREE LH:SKISIZE,A=(RS),LOC=LOCSYS
+         END   ,
+*
+* Free the SOCK itself
+*
+         CLEAR SOCK                    Blitz it
+         VMFREE L'SOCK,A=LA:SOCK,LOC=LOCSYS,FIX=YES        Free it
+         IF    (RVR,NZ),'ABORT FREESOCK'                   No good
+         PEND  ,
+         TITLE 'SCOM segment management'
+*****************************************************************
+*                                                               *
+*   ADDSEG --  This routine adds information about an area of   *
+*              virtual memory to the list in a path send/recv   *
+*              request parameter area.  It updates the count    *
+*              and length values in the parm area.              *
+*                                                               *
+*   Input  --  @ADDSEG                                          *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ADDSEG   PROC  @ADDSEG,SCOPE=LOCAL
+         L     RX,@ADDSPA    Get the parameter area
+         WITH  (#SCSR,RX)
+*
+* Get our starting point for this data
+*
+         L     RJ,#SCSRCT              Get current count
+         SLL   RJ,3                    Size of each segment
+         LA    RJ,#SCSRSEG(RJ)         Location of new segment ptrs
+         L     RA,@ADDSLOC             Starting location
+         LH    RB,@ADDSLEN             And total length
+*
+* Loop through the data area, adding a segment to the parm area for
+* each page or fraction thereof.
+*
+         WHILE (RB,NZ),BEGIN           Through the info
+*
+* Fill in the location for the current part of the data area
+*
+         LRA   RS,@RA                  Real address of current bit
+         IF    NZ,'ABORT BADFIX'       What?
+         ST    RS,@RJ                  Save the real address
+*
+* Figure out how long to the next page boundary
+*
+         LR    RS,RA                   Copy the current address
+         AH    RS,=Y(4096)             Get to the next page
+         N     RS,=X'7FFFF000'         Address of the next page
+         SR    RS,RA                   Length to the page boundary
+         CEIL  RS,RB                   Max is the buffer length
+         ST    RS,@RJ+4                Save the segment length
+*
+* Adjust the pointers for the next pass through
+*
+         AR    RA,RS                   Get to the next segment
+         SR    RB,RS                   Length is less this segment
+         LA    RJ,@RJ+8                Location for next entry
+         END   ,
+*
+* Update the count of segments
+*
+         LA    RS,#SCSRSEG             Starting location
+         SR    RJ,RS                   Length in bytes
+         SRL   RJ,3                    Length in entries
+         ST    RJ,#SCSRCT              Save the count
+*
+* Update the overall length
+*
+         L     RS,#SCSRLEN             Get the previous length
+         AH    RS,@ADDSLEN             Add what we just put in
+         ST    RS,#SCSRLEN             Update the length
+         PEND  ,
+         EJECT ,
+*box
+*
+*  VALBUF  --  Validate a buffer location.
+*
+*   Input  --  @VALBUF
+*
+*  Output  --  RVR: 0=OK; 4=Protection; 5=Addressing
+*
+*
+         SPACE 2
+VALBUF   PROC  @VALBUF,SCOPE=LOCAL
+         L     RJ,@VALBLOC             Get the buffer location
+         LH    RK,@VALBLEN             And it's length
+         LC    RB,@VALBKEY             Get the key of the issuer
+*
+* Check out the buffer
+*
+         PSET  @PAGE
+         MVC   @PAGLOC,@VALBLOC        Location of the buffer
+         LH    RS,@VALBLEN             Get the length
+         ST    RS,@PAGLEN              Tell him about it
+         MVC   @PAGKEY,@VALBKEY        Inform him of the key too
+         VCALL PAGTPROT                Test the protection
+         IF    (RVR,Z),EXIT            All is well
+         IF    (RVR,EQ,3),BEGIN        Addressing exception
+         LA    RVR,5
+         EXIT  VALBUF
+         END   ,
+         IF    (RVR,EQ,2),BEGIN        No access
+         LA    RVR,4
+         EXIT  VALBUF
+         END   ,
+         IF    @VALBWRT,'LA RVR,4'     Only read, he wants write
+         ELSE  'CLEAR RVR'             He just wants to look
+         PEND  ,
+         XTRCDATA ,                    Generate the trace info
+         TITLE 'Network Global Buffer Management'
+*box
+*
+*   GETNBUF -- This routine obtains a global I/O buffer.  If
+*              there is already one on the free queue, it is
+*              used, otherwize and new one is allocate.
+*
+*    Input --  none
+*
+*   Output --  RVR points at the allocated buffer
+*
+*
+         SPACE 2
+GETNBUF  PROC  SCOPE=LOCAL
+         L     RM,MATPTR               Get the MAT location
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT address
+         WITH  (GNCT,RM)               Address it
+*
+* Get a free one if it exists
+*
+         LM    RJ,RK,GNCTBFL           Get Free pointer
+         WITH  (NBUF,RJ)
+         LOOP  BEGIN
+         IF    (RJ,Z),EXIT             No free ones
+         L     RA,NBUFNEXT             Address of the next
+         LA    RB,@RK+1                Increment the control count
+         CDS   RJ,RA,GNCTBFL           Try to remove it
+         UNTIL Z,END                   Keep on trying
+*
+* If we got it, we decrease the free count
+*
+         IF    (RJ,NZ),BEGIN
+         L     RA,GNCTBFC              Get the Free count
+         LOOP  BEGIN
+         LR    RB,RA                   Copy the count
+         DECR  RB                      Decrement it
+         CS    RA,RB,GNCTBFC           Update the count
+         UNTIL Z,END                   Keep trying
+         END   ELSE,BEGIN
+*
+* If we didn't get one, we allocate a new one
+*
+         VMGET LH:GNCTBSIZ,LOC=GLOBHI
+         IF    (RVR,Z),'ABORT NOGLOB'
+         LR    RJ,RVR                  Move it to the right spot
+*
+* And we count it
+*
+         L     RA,GNCTBTC              Get the Total count
+         LOOP  BEGIN
+         LA    RB,@RA+1                Increment the count
+         CS    RA,RB,GNCTBTC           Update the count
+         UNTIL Z,END                   Keep trying
+         END   ,
+*
+* Format the buffer the way we want
+*
+         CLEAR NBUF                    Clear the header
+         MVC   NBUF(4),=C'NBUF'        Move in the ID
+         LH    RS,GNCTBSIZ             Get the total buffer size
+         SH    RS,=Y(L'NBUF+4)         Less the header size
+         STH   RS,NBUFMAXL             Save maximum data length
+         LA    RS,NBUFDATA(RS)         End of data area
+         MVC   @RS(4),=CL4'FUBN'       Buffer end marker
+         LR    RVR,RJ                  Return the location
+         PEND  ,
+         EJECT ,
+*box
+*
+*  FREENBUF -- This routine releases a global I/O buffer.  If
+*              there are already enough on the free queue, then
+*              this one is de-allocated, otherwise it is put on
+*              the free queue.
+*
+*    Input --  @FREENB
+*
+*   Output --  none
+*
+*
+         SPACE 2
+@FREEBUF RECORD BEGIN
+@FREBLOC DS    A             Location of the buffer to free
+         END   ,
+         SPACE 2
+FREENBUF PROC  @FREEBUF,SCOPE=LOCAL
+         L     RM,MATPTR               Get the MAT location
+         WITH  (MAT,RM),'L RM,MATGNCT' Get the GNCT address
+         WITH  (GNCT,RM)               Address it
+         L     RA,@FREBLOC             Get the buffer location
+         WITH  (NBUF,RA)
+         IF    (NBUF,NE,'NBUF'),'ABORT BADNBUF'
+         LH    RS,NBUFMAXL             Maximum data length
+         LA    RS,NBUFDATA(RS)         End of data area
+         IF    ('CLC @RS(4),=CL4"FUBN"',NE),'ABORT BADNBU2'
+         MVI   NBUF+3,C'f'
+*
+* Check on the free status
+*
+         L     RS,GNCTBTC              Get the total count
+         SRL   RS,1                    Divide by 2
+         IF    (RS,GE,GNCTBFC),BEGIN   Less than half are free
+         LM    RJ,RK,GNCTBFL           Get Free pointer
+         LOOP  BEGIN
+         ST    RJ,NBUFNEXT             Address of the next
+         LR    RB,RK                   Copy the control count
+         CDS   RJ,RA,GNCTBFL           Try to add it
+         UNTIL Z,END                   Keep on trying
+*
+* If we added it to the free queue, we update the count
+*
+         L     RS,GNCTBFC              Get the Free count
+         LOOP  BEGIN
+         LA    RB,@RS+1                Increment the count
+         CS    RS,RB,GNCTBFC           Update the count
+         UNTIL Z,END                   Keep trying
+         END   ELSE,BEGIN
+*
+* If too many were free, we de-allocate this one
+*
+         VMFREE LH:GNCTBSIZ,A=(RA),LOC=GLOBHI
+         IF    (RVR,NZ),'ABORT BADFNBUF'
+*
+* And have to update the count of buffers out there
+*
+         L     RS,GNCTBTC              Get the Total count
+         LOOP  BEGIN
+         LR    RB,RS                   Copyt the count
+         DECR  RB                      Decrement the count
+         CS    RS,RB,GNCTBTC           Update the count
+         UNTIL Z,END                   Keep trying
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+*  CHEKNBUF -- This routine validates a global I/O buffer.
+*
+*    Input --  @CHEKNB
+*
+*   Output --  none
+*
+*
+         SPACE 2
+@CHEKBUF RECORD BEGIN
+@CHKBLOC DS    A             Location of the buffer to free
+         END   ,
+         SPACE 2
+CHEKNBUF PROC  @CHEKBUF,SCOPE=LOCAL
+         L     RA,@CHKBLOC             Get the buffer location
+         WITH  (NBUF,RA)
+         IF    (NBUF,NE,'NBUF'),'ABORT BADNBST'
+         LH    RS,NBUFMAXL             Maximum data length
+         LA    RS,NBUFDATA(RS)         End of data area
+         IF    ('CLC @RS(4),=CL4"FUBN"',NE),'ABORT BADNBND'
+         L     RA,NBUFNEXT             Next buffer
+         IF    (RA,NZ),BEGIN
+         IF    (NBUF,NE,'NBUF'),'ABORT BADNBNX'
+         END   ,
+         PEND
+         TITLE 'Network Local Buffer Management'
+*box
+*
+*   GETLBUF -- This routine obtains a local I/O buffer.  If
+*              there is already one on the free queue, it is
+*              used, otherwise a new one is allocated.
+*
+*    Input --  @GETLB
+*              ASLOCK held
+*
+*   Output --  RVR points at the allocated buffer
+*
+*
+         SPACE 2
+@GETLB   RECORD BEGIN
+@GTLBSOC DS    A                       SOCK address
+         END   ,
+         SPACE 2
+GETLBUF  PROC  @GETLB,SCOPE=LOCAL
+         L     RX,@GTLBSOC
+         WITH  (SOCK,RX)
+*
+* Get a free one if it exists
+*
+         L     RJ,SKIFREE              Get Free pointer
+         WITH  (LBUF,RJ)
+         IF    (RJ,NZ),BEGIN
+         MVC   SKIFREE,LBCHAIN         Address of the next
+         END   ,
+*
+* If we didn't get one, we allocate a new one
+*
+         ELSE  BEGIN
+         VMGET LH:SKISIZE,LOC=LOCSYS
+         IF    (RVR,Z),'ABORT NOLOCAL'
+         LR    RJ,RVR                  Move it to the right spot
+         END   ,
+*
+* Format the buffer the way we want
+*
+         CLEAR LBUF                    Clear the header
+         MVC   LBUF(4),=C'LBUF'        Move in the ID
+         LH    RS,SKISIZE              Get the total buffer size
+         SH    RS,=Y(L'LBUF)           Less the header size
+         STH   RS,LBDLEN               Save maximum data length
+         LR    RVR,RJ                  Return the location
+         PEND  ,
+         EJECT ,
+*box
+*
+*  FREELBUF -- This routine releases a local input buffer and
+*              places it on the free queue.
+*
+*    Input --  @FREEBUF
+*              ASLOCK held
+*
+*   Output --  none
+*
+*
+         SPACE 2
+@FREELB  RECORD BEGIN
+@FRLBSOC DS    A             Location of the SOCK
+@FRLBLOC DS    A             Location of the buffer to free
+         END   ,
+         SPACE 2
+FREELBUF PROC  @FREELB,SCOPE=LOCAL
+         L     RX,@FRLBSOC
+         WITH  (SOCK,RX)
+         L     RA,@FRLBLOC             Get the buffer location
+         WITH  (LBUF,RA)
+         IF    (LBUF,NE,'LBUF'),'ABORT BADLBUF'
+         MVI   LBUF+3,C'f'
+*
+*  Add buffer to the free queue.
+*
+         MVC   LBCHAIN,SKIFREE
+         ST    RA,SKIFREE
+         PEND  ,
+         TITLE 'Translation Services'
+*box
+*
+*  The following translate tables were lifted directly from
+*  WYLBUR. So right or wrong, at least we're consistent.
+*
+         SPACE 2
+         DATA  BEGIN
+*-
+*-  ASCTBL -- Translate table for EBCDIC to ASCII conversion.
+*-
+         SPACE
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+ASCTBL   DC    X'000102038009817F8283840B0C0D0E0F'   0
+         DC    X'1011121385860887181988891C1D1E1F'   1
+         DC    X'8A8B8C8D8E0A171B8F90919293050607'   2
+         DC    X'94951696979899049A9B9C9D14159E1A'   3
+         DC    X'20A9A1A2A3A4A5A6AAA85E2E3C282B7C'   4
+         DC    X'26D1D2D3D4D5D6D7D8D921242A293B7E'   5
+         DC    X'2D2FB1B2B3B4B5B6B8EE9F2C255F3E3F'   6
+         DC    X'EACEE8CFE2E7F0E6E9603A2340273D22'   7
+         DC    X'D0616263646566676869E0ACBCCCCACB'   8
+         DC    X'DE6A6B6C6D6E6F707172DFADBDCDABA0'   9
+         DC    X'E5E3737475767778797AAFBEBF5BA7B7'   A
+         DC    X'C0C1C2C3C4C5C6C7C8C9BABBDC5DEDFE'   B
+         DC    X'7B414243444546474849DADBDDF9B0F1'   C
+         DC    X'7D4A4B4C4D4E4F505152F8B9FAFBF2F3'   D
+         DC    X'5CE1535455565758595AF4F5E4AEF7EF'   E
+         DC    X'30313233343536373839EBECFCFDF6FF'   F
+         EJECT
+*-
+*-  EBCTBL -- Translate table for ASCII to EBCDIC conversion.
+*-
+         SPACE
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+EBCTBL   DC    X'00010203372D2E2F1605250B0C0D0E0F'   0
+         DC    X'101112133C3D322618193F271C1D1E1F'   1
+         DC    X'405A7F7B5B6C507D4D5D5C4E6B604B61'   2
+         DC    X'F0F1F2F3F4F5F6F7F8F97A5E4C7E6E6F'   3
+         DC    X'7CC1C2C3C4C5C6C7C8C9D1D2D3D4D5D6'   4
+         DC    X'D7D8D9E2E3E4E5E6E7E8E9ADE0BD4A6D'   5
+         DC    X'79818283848586878889919293949596'   6
+         DC    X'979899A2A3A4A5A6A7A8A9C04FD05F07'   7
+         DC    X'040608090A1415171A1B202122232428'   8
+         DC    X'292A2B2C30313334353638393A3B3E6A'   9
+         DC    X'9F424344454647AE4941489E8B9BEDAA'   A
+         DC    X'CE626364656667AF68DBBABB8C9CABAC'   B
+         DC    X'B0B1B2B3B4B5B6B7B8B98E8F8D9D7173'   C
+         DC    X'80515253545556575859CACBBCCC909A'   D
+         DC    X'8AE174A1ECA07775727870FAFBBE69EF'   E
+         DC    X'76CFDEDFEAEBFEEEDACDDCDDFCFDBFFF'   F
+         END   ,
+         EJECT ,
+*box
+*
+*  TOASC   --  Translate data from EBCDIC to ASCII.
+*
+*    Input --  @TOASC
+*
+*   Output --  The translation is done in place
+*
+*
+         SPACE 2
+@TOASC   RECORD BEGIN
+@TOASLOC DS    A             Location of the buffer to translate
+@TOASLEN DS    A             Length of the buffer
+         END   ,
+         SPACE 2
+TOASC    PROC  @TOASC,SCOPE=LOCAL
+         L     RA,@TOASLOC
+         L     RS,@TOASLEN
+         WHILE (RS,GT,256),BEGIN
+         TR    @RA(256),ASCTBL
+         S     RS,=A(256)
+         AL    RA,=A(256)
+         END   ,
+         DEX   RS,'TR @RA(0),ASCTBL'
+         CLEAR RVR
+         PEND
+         EJECT ,
+*box
+*
+*  TOEBC   --  Translate data to EBCDIC from ASCII.
+*
+*    Input --  @TOEBC
+*
+*   Output --  The translation is done in place
+*
+*
+         SPACE 2
+@TOEBC   RECORD BEGIN
+@TOEBLOC DS    A             Location of the buffer to translate
+@TOEBLEN DS    A             Length of the buffer
+         END   ,
+         SPACE 2
+TOEBC    PROC  @TOEBC,SCOPE=LOCAL
+         L     RA,@TOEBLOC
+         L     RS,@TOEBLEN
+         WHILE (RS,GT,256),BEGIN
+         TR    @RA(256),EBCTBL
+         S     RS,=A(256)
+         AL    RA,=A(256)
+         END   ,
+         DEX   RS,'TR @RA(0),EBCTBL'
+         CLEAR RVR
+         PEND
+         EJECT
+         END   .

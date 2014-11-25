@@ -1,0 +1,3352 @@
+INLI     TITLE 'INLINE--SYNTAX CHECKER FOR BASIC'
+         MACRO
+&NAME    STORI &CODE
+&NAME    AH    INLRC,&CODE         FORM HALFWORD
+         STH   INLRC,0(INLRO)      STORE IN OUTPUT STRING (INFIX)
+         LA    INLRO,2(INLRO)      ADVANCE INFIX PTR
+         MEND
+*
+         MACRO
+&LABEL   INLERR &XX
+&LABEL   LA    INLRER,INLERN&XX
+         B     INLERROR
+         SPACE 1
+         MEND
+*
+         MACRO
+&LABEL   SETTABL &VAL,&COD1,&COD2,&COD3,&COD4
+&LABEL   LA    INLRWORK,INLSEQTB   COMPUTE ADDR OF TABLE ROW
+         LA    INLRLINK,INLXDIM2*INLX&COD1  TO BE CHANGED
+         AR    INLRLINK,INLRWORK
+         LM    R0,R1,INL&VAL       PICK UP NEW SETTING
+         STM   R0,R1,0(INLRLINK)   AND STORE IN SEQUENCE TABLE
+         AIF   (K'&COD2 EQ 0).END
+         LA    INLRLINK,INLXDIM2*INLX&COD2
+         AR    INLRLINK,INLRWORK
+         STM   R0,R1,0(INLRLINK)
+         AIF   (K'&COD3 EQ 0).END
+         LA    INLRLINK,INLXDIM2*INLX&COD3
+         AR    INLRLINK,INLRWORK
+         STM   R0,R1,0(INLRLINK)
+         AIF   (K'&COD4 EQ 0).END
+         LA    INLRLINK,INLXDIM2*INLX&COD4
+         AR    INLRLINK,INLRWORK
+         STM   R0,R1,0(INLRLINK)
+.END     MEND
+*
+         GBLA  &MAXLITS      MAX SIZE OF LITERAL POOL IN BYTES
+INLINE   CSECT
+         TITLE 'INLINE'
+**********************************************************************
+**********************************************************************
+***************************** INLINE ROUTINE *************************
+**********************************************************************
+**********************************************************************
+*   PURPOSES:
+*             1.  TO CHECK AN INPUT BASIC STATEMENT FOR CORRECT SYNTAX.
+*                 IF THE SYNTAX IS CORRECT,
+*
+*             2.  TO CONVERT THE BASIC STATEMENT INTO A SERIES OF HALF-
+*                 WORD CODED ELEMENTS.  IN GENERAL, EACH INTEGRAL ITEM
+*                 IN THE STATEMENT--SUCH AS A VARIABLE NAME, A KEYWORD,
+*                 OR A CONSTANT--IS CONVERTED INTO A CORRESPONDING
+*                 HALFWORD.
+*
+*              ---IF THE STATEMENT IS SYNTACTICALLY INCORRECT, THE SCAN
+*                 STOPS AND THE ERROR MESSAGE ROUTINE IS CALLED WITH A
+*                 CODE INDICATING THE ERROR.
+*
+*
+*
+*   INPUT:
+*             REGISTER 1 POINTS TO AN 83-WORD PARAMETER/WORK AREA WITH
+*             THE FOLLOWING FORMAT:
+*
+*                  WORD 1 OF THE PARAM/WORK AREA POINTS TO A BASIC
+*                       STATEMENT WITH THE BLANKS SQUEEZED OUT; END OF
+*                       STATEMENT IS INDICATED BY A BLANK.
+*
+*                       THE ENTIRE INPUT STRING IS IN EBCDIC EXCEPT FOR
+*                       FOR FIRST WORD; THE FIRST HALF OF THIS WORD
+*                       CONTAINS THE LINE NUMBER IN BINARY AND THE
+*                       SECOND HALF IS RESERVED FOR FUTURE USE.
+*
+*                  WORD 2 POINTS TO THE OUTPUT AREA WHERE 'INLINE' IS
+*                       TO PUT THE TRANSLATED STMT, ALONG WITH ITS
+*                       CONSTANTS (IF ANY).
+*
+*                  WORD 3 CONTAINS THE NUMBER OF CONSTANTS CURRENTLY
+*                       IN THE NUMERICAL CONSTANT TABLE FOR THIS
+*                       USER.
+*
+*                  WORD 4 CONTAINS THE NUMBER OF CONSTANTS CURRENTLY
+*                       IN THE STRING CONSTANT TABLE FOR THIS USER.
+*
+*                  THE REMAINING 79 WORDS ARE USED FOR WORK AREA;
+*                       CERTAIN OF THESE MUST BE INITIALIZED BEFORE THE
+*                       FIRST CALL TO 'INLINE'.
+*
+*             THE WORD 'INLCNPTR' IN INLINE'S BUFFER HAS BEEN INIT-
+*             IALIZED BY THE CONTROL PROGRAM TO POINT TO THE PLACE
+*             WHERE INLINE SHOULD STORE CONSTANTS FOR THE STATEMENT.
+*             (THIS IS DONE BY THE CONTROL PROGRAM SINCE BUFFER LENGTHS
+*             DIFFER IN THE BATCH & TIME SHARING VERSIONS AND THE CON-
+*             TROL PROGRAM IN EACH CASE KNOWS WHICH VERSION APPLIES
+*             WHEREAS INLINE DOES NOT.)
+*
+*
+*   OUTPUT:
+*             1.  A STRING OF HALFWORDS, EACH OF WHICH CORRESPONDS TO
+*                 AN INPUT ELEMENT--FOR EXAMPLE, THE KEYWORD 'LET'
+*                 BECOMES ONE HALFWORD.
+*
+*                  EACH HALFWORD REPRESENTS A LABEL (LINE NUMBER),
+*                  A KEYWORD, AN OPERATOR, AN OPERAND, OR
+*                  PUNCTUATION.
+*
+*                  THE FIRST HALFWORD IS ALWAYS THE LINE NUMBER (IN
+*                  BINARY) AND THE SECOND HALFWORD IS ALWAYS THE
+*                  KEYWORD.  THE LENGTH OF THE CODED STRING (INCLUD-
+*                  ING THE END SYMBOL BUT NOT INCLUDING THE CONSTANTS)
+*                  IN BYTES IS PLACED IN THE HALFWORD PRECEDING THE
+*                  LINE NUMBER.
+*
+*                  IF THE STATEMENT CONTAINS NUMERICAL OR STRING CON-
+*                  STANTS, THEY ARE PLACED IN THE "CONSTANT AREA",
+*                  WHICH BEGINS 144 BYTES PAST THE BEGINNING OF THE
+*                  CODED OUTPUT LINE.
+*
+*                       THE FORMAT FOR EACH CONSTANT IS AS FOLLOWS:
+*                        THE WORD PRECEDING THE CONSTANT TELLS
+*                        (1) WHERE IN THE CODED OUTPUT LINE THE CON-
+*                        STANT BELONGS (IN ITS FIRST HALFWORD) AND
+*                        (2) IDENTIFIES THE CONSTANT TYPE (IN ITS
+*                        SECOND HALFWORD)--A'4' INDICATES NUMERICAL
+*                        CONSTANT AND A '16' INDICATES A STRING CON-
+*                        STANT.
+*
+*                        THE CONSTANT ITSELF COMES NEXT AND OCCUPIES
+*                        4 BYTES IF A NUMERICAL CONSTANT & 16 BYTES
+*                        IF A STRING CONSTANT.
+*                        THE LAST BYTE OF THE STRING CONSTANT GIVES
+*                        ITS ACTUAL LENGTH IN BYTES.  THIS LENGTH MUST
+*                        ALWAYS BE LESS THAN 16 BYTES; NULL STRINGS
+*                        ARE O.K.
+*
+*                       THE LAST CONSTANT IS FOLLOWED BY A WORD SET TO
+*                       ZERO.
+*
+*
+*             2.  UPON RETURN FROM 'INLINE' TO CALLER,
+*
+*                  -------------------         -----------
+*
+*                       -1                  GOOD LINE, CONTINUE
+*                        0                  BAD LINE, IGNORE
+*                        1                  GOOD LINE, LOGICAL END OF
+*                                           PROGRAM (I.E., "END" STMT)
+*                        2                  GOOD LINE, "DEF" STMT
+*                        3                  GOOD LINE, "DIM" STMT
+*                        4                  -DELETE LINE-
+*                        5                  GOOD LINE, IS ONE OF THE
+*                                           FOLLOWING STMT TYPES WHICH
+*                                           CAN HAVE NO CONSTANTS:
+*                                             GOSUB, RETURN,STOP,
+*                                             RESTORE, NEXT, GOTO,
+*                                             DUMP, PAUSE, REM, DATA
+*                        6                  "DEFINE FILE" STMT
+*                                                                     *
+*                                                                     *
+*   EXTERNAL ROUTINES CALLED:
+*             CONVERT CALLED TO CONVERT EBCDIC NUMBER TO FL. PT.
+*             RUNERR  CALLED WHEN 'INLINE' FINDS ERRONEOUS SYNTAX
+*                     TO SEND AN APPROPRIATE ERROR MESSAGE TO THE USER.
+*
+*
+*                                                                     *
+*
+*
+*   ATTRIBUTE:
+*             'INLINE' IS REENTRANT:  ALL AREAS WHICH ARE MODIFIED ARE
+*             LOCATED IN THE DSECT 'INLDSECT' WHICH IS MAPPED ONTO THE
+*             PARAM/WORK AREA INPUT TO THE ROUTINE.
+*
+*             NOTE:  'INLINE' DOES MODIFY THE INPUT STRING SO THE
+*             SAME STRING CANNOT BE GIVEN AS INPUT MORE THAN ONCE.
+*
+*
+*   METHOD:
+*             FIRST 'INLINE' DETERMINES WHAT TYPE OF STATEMENT IT HAS
+*             BEEN GIVEN BY EXAMINING THE FIRST 3 CHARACTERS.  (IF THE
+*             FIRST 3 CHARACTERS DO NOT SPELL ANY OF THE STMT TYPES,
+*             THE STMT IS ASSUMED TO BE AN ASSIGNMENT STMT--'LET'.)
+*
+*             THEN, BASED ON THE KNOWN SYNTACTIC STRUCTURE OF THAT
+*             PARTICULAR STATEMENT (REFER TO A DESCRIPTION OF STANFORD
+*             BASIC IN BACKUS NORMAL FORM), 'INLINE' LOOKS FOR THE
+*             APPROPRIATE SUCCESSION OF COMPONENTS.  (THIS SCAN IS NOT
+*             TABLE-DRIVEN AS WITH MANY STATEMENT ANALYZERS BUT RATHER
+*             "CODE-DRIVEN".)
+*
+*             'INLINE' CALLS UPON VARIOUS SMALL INTERNAL UTILITY ROUT-
+*             INES TO RECOGNIZE AND ISOLATE SUCH STMT COMPONENTS AS
+*             LINE NUMBERS, SIMPLE VARIABLE NAMES, ARRAY NAMES, AND
+*             STRING CONSTANTS.  (IT CALLS UPON THE EXTERNAL ROUTINE
+*             'CONVERT' TO SCAN NUMERICAL CONSTANTS.)
+*
+*             'INLINE' CALLS UPON ITS ONE MAJOR INTERNAL ROUTINE, THE
+*             EXPRESSION HANDLER ('INLXH') TO SCAN ARITHMETIC EXPRESS-
+*             IONS.
+*
+*                  THE EXPRESSION HANDLER IS TABLE-DRIVEN: IT MAKES A
+*                  LEFT-TO-RIGHT SCAN OF THE INPUT STRING, EXAMINING
+*                  TWO CONSECUTIVE ELEMENTS AT A TIME.  'INLXH' DETER-
+*                  MINES WHETHER THE SECOND ELEMENT CAN FOLLOW THE
+*                  FIRST BY REFERENCING A PRE-SET "SEQUENCE ACCEPT-
+*                  ABILITY" TABLE.  THIS TABLE, FOR EXAMPLE, WILL TELL
+*                  'INLXH' THAT "A+" IS LEGAL WHILE "SIN+" AND "-+"
+*                  ARE NOT.
+*
+*                  'INLXH' MAINTAINS A SPECIAL STACK ('INLXSTAK') TO
+*                  KEEP TRACK OF THE LEVELS OF PARENTHESES AND TO TELL
+*                  WHEN COMMAS ARE LEGAL (I.E., WHEN THE SCAN IS IN A
+*                  SUBSCRIPT).
+*                  FOR EXAMPLE, THIS STACK WILL ENABLE 'INLXH' TO DE-
+*                  TECT THE FOLLOWING FAULTY CONSTRUCTS:
+*
+*                       "SIN(X(I,J)"    --MISSING CLOSE PARENTHESIS
+*                       "A)B(I,J))"     --MISSING OPEN PARENTHESES
+*                       "B(I,INT(J,L))" --MISPLACED COMMA (THE FUNCTION
+*                                         'INT' CAN HAVE ONLY 1 ARG.)
+*
+*                  BEFORE A STATEMENT HANDLER IN 'INLINE' CALLS
+*                  'INLXH', IT TELLS 'INLXH' WHAT ELEMENTS ARE LEGAL
+*                  TERMINATORS FOR THE ARITHMETIC EXPRESSION TO BE
+*                  SCANNED.  CONSIDER, FOR EXAMPLE, 2 DIFFERENT STATE-
+*                  MENT TYPES:  AN "IF" STATEMENT AND A "DEFINE
+*                  FUNCTION" STMT.  SYNTACTICALLY,
+*
+*                   <IF STMT> ::= IF <EXPR><RELATION-OP><EXPR> THEN
+*                                 <LINE NUMBER>
+*                   <DEF STMT>::= DEFFN<LETTER>(<SIMPLE VAR>) = <EXPR>
+*
+*                  BEFORE CALLING 'INLXH' TO EXAMINE AN EXPRESSION IN
+*                  AN "IF" STATEMENT, 'INLINE' SETS <RELATION-OP> AND
+*                  "THEN" AS LEGAL TERMINATORS TO THE EXPRESSION,
+*                  WHEREAS IT SETS BLANKS AS THE ONLY LEGAL TERMIN-
+*                  ATORS WHEN CALLING 'INLXH' TO EXAMINE AN EXPRESSION
+*                  IN A "DEFINE FUNCTION" STMT.  THIS SETTING OF TERM-
+*                  INATORS IS DONE THROUGH THE "SEQUENCE ACCEPTABILITY"
+*                  TABLE; FOR A MORE DETAILED EXPLANATION, REFER TO THE
+*                  DESCRIPTION OF 'INLXH' PRECEDING THAT ROUTINE.
+*
+*
+*   STRUCTURE AND BASE REGISTER CONVENTIONS:
+*
+*             THE CODE IS LAID OUT IN THE FOLLOWING ORDER:
+*
+*                      CODE                   COVERED BY BASE REGISTER
+*                      ----                   ------------------------
+*                 1. 'INLINE' PROPER                    10 & 11
+*                 2. CONSTANTS FOR BOTH                 11
+*                    'INLINE' & 'INLXH'
+*                    (MOST EQU'S ARE HERE)
+*                 3. SMALL UTILITY ROUTINES             11
+*                    A. CODE STORING ROUTINES FOR
+*                       GROUPS 2, 3, 4, & 5
+*                    B. COMPOUND "IF" STMT TEST
+*                    C. INLINTDM & INLINTLN--INTEGER
+*                       HANDLER FOR DIM, GOTO, GOSUB,
+*                       & IF STMT HANDLERS.
+*                    D. INLETTER--ARRAY NAME RECOGNIZER
+*                    E. INLLORL$--STRING ARRAY RECOGNIZER
+*                    F. INLSIMVR--SIMPLE VARIABLE NAME
+*                       RECOGNIZER
+*                    G. INLTRLD--TRANSLATES SIMVAR
+*                       NAMES TO INTERNAL CODE
+*                    H. INLSTRNG--STRING CONSTANT
+*                       RECOGNIZER
+*                    I. INLERROR--SETS UP CALL TO
+*                       EXTERNAL ROUT. 'RUNERR' WITH
+*                       ERROR CODE
+*                 4. LITERAL POOL FOR ALL OF 'INLINE'   11
+*                 5. 'INLXH'--EXPRESSION HANDLER        10
+*                 6. 'INLXTT'--TABLE LOOK-UP ROUT.      10
+*                    FOR 'INLXH'
+*                 7. 'INLDSECT'--LAYOUT OF INLINE'S     12
+*                    PARAM/WORK AREA
+*
+*                 NOTE:  INLRBAS1 EQU   10
+*                        INLRBAS2 EQU   11
+*                        INLRDBAS EQU   12
+*
+*
+*   LIMITATIONS IMPOSED UPON 'INLINE' BY THIS STRUCTURE:
+*             1.   THE CODE IN ITEMS 1 THROUGH 4 (ABOVE) MUST OCCUPY
+*                  FEWER THAN 2000 (HEX) BYTES, BECAUSE ONLY 2 BASE
+*                  REGISTERS ARE AVAILABLE TO COVER IT.  THIS SHOULD
+*                  NOT POSE A PROBLEM AS THERE ARE CURRENTLY (7/18/68)
+*                  SOME 2000 (HEX) MINUS 1A50 (HEX) = 5B0 (HEX) BYTES
+*                  TO SPARE.
+*
+*             2.   'INLXH' AND 'INLXTT' MUST BE COVERED BY 1 BASE REG
+*                  --NO PROBLEM, SINCE THE SIZE OF THESE 2 ROUTINES
+*                  COMBINED IS APPROXIMATELY 4B2 (HEX) BYTES.
+*
+*
+*                                                                     *
+********************NAMING CONVENTIONS****************************
+*
+*        IN GENERAL, THE FOLLOWING CONVENTIONS ARE USED:
+*              SYMBOLS USED BY 'INLINE' PROPER BEGIN WITH 'INL'
+*              SYMBOLS USED BY THE EXPRESSION HANDLER BEGIN WITH
+*                              'INLX'
+*              SYMBOLS USED BY STRING SCAN ROUTINE BEGIN WITH 'INLS'
+*              SYMBOLS DENOTING REGISTERS BEGIN WITH 'INLR'
+*
+         EJECT
+***********************HALFWORD CODE CONVENTIONS******************
+*
+*   A LINE NUMBER IS GIVEN IN ITS BINARY EQUIVALENT.  IDENTIFICATION
+*                 IS SOLELY BY CONTEXT.
+*
+*             1.  Symbol table designations:
+*                   A  - Z     -   1000 - 1019
+*                   A0 - Z9    -   2000 - 2103
+*                   A$ - Z$    -   3000 - 3019
+*                   NUMBER CONS    6000 - 6XXX
+*                   STRING CONS-   7000 - 7XXX
+*                   FNA- FNZ   -   B000 - B019
+*
+*             E.g.  ----------------
+*                   0011000000000100
+*                   ----------------  in the operand field points
+*             to the fifth entry in table STSYM (A$-Z$)--i.e., E$.
+*
+         EJECT
+*             2.  Keyword, function, operator, and punctuation
+*                 designations:
+*
+*               A0xx                  0Bxx                0Cxx
+*
+*               0   sin            0   let                 0   <
+*               1   cos            1   if                  1   >
+*               2   tan            2   for                 2   <=
+*               3   atn            3   gosub               3   >=
+*               4   log            4   return              4   <>
+*               5   exp            5   dim                 5   =r
+*               6   SQR            6   END                 6   =
+*               7   RND            7   stop                7   +
+*               8   abs            8   RESTORE             8   -
+*               9   SGN            9   read                9   *
+*              10   INT (+BELOW)  10   write              10   /
+*                                 11   print              11   **
+*               90xx              12   input              12   (
+*                                 13   mat                13   (s
+*               0   zer           14   def                14   )
+*               1   con           15   next               15   ,s
+*               2   idn           16   go to
+*               3   trn           17   dump
+*               4   inv           18   pause              0Dxx
+*               5   NRM           19   rem
+*               6   EIG
+*                                 20   -delete-
+*                                 21   data
+*                                 22   syntax error        0   then
+*                                 23   computed go to      1   step
+*                                 24   CLEAR DATA          2   to
+*                                 25   DEFINE FILE         3   ,
+*                                 26   PRINT USING         4   ;
+*                                 27   : (IMAGE)           5   blank
+*                                                          6   GOTO
+*                                                          7   GOSUB
+*+ A0XX
+*        0B  PAT
+*        0C  PDT
+*        0D  PSX
+*        0E  PSY
+*        0F  PCH
+*        10  PLT
+*        11  DAT
+*        12  CLK
+*        13  LEN
+*        14  CAT
+*        15  LST
+*        16  RST
+*        17  NDX
+*        18  NCH
+*        19  CHN
+*        1A  TAB
+*
+&MAXLITS SETA  132            MAX SIZE OF LITERAL POOL IN BYTES
+         B     12(0,15)     BRANCH AROUND ID
+         DC    AL1(6)
+         DC    CL6'INLINE'  IDENTIFIER
+         STM   14,12,12(13) SAVE REGISTERS
+         LA    INLR2,72(R13)  SET UP PTR TO INLINE'S SAVE AREA
+         ST    R13,4(INLR2)   PUT PTR TO CALLER'S SAVE AREA IN INLINE'S
+*                             SAVE AREA
+         ST    INLR2,8(R13)   PUT PTR TO INLINE'S SAVE AREA IN CALLER'S
+*                             SAVE AREA
+         LR    R13,INLR2      SET R13 TO POINT TO INLINE'S SAVE AREA
+         BALR  INLRBAS1,0     SET UP BASE REG 1
+         USING *,INLRBAS1,INLRBAS2
+INLHERE  LA    INLRBAS2,2048(INLRBAS1)   SET UP BASE REG 2
+         LA    INLRBAS2,2048(INLRBAS2)
+         USING INLINARG,INLRDBAS
+         LR    INLRDBAS,INLR1      LOAD DSECT BASE REG
+         ST    INLRBAS1,INLSAVB1   SAVE A(INLHERE)
+         L     INLRI,INLDIN  SET UP PTR TO INPUT BUFFER
+         L     INLRO,INLDOUT SET UP PTR TO OUTPUT BUFFER
+         L     INLRWORK,INLDCN  SAVE NUMBER OF CONSTANTS CURRENTLY
+         STH   INLRWORK,INLCNSV  IN CONSTANT TABLES SO CAN RETRACE
+         L     INLRWORK,INLDSCN  STEPS IN CASE OF SYNTAX ERROR
+         STH   INLRWORK,INLSCNSV
+         ST    INLRO,INLAINFX      SAVE ADDR OF INFIX
+         LH    INLRWORK,0(INLRI)   MOVE LINE NUMBER
+         STH   INLRWORK,0(INLRO)   TO OUTPUT STRING
+         LA    INLRI,4(INLRI)      ADVANCE TO NEXT ELEMENT
+         LA    INLRO,2(INLRO)      ADVANCE OUTPUT PTR
+         MVI   INLSWUT2,X'00'    INITIALIZE 2-PART UTILITY SWITCH
+INLHERE1 MVC   INLSPAC+3(1),0(INLRI)  MOVE FIRST CHAR FOR TESTING
+         TR    INLSPAC+3(1),INLLETAB  EXAMINE FIRST CHARACTER
+         CLI   0(INLRI),C':'
+         BE    INLIMG             GO HANDLE IMAGE INPUT
+         TM    INLSPAC+3,X'FF'        OF THE LINE; IS IT A LETTER?
+         BO    INLER2                 IF NOT, ERROR
+         SR    INLRWORK,INLRWORK   INITIALIZE FOUR
+         ST    INLRWORK,INLSWCHS   ONE-BYTE SWITCHES
+         NI    INLSWUT2,X'0F'      INITIALIZE FIRST 4 BITS OF SW
+         L     INLRWORK,INLSPAC    COMPUTE INDEX IN ADDRESS TABLE
+         LA    INLRLINK,INLKEYTB
+         L     INLRLINK,0(INLRLINK,INLRWORK)  PICK UP ADDRESS
+         BR    INLRLINK            BRANCH TO APPROPRIATE ROUTINE
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS ':' *******************
+**********************************************************************
+INLIMG   LA    INLRC,INLKIMG
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,1(INLRI)
+         TM    0(INLRI),X'7D'     CHECK FOR STRING CONSTANT
+         BC    B'1110',INLIMG1    NO, GO CHECK SIMPLE STRING VAR
+         BAL   INLRLINK,INLSTRNG    GO PROCESS STRING CONSTANT
+INLIMG0  CLI   0(INLRI),C' '      SHOULD BE AT END NOW
+         BE    INLRET1
+         B     INLER29            IF NOT, ERROR
+INLIMG1  BAL   INLRLINK,INLLORL$   CHECK FOR STRING VAR (SIMPLE)
+         B     INLER36            ERROR, ONLY STRING VAR ALLOWED
+         B     INLER36            ERROR, ONLY STRING VAR ALLOWED
+         B     INLIMG0            GOT ONE, SHOULD BE DONE
+         SPACE 3
+**********************************************************************
+****************** FIRST CHARACTER OF LINE IS A BLANK ****************
+**********************************************************************
+*                                            -------------------------
+*-------------------------------------------<           -DELETE- STMT
+*                                            -------------------------
+INLBL1   LA    INLRC,INLKDEL  LOAD 'DELETE' CODE
+         LA    INLR0,4      INDICATE 'DELETE' STMT TO CONTROL PROG
+         B     INLSTO2
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'R' *******************
+**********************************************************************
+INLCR1   CLI   1(INLRI),C'E' IS CHAR+1 = 'E'?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+         CLI   2(INLRI),C'M' IS IT 'REM'?
+         BNE   INLRT2
+*                                            -------------------------
+*-------------------------------------------<              'REM' STMT
+*                                            -------------------------
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKREM LOAD 'REM'CODE
+         B     INLSETRC         GO SET RETURN CODE
+         SPACE 2
+INLSTO   BAL   INLRLINK,INLSTOG3
+INLRET1  SR    INLR0,INLR0   PUT '-1' IN REG. 0 TO INDICATE
+         BCTR  INLR0,0       GOOD LINE,CONTINUE
+INLRET1A LH    INLRWORK,INLEOL
+         STH   INLRWORK,0(INLRO)   STORE END-OF-LINE CODE
+         SPACE 1
+         SR    INLRWORK,INLRWORK   STORE END-OF-CONSTANT-BUFFER
+         L     INLRLINK,INLCNPTR   INDICATOR (A WORD=0)
+         ST    INLRWORK,0(INLRLINK)
+         LA    INLRO,2(INLRO)      ADV PTR PAST 'EOL' CODE
+         L     INLRWORK,INLAINFX   COMPUTE LENGTH OF 'INFIX'
+         SR    INLRO,INLRWORK      PROPER (NOT INCL. CONSTANTS)
+         SH    INLRWORK,=H'2'      SET PTR TO ADDR OF INFIX MINUS 2
+         STH   INLRO,0(INLRWORK)   STORE LENGTH
+         SPACE
+         CH    INLR0,=H'5'       WAS CODE 5 PRESET IN R0?
+         BNE   INLRET1B          NO, BRANCH
+         TM    INLSWUT2,X'0F'    COMPOUND "IF" STMT?
+         BZ    INLRET1B          NO, BRANCH
+         SR    INLR0,INLR0       RESET R0 TO INDICATE TO CONTROL
+         BCTR  INLR0,0           PROGRAM LINE MAY CONTAIN CONSTANTS
+         SPACE
+INLRET1B L     R13,4(R13)          FETCH PTR TO CALLER'S SAVE AREA
+         LM    R14,R15,12(R13)      RESTORE ALL REGS EXCEPT R0
+         LM    R1,R12,24(R13)
+         BR    R14                  RETURN
+         SPACE
+         SPACE 3
+INLRT2   CLC   2(4,INLRI),=CL4'TURN'     'RETURN'?
+         BNE   INLRT3
+*                                            -------------------------
+*-------------------------------------------<           'RETURN' STMT
+*                                            -------------------------
+         LA    INLRI,6(INLRI)    ADVANCE PAST STMT TYPE
+         LA    INLRC,INLKRET LOAD 'RETURN' CODE
+         SPACE
+INLTEND  CLI   0(INLRI),C' '     IS THERE A BLANK FOLLOWING THE STMT
+*                  TYPE?--THIS TEST IS USED FOR RETURN, STOP, RESTORE,
+*                  DUMP, & PAUSE
+         BNE   INLER29           ERROR IF NOT
+         SPACE 2
+INLSETRC LA    INLR0,5    SET RETURN CODE REG TO TELL CONTROL PROGRAM
+*                         THIS STMT TYPE CAN HAVE NO CONSTANTS
+         B     INLSTO2       STORE CODE FOR KEYWORD  AND RETURN
+         SPACE 1
+INLRT3   CLC   2(2,INLRI),=CL2'AD'   'READ'?
+         BNE   INLRT4
+*                                            -------------------------
+*-------------------------------------------< 'READ' OR 'READ-I' STMT
+*                                            -------------------------
+         LA    INLRC,INLKREAD      LOAD 'READ'CODE
+         BAL   INLRLINK,INLSTOG3        STORE HALFWORD CODE
+         LA    INLRI,4(INLRI)      ADVANCE INPUT PTR TO NEXT ELEMENT
+         OI    INLSW,INLZRD   SET SWITCH FOR READ OR READ-I STMT
+         CLI   0(INLRI),C'('       READ-I STATEMENT?
+         BNE   INLRDA
+         LA    INLREGL,INLRDA
+         SPACE
+**********************************************************************
+************* CODE TO EXAMINE (<EXPRESSION>,<SIMVAR>) & (<EXPRESSION>,
+************* <SIMVAR>,<LINE NO.>) IN READ-I & WRITE-I STMTS **********
+**********************************************************************
+INLRIWI  LA    INLRC,INLLPA        LOAD '(' CODE
+         BAL   INLRLINK,INLSTOG4              STORE IT
+         LA    INLRI,1(INLRI)      ADV SCAN PTR
+         BAL   INLRLINK,INLXH      GO SCAN EXPRESSION (THE VALUE OF THE
+*                                  EXP IS TAKEN AS FILE IDENTIFIER)
+         SETTABL ZERO,COM
+         CLI   0(INLRI),C','       COMMA?
+         BNE   INLER18             ERROR IF NOT
+         LA    INLRC,INLCOMC       LOAD COMMA CODE
+         BAL   INLRLINK,INLSTOG5
+         LA    INLRI,1(INLRI)
+         BAL   INLRLINK,INLSIMVR   LOOK FOR SIMVAR --RECORD NO.
+         B     INLER31             ERROR RET
+         TM    INLSW,INLZRD2       READ-I STMT?  (MAT OR OTHERWISE)
+         BZ    INLRIWI1            NO, WRITE-I--BRANCH
+         LA    INLRC,INLCOMC       LOAD COMMA CODE
+         BAL   INLRLINK,INLSTOG5
+         CLI   0(INLRI),C','       COMMA AFTER  SIMVAR?
+         BNE   INLRIWI2            BRANCH IF NOT
+         LA    INLRI,1(INLRI)      ADVANCE ONE CHARACTER
+         SPACE
+         BAL   INLRLINK,INLINTLN   GO EXAMINE LINE NUMBER
+         SPACE
+INLRIWI1 CLI   0(INLRI),C')'       CLOSE PAREN?
+         BNE   INLER18             ERROR IF NOT
+         LA    INLRC,INLRPA        LOAD ')' CODE
+         BAL   INLRLINK,INLSTOG4              STORE IT
+         LA    INLRI,1(INLRI)   ADVANCE SCAN PTR
+         BR    INLREGL
+         SPACE
+INLRIWI2 SR    INLRLINK,INLRLINK   IF NO E.O.F. LINE NUMBER IN READ-I
+         STH   INLRLINK,0(INLRO)   FORCE ZERO AS LINE NO.
+         LA    INLRO,2(INLRO)
+         B     INLRIWI1
+         SPACE 2
+INLRDA   SETTABL TERM,COM,BL       SET COMMAS AND BLANKS AS TERMINATORS
+         SPACE 3
+***********************************************************************
+*************************** VARIABLE SCANNER **************************
+********* --USED IN SCANNING LET, INPUT, READ, AND READ-I STATEMENTS **
+********* (STRING LET IS HANDLED SEPARATELY) **************************
+***********************************************************************
+INLVRSC1 MVC   INLSPAC+3(1),0(INLRI)
+         TR    INLSPAC+3(1),INLLTAB
+         TM    INLSPAC+3,X'FF'     IS CHAR A LETTER?
+         BO    INLRORIT
+         L     INLRC,INLSPAC
+INLVRSC9 CLI   1(INLRI),C'0'       IS CHAR+1 A DIGIT?
+         BL    INLVRSC2            BR IF NOT
+         CLI   1(INLRI),C'9'
+         BH    INLVRSC2
+         MH    INLRC,=H'10'        COMPUTE CODE FOR <LETTER><DIGIT>
+         MVN   INLTEMP1+3(1),1(INLRI)
+         A     INLRC,INLTEMP1
+         STORI INLLDCD
+         LA    INLRI,2(INLRI)      ADV PAST VAR NAME
+         SPACE
+INLVTERM TM    INLSW,INLZLET       LET ST?
+         BZ    INLVRSC3            NO. BRANCH
+         CLI   0(INLRI),C'='       YES. IS CHAR '='?
+         BNE   INLER25             ERROR IF NOT
+         SPACE 2
+         LA    INLRC,INLEQ         LOAD '=' CODE IF SO
+         BAL   INLRLINK,INLSTOG4              AND STORE IT
+         LA    INLRI,1(INLRI)
+         L     INLRWORK,INLEQCNT    OBTAIN NO. OF '=' SIGNS REMAINING
+         BCTR  INLRWORK,0           IN LINE AND DECREMENT BY ONE
+         ST    INLRWORK,INLEQCNT
+         LTR   INLRWORK,INLRWORK    IS THAT ALL?
+         BC    B'0010',INLVRSC1     NO, GO SCAN NEXT VARIABLE
+         SETTABL ZERO,ELET         IF NO MORE '=' SIGNS, NEXT ELEMENT
+*                                  MUST BE AN EXPRESSION--
+         SETTABL TERM,BL           SET BLANKS AS ONLY TERMINATOR
+         BAL   INLRLINK,INLXH      AND SCAN EXP.
+INLVREST SETTABL ZERO,BL           RESTORE TABLE
+         B     INLRET1             AND GO TERMINATE LINE
+         SPACE 2
+INLVRSC3 CLI   0(INLRI),C','       READ/INPUT--IS CHAR A COMMA?
+         BNE   INLVRSC4
+         LA    INLRC,INLCOMC       YES. LOAD COMMA CODE
+         BAL   INLRLINK,INLSTOG5              AND STORE
+         LA    INLRI,1(INLRI)      ADV TO NEXT VAR
+         B     INLVRSC1            AND GO SCAN IT
+         SPACE
+INLVRSC4 CLI   0(INLRI),C' '       BLANK?
+         BNE   INLER12             ERROR IF NOT
+         SETTABL ZERO,COM          RESTORE TABLE PARTIALLY
+         B     INLVREST            AND GO FINISH IT
+         SPACE 2
+INLVRSC2 CLI   0(INLRI),C'$'
+         BNE   INLVRS1
+         STORI INLL$CD
+         B     INLVRS2
+INLVRS1  STORI INLLCD              STORE <LETTER> CODE
+INLVRS2  LA    INLRI,1(INLRI)      ADV PAST LETTER
+         CLI   0(INLRI),C'('       IS VAR SUBSCRIPTED?
+         BE    INLVRSC5            BR IF SO
+         TM    INLSW,INLIRDRI      INPUT, READ, OR READ-I?
+         BZ    INLVTERM            BR IF NOT
+         CLI   0(INLRI),C'$'       YES. TEST FOR STRING VAR NAME
+         BNE   INLVTERM            IF NOT, BR
+         SH    INLRO,=H'2'         BACK UP SO WILL OVERWRITE LAST CODE
+         L     INLRC,INLSPAC   RELOAD LETTER CODE
+         STORI INLL$CD             STORE <LETTER>$ CODE IF SO
+         LA    INLRI,1(INLRI)      ADV PAST '$'
+         CLI   0(INLRI),C'('       IS THE STRING VAR SUBSCRIPTED?
+         BNE   INLVRSC3            BR IF NOT
+         LA    INLREGL,INLVTERM    SET LINK REG
+*              SUBSCRIPTED STRING VARIABLE
+INLVRS7A LA    INLRCURR,INLXF      SET CURRENT TO FUNCTION NAME
+INLVRSC7 MVI   INLXINSW,X'FF'      SET SW SO E.H. WON'T RESET CURRENT
+         BAL   INLRLINK,INLXH
+         L     INLRLINK,INLXPRIC   CHECK PRIMARY COUNT--
+         LTR   INLRLINK,INLRLINK   IS IT ZERO?
+         BC    B'0111',INLRORIT    ERROR IF NOT
+         L     INLRLINK,INLXLPCT   CHECK LEFT PAREN COUNT--
+         CH    INLRLINK,=H'1'      IS IT ONE?
+         BCR   B'1000',INLREGL     YES. SUBSCRIPT SCAN DONE, RETURN
+         SPACE 2
+INLRORIT TM    INLSW,INLZRDIN      EITHER READ OR INPUT?
+         BC    B'0111',INLER12     READ/INPUT ERR IF SO
+         B     INLER25
+         SPACE 3
+*              SUBSCRIPTED VARIABLE
+INLVRSC5 LA    INLRCURR,INLXL      SET CURRENT TO ARRAY NAME FOR E.H.
+         LA    INLREGL,INLVTERM    SET LINK REG
+         B     INLVRSC7            AND GO SCAN SUBSCRIPT
+         SPACE 3
+         SPACE 3
+INLRT4   CLC   2(5,INLRI),=CL5'STORE'   'RESTORE'?
+         BNE   INLER2        ERROR IF NOT--KEYWORD NOT RECOGNIZED
+*                                            -------------------------
+*-------------------------------------------<          'RESTORE' STMT
+*                                            -------------------------
+         LA    INLRC,INLKREST      LOAD 'RESTORE'CODE
+         LA    INLRI,7(INLRI)  ADVANCE PAST STMT TYPE
+         B     INLTEND       GO FORM INFIX CODE AND STORE
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'S' *******************
+**********************************************************************
+INLS1    CLC   1(3,INLRI),=CL3'TOP'    'STOP'?
+         BNE   INLDELET      IF NO, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<             'STOP' STMT
+*                                            -------------------------
+         LA    INLRC,INLKSTOP      LOAD 'STOP' CODE
+         SPACE
+INLBUMP4 LA    INLRI,4(INLRI)  ADVANCE PAST STMT TYPE
+         B     INLTEND         GO TERMINATE LINE
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'E' *******************
+**********************************************************************
+INLE1    CLC   1(2,INLRI),=CL2'ND'     'END'?
+         BNE   INLDELET      BR IF NOT
+*                                            -------------------------
+*-------------------------------------------<              'END' STMT
+*                                            -------------------------
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKEND LOAD 'END' CODE
+         LA    INLR0,1      INDICATE GOOD LINE, 'END' STMT
+         CLI   3(INLRI),C' '   BLANK AFTER STMT TYPE?
+         BNE   INLER29         ERROR IF NOT
+INLSTO2  BAL   INLRLINK,INLSTOG3
+         B     INLRET1A
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'D' *******************
+**********************************************************************
+INLD1    CLC   1(3,INLRI),=CL3'ATA'   'DATA'?
+         BNE   INLDT2
+*                                            -------------------------
+*-------------------------------------------<             'DATA' STMT
+*                                            -------------------------
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKDATA      LOAD 'DATA' CODE
+         BAL   INLRLINK,INLSTOG3              STORE IT
+         OI    INLSWUT2,X'F0'      SET 'DATA' STMT ID SWITCH FOR STRING
+*                                  CONSTANT SCANNER'S STORING
+         LR    INLRL,INLRO         SAVE PTR TO WORD WHICH WILL
+*                                  CONTAIN NO. OF DATA ITEMS
+         LA    INLRO,4(INLRO)      ADV INFIX PTR PAST THIS WORD
+         SR    INLRC,INLRC         INITIALIZE DATA ITEM COUNTER
+         LA    INLRI,4(INLRI)      ADV SCAN PTR PAST KEYWORD
+         SPACE
+INLDCHEK TM    0(INLRI),X'7D'      IS THIS DATA ITEM A STRING CONSTANT?
+         BO    INLDATST            BRANCH IF SO
+         CLI   0(INLRI),C' '       GUARD AGAINST MISSING DATA ITEM
+         BE    INLER1              ERROR--"STMT ENDS UNEXPECTEDLY"
+         LA    INLRWORK,CONWORKA   PROVIDE WORKAREA FOR CONVERT ROUT.
+         LR    CONRP,INLRI         SET UP SCAN PTR FOR CONVERT ROUTINE
+         L     R15,=V(CONVERTM)
+         BALR  R14,R15       BR TO CONVERT ROUT
+         B     INLER11       ERROR RETURN
+         LR    INLRI,CONRP   ADVANCE INPUT PTR PAST NUMBER
+         STE   FR0,0(INLRO)  NORMAL RETURN; STORE NUMBER IN INFIX
+INLDATBK LA    INLRO,4(INLRO)  BUMP INFIX PTR
+         LA    INLRC,1(INLRC)  BUMP DATA ITEM COUNTER
+INLDAT3  CLI   0(INLRI),C',' DELIMITER PRESENT?
+         BNE   INLDAT2       BR IF NOT
+         LA    INLRI,1(INLRI)      ADV TO NEXT ITEM IF SO
+         B     INLDCHEK      AND GO EXAMINE IT
+INLDAT2  CLI   0(INLRI),C' ' END OF STATEMENT?
+         BNE   INLER29       ERROR IF NOT
+         ST    INLRC,0(INLRL)  STORE NUMBER OF DATA WORDS IN THIS
+*                              STMT IN SECOND WORD OF INFIX
+         LA    INLR0,5       SET RETURN CODE REG 0 TO 5 TO TELL
+*                            CONTROL PROG. THIS STMT TYPE CAN HAVE
+*                            NO CONSTANTS
+         B     INLRET1A
+         SPACE
+INLDATST BAL   INLRLINK,INLSTRNG  GO SCAN STRING CONSTANT
+         B     INLDATBK
+         SPACE 2
+INLDT2   CLC   1(2,INLRI),=CL2'IM'   'DIM'?
+         BNE   INLDT3
+*                                            -------------------------
+*-------------------------------------------<              'DIM' STMT
+*                                            -------------------------
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKDIM LOAD 'DIM' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,3(INLRI)      ADV INPUT PTR
+INLDARAT BAL   INLRLINK,INLLORL$    ARRAY OR STRING ARRAY IDENTIFIER?
+         B     INLER27              RETURN 1--ERROR IF NO LETTER
+         B     INLDARA3             RET 2--ARRAY ID FOUND BUT NOT STRNG
+         MVI   INLSTRDM,X'FF'  AND SET 'STRING ARRAY' SWITCH
+INLDARA4 CLI   0(INLRI),C'(' IS IT '('?
+         BNE   INLER25       ERROR IF NOT
+         LA    INLRI,1(INLRI)      ADVANCE TO INTEGER
+         BAL   INLRLINK,INLINTDM   BR TO INTEGER-CONVERSION-
+*                                  AND-SCAN-DIMENSION ROUTINE
+         STH   INLREGT,0(INLRO)    STORE DIM1
+         STH   INLREG,2(INLRO)     STORE DIM2
+         LA    INLRO,4(INLRO)      ADV INFIX PTR
+         CLI   1(INLRI),C',' IS NEXT CHAR A COMMA?
+         BNE   INLDARA2      IF NOT, BR
+         LA    INLRI,2(INLRI)      IF SO, SCAN FOR NEXT ARRAY
+         B     INLDARAT
+         SPACE
+INLDARA2 CLI   1(INLRI),C' ' TEST FOR END
+         LA    INLR0,3      INDICATE GOOD LINE, 'DIM' STMT
+         BE    INLRET1A
+         B     INLER29       IF NOT END, ERROR
+         SPACE
+INLDARA3 STORI INLLCD     STORE ARRAY ID
+         MVI   INLSTRDM,X'00'    SET SWITCH TO INDICATE NOT
+*                                STRING ARRAY
+         LA    INLRI,1(INLRI)    ADVANCE PAST ARRAY NAME
+         B     INLDARA4
+         SPACE 2
+INLDT3   CLC   1(2,INLRI),=CL2'EF'     'DEF'?
+         BNE   INLDT4
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         CLC   3(3,INLRI),=CL3'INE'    'DEFINE FILE' STATEMENT?
+         BNE   INLDT3B                 BR IF NOT
+*                                            -------------------------
+*-------------------------------------------<      'DEFINE FILE' STMT
+*                                            -------------------------
+INLDT3A  LA    INLR0,6                 TELL CONTROL PROGRAM THIS IS A
+*                               'DEFINE FILE' STMT
+         LA    INLRC,INLKDFIL   LOAD "DEFINE FILE" CODE
+         BAL   INLRLINK,INLSTOG3           AND STORE IT
+         B     INLRET1A         AND LET IT SCAN THE STMT
+         SPACE
+INLDT3B  CLC   3(4,INLRI),=CL4'FILE'   'DEFINE FILE' STMT?
+         BE    INLDT3A                 YES. BRANCH
+         SPACE
+         CLC   3(2,INLRI),=CL2'FN'     'DEFFN'?
+         BNE   INLER4                  ERROR IF NOT
+*                                            -------------------------
+*-------------------------------------------<              'DEF' STMT
+*                                            -------------------------
+         LA    INLRC,INLKDEF  IF SO, LOAD 'DEF' CODE
+         BAL   INLRLINK,INLSTOG3
+         TR    5(1,INLRI),INLLTAB  LETTER SHOULD FOLLOW 'DEFFN';
+         TM    5(INLRI),X'FF'      DOES IT?
+         BO    INLER4        ERROR IF NOT
+         LH    INLRC,INLFNCD SET UP HALF WORD CODE
+         IC    INLRC,5(INLRI)      FOR 'FN<LETTER>'
+         STH   INLRC,0(INLRO)      STORE IT IN INFIX STRING
+         LA    INLRO,2(INLRO)      ADV INFIX PTR
+         CLI   6(INLRI),C'(' LEFT PAREN?
+         BNE   INLER5        ERROR IF NOT
+         LA    INLRC,INLLPS  LOAD '(S' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,7(INLRI)      ADV INPUT PTR TO FORMAL VARIABLE
+         BAL   INLRLINK,INLSIMVR   AND BR TO SIMPLE VARIABLE ROUTINE
+         B     INLER5        ERROR RET--SIMPLE VAR NAME NOT FOUND
+         CLI   0(INLRI),C')' DOES ')' FOLLOW SIMPLE VAR?
+         BNE   INLER5        ERROR IF NOT
+         LA    INLRC,INLRPA  LOAD ')' CODE
+         BAL   INLRLINK,INLSTOG4
+         CLI   1(INLRI),C'=' IS NEXT CHAR '='?
+         BNE   INLER6        ERROR IF NOT
+         LA    INLRC,INLEQ   LOAD '=' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,2(INLRI) ADV INPUT PTR PAST '='
+         SETTABL TERM,BL     SET BLANKS AS TERMINATORS FOR E.H.
+         BAL   INLRLINK,INLXH      BR TO EXPRESSION HANDLER
+         SETTABL ZERO,BL     RESET TABLE TO INITIAL STATE
+         LA    INLR0,2      INDICATE GOOD LINE, 'DEF' STMT
+         B     INLRET1A      EXPRESSION O.K., GO TERMINATE LINE & RET
+         SPACE 2
+INLDT4   CLC   1(3,INLRI),=CL3'UMP'    'DUMP'?
+         BNE   INLDT5        IF NOT, ASSUME DEFAULT LET
+*                                            -------------------------
+*-------------------------------------------<             'DUMP' STMT
+*                                            -------------------------
+         LA    INLRC,INLKDUMP      LOAD 'DUMP'CODE
+         B     INLBUMP4     GO SET RETURN CODE FOR CONTROL PROGRAM
+         SPACE
+INLDT5   CLI   1(INLRI),C'O'   'DO'? (ALTERNATIVE FOR 'FOR')
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+         LA    INLRI,2(INLRI)  ADVANCE PAST 'DO'
+         B     INLF2         AND GO TREAT STMT LIKE 'FOR' STMT
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'P' *******************
+**********************************************************************
+INLP1    CLC   1(4,INLRI),=CL4'RINT'   'PRINT'?
+         BNE   INLPT2        BR IF NOT
+         LA    INLRLINK,INLPRT1
+         ST    INLRLINK,INLWORKC
+*                                            -------------------------
+*-------------------------------------------<            'PRINT' STMT
+*                                            -------------------------
+         MVI   INLSWUTL,X'00'     INIT. PRINT USING SWITCH
+         CLC   5(5,INLRI),=CL5'USING'      IS THIS PRINT USING
+         BNE   INLPRT0
+*                                            -------------------------
+*-------------------------------------------<      'PRINT USING' STMT
+*                                            -------------------------
+         LA    INLRC,INLKPRNU     LOAD PRINT USING CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,5(INLRI)     SKIP OVER INPUT
+         MVI   INLSWUTL,X'FF'     SET PRINT USING SWITCH
+         B     INLP11             GO HANDLE PRINT LIST
+INLPRT0  LA    INLRC,INLKPRIN      LOAD 'PRINT'CODE
+         BAL   INLRLINK,INLSTOG3
+INLP11   CLI   5(INLRI),C' ' ANY PRINT ITEMS?
+         BE    INLRET1       DONE IF NOT
+         LA    INLRI,5(INLRI)      ADVANCE TO FIRST ITEM
+         OI    INLSW,INLZPRNT   SET 'PRINT' STMT SW
+*                                  SO EXP HANDLER WILL
+*                                  CONSIDER COMMAS OUTSIDE OF SUB-
+*                                  SCRIPTS AS DELIMITERS
+*
+INLPRWRI SETTABL TERM,QUO,COM,SEMI,BL
+         CLI   INLSWUTL,X'00'     IS THIS PRING USING
+         BE    INLPRT1            NO, BRANCH
+INLPRT00 CLI   0(INLRI),C'0'      IS LINE NUM. NEXT
+         BL    INLPRT1            NO, GO ON
+         SR    INLRC,INLRC        SET CODE IN INLINE TO INDICATE
+         BCTR  INLRC,0             THAT THE NEXT HALF-WORD IS
+         STH   INLRC,0(INLRO)      A LINE NUMBER, NOT A VARIABLE
+         LA    INLRO,2(INLRO)      I.E. AND X'FFFF'
+         LA    INLR0,5            GO PROCESS LINE NO.
+         BAL   INLRLINK,INLINTLN
+         B     INLPRT11
+INLPRT1  TM    0(INLRI),X'7D'      STRING CONSTANT?
+         BC    B'1110',INLPRT2     BR IF NOT
+INLPRT3  BAL   INLRLINK,INLSTRNG   GO SCAN STR CONST AND STORE IT
+*        A PRINT PART ITEM, DELIMITER, OR BLANK MUST FOLLOW A STR CONST
+INLPRT3C CLI   0(INLRI),C','       DELIM?
+         BNE   INLPRT4             BR IF NOT
+INLPRT3B LA    INLRC,INLCOMC       LOAD COMMA CODE
+INLPRT3A BAL   INLRLINK,INLSTOG5              STORE DELIM CODE
+         LA    INLRI,1(INLRI)      ADV PAST DELIM
+         L     INLRLINK,INLWORKC  GET RETURN FOR NEXT ITEM OR
+         BR    INLRLINK            RETURN TO MAT PRINT USING
+         SPACE
+INLPRT4  CLI   0(INLRI),C';'       DELIM?
+         BNE   INLPRT5
+INLPRT4A LA    INLRC,INLSEMIC      LOAD SEMICOLON CODE
+         B     INLPRT3A            GO STORE IT
+         SPACE
+INLPRT5  CLI   0(INLRI),C' '       BLANK?
+         BE    INLPRTEL            END OF LINE IF SO
+         LA    INLRC,INLSEMIC      FORCE SEMICOLON IF NONE PRESENT
+         BAL   INLRLINK,INLSTOG5              &  STORE IT
+         B     INLPRT6
+         SPACE 2
+*              ELEMENT MUST BE A PRINT PART ITEM OR A BLANK
+INLPRT2  CLI   0(INLRI),C' '       BLANK?
+         BNE   INLPRT6             BR IF NOT
+INLPRTEL SETTABL ZERO,QUO,COM,SEMI,BL        RESTORE TABLE
+         B     INLRET1             DONE
+         SPACE
+INLPRT6  BAL   INLRLINK,INLLORL$   GO SEE IF ELEMENT IS ARRAY OR STRING
+*                                  VARIABLE
+         B     INLPRT7             RETURN 1; ASSUME EXPRESSION
+         B     INLPRT7             RETURN 2; ASSUME EXPRESSION
+         CLI   0(INLRI),C'('       SUBSCRIPTED STRING VAR?
+         BNE   INLPRT10            BR IF NOT
+         LA    INLRCURR,INLXF      SET CURRENT TO FUNCTION
+         MVI   INLXINSW,X'FF'      TELL E.H. NOT TO RESET CURRENT
+         OI    INLSW,INLZSTRV      SET 'SUBSCRIPTED STR VAR' SW
+INLPRT8  BAL   INLRLINK,INLXH      GO SCAN EXPRESSION
+         TM    INLSW,INLZSTRV      WAS EXP A STR VAR SUBSCRIPT?
+         BZ    INLPRT10            BR IF NOT
+         L     INLRLINK,INLXPRIC   IF SO, MAKE SURE EXPRESSION WAS A
+         LTR   INLRLINK,INLRLINK   SUBSCRIPT
+         BC    B'0111',INLER14     ERROR IF NOT
+         L     INLRLINK,INLXLPCT
+         CH    INLRLINK,=H'1'
+         BNE   INLER14
+         SPACE
+INLPRT10 TM    0(INLRI),X'7D'      QUOTE?
+         BC    B'1110',INLPRT11    BR IF NOT
+         LA    INLRC,INLSEMIC      IF SO, FORCE SEMICOLON
+         BAL   INLRLINK,INLSTOG5              AND STORE IT
+         B     INLPRT3             GO SCAN STR CONST
+         SPACE
+INLPRT11 CLI   0(INLRI),C' '       BLANK?
+         BE    INLPRTEL            END OF LINE IF SO
+         CLI   0(INLRI),C','       COMMA?
+         BE    INLPRT3B            IF SO, GO STORE IT
+         CLI   0(INLRI),C';'       IF NOT, TEST FOR SEMICOLON
+         BNE   INLER14             ERROR IF NOT ';'
+         B     INLPRT4A            GO STORE ';'
+         SPACE 2
+INLPRT7  NI    INLSW,INLZSTOF      SET SW TO INDICATE THIS IS NOT A
+         B     INLPRT8             SUBSCRIPTED STR VAR AND GO SCAN EXP.
+         SPACE 2
+INLPT2   CLC   1(4,INLRI),=CL4'AUSE'   'PAUSE'?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<            'PAUSE' STMT
+*                                            -------------------------
+         LA    INLRC,INLKPAUS      LOAD 'PAUSE' CODE
+         LA    INLRI,5(INLRI)   ADVANCE PAST STMT TYPE
+         B     INLTEND      GO SET RETURN CODE FOR CONTROL PROG.
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'L' *******************
+**********************************************************************
+INLL1    CLC   1(2,INLRI),=CL2'ET'  'LET'?
+         BNE   INLDELET      IF NO KEYWORK 'LET', ASSUME DEFAULT 'LET'
+         LA    INLRI,3(INLRI)      ADV INPUT PTR PAST KEYWORD
+         SPACE
+*                                            -------------------------
+*-------------------------------------------<              'LET' STMT
+*                                            -------------------------
+INLDELET LA    INLRC,INLKLET LOAD 'LET' CODE
+         BAL   INLRLINK,INLSTOG3
+         SR    INLRWORK,INLRWORK   ZERO THE '=' SIGN COUNTER
+         LR    INLREG,INLRI        INITIALIZE SCAN PTR AT BEG OF LINE
+         SPACE
+INLLTEST CLI   0(INLREG),C' '      END OF LINE?
+         BE    INLLBLK             BRANCH IF SO
+         CLI   0(INLREG),C'='      EQUALS SIGN?
+         BNE   INLLET1A            BRANCH IF NOT
+         LA    INLRWORK,1(INLRWORK)  BUMP '=' SIGN COUNTER
+INLLET1A LA    INLREG,1(INLREG)    ADVANCE SCAN PTR
+         B     INLLTEST            AND CONTINUE SCAN
+         SPACE
+INLLBLK  LTR   INLRWORK,INLRWORK   BLANK FOUND; END OF PRE-SCAN
+         BZ    INLER25              ERROR IF NO EQUAL SIGNS WERE FOUND
+         ST    INLRWORK,INLEQCNT   SAVE NO. OF '=' SIGNS IN 'LET' STMT
+         SETTABL TERM,ELET         SET '=' AS ONLY TERMINATORS FOR E.H.
+         BAL   INLRLINK,INLLORL$   IS ELEMENT A VARIABLE?--
+*                                  I.E., IS CHAR A LETTER?
+         B     INLER25             RETURN 1; ERROR IF NOT
+         B     INLLET1             RETURN 2; REGULAR 'LET' STMT
+         B     INLSTRL1            STRING VAR--GO CHECK FOR SUBSCRIPT
+         SPACE
+INLLET1  OI    INLSW,INLZLET       SET SW FOR 'LET' STMT
+         B     INLVRSC9            GO SCAN FOR VARIABLE(S)
+         SPACE 3
+         SPACE
+********************* STRING LET HANDLER **************
+INLSTRLT BAL   INLRLINK,INLLORL$        IS ELEMENT A STRING VAR?
+         B     INLER36             RETURN 1; ERROR IF NO LETTER
+         B     INLER36             RETURN 2; ERROR IF LETTER & NO '$'
+         SPACE
+INLSTRL1 CLI   0(INLRI),C'('       IS STR VAR SUBSCRIPTED?
+         BNE   INLSTRL2            BR IF NOT
+         LA    INLREGL,INLSTRL2    YES, SET LINK REG
+         B     INLVRS7A            AND GO SCAN SUBSCRIPT
+         SPACE 2
+INLSTRL2 CLI   0(INLRI),C'='       EQUALS SIGN?
+         BE    INLSTRL3            BR IF SO
+         TM    INLSW,INLZEQSN      LAST OPERAND?
+         BO    INLSTR3A            GO TERMINATE LINE IF SO
+         B     INLER25   (OR  6??) ERROR IF NOT
+         SPACE
+INLSTRL3 LA    INLRC,INLEQ         YES, LOAD '=' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,1(INLRI)      ADV PAST '='
+         L     INLRWORK,INLEQCNT   CHECK TO SEE IF THIS IS THE LAST '='
+         BCTR  INLRWORK,0          SIGN
+         ST    INLRWORK,INLEQCNT   SAVE COUNT OF '=' SIGNS REMAINING
+         LTR   INLRWORK,INLRWORK
+         BC    B'0010',INLSTRLT    IF THIS IS NOT LAST '=' (I.E., MORE
+*                                  VARIABLE(S) ARE EXPECTED), GO SCAN
+*                                  FOR NEXT STRING VARIABLE
+         SETTABL ZERO,ELET         UNSET '=' AS TERMINATORS
+         OI    INLSW,INLZEQSN      SET 'LAST OPERAND' INDICATOR
+         TM    0(INLRI),X'7D'      IS CHAR STR CONSTANT DELIMITER?
+         BC    B'1110',INLSTRL4    NO.  BRANCH
+         BAL   INLRLINK,INLSTRNG   YES. GO SCAN STRING CONSTANT
+INLSTR3A SETTABL ZERO,BL           RESET TABLE TO INITIAL CONDITION
+         CLI   0(INLRI),C' '       BLANK?
+         BE    INLRET1             DONE IF SO
+         B     INLER29             ERROR IF NOT
+         SPACE
+INLSTRL4 SETTABL TERM,BL           SET BLANK AS ONLY TERMINATOR
+         B     INLSTRLT
+         SPACE 3
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'G' *******************
+**********************************************************************
+INLG1    CLI   1(INLRI),C'O' IS CHAR+1 = 'O'?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+         CLC   2(2,INLRI),=CL2'TO' 'GOTO'?
+         BNE   INLGT2
+*                                            -------------------------
+*-------------------------------------------<            'GO TO' STMT
+*                                            -------------------------
+         LA    INLRC,INLKGOTO      LOAD 'GOTO' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,4(INLRI)      ADVANCE PAST KEYWORD
+         B     INLLINV5
+         SPACE 1
+INLGT2   CLC   2(3,INLRI),=CL3'SUB'  'GOSUB'?
+         BNE   INLER2
+*                                            -------------------------
+*-------------------------------------------<            'GOSUB' STMT
+*                                            -------------------------
+         LA    INLRC,INLKGOS LOAD 'GOSUB'CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,5(INLRI)      ADV PAST KEYWORD
+         SPACE
+INLLINV5 LA    INLR0,5     SET R0 TO 5 TO TELL CONTROL PROGRAM THIS
+*                          STMT TYPE CAN HAVE NO CONSTANTS
+*          NEXT MUST COME A LINE NUMBER
+INLLINEV BAL   INLRLINK,INLINTLN   BR TO INTEGER ANALYZER ROUTINE
+         CLI   0(INLRI),C' '       BLANK?
+         BE    INLRET1A            GO TERMINATE LINE IF SO
+         B     INLER29             ERROR IF NOT
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'F' *******************
+**********************************************************************
+INLF1    CLC   1(2,INLRI),=CL2'OR'  'FOR'?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<              'FOR' STMT
+*                                            -------------------------
+         LA    INLRI,3(INLRI)      ADV PAST KEYWORD
+INLF2    BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKFOR LOAD 'FOR' CODE
+         BAL   INLRLINK,INLSTOG3
+**THE NEXT ELEMENT MUST BE A SIMPLE VARIABLE NAME**
+         BAL   INLRLINK,INLSIMVR   GO SEE IF IT IS
+         B     INLER8        ERROR IF NOT
+         CLI   0(INLRI),C'=' IS ASSIGNMENT OPERATOR PRESENT?
+         BNE   INLER8        ERROR IF NOT
+         LA    INLRC,INLEQ   LOAD '=' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,1(INLRI)      ADV PAST '='
+         SETTABL TERM,FOR,BL    SET 'TO', 'STEP', AND -BLANK- AS ONLY
+*                               TERMINATORS FOR E.H.
+INLFEXP  BAL   INLRLINK,INLXH
+         TM    INLSWUTL,X'FF'   FIRST TIME THROUGH?
+         BO    INLFT2        NO, BRANCH
+         MVI   INLSWUTL,X'FF'   YES, SET SW
+         CLI   0(INLRI),C'T' WAS THE TERMINATOR 'TO'?
+         BNE   INLER9        ERROR IF NOT
+         STH   INLRC,0(INLRO)      STORE 'TO' CODE
+         LA    INLRO,2(INLRO)
+         AR    INLRI,INLRL
+         B     INLFEXP       GO ANALYZE 'LIMIT' EXPRESSION
+         SPACE
+INLFT2   CLI   0(INLRI),C' ' WAS TERMINATOR A BLANK?
+         BE    INLFFIN       BR IF SO
+         CLI   0(INLRI),C'S' WAS TERMINATOR 'STEP'?
+         BE    INLFT3
+         CLI   0(INLRI),C'B'       WAS TERMINATOR 'BY'?
+         BNE   INLER10
+INLFT3   STH   INLRC,0(INLRO)      STORE 'STEP' (OR 'BY') CODE
+         LA    INLRO,2(INLRO)
+         AR    INLRI,INLRL
+         SETTABL ZERO,FOR    SET BLANK AS ONLY TERMINATOR
+         BAL   INLRLINK,INLXH      GO SCAN EXPRESSION
+         SPACE
+INLFFIN  SETTABL ZERO,FOR,BL    RE-INITIALIZE SEQUENCE TABLE
+         B     INLRET1       AND RETURN
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'N' *******************
+**********************************************************************
+INLN1    CLC   1(3,INLRI),=CL3'EXT'  'NEXT'?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<             'NEXT' STMT
+*                                            -------------------------
+         BAL   INLRLINK,INLCIFT   GUARD AGAINST COMPOUND "IF" ERROR
+         LA    INLRC,INLKNEXT      LOAD 'NEXT' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,4(INLRI)      ADV PAST KEYWORD
+**NEXT ELEMENT MUST BE A SIMPLE VARIABLE NAME**
+         BAL   INLRLINK,INLSIMVR   GO SEE IF IT IS
+         B     INLER8        ERROR IF NOT
+         CLI   0(INLRI),C' ' END OF LINE O.K.?
+         BNE   INLER29       ERROR IF NOT
+         LA    INLR0,5       YES. SET RETURN CODE REG TO TELL CONTROL
+*                       PROGRAM THIS STMT TYPE CAN HAVE NO CONSTANTS
+         B     INLRET1A
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'M' *******************
+**********************************************************************
+INLM1    CLC   1(2,INLRI),=CL2'AT'  'MAT' STATEMENT?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<              'MAT' STMT
+*                                            -------------------------
+         LA    INLRC,INLKMAT LOAD 'MAT' CODE
+         BAL   INLRLINK,INLSTOG3
+         CLC   3(4,INLRI),=CL4'READ'  'MAT READ'?
+         BNE   INLMTINP
+         LA    INLRC,INLKREAD      LOAD 'READ' CODE
+         BAL   INLRLINK,INLSTOG3        AND STORE
+         LA    INLRI,7(INLRI)      ADV PAST KEYWORDS
+         OI    INLSW,INLZMTRD      SET LIST SWITCH SO COMMAS OUTSIDE
+*                            SUBSCRIPTS WILL BE REGARDED AS DELIMITERS
+*
+****************** MAT READ AND MAT INPUT *****************
+         SPACE
+         CLI   0(INLRI),C'('    MAT READ-I?
+         BNE   INLMT1B          NO, BRANCH
+         SPACE
+****************** MAT READ-I **************
+         BAL   INLREGL,INLRIWI  YES, GO SCAN PARAMETER LIST
+         SPACE
+INLMT1B  SETTABL TERM,BL,COM  SET BLANK AND COMMA AS ONLY TERMINATORS
+INLMRLT  MVC   INLSPAC+3(1),0(INLRI)
+         TR    INLSPAC+3(1),INLLTAB    IS CHAR A LETTER?
+         TM    INLSPAC+3,X'FF'
+         BO    INLER27 --OR 12?    IF NOT, ERROR
+         CLI   1(INLRI),C'(' IS ARRAY NAME SUBSCRIPTED?
+         BE    INLMEH        IF SO, BRANCH
+         L     INLRC,INLSPAC IF NOT, TRANSLATE THE ARRAY NAME
+         STORI INLLCD        AND STORE IT IN INFIX STRING
+         LA    INLRI,1(INLRI)      BUMP SCAN PTR
+         B     INLMRCT       AND GO TEST FOR DELIMITER
+         SPACE
+INLMEH   BAL   INLRLINK,INLXH      GO ANALYZE SUBSCRIPT
+         L     INLRLINK,INLXPRIC   CHECK PRIMARY COUNT
+         CH    INLRLINK,=H'1'      IS IT = 1?
+         BNE   INLER12       ERROR IF NOT
+         L     INLRLINK,INLXLPCT   CHECK LEFT PAREN COUNT
+         CH    INLRLINK,=H'1'      IS IT = 1?
+         BNE   INLER12             ERROR IF NOT
+INLMRCT  CLI   0(INLRI),C',' IS CHAR A COMMA?
+         BNE   INLMRBLT      BR IF NOT
+         LA    INLRC,INLCOMC LOAD ',' CODE
+         BAL   INLRLINK,INLSTOG5
+         LA    INLRI,1(INLRI)      BUMP SCAN PTR
+         B     INLMRLT
+         SPACE
+INLMRBLT CLI   0(INLRI),C' ' IS CHAR BLANK?
+         BNE   INLER27       IF NOT, ERROR
+         SETTABL ZERO,BL,COM     IF SO, END OF STATEMENT--
+*                            RESTORE SEQUENCE TABLE TO INITIAL STATE
+         B     INLRET1       AND RETURN
+         SPACE
+INLMTINP CLC   3(5,INLRI),=CL5'INPUT'   'MAT INPUT'?
+         BNE   INLMTWR       IF NOT, BRANCH
+         LA    INLRC,INLKINP LOAD 'INPUT' CODE
+         BAL   INLRLINK,INLSTOG3  GO STORE CODE
+         LA    INLRI,8(INLRI)   ADVANCE SCAN PTR PAST KEYWORDS
+         OI    INLSW,INLZMTRD   SET LIST SWITCH FOR EXPRESSION HANDLER
+         B     INLMT1B          AND TREAT REST OF STMT LIKE 'MAT READ'
+         SPACE
+INLMTWR  CLC   3(5,INLRI),=CL5'WRITE'   'MAT WRITE-I'?
+         BNE   INLMT2           NO, BRANCH
+         SPACE
+****************** MAT WRITE-I *************
+         SPACE
+         LA    INLRC,INLKWRIT   LOAD 'WRITE' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,8(INLRI)   ADVANCE PAST KEYWORDS
+         CLI   0(INLRI),C'('    DOES PARAMETER LIST FOLLOW?
+         BNE   INLER23          ERROR IF NOT--MISSING LEFT PAREN
+         OI    INLSW,INLZWRT  SET 'WRITE' SWITCH SO EXP. HANDLER WILL
+*              REGARD COMMAS OUTSIDE SUBSCRIPTS AS DELIMITERS
+         BAL   INLREGL,INLRIWI  GO SCAN PARAMETER LIST
+         B     INLMPLT          AND TREAT REST OF STMT LIKE 'MAT PRINT'
+         SPACE 3
+*
+**************** MAT PRINT ********************
+INLMT2   CLC   3(5,INLRI),=CL5'PRINT'  'MAT PRINT'?
+         BNE   INLMT3
+         MVI   INLSWUTL,X'00'     PRINT USING SWITCH
+         CLC   8(5,INLRI),=CL5'USING'
+         BNE   INLMT22
+         MVI   INLSWUTL,X'FF'     SET USING SWITCH ON
+         LA    INLRC,INLKPRNU
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,8(INLRI)
+         LA    INLRLINK,INLMPLT
+         ST    INLRLINK,INLWORKC   SET TO RETURN TO MAT
+         B     INLP11
+INLMT22  LA    INLRC,INLKPRIN      LOAD 'PRINT' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,8(INLRI)      ADV PAST KEYWORDS
+INLMPLT  BAL   INLRL2,INLETTER     IS CHAR A LETTER (ARRAY IDEN.)?
+         B     INLMPT2             NO. BRANCH
+INLMPDT  CLI   0(INLRI),C','       YES. IS DELIMITER A COMMA?
+         BNE   INLMPST       BR IF NOT
+         LA    INLRC,INLCOMC STORE ',' CODE
+         BAL   INLRLINK,INLSTOG5
+         LA    INLRI,1(INLRI)
+         B     INLMPLT       AND GO LOOK FOR NEXT PRINT ITEM
+         SPACE
+INLMPST  CLI   0(INLRI),C';' IS DELIMITER A SEMICOLON?
+         BNE   INLMPBT       BR IF NOT
+         LA    INLRC,INLSEMIC      LOAD ';' CODE
+         BAL   INLRLINK,INLSTOG5
+         LA    INLRI,1(INLRI)
+         B     INLMPLT
+         SPACE
+INLMPBT  CLI   0(INLRI),C' ' IS CHAR A BLANK?
+         BNE   INLER27
+         CLI   INLSWUTL,X'00'
+         BE    INLRET1
+         B     INLPRTEL
+         SPACE
+INLMPT2  LR    INLRLINK,INLRI
+         SH    INLRLINK,=H'5'      IS PRINT LIST EMPTY?
+         CLC   0(2,INLRLINK),=CL2'PR'
+         BNE   INLMPBT       MAY BE END OF STMT; GO SEE
+         CLI   0(INLRI),C' ' BLANK? (GUARD AGAINST NO MAT PRINT ARRAYS'
+         BE    INLER1        ERROR IF SO--'STMT ENDS UNEXPECTEDLY'
+         B     INLER14       ERROR IF NOT--'BAD PRINT QUANTITY'
+         SPACE 3
+INLMT3   LA    INLRI,3(INLRI)      ADVANCE PAST 'MAT'
+         BAL   INLRL2,INLETTER     IS CHAR A LETTER?
+         B     INLER15       ERROR RETURN--"ILLEGAL WORD FOLLOWS 'MAT'"
+         CLI   0(INLRI),C'=' IS CHAR '='?
+         BNE   INLER6        IF NOT,ERROR--MISSING ASSIGNMENT OPERATOR
+         LA    INLRC,INLEQ
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,1(INLRI)
+         CLI   0(INLRI),C'(' SCALAR MULTIPLICATION?
+         BNE   INLMFNT       IF NOT, BRANCH
+         SETTABL TERM,BL     SET BLANK AS ONLY TERMINATOR
+         BAL   INLRLINK,INLXH
+         SETTABL ZERO,BL     RESTORE TABLE
+         SH    INLRO,=H'6'
+         LA    INLRLINK,INLRPA     FORM HALFWORD CODE FOR ')' TO
+         AH    INLRLINK,INLKG4     COMPARE AGAINST
+         CH    INLRLINK,0(INLRO)  WAS 3-RD CHAR FROM END A CLOSE PAREN?
+         BNE   INLER17       ERROR, IF NOT
+         LA    INLRLINK,INLMULT    SET UP INFIX CODE
+         AH    INLRLINK,INLKG4     FOR '*' TO COMPARE AGAINST
+         CH    INLRLINK,2(INLRO)   WAS 2-ND CHAR FROM END A '*'?
+         BNE   INLER17       ERROR IF NOT
+         CLC   INLLCD(1),4(INLRO)  IS LAST CHAR IN LINE A LETTER?
+         BNE   INLER27       ERROR IF NOT
+         LA    INLRO,6(INLRO)      RESTORE INFIX PTR
+         B     INLRET1       AND TERMINATE
+         SPACE 2
+INLMFNT  LA    INLRWORK,INLMATF    INITIALIZE TABLE PTR
+         LA    INLR0,4        SET INDEX = TABLE ENTRY SIZE
+         LA    INLR1,INLMATFE SET LIMIT = ADDRESS OF LAST TABLE ENTRY
+INLLOP3  CLC   0(3,INLRWORK),0(INLRI)   COMPARE
+         BE    INLOUT3
+         BXLE  INLRWORK,INLR0,INLLOP3
+         SPACE
+         B     INLMT8         ELEMENT IS NOT A MAT FUNCTION, BRANCH
+         SPACE 2
+INLOUT3  SR    INLRC,INLRC    PICK UP MAT FUNCTION CODE
+         IC    INLRC,3(INLRWORK)
+         LA    INLRWORK,INLMIF     CHECK MAT FUNCTION TYPE--I.E., IS
+         CR    INLRC,INLRWORK   IT AN INITIALIZATION FUNCTION OR
+*                             OTHERWISE?
+         BL    INLMSUBS       BRANCH IF INITIALIZATION FUNCTION (SUCH
+*                             AS ZER,CON,IDN)
+         SPACE
+         BAL   INLRLINK,INLSTOG2   GO STORE FUNCTION CODE
+         CLI   3(INLRI),C'(' DOES A '(' FOLLOW?
+         BNE   INLER23       ERROR IF NOT
+         LA    INLRC,INLLPS  LOAD '(S' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,4(INLRI)      ADVANCE PTR TO ARG
+         BAL   INLRL2,INLETTER     GO SEE IF ARG IS A LETTER
+         B     INLER27       ERROR IF NOT
+         LR    INLRWORK,INLRO CHECK TO SEE WHICH MAT FUNCTION--
+         SH    INLRWORK,=H'6' SOME ARE TREATED DIFFERENTLY
+         CLC   1(1,INLRWORK),INLMNRM+3   IS IT 'NRM'?
+         BE    INLMT4         BR IF SO
+         CLC   1(1,INLRWORK),INLMINV+3   IS IT 'INV'?
+         BE    INLMT5         BR IF SO
+         SPACE
+*        FUNCTION IS 'TRN', SO GUARD AGAINST TARGET ARRAY BEING THE
+*        SAME AS THE SUBJECT ARRAY:
+         SH    INLRWORK,=H'4'  SET PTR BACK TO ARRAY NAME TO BE STORED
+*                            INTO
+         CH    INLRC,0(INLRWORK)   IS IT SAME AS THE ARRAY NAME JUST
+*                                  STORED?
+         BE    INLER19       ERROR IF SO
+INLMT4   CLI   0(INLRI),C')' IS CHAR A ')'?
+         BNE   INLER18       ERROR IF NOT
+         LA    INLRC,INLRPA  SET ')' CODE
+         BAL   INLRLINK,INLSTOG4
+         CLI   1(INLRI),C' ' END OF LINE?
+         BNE   INLER29       ERROR IF NOT
+         B     INLRET1       TERMINATE IF SO
+         SPACE
+INLMT5   CLI   0(INLRI),C','  FUNCTION IS 'INV':  IS THE DETERMINANT
+*                             DESIRED?
+         BNE   INLMT4         NO, BRANCH
+         LA    INLRC,INLCOMS  YES, LOAD ',S' CODE
+         BAL   INLRLINK,INLSTOG4
+         LA    INLRI,1(INLRI) ADVANCE PAST COMMA
+         BAL   INLRLINK,INLSIMVR   GO SCAN FOR SIMPLE VARIABLE
+         B     INLER31        RETURN 1: ERROR IF SIMVAR NOT FOUND
+         B     INLMT4         RETURN 2: SIMVAR FOUND
+         SPACE
+INLMSUBS BAL   INLRLINK,INLSTOG2
+         CLI   3(INLRI),C' ' END OF LINE?
+         BE    INLRET1       TERMINATE IF SO
+         CLI   3(INLRI),C'(' IS THERE A SUBSCRIPT?
+         BNE   INLER25
+         LA    INLRI,3(INLRI)  BUMP INPUT PTR
+         SETTABL TERM,BL     SET BLANK AS ONLY TERMINATOR
+         LA    INLRCURR,INLXL PRESET 'CURRENT' TO ARRAY NAME
+         MVI   INLXINSW,X'FF'   PREVENT E.H. FROM RESETTING CURRENT
+         BAL   INLRLINK,INLXH  AND GO EXAMINE SUBSCRIPT
+         SETTABL ZERO,BL     RESTORE SEQUENCE TABLE
+         L     INLRWORK,INLXPRIC  CHECK PRIMARY COUNT--
+         LTR   INLRWORK,INLRWORK  DOES IT = 0?
+         BC    B'0111',INLER17  ERROR IF NOT
+         L     INLRWORK,INLXLPCT   CHECK LEFT PAREN COUNT--
+         CH    INLRWORK,=H'1'      DOES IT = 1?
+         BNE   INLER17             ERROR IF NOT
+         B     INLRET1
+         SPACE 2
+INLMT8   BAL   INLRL2,INLETTER IS CHAR A LETTER?
+         B     INLER27       ERROR IF NOT
+         CLI   0(INLRI),C' ' END OF STATEMENT?
+         BE    INLRET1       TERMINATE IF SO
+         CLI   0(INLRI),C'+' MATRIX ADDITION?
+         BNE   INLMT9
+         LA    INLRC,INLPLUS LOAD '+' CODE
+INLMOP1  BAL   INLRLINK,INLSTOG4
+         LA    INLRI,1(INLRI)      ADVANCE PAST OPERATOR
+         BAL   INLRL2,INLETTER     IS CHAR A LETTER?
+         B     INLER17       ERROR IF NOT
+         TM    INLSWUTL,X'FF'   WAS IT MATRIX MULT.?
+         BZ    INLMT10
+         SH    INLRO,=H'10'  IF SO, GUARD AGAINST SAME ARRAY
+         CH    INLRC,0(INLRO)      LEFT AND RIGHT SIDE OF '='
+         BE    INLER22       ERROR---MATRIX MAY NOT BE BOTH OPERAND AND
+*                            RESULT OF MATRIX MULTIPLICATION
+         LH    INLRC,4(INLRO)    PICK UP FIRST OPERAND TO RIGHT OF '='
+         CH    INLRC,0(INLRO)    AND COMPARE
+         BE    INLER22
+         LA    INLRO,10(INLRO)    RESET INFIX PTR TO END
+         SPACE
+INLMT10  CLI   0(INLRI),C' ' END OF STATEMENT?
+         BNE   INLER29       ERROR IF NOT
+         B     INLRET1
+         SPACE
+INLMT9   CLI   0(INLRI),C'-' MATRIX SUBTRACTION?
+         BNE   INLMT11
+         LA    INLRC,INLMINUS      LOAD '-' CODE
+         B     INLMOP1
+         SPACE
+INLMT11  CLI   0(INLRI),C'*' MATRIX MULTIPLICATION?
+         BNE   INLER17       ERROR IF NOT
+         LA    INLRC,INLMULT
+         MVI   INLSWUTL,X'FF'   SET SW TO INDICATE MAT. MULT.
+         B     INLMOP1       AND GO HANDLE REST OF STATEMENT
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'I' *******************
+**********************************************************************
+INLI1    CLI   1(INLRI),C'F' 'IF'?
+         BNE   INLIT1
+*                                            -------------------------
+*-------------------------------------------<               'IF' STMT
+*                                            -------------------------
+         LA    INLRC,INLKIF   LOAD 'IF' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,2(INLRI) ADVANCE PAST KEYWORD
+         SETTABL TERM,IF,ELET  SET AS TERMINATORS 'THEN' AND REL-OPS
+         BAL   INLRLINK,INLLORX$  IS ELEMENT A VARIABLE; IF SO, IS IT
+*                                 A STRING ARRAY?
+         B     INLIFT1            RETURN 1; NO, NOT VARIABLE
+         B     INLORDIF           RETURN 2; NOT STRING VAR; ASSUME
+*                                 REGULAR 'IF' STMT
+         B     INLSTIF1           'STRING IF'; BRANCH
+         SPACE
+INLORDIF BAL   INLRLINK,INLLORF$  CHECK FOR STRING FUNCTION
+         B     INLORDF2           NOT FOUND
+         B     INLSTIFX           GOT IT, PROCESS FUNCTION EXPR.
+INLORDF2 BAL   INLRLINK,INLXH GO SCAN EXPRESSION
+         TM    INLSWUTL,X'FF'    REL-OP ENCOUNTERED YET?
+         BO    INLIFTH        BR IF SO
+         MVI   INLSWUTL,X'FF'    SET SW IF NOT
+         CLI   0(INLRI),C'T'  WAS TERMINATOR 'THEN'?
+         BE    INLER40        ERROR IF SO--'MISSING REL-OP'
+*                            IF NOT, TERMINATOR MUST HAVE BEEN A REL-OP
+         CLI   0(INLRI),C'='  WAS THE REL-OP AN EQUALS SIGN?
+         BNE   INLIFSTO
+         LA    INLRC,INLEQREL IF SO, CHANGE CODE TO '=R'
+         AH    INLRC,INLKG4
+INLIFSTO STH   INLRC,0(INLRO) STORE CODE
+         LA    INLRO,2(INLRO) BUMP OUTPUT PTR
+         AR    INLRI,INLRL    ADVANCE INPUT PTR
+         B     INLORDIF
+         SPACE 2
+INLIFT1  TM    0(INLRI),X'7D' SINGLE OR DOUBLE QUOTE?
+         BO    INLSTIFQ       BR IF SO;  STRING IF STATEMENT
+         B     INLORDIF       OTHERWISE, ORDINARY IF STATEMENT
+         SPACE
+INLIFTH  CLI   0(INLRI),C'T'  IS TERMINATOR 'THEN'?
+         BNE   INLER7         ERROR IF NOT--MISSING 'THEN'
+INLIFLIN STH   INLRC,0(INLRO) STORE 'THEN' CODE
+         LA    INLRO,2(INLRO)
+         AR    INLRI,INLRL    ADVANCE PAST 'THEN'
+         SETTABL ZERO,IF,ELET  RESTORE SEQUENCE TABLE
+         CLI   0(INLRI),C'0'  DOES A LINE NUMBER FOLLOW "THEN"?
+         BL    INLCOMIF       IF NOT, ASSUME COMPOUND "IF"
+         CLI   0(INLRI),C'9'
+         BH    INLCOMIF
+         LA    INLRC,INLKGOTO IF SO, FORCE A "GOTO" CODE
+         BAL   INLRLINK,INLSTOG3  IN INFIX
+         SR    INLR0,INLR0   PRE-SET 'GOOD LINE' RETURN CODE FOR
+         BCTR  INLR0,0       CONTROL PROGRAM
+         B     INLLINEV       GO SCAN LINE NO.
+         SPACE
+INLCOMIF OI    INLSWUT2,X'0F'  SET SWITCH TO INDICATE COMPOUND "IF"
+         B     INLHERE1        STMT AND GO SCAN NEXT SEGMENT
+         SPACE 3
+*******************STRING IF HANDLER*****************
+INLSTIF2 BAL   INLRLINK,INLLORL$  IS OPERAND A STRING VARIABLE
+*                                 NAME--I.E., IS IT <LETTER>$?
+         B     INLSIFT3           RETURN 1; NOT VARIABLE, GO LOOK
+*                                 FOR QUOTES
+         B     INLER36            RETURN 2; ERROR--STRING VAR OR STRING
+*                                 CONSTANT REQUIRED HERE
+*                                 RETURN 3; STRING VARIABLE FOUND...
+INLSTIF1 CLI   0(INLRI),C'('  IS VARIABLE SUBSCRIPTED?
+         BNE   INLSTIF5       BR IF NOT
+         MVI   INLXINSW,X'FF'      PRE-SET 'CURRENT' TO FUNCTION
+         LA    INLRCURR,INLXF      NAMES FOR EXPRESSION HANDLER
+         BAL   INLRLINK,INLXH
+         L     INLRWORK,INLXPRIC   CHECK PRIMARY COUNT:
+         LTR   INLRWORK,INLRWORK   IS IT = 0?
+         BC    B'0111',INLER36     ERROR IF NOT
+         L     INLRWORK,INLXLPCT   CHECK LEFT PAREN COUNT--
+         CH    INLRWORK,=H'1'      IS IT = 1?
+         BNE   INLER36        ERROR IF NOT
+         B     INLSTIF5
+INLSTIFX BAL   INLRLINK,INLXH
+INLSTIF5 TM    INLSWUTL,X'FF'    REL-OP ENCOUNTERED?
+         BZ    INLSTIF9       BR IF NOT
+         CLC   0(4,INLRI),=CL4'THEN'  YES.  IS ELEMENT 'THEN'?
+         BNE   INLER7         IF NOT, ERROR--'MISSING "THEN"'
+         LA    INLRC,INLTHENC
+         LA    INLRL,4        SET LENGTH TO 4
+         AH    INLRC,INLKG5
+         B     INLIFLIN       AND GO FINISH STATEMENT
+         SPACE
+INLSTIF9 CLI   0(INLRI),C'='  SEARCH FOR REL-OP; IS CHAR '='?
+         BNE   INLSTIFA
+         LA    INLRC,INLEQREL LOAD '=R' CODE
+INLSTIFB LA    INLRL,1
+INLSTIFC AH    INLRC,INLKG4
+         STH   INLRC,0(INLRO)
+         LA    INLRO,2(INLRO)
+         MVI   INLSWUTL,X'FF'    SET REL-OP ENCOUNTERED SWITCH
+         AR    INLRI,INLRL    ADVANCE PAST REL-OP
+         BAL   INLRLINK,INLLORF$  CHECK FOR STRING FUNCTION
+         B     INLSTIF2           NO, GO PROCESS STRING ARG
+         B     INLSTIFX           CHECK FOR END OF COMPARE
+         SPACE
+INLSTIFA CLI   0(INLRI),C'<'  IS CHAR '<'?
+         BNE   INLSTIFD
+         CLI   1(INLRI),C'='  IS ELEMENT '<='?
+         BNE   INLSTIFE
+         LA    INLRC,INLLTE   LOAD '<=' CODE
+INLSTIFG LA    INLRL,2        SET LENGTH TO 2
+         B     INLSTIFC       GO STORE KEYWORD CODE
+         SPACE
+INLSTIFE CLI   1(INLRI),C'>'  IS ELEMENT '<>'?
+         BNE   INLSTIFF       BR IF NOT
+         LA    INLRC,INLLTGT  LOAD '<>' CODE
+         B     INLSTIFG
+         SPACE
+INLSTIFF LA    INLRC,INLLT    LOAD '<' CODE
+         B     INLSTIFB       AND GO STORE IT
+         SPACE 2
+INLSTIFD CLI   0(INLRI),C'>'  IS CHAR '>'?
+         BNE   INLER40        ERROR IF ELEMENT NOT A RELOP
+         CLI   1(INLRI),C'='  IS ELEMENT '>='?
+         BNE   INLSTIFH
+         LA    INLRC,INLGTE   LOAD '>=' CODE
+         B     INLSTIFG
+         SPACE
+INLSTIFH LA    INLRC,INLGT     LOAD '>' CODE
+         B     INLSTIFB
+         SPACE 3
+INLSIFT3 TM    0(INLRI),X'7D' IS OPERAND A STRING CONSTANT?
+         BC    B'1110',INLER36     ERROR IF NOT
+INLSTIFQ BAL   INLRLINK,INLSTRNG   GO SCAN AND STORE STRING CONSTANT
+         B     INLSTIF5
+         SPACE 4
+         SPACE 2
+INLIT1   CLC   1(4,INLRI),=CL4'NPUT'  'INPUT' STATEMENT?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<            'INPUT' STMT
+*                                            -------------------------
+         LA    INLRC,INLKINP       LOAD 'INPUT' CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,5(INLRI)      ADV. PAST 'INPUT'
+         OI    INLSW,INLZINP       SET SW  FOR 'INPUT' STMT
+         B     INLRDA              GO PREPARE TO SCAN VARIABLE LIST
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'W' *******************
+**********************************************************************
+INLW1    CLC   1(4,INLRI),=CL4'RITE'  'WRITE' STATEMENT?
+         BNE   INLDELET      IF NOT, ASSUME DEFAULT 'LET'
+*                                            -------------------------
+*-------------------------------------------<            'WRITE' STMT
+*                                            -------------------------
+         LA    INLRC,INLKWRIT      LOAD 'WRITE' CODE
+         BAL   INLRLINK,INLSTOG3              AND STORE
+         CLI   5(INLRI),C'('       '(' MUST FOLLOW
+         BNE   INLER18             ERROR IF IT DOES NOT
+         LA    INLRI,5(INLRI)      ADV PAST 'WRITE'
+*
+**THIS CODE ADDED 11/23/69 TO COVER THE CASE OF A WRITE-I STATMENT
+**WHICH HAS NO VARIABLES SPECIFIED TO BE WRITTEN.
+**
+**THIS ADDED CODE DESTROYS THE CONTENTS OF REG 15.
+**
+         LR    R15,INLRI          GET CURRENT POINTER IN SAFE (?) REG
+RODF     LA    R15,1(R0,R15)      JUMP OVER
+         CLI   0(R15),C' '        IF BLANK WE HAVE AN ERROR
+         BE    INLER30            GO BLAST OUT AN ERROR
+         CLI   0(R15),C')'        WE ARE TRYING TO GET OVER )
+         BNE   RODF               LOOP UNTIL FOUND
+         CLI   1(R15),C' '        IT BETTER NOT BE BLANK
+         BE    INLER16            BLAST OUT ERROR
+*
+**END OF CODE ADDED 11/23/69
+**NOTE THAT TWO ERROR CODES ADDED 30 AND 16
+*
+         OI    INLSW,INLZWRT       INDICATE WRITE-I STMT
+         CLI   0(INLRI),C' '       BLANK?
+*                                  (MUST CHECK HERE SINCE 'PRINT' STMT
+*                                  HANDLING CODE WILL NOT DISCARD THIS
+*                                  ILLEGAL CASE: WRITE(N,I)    )
+         BE    INLER1              ERROR IF NO MORE
+         LA    INLREGL,INLPRWRI    SET UP LINK REG TO BR TO "PRINT OR
+*                                  WRITE-I" HANDLING CODE
+         LA    INLRLINK,INLPRT1
+         ST    INLRLINK,INLWORKC  NEEDED FOR PRINT CODE
+         B     INLRIWI             GO SCAN (<EXPRESSION>,<SIMVAR>)
+         SPACE
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'O' *******************
+**********************************************************************
+INLO1    CLI   1(INLRI),C'N'       'ON'?--IS THIS THIS A COMPUTED GOTO?
+         BNE   INLDELET            BR IF NOT
+*                                            -------------------------
+*-------------------------------------------<   'COMPUTED GO TO' STMT
+*                                            -------------------------
+         LA    INLRC,INLKCGTO      LOAD 'ON' (COMPUTED GO TO) CODE
+         BAL   INLRLINK,INLSTOG3
+         LA    INLRI,2(INLRI)      ADVANCE PAST KEYWORK
+         SETTABL TERM,GOTO         SET "GOTO" AS EXPRESSION TERMINATOR
+         BAL   INLRLINK,INLXH      GO SCAN EXPRESSION
+         SETTABL ZERO,GOTO         RESTORE TABLE
+         CLI   2(INLRI),C'T'       'GOTO' OR 'GOSUB'?
+         BNE   INLON1              BR IF 'GOSUB'
+         LA    INLRC,INLGOTOC      LOAD "GOTO" CODE
+INLON2   BAL   INLRLINK,INLSTOG5              AND STORE IT
+         AR    INLRI,INLRL         ADVANCE PAST "GOTO"/"GOSUB"
+         LR    INLR15,INLRO        SAVE A SPACE IN INFIX FOR COUNT OF
+         LA    INLRO,2(INLRO)      LINE NUMBERS AND UPDATE INFIX PTR
+         SR    INLREGT,INLREGT     ZERO COUNT REGISTER
+INLLOOP  LA    INLREGT,1(INLREGT)  BUMP COUNT BY ONE
+         BAL   INLRLINK,INLINTLN   GO SCAN LINE NO.
+         CLI   0(INLRI),C' '       END OF LINE?
+         BE    INLOUT              BRANCH IF SO
+         CLI   0(INLRI),C','       COMMA?
+         BNE   INLER25             ERROR IF NOT
+         LA    INLRI,1(INLRI)      ADVANCE SCAN PTR PAST COMMA
+         B     INLLOOP
+         SPACE
+INLON1   LA    INLRC,INLGOSBC      LOAD 'GOSUB' CODE
+         LA    INLRL,5             LOAD LENGTH OF 5
+         B     INLON2
+         SPACE
+INLOUT   STH   INLREGT,0(INLR15)   STORE LINE NO. COUNT IN INFIX RIGHT
+*                                  AFTER CODE FOR "GOTO" OR "GOSUB"
+         B     INLRET1             AND GO TERMINATE LINE
+         SPACE 3
+**********************************************************************
+******************* FIRST CHARACTER OF LINE IS 'C' *******************
+**********************************************************************
+INLC1    CLC   1(5,INLRI),=CL5'LEARD'     'CLEAR DATA' STMT?
+         BNE   INLDELET                   NO, BRANCH
+*                                            -------------------------
+*-------------------------------------------<       'CLEAR DATA' STMT
+*                                            -------------------------
+         LA    INLRC,INLKCLER             LOAD 'CLEAR DATA' CODE
+         B     INLSETRC                   AND GO TERMINATE LINE
+         SPACE 3
+         TITLE 'INLINE CONSTANTS'
+INLKEYTB DS    0F            ADDRESS TABLE FOR KEYWORD ROUTINES
+INLKEYL  DC    A(INLL1)      L     LET
+INLKEYI  DC    A(INLI1)      I     IF,INPUT
+INLKEYF  DC    A(INLF1)      F     FOR
+INLKEYG  DC    A(INLG1)      G     GOSUB,GOTO
+INLKEYR  DC    A(INLCR1)     R     RETURN,RESTORE,READ,REM
+INLKEYD  DC    A(INLD1)      D     DATA,DEF,DUMP,DIM,DEFINE FILE
+INLKEYE  DC    A(INLE1)      E     END
+INLKEYS  DC    A(INLS1)      S     STOP
+INLKEYW  DC    A(INLW1)      W     WRITE
+INLKEYP  DC    A(INLP1)      P     PRINT,PAUSE
+INLKEYM  DC    A(INLM1)      M     MAT
+INLKEYN  DC    A(INLN1)      N     NEXT
+INLKEYO  DC    A(INLO1)      O     ON (COMPUTED GO TO)
+INLKEYC  DC    A(INLC1)      C     CLEAR DATA
+INLKEYDL DC    A(INLDELET)   DEFAULT LET
+INLKEYBL DC    A(INLBL1)     -BLANK-   (MEANS DELETE THE LINE)
+*
+INLLETAB DC    64X'FF'
+         DC    AL1(INLKEYBL-INLKEYTB)  -BLANK-
+         DC    128X'FF'
+         DC    2AL1(INLKEYDL-INLKEYTB)    A-B
+         DC    AL1(INLKEYC-INLKEYTB)      C
+         DC    AL1(INLKEYD-INLKEYTB)      D
+         DC    AL1(INLKEYE-INLKEYTB)      E
+         DC    AL1(INLKEYF-INLKEYTB)      F
+         DC    AL1(INLKEYG-INLKEYTB)      G
+         DC    AL1(INLKEYDL-INLKEYTB)     H
+         DC    AL1(INLKEYI-INLKEYTB)      I
+         DC    7X'FF'
+         DC    2AL1(INLKEYDL-INLKEYTB)    J-K
+         DC    AL1(INLKEYL-INLKEYTB)      L
+         DC    AL1(INLKEYM-INLKEYTB)      M
+         DC    AL1(INLKEYN-INLKEYTB)      N
+         DC    AL1(INLKEYO-INLKEYTB)      O
+         DC    AL1(INLKEYP-INLKEYTB)      P
+         DC    AL1(INLKEYDL-INLKEYTB)     Q
+         DC    AL1(INLKEYR-INLKEYTB)      R
+         DC    8X'FF'
+         DC    AL1(INLKEYS-INLKEYTB)      S
+         DC    3AL1(INLKEYDL-INLKEYTB)    T-V
+         DC    AL1(INLKEYW-INLKEYTB)      W
+         DC    3AL1(INLKEYDL-INLKEYTB)    X-Z
+         DC    22X'FF'
+*
+*
+INLLTAB  DS    0F            USED TO TEST AND TRANSLATE LETTERS;
+*                            NON-LETTERS BECOME X'FF'
+         DC    193X'FF'
+         DC    X'000102030405060708'      A-I
+         DC    7X'FF'
+         DC    X'090A0B0C0D0E0F1011'      J-R
+         DC    8X'FF'
+         DC    X'1213141516171819'        S-Z
+         DC    22X'FF'
+*
+***************KEYWORD GROUP 1 TABLE--SYSTEM FUNCTIONS*************
+*
+INLXFUN  DS    0C             FUNCTION TABLE FOR EXPRESSION HANDLER
+         DC    C'SIN',X'00'   SIN
+         DC    C'COS',X'01'   COS
+         DC    C'TAN',X'02'   TAN
+         DC    C'ATN',X'03'   ATN
+         DC    C'LOG',X'04'   LOG
+         DC    C'EXP',X'05'   EXP
+         DC    C'SQR',X'06'   SQR
+         DC    C'RND',X'07'   RND
+         DC    C'ABS',X'08'   ABS
+         DC    C'SGN',X'09'   SGN
+         DC    C'INT',X'0A'   INT
+         DC    C'PAT',X'0B'       PAT
+         DC    C'PDT',X'0C'       PDT
+         DC    C'PSX',X'0D'       PSX
+         DC    C'PSY',X'0E'       PSY
+         DC    C'PCH',X'0F'       PCH
+         DC    C'PLT',X'10'       PLT
+         DC    C'DAT',X'11'       DAT
+         DC    C'CLK',X'12'       CLK
+         DC    C'LEN',X'13'       LEN
+         DC    C'CAT',X'14'       CAT
+         DC    C'LST',X'15'       LST
+         DC    C'RST',X'16'       RST
+         DC    C'NDX',X'17'       NDX
+         DC    C'NCH',X'18'       NCH
+         DC    C'CHN',X'19'       CHN
+         DC    C'TAB',X'1A'       TAB
+INLXFUNE EQU   *-4
+*
+INLMATF  DS    0C             MAT FUNCTION (GROUP 2) TABLE
+*        EACH 4-BYTE ENTRY CONSISTS OF 2 PARTS:
+*              1.  FUNCTION NAME (3 BYTES)
+*              2.  FUNCTION CODE (1 BYTE)
+*
+         DC    C'ZER',X'00'   ZER
+         DC    C'CON',X'01'   CON
+         DC    C'IDN',X'02'   IDN
+         DC    C'TRN',X'03'   TRN
+INLMINV  DC    C'INV',X'04'   INV
+INLMNRM  DC    C'NRM',X'05'   NRM
+INLMEIG  DC    C'EIG',X'06'   EIG
+INLMATFE EQU   *-4
+*
+*        NOTE IN ADDING MAT FUNCTIONS TO TABLE 'INLMATF':
+*              IF AN ARRAY INITIALIZATION FUNCTION (SUCH AS ZER,CON,
+*              IDN) IS TO BE ADDED, (1) 'INLMIF' MUST BE SET TO THE
+*              NEW TOTAL OF SUCH FUNCTIONS AND (2) THE CODE OF THE NEW
+*              FUNCTION MUST BE SUCH THAT
+*                    0 <= NEW CODE <= 'INLMIF'
+*              REGULAR ARRAY FUNCTIONS (SUCH AS TRN, INV, NRM) MUST BE
+*              GIVEN A NEW CODE SUCH THAT
+*                    'INLMIF' < NEW CODE <= NEW TOTAL NO. OF CODES
+*
+INLMIF   EQU   3
+*
+***************KEYWORD GROUP 3 CODES****************
+*
+INLKLET  EQU   0             LET
+INLKIF   EQU   1             IF
+INLKFOR  EQU   2             FOR
+INLKGOS  EQU   3             GOSUB
+INLKRET  EQU   4             RETURN
+INLKDIM  EQU   5             DIM
+INLKEND  EQU   6             END
+INLKSTOP EQU   7             STOP
+INLKREST EQU   8             RESTORE
+INLKREAD EQU   9             READ
+INLKWRIT EQU   10            WRITE
+INLKPRIN EQU   11            PRINT
+INLKINP  EQU   12            INPUT
+INLKMAT  EQU   13            MAT
+INLKDEF  EQU   14            DEF
+INLKNEXT EQU   15            NEXT
+INLKGOTO EQU   16            GOTO
+INLKDUMP EQU   17            DUMP
+INLKPAUS EQU   18            PAUSE
+INLKREM  EQU   19            REM
+INLKDEL  EQU   20            -DELETE THE LINE-
+INLKDATA EQU   21            DATA
+INLKSNER EQU   22            --SYNTAX ERROR--
+INLKCGTO EQU   23            ON--COMPUTED GO TO
+INLKCLER EQU   24            CLEAR DATA
+INLKDFIL EQU   25            DEFINE FILE
+INLKPRNU EQU   26            PRINT USING
+INLKIMG  EQU   27            : (IMAGE)
+*
+***************KEYWORD GROUP 4 CODES****************
+*
+INLLT    EQU   0             <
+INLGT    EQU   1             >
+INLLTE   EQU   2             <=
+INLGTE   EQU   3             >=
+INLLTGT  EQU   4             <>
+INLEQREL EQU   5             =R
+INLEQ    EQU   6             =
+INLPLUS  EQU   7             +
+INLMINUS EQU   8             -
+INLMULT  EQU   9             *
+INLDIV   EQU   10            /
+INLEXPO  EQU   11            **
+INLLPA   EQU   12            (
+INLLPS   EQU   13            (S
+INLRPA   EQU   14            )
+INLCOMS  EQU   15            ,S
+*
+INLXG5T  DS    0C      KEYWORD TERMINATOR (GROUP 5) TABLE
+*              EACH ENTRY CONSISTS OF 4 PARTS:
+*                   1.  LENGTH OF KEYWORD MINUS ONE (1 BYTE)
+*                   2.  KEYWORD ITSELF (VARIABLE LENGTH)
+*                   3.  CODE FOR KEYWORD (1 BYTE)
+*                   4.  SEQUENCE TABLE INDEX (1 BYTE)
+*
+         DC    AL1(L'INLXTHEN-1)
+INLXTHEN DC    C'THEN',X'00',X'09'     THEN
+         DC    AL1(L'INLXSTEP-1)
+INLXSTEP DC    C'STEP',X'01',X'08'     STEP
+         DC    AL1(L'INLXBY-1)
+INLXBY   DC    C'BY',X'01',X'08'       BY (=STEP)
+         DC    AL1(L'INLXTO-1)
+INLXTO   DC    C'TO',X'02',X'08'       TO
+         DC    AL1(L'INLXGTO-1)
+INLXGTO  DC    C'GOTO',X'06',X'0F'     GOTO
+         DC    AL1(L'INLXGSUB-1)
+INLXGSUB DC    C'GOSUB',X'07',X'0F'    GOSUB
+INLXG5TE EQU   *
+*
+*
+INLXCLC  CLC   1(0,INLRWORK),0(INLRI)  USED TO COMPARE SYNTACTIC
+*              ELEMENTS WITH ENTRIES IN KEYWORD TERMINATOR TABLE
+*
+*
+***************KEYWORD GROUP 5 CODES****************
+INLTHENC EQU   0             THEN
+INLSTEPC EQU   1             STEP
+INLTOC   EQU   2             TO
+INLCOMC  EQU   3             ,
+INLSEMIC EQU   4             ;
+INLBLC   EQU   5             -BLANK-
+INLGOTOC EQU   6             GOTO (IN COMPUTED GOTO & IF STMTS)
+INLGOSBC EQU   7             GOSUB (IN IF & COMPUTED GOTO STMTS)
+*
+         DS    0H
+INLEOL   DC    X'0D05'       END OF LINE CODE
+INLCOMAX DC    X'81'         LOW ORDER 4 BITS ARE MAXIMUM NO. OF COMMAS
+*                            ALLOWED IN A SUBSCRIPT.  HIGH ORDER BIT IS
+*                            FLAG FOR COMPARE IN EXPRESSION HANDLER.
+INLINLEN EQU   133     ***---***MAX LINE LENGTH IN BYTES
+         DS    0F
+INLLX7E  DC    X'0000007E'     CODE FOR '='
+***************KEYWORD CODES BY GROUP****************
+         DS    0H
+INLKG1   DC    X'A000'
+INLKG2   DC    X'9000'
+INLKG3   DC    X'0B00'
+INLKG4   DC    X'0C00'
+INLKG5   DC    X'0D00'
+*****************************************************
+***************SYMBOL CODES BY GROUP*****************
+*
+INLLCD   DC    X'1000'       AVSYM    A-Z
+INLL$CD  DC    X'3000'       STSYM    A$-Z$
+INLFNCD  DC    X'B000'       FNSYM    FNA-FNZ
+INLLDCD  DC    X'2000'       SVSYM    A0-Z9
+INLCNCD  DC    X'6000'       NUMBER CONSTANTS
+INLSCNCD DC    X'7000'       STRING CONSTANTS
+*
+         DS    0D
+INLTERM  DC    X'0200020002000000'     DOUBLE WORD TERMINATOR
+INLZERO  DC    X'0000000000000000'     DOUBLE WORD INITIALIZER
+INLGOOD  DC    X'0100010001000000'     USED TO SET COMMA AS LEGAL
+*
+*                            TO HOLD COUNT OF '=' SIGNS REMAINING IN
+*                            LINE
+***************REGISTERS**********
+INLRBAS1 EQU   10
+INLRBAS2 EQU   11            SECOND BASE REG FOR INLINE
+INLRDBAS EQU   12            BASE REG FOR PARAM/WORK AREA
+INLR1    EQU   1
+INLR2    EQU   2
+INLREGL  EQU   15               LINK REG
+R12      EQU   12
+R13      EQU   13
+INLRWORK EQU   9
+INLRL2   EQU   INLRWORK
+INLRW2   EQU   2
+CONRP    EQU   1
+FR0      EQU   0
+R14      EQU   14
+R15      EQU   15
+INLRLINK EQU   14
+INLRI    EQU   7
+STMT     EQU   INLRI         UPON ENTRY, REG 'STMT' POINTS TO SOURCE
+INLRO    EQU   8
+INLRC    EQU   5
+INLRL    EQU   6
+R0       EQU   0
+R1       EQU   1
+INLRCNT  EQU   INLRL2        WORK REG IN INLINTDM & INLINTLN ROUTINES
+INLREG   EQU   INLRC         PARAM REG IN INLINTDM & INLINTLN ROUTINES
+INLREGT  EQU   INLRL         PARAM REG IN INLINTDM AND INLINTLN
+*                            ROUTINES
+INLRER   EQU   1             ERROR PARAM REG
+INLR0    EQU   0             RETURN CODE REG
+INLRCURR EQU   3
+INLRPREV EQU   4
+INLRSTKP EQU   2             POINTER TO TOP OF STACK IN E.H.
+**********************************************************************
+*****************************************************************
+*              --'INLSW' SWITCH SETTINGS FOR I/O AND LET STMTS--
+*              "INLSW" IS THE STATEMENT TYPE SWITCH---
+*        IF 'LET' STMT, 'INLEQCNT' CONTAINS NO. OF EQUALS SIGNS
+*        FOUND IN LINE BY PRESCAN
+INLZINP  EQU   X'80'               INPUT
+INLZRD   EQU   X'40'               READ OR READ-I
+INLZLET  EQU   X'04'               LET
+INLZMTRD EQU   X'02'               MAT READ
+INLZPRNT EQU   X'20'               PRINT
+INLZWRT  EQU   X'10'               WRITE-I OR MAT WRITE-I
+INLLIST  EQU   X'F2'               USED BY EXPRESSION HANDLER TO TEST
+*                                  'INLSW' TO SEE IF THIS IS A STMT
+*                                  TYPE WHICH CONTAINS LISTS.  (IN SUCH
+*                                  A STMT, COMMAS OUTSIDE SUBSCRIPTS
+*                                  ARE REGARDED AS DELIMITERS.)
+INLIRDRI EQU   X'C0'               USED BY VARIABLE SCANNER TO SEE IF
+*                                  THIS IS INPUT,READ, OR READ-I STMT
+INLZEQSN EQU   X'01'               USED IN STRING LET--MEANS SCAN IS
+*                                  ON LAST OPERAND
+INLZRDIN EQU   X'C0'               READ OR INPUT TEST MASK
+INLZRD2  EQU   X'42'           READ, READ-I, MAT READ-I MASK FOR
+*                              PARAMETER LIST SCANNER
+INLZSTRV EQU   X'08'           USED BY PRINT HANDLER TO INDICATE SUB-
+*                              SCRIPTED STRING VARIABLE
+INLZSTOF EQU   X'F7'           USED BY PRINT HANDLER TO INDICATE EXP.
+*                              UNDER CONSIDERATION IS NOT A STRING VAR.
+*****************************************************************
+*
+********************* SWITCH SETTINGS FOR 'INLSTRSW' ******************
+INLSLONG EQU   X'80'         USED TO INDICATE STRING CONSTANT LONGER
+*                            THAN 'INLSTMAX' CHARACTERS IN 'PRINT' STMT
+*
+***********************************************************************
+*
+*
+**********************************************************************
+INLSCMP1 CLI   0(INLRI),X'00' USED TO TEST FOR DELIMITER
+INLSCMP2 CLI   1(INLRI),X'00' USED TO TEST FOR DELIMITER
+INLSMVC  MVC   0(0,INLRSCAN),1(INLRSCAN)  USED TO COMPRESS STRING
+INLSMVC2 MVC   4(0,INLRL),0(INLRSBEG)     USED TO STORE STRING
+*                                         IN CONSTANT BUFFER
+***********************CODE SETTINGS FOR SEQUENCE TABLE***************
+*
+INLXLDC  EQU   0             A0-Z9,CONSTANTS
+INLXF    EQU   1             FNA-FNZ,SIN,ETC
+INLXL    EQU   2             A-Z
+INLXLPR  EQU   3             (
+INLXRPR  EQU   4             )
+INLXMOP  EQU   5             * / **
+INLXAOP  EQU   6             + -
+INLXINIT EQU   7             INIT.
+INLXFOR  EQU   8             TO  STEP
+INLXIF   EQU   9             THEN  REL.-OP. (EXCEPT =)
+INLXELET EQU   10            =
+INLXQUO  EQU   11            '  "
+INLXCOM  EQU   12            ,
+INLXSEMI EQU   13            ;
+INLXBL   EQU   14            -BLANK-
+INLXGOTO EQU   15            GOTO GOSUB (IN COMPUTED GOTO & IF)
+***********EXPRESSION HANDLER'S TRANSLATE TABLE
+INLXCTAB DS    0F
+         DC    64X'FF'             FILL
+         DC    AL1(INLXADBL-INLXAD00)   -BLANK-
+         DC    10X'FF'             FILL
+         DC    AL1(INLXADNM-INLXAD00)   .     (DEC. PT.)
+         DC    AL1(INLXADLT-INLXAD00)   <
+         DC    AL1(INLXADLP-INLXAD00)   (
+         DC    AL1(INLXADPL-INLXAD00)   +
+         DC    13X'FF'             FILL
+         DC    AL1(INLXADAS-INLXAD00)   *
+         DC    AL1(INLXADRP-INLXAD00)   )
+         DC    AL1(INLXADSM-INLXAD00)   ;
+         DC    X'FF'               FILL
+         DC    AL1(INLXADMN-INLXAD00)   -
+         DC    AL1(INLXADDV-INLXAD00)   /
+         DC    9X'FF'              FILL
+         DC    AL1(INLXADCM-INLXAD00)   ,
+         DC    2X'FF'              FILL
+         DC    AL1(INLXADGT-INLXAD00)   >
+         DC    14X'FF'             FILL
+         DC    AL1(INLXADQ-INLXAD00)    '
+         DC    AL1(INLXADEQ-INLXAD00)   =
+         DC    AL1(INLXADQ-INLXAD00)    "
+         DC    65X'FF'             FILL
+         DC    9AL1(INLXADL-INLXAD00)    A-I
+         DC    7X'FF'              FILL
+         DC    9AL1(INLXADL-INLXAD00)    J-R
+         DC    8X'FF'              FILL
+         DC    8AL1(INLXADL-INLXAD00)    S-Z
+         DC    6X'FF'              FILL
+         DC    10AL1(INLXADNM-INLXAD00)    0-9
+         DC    6X'FF'              FILL
+*
+INLXAD00  DS    0F            ADDRESS TABLE
+*        ADDRESS OF ROUTINE        TO HANDLE
+INLXADBL DC    A(INLXBLNK)         -BLANK-
+INLXADNM DC    A(INLXNUM)          DEC PT, DIGIT
+INLXADLT DC    A(INLXLT)           <
+INLXADLP DC    A(INLXLP)           (
+INLXADPL DC    A(INLXPL)           +
+INLXADAS DC    A(INLXAST)          *
+INLXADRP DC    A(INLXRP)           )
+INLXADSM DC    A(INLXSEM)          ;
+INLXADMN DC    A(INLXMIN)          -
+INLXADDV DC    A(INLXDIV)          /
+INLXADCM DC    A(INLXCOMA)         ,
+INLXADGT DC    A(INLXGT)           >
+INLXADQ  DC    A(INLXSDQ)          ' OR "
+INLXADEQ DC    A(INLXEQ)           =
+INLXADL  DC    A(INLXLETR)         A-Z
+INLXLDIS EQU   INLXADL-INLXAD00     ADDR TABLE DISPLACEMENT FOR LETTER
+*                                  ROUTINE
+*
+INLXON   EQU   X'80'         USED IN PAREN STACK MAINTAINANCE
+INLXOFF  EQU   X'7F'         USED IN PAREN STACK MAINTAINANCE
+INLXDIM1 EQU   15            ROWS
+INLXDIM2 EQU   8             COLUMNS
+INLXSHFT EQU   3             THIS QUANTITY MUST = X IN 2**X=INLXDIM2
+INLXLN   EQU   INLXDIM2*(INLXGOTO-INLXFOR+1)  USED TO COMPUTE NO. OF
+*                                 BYTES FROM "FOR" ROW TO "BLANK" ROW
+*                                 IN SEQUENCE TABLE--THE ERROR HANDLER
+*                                 NEEDS TO KNOW HOW MANY BYTES TO
+*                                 RESET TO ZERO.
+INLXAER  DC    A(INLXERTB)
+INLXERTB DS    0D            ERROR TABLE WHOSE SET-UP DUPLICATES
+*              INLSEQTB:  FOR EVERY ZERO ENTRY IN INLSEQTB, THERE IS AN
+*              APPROPRIATE ERROR CODE IN THE CORRESPONDING ENTRY IN
+*              'INLXERTB'
+*        NOTE:  THE CODES IN THE ERROR TABLE ARE ADJUSTED TO BE IN
+*        THE ONE-THOUSAND SERIES BY ADDING 1000 BEFORE CALLING
+*        'RUNERR'
+*
+         DC    X'1917190019000000'      ROW 0
+         DC    X'1917190019000000'      ROW 1
+         DC    X'1917190019000000'      ROW 2
+         DC    X'2200000022000000'      ROW 3
+         DC    X'0017002300232323'      ROW 4
+         DC    X'0017001900202019'      ROW 5
+         DC    X'0017000000202000'      ROW 6
+         DC    X'1917191919191919'      ROW 7
+         DC    X'1917191919191919'      ROW 8
+         DC    X'1917191919191919'      ROW 9
+         DC    X'1917191919191919'      ROW 10
+         DC    X'2517252525252525'      ROW 11
+         DC    X'2617262626262626'      ROW 12
+         DC    X'2617262626262626'      ROW 13
+         DC    X'0117010101010101'      ROW 14
+         DC    X'1917191919191919'      ROW 15
+*
+         TITLE 'HALFWORD CODE STORING ROUTINES'
+*
+*        THESE 4 ROUTINES OF 14 BYTES EACH COMBINE AND STORE HALFWORD
+*        CODES FOR GROUPS 2,3,4, & 5 (MAT FUNCTIONS, KEYWORDS,
+*        OPERATORS, AND TERMINATORS)
+*
+*        LINK REGISTER IS 'INLRLINK'
+*
+         SPACE 2
+INLSTOG2 STORI INLKG2
+         BR    INLRLINK
+         SPACE 2
+INLSTOG3 STORI INLKG3
+         BR    INLRLINK
+         SPACE 2
+INLSTOG4 STORI INLKG4
+         BR    INLRLINK
+         SPACE 2
+INLSTOG5 STORI INLKG5
+         BR    INLRLINK
+         TITLE 'TEST FOR COMPOUND "IF" STATEMENT'
+*        THE FOLLOWING TEST IS USED TO PREVENT "FOR", "NEXT", AND
+*        NON-EXECUTABLE STATEMENTS FROM OCCURRING IN A COMPOUND
+*        "IF" STATEMENT
+         SPACE
+INLCIFT  TM    INLSWUT2,X'0F'  COMPOUND "IF"?
+         BO    INLER41         ERROR IF SO:  "FOR", "NEXT", AND
+*        NON-EXECUTABLE STMTS ILLEGAL AFTER "THEN"
+         BR    INLRLINK
+         TITLE 'INTEGER HANDLER'
+*********************************************************************
+********************* INTEGER HANDLER *******************************
+*********************************************************************
+*        PURPOSE:  TO SCAN EBCDIC INTEGERS AND CONVERT THEM TO BINARY.
+*                  THIS ROUTINE IS USED BY THE DIM, GOTO, GOSUB, IF,
+*                  AND READ-I STATEMENT HANDLERS.
+*
+*          ENTRY 1 IS USED BY THE DIM ST HANDLER
+*          ENTRY 2 IS USED WHEN A LINE NO. IS EXPECTED
+**         ENTRY 1 (INLINTDM) USES 3 REGS--INLREG,INLREGT,INLRCNT
+**         ENTRY 2 (INLINTLN) USES 2 REGS--INLREG,INLRCNT
+*
+*        CALLS:
+*              BAL   INLRLINK,INLINTDM  TO SCAN ARRAY DIMENSIONS IN
+*                                       'DIM' STATEMENTS
+*
+*              BAL   INLRLINK,INLINTLN  TO SCAN A LINE NUMBER AT THE
+*                            END OF A LINE--OR IN READ-I STMT OR
+*                            COMPUTED GO TO STMT
+*
+*
+*        RETURNS:
+*              INLINTDM RETURNS DIM1 IN INLREGT AND DIM2 (IF NONE, THEN
+*              ZERO) IN INLREG
+*              INLINTLN STORES THE LINE NUMBER IN THE INFIX
+*
+*              UPON RETURN, INLRI (SCAN PTR) POINTS TO THE CHARACTER
+*              AFTER THE LAST DIGIT IN LINE NO. IF LINE NO. AND ')' IF
+*              DIM STATEMENT
+*
+*        NOTE:   REGISTER 0, THE RETURN CODE REG., MUST NOT
+*                BE ALTERED BY INLINTLN, AS IT IS SET BY THE
+*                IF, GOTO, AND GOSUB STMT HANDLERS BEFORE ENTRY TO
+*                INLINTLN.
+*
+*
+INLMAXD  EQU   5             MAXIMUM NO. OF DIGITS ALLOWED IN DIMENSION
+*                            PLUS ONE
+INLMAXL  EQU   5             MAXIMUM NO. OF DIGITS ALLOWED IN LINE NO.
+*                            PLUS ONE
+*
+         DS    0H
+INLINTDM SR    INLREGT,INLREGT     ZERO DIM1 REG
+         LA    INLRCNT,INLMAXD     SET MAX. NO. OF DIGITS ALLOWED IN
+*                                  INTEGER
+         MVI   INLSWTCH,X'FF'      SET SWITCH TO BR TO DIM CODE
+         B     INLDMLN       BRANCH TO COMMON CODE
+         SPACE
+INLINTLN LA    INLRCNT,INLMAXL     SET MAX. NO. OF DEGITS ALLOWED IN
+*                                  LINE NO.
+         MVI   INLSWTCH,X'00'      SET SWITCH TO FALL THROUGH TO LINE
+*                                  NO. RETURN
+         SPACE
+INLDMLN  SR    INLREG,INLREG ZERO RESULT REG
+         ST    INLREG,INLWORKB     ZERO WORK AREA
+         MVI   INLFTSW,X'FF' SET FIRST TIME SWITCH
+INLDIGTT CLI   0(INLRI),C'0' IS CHAR A DIGIT?
+         BL    INLFTSWT      BR IF NOT
+         CLI   0(INLRI),C'9'
+         BH    INLFTSWT
+         MVI   INLFTSW,X'00' YES, SET FIRST TIME SW
+         MVN   INLWORKB+3(1),0(INLRI)
+         MH    INLREG,=H'10'       MULTIPLY NUMBER BY 10
+         A     INLREG,INLWORKB     AND ADD NEWEST DIGIT
+         LA    INLRI,1(INLRI)      ADVANCE TO NEXT CHAR
+         BCT   INLRCNT,INLDIGTT
+         B     INLER28       TOO MANY DIGITS IN INTEGER--ERROR
+         SPACE 2
+INLFTSWT TM    INLFTSW,X'FF' ANY DIGITS ENCOUNTERED YET?
+         BO    INLER28       ERROR IF NOT
+         SPACE 2
+         TM    INLSWTCH,X'FF' IS THIS A 'DIM' STMT?
+         BO    INLDIMST      BR IF SO
+         SPACE
+         LTR   INLREG,INLREG MAKE SURE LINE NO IS NOT ZERO
+         BZ    INLER28
+         STH   INLREG,0(INLRO)   STORE LINE NO. IN INFIX
+         LA    INLRO,2(INLRO)    AND ADVANCE INFIX POINTER
+         BR    INLRLINK      GOOD LINE NUMBER--RETURN
+         SPACE 3
+INLDIMST TM    INLSTRDM,X'FF'  IS THIS A STRING VARIABLE?
+         BO    INLDIMT2        BR IF SO; ONLY ONE SUBSCRIPT ALLOWED
+         SPACE
+         CLI   0(INLRI),C',' IS CHAR A COMMA?
+         BNE   INLDIMT2      NO, BRANCH
+         LTR   INLREGT,INLREGT     DIM2 ALREADY FOUND?
+         BNZ   INLER26       ERROR IF SO--TOO MANY DIMENSIONS IN DIM ST
+         LTR   INLREG,INLREG IS CURRENT DIM=0?
+         BZ    INLER26       ERROR IF SO
+         LR    INLREGT,INLREG      RESULT O.K., SAVE IT
+         LA    INLRCNT,INLMAXD     RELOAD DIGIT COUNTER
+         LA    INLRI,1(INLRI)      ADVANCE PAST COMMA
+         B     INLDMLN       AND SCAN SECOND DIMENSION
+         SPACE 2
+INLDIMT2 CLI   0(INLRI),C')' IS CHAR A RIGHT PAREN?
+         BNE   INLER26       ERROR IF NOT
+         LTR   INLREG,INLREG IS DIM=0?
+         BZ    INLER26       ERROR IF SO
+         LTR   INLREGT,INLREGT     HOW MANY DIMENSIONS?
+         BNZ   INLDMRET
+         LR    INLREGT,INLREG      IF ONE, MOVE DIM TO DIM1 REG AND
+         SR    INLREG,INLREG       ZERO DIM2 REG
+INLDMRET BR    INLRLINK            RETURN
+*
+         TITLE 'INLETTER--ARRAY IDENTIFIER CHECKING ROUTINE'
+*        INLETTER TESTS THE CHARACTER POINTED TO BY REG INLRI TO SEE IF
+*        IT IS A LETTER.  IF IT IS, ITS CODE (A-Z: AVSYM) IS RETURNED
+*        ON REG INLRC AND RETURN IS MADE TO THE RETURN ADDR + 4.
+*        IF IT IS NOT A LETTER, RETURN IS MADE TO RETURN ADDR.
+*
+*        (THE ORIGINAL CHARACTER IS NOT DESTROYED AND RESIDES AT
+*        C(INLRI)-1 UPON RETURN.)
+*
+*        CALL:
+*                      BAL   INLRL2,INLETTER
+*                      B     NOTLETTER
+*             LETTER   EQU   *
+*
+INLETTER MVC   INLSPAC+3(1),0(INLRI)  PRESERVE ORIGINAL CHAR BY TESTING
+         TR    INLSPAC+3(1),INLLTAB   IN WORKAREA
+         TM    INLSPAC+3,X'FF'     IS CHAR A LETTER?
+         BCR   B'0001',INLRL2      BR TO RET ADDR IF NOT
+         L     INLRC,INLSPAC IF SO, SET UP CODE
+         STORI INLLCD        AND STORE IT
+         LA    INLRI,1(INLRI)      ADVANCE SCAN PTR PAST LETTER
+         B     4(INLRL2)     AND RETURN
+*
+         TITLE 'INLLORL$--STRING ARRAY IDENTIFIER CHECKING ROUTINE'
+******************************************************************* ***
+**********  INLLORF$---STRING FUNCTION CHECKING ROUTINE ***************
+***********************************************************************
+INLLORF$ LA    INLRWORK,INLXFUN
+         LA    INLR0,4
+         LA    INLR1,INLXFUNE
+INLLF$1  CLC   0(3,INLRI),0(INLRWORK)
+         BE    INLLF$2
+         BXLE  INLRWORK,INLR0,INLLF$1
+         BR    INLRLINK
+INLLF$2  CLI   3(INLRWORK),X'11'
+         BCR   4,INLRLINK
+         CLI   3(INLRWORK),X'13'
+         BCR   8,INLRLINK
+         CLI   3(INLRWORK),X'17'
+         BCR   8,INLRLINK
+         CLI   3(INLRWORK),X'19'
+         BCR   8,INLRLINK
+         B     4(INLRLINK)
+         EJECT
+***********************************************************************
+********* INLLORL$--STRING ARRAY IDENTIFIER CHECKING ROUTINE **********
+***********************************************************************
+*
+*        PURPOSE:
+*              TO RECOGNIZE BOTH ARRAY IDENTIFIERS AND STRING ARRAY
+*              IDENTIFIERS AND, IF THE ELEMENT IS THE LATTER, TO STORE
+*              THE STRING ARRAY IDENTIFIER IN INFIX.
+*
+*        INPUT:
+*              A PTR ON 'INLRI' TO THE FIRST CHARACTER OF THE ELEMENT
+*              TO BE ANALYZED
+*
+*        OUTPUT:
+*              EXITS 1 & 2:     THE INPUT PTR 'INLRI' IS NOT ALTERED
+*
+*              EXIT 3 (ELEMENT IS STRING ARRAY):  A PTR ON 'INLRI' TO
+*                               THE CHARACTER AFTER THE STRING ARRAY
+*                               IDENTIFIER
+*
+*
+*        RETURNS:
+*              EXIT 1:     RETURN ADDR.  FIRST CHARACTER OF ELEMENT IS
+*                                        NOT A LETTER.
+*
+*              EXIT 2:     RETURN ADDR+4.  FIRST CHARACTER OF ELEMENT
+*                                        IS A LETTER, BUT 2-ND CHAR IS
+*                                        NOT '$'.
+*
+*              EXIT 3:     RETURN ADDR+8.  ELEMENT IS A STRING ARRAY
+*                                        IDENTIFIER.
+*
+*        CALL:
+*                       BAL   INLRLINK,INLLORL$  GO EXAMINE ELEMENT
+*                       B     INLEXIT1   CHAR(I) IS NOT A LETTER
+*                       B     INLEXIT2   CHAR(I+1) IS NOT A '$'
+*              INLEXIT3 .....            'INLRI' POINTS TO CHAR AFTER
+*              *                         <LETTER>$
+*
+*
+*
+*        NOTE: A SPECIAL ENTRY FOR INLLORX$ IS USED WHEN WE WANT
+*              THE IDENTIFICATION OF ANY STRING VARIABLE  TO RETURN
+*              AT 8(INLRLINK).    WHEN INLLOR$L IS CALLED WHICH IS
+*              THE MORE NORMAL TYPE, A$=... ETC RETURNS AS NON-STRING
+*              SO ASSIGNMENT IS TREATED JUST AS  NUMERIC ASSIGNMENT
+*              IS.
+*
+*
+*********************************************************************
+INLLORX$ SR    R0,R0            SET INDICATOR WANT TO IDENT. ANY $ VAR.
+         B     INLL$XX
+INLLORL$ LA    R0,1
+INLL$XX  ST    R0,INLWORKG
+         ST    INLRI,INLWORKF
+         MVC   INLSPAC+3(1),0(INLRI)   IS CHARACTER A LETTER?
+         TR    INLSPAC+3(1),INLLTAB
+         TM    INLSPAC+3,X'FF'
+         BCR   B'0001',INLRLINK    NO; EXIT 1
+         SPACE
+         L     INLRC,INLSPAC
+         CLI   1(INLRI),C'$'  STRING ARRAY?
+         BC    B'0111',4(INLRLINK) NO; EXIT 2
+         CLI   2(INLRI),C'='      ONLY CHECK FURTHER IF DEALING
+         BE    INLL$X              WITH ASSIGNMENT STMT
+         CLI   2(INLRI),C'('
+         BNE   INLL$2
+         LA    R0,1
+         SR    R1,R1
+INLL$Y   AR    INLRI,R0
+         CLI   2(INLRI),C' '
+         BE    INLL$2
+         CLI   2(INLRI),C'('
+         BNE   INLL$Y1
+         AR    R1,R0
+         B     INLL$Y
+INLL$Y1  CLI   2(INLRI),C')'
+         BNE   INLL$Y
+         SR    R1,R0
+         BNM   INLL$Y
+         AR    INLRI,R0
+         CLI   2(INLRI),C'='
+         BNE   INLL$2
+INLL$X   LA    INLRWORK,INLXFUN
+         LA    INLR0,4
+         LA    INLR1,INLXFUNE
+INLL$1   CLC   3(3,INLRI),0(INLRWORK)
+         BE    INLL$3
+         BXLE  INLRWORK,INLR0,INLL$1
+         SPACE
+INLL$2   L     INLRI,INLWORKF
+         STORI INLL$CD        YES; STORE CODE
+         LA    INLRI,2(INLRI) AND ADVANCE PTR PAST STRING VAR
+         B     8(INLRLINK)    RETURN
+INLL$3   L     INLRI,INLWORKF
+         L     R0,INLWORKG
+         LTR   R0,R0              WHAT TYPE OF CALL
+         BZ    INLL$4
+         CLI   3(INLRWORK),X'11'
+         BL    INLL$2
+         CLI   3(INLRWORK),X'13'
+         BE    INLL$2
+         CLI   3(INLRWORK),X'17'
+         BE    INLL$2
+         CLI   3(INLRWORK),X'19'
+         BE    INLL$2
+         LA    INLRI,1(,INLRI)
+         B     4(INLRLINK)
+INLL$4   CLI   3(INLRWORK),X'11'
+         BL    INLL$5
+         CLI   3(INLRWORK),X'13'
+         BE    INLL$5
+         CLI   3(INLRWORK),X'17'
+         BE    INLL$5
+         CLI   3(INLRWORK),X'19'
+         BNE   INLL$2
+INLL$5   LA    INLRI,1(,INLRI)
+         B     4(INLRLINK)
+         TITLE 'INLSIMVR--SIMPLE VARIABLE HANDLER'
+*      THE FOLLOWING ROUTINE, INLSIMVR, DETERMINES IF THE CHARACTER(S)
+*      POINTED TO BY INLRI (AND INLRI+1) FORMS A <SIMPLE VARIABLE>.
+*
+*              <SIMPLE VARIABLE> ::= <LETTER> | <LETTER> <DIGIT>
+*
+*        CALL:
+*              BAL   INLRLINK,INLSIMVR
+*
+*        IF THE INPUT ELEMENT IS NOT A SIMPLE VARIABLE, RETURN IS MADE
+*        TO RETURN ADDR.
+*        IF IT IS, THE HALFWORD CODE FOR THE VARIABLE IS STORED AND THE
+*        INPUT PTR UPDATED TO POINT TO THE CHARACTER AFTER THE VARIABLE
+*        AND RETURN IS MADE TO RETURN ADDR+4.
+         SPACE 2
+INLSIMVR MVC   INLSPAC+3(1),0(INLRI)  MOVE CHAR TO BE TESTED
+         TR    INLSPAC+3(1),INLLTAB   TO WORK SPACE--
+         TM    INLSPAC+3,X'FF'        IS CHAR A LETTER?
+         BCR   B'0001',INLRLINK    ERROR IF NOT
+         CLI   1(INLRI),C'0' IF SO, IS CHAR+1 A DIGIT?
+         BL    INLSVND       NO, CONSIDER VARIABLE NAME = <LETTER>
+         CLI   1(INLRI),C'9'
+         BH    INLSVND
+         BAL   INLRL2,INLTRLD      GO COMPUTE CODE FOR <LETTER><DIGIT>
+         LA    INLRI,2(INLRI)      ADVANCE PAST <LETTER><DIGIT>
+         SPACE
+INLSIMST STH   INLRC,0(INLRO)      STORE CODED HALFWORD
+         LA    INLRO,2(INLRO)      ADV INFIX PTR
+         B     4(INLRLINK)   AND RETURN
+         SPACE
+INLSVND  L     INLRC,INLSPAC SET UP HALFWORD CODE FOR A-Z
+         AH    INLRC,INLLCD
+         LA    INLRI,1(INLRI)      ADVANCE PAST LETTER
+         B     INLSIMST            AND GO STORE CODE
+*
+         TITLE 'INLTRLD--TRANSLATE <LETTER><DIGIT>'
+*
+*        PURPOSE:  COMPUTE INFIX CODE FOR <LETTER><DIGIT>
+*
+*        INPUT:    TRANSLATED LETTER (0-25) IN 'INLSPAC' AND EBCDIC
+*                  DIGIT AT 1(INLRI)
+*
+*        OUTPUT:   INFIX CODE FOR <LETTER><DIGIT> IN REG INLRC
+*
+*        CALLS:
+*              BAL   INLRL2,INLTRLD    IF TRANSLATED LETTER IS IN
+*                                      'INLSPAC'
+*
+*              BAL   INLRL2,INLTRLD1    IF TRANSLATED LETTER IS AT
+*                                      0(INLRI)
+*
+*        ERROR RETURNS:  NONE
+*
+         DS    0H
+         SPACE
+         SPACE
+INLTRLD  L     INLRC,INLSPAC OBTAIN TRANSLATED LETTER FROM INLSPAC
+         MH    INLRC,=H'10'  MULTIPLY BY 10
+         MVN   INLTEMP1+3(1),1(INLRI)  OBTAIN <DIGIT>
+         A     INLRC,INLTEMP1      ADD DIGIT
+         AH    INLRC,INLLDCD       COMBINE WITH SVSYM CODE
+         LA    INLRL,2       PUT LENGTH ON INLRL FOR E.H.
+         BR    INLRL2        RETURN
+*
+         TITLE 'INLSTRNG--STRING CONSTANT SCAN ROUTINE'
+*********************INLSTRNG*****************
+*
+*        PURPOSE:
+*              SCAN STRING CONSTANTS AND STORE THEM IN THE INFIX
+*
+*        INPUT:
+*              A PTR TO THE FIRST QUOTE (DENOTING THE BEGINNING OF THE
+*                    STRING)
+*
+*        OUTPUT:
+*              A PTR TO THE CHARACTER DIRECTLY AFTER THE CLOSE QUOTE
+*                    OF THE STRING
+*
+*        NOTE THAT A STRING MAY BE DELIMITED BY EITHER A SINGLE OR
+*                    A DOUBLE QUOTE
+*
+*
+*        ERROR INDICATOR:
+*              IF THE STRING EXCEEDS 15 CHARACTERS IN LENGTH, AN
+*              ERROR MESSAGE IS GIVEN, UNLESS THE STRING OCCURS IN A
+*              'PRINT' STATEMENT
+*
+*        CALL:
+*              BAL  INLRLINK,INLSTRNG
+*
+************************** REGISTERS **********************************
+INLRMQCT EQU   3              IMBEDDED QUOTE COUNT
+INLRSCAN EQU   15
+INLRINDX EQU   4
+INLRLIM  EQU   5
+INLRSBEG EQU   1              PTR TO 1-ST CHAR IN STRING
+INLRCNTR EQU   0
+INLR6    EQU   6
+INLR14   EQU   14
+INLR15   EQU   15
+INLRSCND EQU   INLRINDX
+***********************************************************************
+INLSTMAX EQU   255            MAXIMUM NO. OF CHARACTERS ALLOWED IN A
+*                             STRING--NOTE:  THIS CANNOT BE SET > 256
+*                             AND MUST BE A (MULTIPLE OF 4) MINUS 1
+INLSTMX1 EQU   INLSTMAX-1     MAXIMUM STRING LENGTH MINUS 1--USED IN
+*                             MVC INSTR
+*                             HANDLER
+         SPACE 3
+INLSTRNG STM   INLR14,INLR6,INLSTSAV    SAVE REGS
+*              NOTE:  DO NOT SAVE AND RESTORE INLRI AND INLRO AS THEY
+*              ARE UPDATED BY INLSTRNG
+         IC    INLRW2,0(INLRI)          GET DELIMITER
+         LA    INLRI,1(INLRI)      LOOK AT 1-ST CHAR IN STRING
+INLSCBEG MVI   INLSTRSW,X'00'    INITIALIZE STRING SWITCH
+         LA    INLRINDX,1               SET INDEX
+         LR    INLRSBEG,INLRI      SAVE BEG. OF STRING
+         LA    INLRLIM,INLSTMAX(INLRI)  SET LIMIT
+         SR    INLRMQCT,INLRMQCT   ZERO IMBEDDED QUOTE COUNT
+         SPACE
+INLSCOMP EX    INLRW2,INLSCMP1     IS CHAR=DELIMITER?
+         BNE   INLSBXLE            BR IF NOT
+         EX    INLRW2,INLSCMP2     YES. IS CHAR+1=DELIMITER?
+         BNE   INLSEND             IF NOT, END OF STRING
+         SPACE
+*        THE FOLLOWING TEST IS NECESSARY TO HANDLE DOUBLE QUOTES AT
+*        THE BEGINNING OF ANY 'PRINT' STRINGS AFTER THE FIRST
+*        'INLSTMAX' CHARACTERS.
+         CR    INLRI,INLRLIM     IS SCAN FINISHED WITH A STRING?
+         BC    B'1011',INLSTOI   IF SO, GO TEST FOR 'PRINT' STMT
+         SPACE
+         LA    INLRMQCT,1(INLRMQCT)     IF SO, IMBEDDED DELIMITER;
+*                                       BUMP IMBEDDED QUOTE COUNT
+         MVI   1(INLRI),X'00'      MARK 2-ND QUOTE FOR LATER
+*                                  COMPRESSION
+         LA    INLRI,1(INLRI)
+         LA    INLRLIM,1(INLRLIM)  ADJUST LIMIT
+INLSBXLE BXLE  INLRI,INLRINDX,INLSCOMP  BUMP SCAN PTR
+         SPACE
+         BCTR  INLRI,0        POINT SCANNER TO FIRST CHAR OF NEXT
+*                             STRING
+INLSTOI  OI    INLSTRSW,INLSLONG  SET "LONG STRING" SWITCH
+         TM    INLSW,INLZPRNT ARE WE IN A 'PRINT' STMT?
+         BZ    INLER33        ERROR IF NOT; STRING CONSTANT TOO LONG
+         L     INLR15,INLDIN  GUARD AGAINST NO CLOSE QUOTE
+         LA    INLR15,INLINLEN(INLR15)  ON 'PRINT' STRING
+         CR    INLRI,INLR15
+         BH    INLER13        ERROR IF SCAN HAS RUN OFF END OF INPUT
+*                             BUFFER
+         SPACE 2
+INLSEND  LTR   INLRMQCT,INLRMQCT   WERE THERE ANY DOUBLE DELIMITERS?
+         BNZ   INLSPRES            IF SO, GO COMPRESS STRING
+         LR    INLRCNTR,INLRI      IF NOT, PREPARE TO STORE STRING
+         SR    INLRCNTR,INLRSBEG   COMPUTE NO.OF CHARACTERS IN STRING
+         B     INLSTOR1
+         SPACE
+INLSPRES LR    INLRCNTR,INLRMQCT   SET LOOP LIMIT
+         LR    INLRSCND,INLRI      SET PTR TO LAST CHAR IN STRING
+         BCTR  INLRSCND,0
+         LR    INLRSCAN,INLRSBEG
+         SPACE
+INLSAGIN LA    INLRSCAN,1(INLRSCAN)     SCAN FOR X'00' MARKERS
+         CLI   0(INLRSCAN),X'00'
+         BNE   INLSAGIN
+*                             WHEN A MARKER IS FOUND,
+         BCTR  INLRSCND,0     DECREMENT LAST CHAR PTR
+         LR    INLR14,INLRSCND
+         SR    INLR14,INLRSCAN
+         BC    B'0100',INLSTORE    NO NEED TO COMPRESS IF DOUBLE
+*                                  DELIMITER AT END OF STRING:
+*                                  E.G., 'TEXT'''
+         EX    INLR14,INLSMVC MOVE CHARACTERS RSCAN+1 THROUGH SCAN END
+*                             TO RSCAN
+         BCT   INLRCNTR,INLSAGIN
+INLSTORE LA    INLRCNTR,1(INLRSCND)  STRING IS COMPRESSED;
+         SR    INLRCNTR,INLRSBEG     COMPUTE NUMBER OF CHARACTERS IN IT
+INLSTOR1 LR    INLR15,INLRCNTR
+********************************************************************
+*************** STRING CONSTANT STORE ROUTINE **********************
+********************************************************************
+         TM    INLSWUT2,X'F0'       IN 'DATA' STMT?
+         BO    INLSTODT             BR IF SO
+         LR    INLRWORK,INLRO       COMPUTE DISPLACEMENT OF CONSTANT'S
+         S     INLRWORK,INLAINFX    LOCATION FROM BEG. OF 'INFIX'
+         L     INLRL,INLCNPTR       LOAD PTR TO CURRENT END OF CON-
+*                                   STANT BUFFER
+         STH   INLRWORK,0(INLRL)    STORE DISPLACEMENT
+         LR    INLRWORK,INLR15      STORE LENGTH OF CONSTANT
+         STH   INLRWORK,2(INLRL)    =LENGTH
+         LH    INLRC,INLSCNSV     FETCH NO. OF CONSTANTS IN TABLE
+         LR    INLRWORK,INLRC     AND SAVE IT
+         STORI INLSCNCD             FORM & STORE STRING CONSTANT CODE
+         LA    INLRWORK,1(INLRWORK) BUMP COUNTER
+         STH   INLRWORK,INLSCNSV  AND SAVE IT
+INLSTRS2 BCTR  INLR15,0             THEN PREPARE TO MOVE STRING
+*                                   INTO BUFFER
+         LTR   INLR15,INLR15        NULL STRING?
+         BM    INLSTRS3             NO STRING TO STORE IF SO
+         EX    INLR15,INLSMVC2      OTHERWISE, STORE STRING
+INLSTRS3 LA    R15,1(,R15)
+         TM    INLSWUT2,X'F0'       ARE WE IN A 'DATA' STMT?
+         BO    INLSTOUT             GO EXIT FROM ROUTINE IF SO
+         LA    INLRL,7(INLR15,INLRL)         NEW END OF THE CONSTANT
+         SRL   INLRL,2
+         SLL   INLRL,2
+         ST    INLRL,INLCNPTR       BUFFER
+********************************************************************
+*************** END OF STRING CONSTANT STORE ROUTINE ***************
+********************************************************************
+         SPACE
+         TM    INLSTRSW,INLSLONG   IS THERE MORE IN THE STRING TO SCAN?
+         BZ    INLSTOUT            DONE IF NOT
+         LA    INLRC,INLSEMIC      AND FORCE ';' CODE IN INFIX RIGHT
+         BAL   INLRLINK,INLSTOG5   AFTER THE STRING CONSTANT INDEX JUST
+*                                  STORED
+         B     INLSCBEG            GO CONTINUE SCAN
+INLRM    MVC   0(0,R14),0(INLRSBEG)
+         SPACE
+INLSTODT LR    INLRL,INLRO         SET UP REG 'INLRL' TO STORE CONSTANT
+         SH    INLRL,=H'4'         IN INFIX FOR 'DATA' STMT
+         USING AREA,INLR2
+         L     INLR2,4(13)        GET AREA ADDRESS FROM SAVED REGS
+         L     INLR2,64(INLR2)    BECAUSE IT WAS IN R11 FOR INLI CALL
+         L     R14,ASTR2PTR
+         SR    R14,R15            SEE WHERE STRING WILL GO
+         C     R14,ASTR1PTR       PAST END ?
+         BNH   INLER42            YES, ERROR
+         ST    R14,ASTR2PTR       STORE NEW POINTER
+         A     R14,ASTRGBEG       GET ACTUAL ADDRESS
+         LA    R14,0(R14,INLR2)
+         ST    R14,4(INLRL)       STORE POINTER
+         STC   R15,4(INLRL)         AND LENGTH
+         BCTR  R15,0              MINUS 1 FOR MVC
+         EX    R15,INLRM
+         SPACE 2
+INLSTOUT LA    INLRI,1(INLRI)      ADVANCE SCAN PTR TO CHAR RIGHT AFTER
+*                                  THE STRING
+         LM    INLR14,INLR6,INLSTSAV  RESTORE REGS--NOTE:  DO NOT SAVE
+*                  AND RESTORE 'INLRI' & 'INLRO' AS THEY ARE UPDATED BY
+*                  INLSTRNG
+         BR    INLRLINK       AND RETURN TO CALLER
+         TITLE 'ERROR HANDLING'
+************************** ERROR CODES ******************************
+INLERN01 EQU   1001       STATEMENT ENDS UNEXPECTEDLY
+INLERN02 EQU   1002       MISSING OR INCORRECT STATEMENT TYPE
+*              1003       SYMBOL FOLLOWING "MAT" NOT RECOGNIZED
+INLERN04 EQU   1004       MISSING OR INCORRECT FUNCTION IDENTIFIER
+*                         --IN "DEF"
+INLERN05 EQU   1005       MISSING OR INCORRECT PARAMETER --IN "DEF"
+INLERN06 EQU   1006       MISSING EQUALS SIGN
+INLERN07 EQU   1007       MISSING "THEN" --"IF"
+INLERN08 EQU   1008       MISSING OR INCORRECT "FOR-VARIABLE"
+INLERN09 EQU   1009       MISSING "TO"
+INLERN10 EQU   1010       INCORRECT STEP --IN "FOR"
+INLERN11 EQU   1011       INCORRECT CONSTANT
+INLERN12 EQU   1012       MISSING OR INCORRECT QUANTITY --IN "READ" OR
+*                         "INPUT"
+INLERN13 EQU   1013       NO CLOSE QUOTE FOR PRINT STRING
+INLERN14 EQU   1014       MISSING PUNCTUATION OR BAD EXPRESSION --IN
+*                         "PRINT" OR "WRITE-I"
+INLERN15 EQU   1015       ILLEGAL WORD FOLLOWS "MAT"
+INLERN16 EQU   1016       NOTHING TO WRITE SPECIFIED IN WRITE STATEMENT
+INLERN17 EQU   1017       IMPROPER MATRIX FUNCTION
+INLERN18 EQU   1018       INCORRECT PARAMETER LIST --IN "READ-I" OR
+*                         "WRITE-I" OR IN A MAT FUNCTION
+INLERN19 EQU   1019       MAY NOT TRANSPOSE MATRIX INTO SELF
+*              1020       MISSING MULTIPLICATION OPERATOR
+*              1021       IMPROPER MATRIX OPERATOR
+INLERN22 EQU   1022       MATRIX MAY NOT BE BOTH OPERAND AND RESULT OF
+*                         MATRIX MULT.
+INLERN23 EQU   1023       MISSING LEFT PARENTHESIS
+INLERN24 EQU   1024       MISSING RIGHT PARENTHESIS
+INLERN25 EQU   1025       ELEMENT NOT RECOGNIZED
+INLERN26 EQU   1026       BAD SUBSCRIPT --IN "DIM"
+INLERN27 EQU   1027       MISSING ARRAY IDENTIFIER
+INLERN28 EQU   1028       MISSING OR BAD INTEGER OR LINE NUMBER
+INLERN29 EQU   1029       NON BLANK CHARACTER FOLLOWING STATEMENT'S
+*                         LOGICAL END
+INLERN30 EQU   1030       MISSING RIGHT PREN. IN WRITE STATEMENT
+INLERN31 EQU   1031       MISSING SIMPLE VARIABLE NAME
+INLERN32 EQU   1032       OPERATOR CANNOT DIRECTLY FOLLOW OPERATOR --
+*                         INVALID EXPRESSION
+INLERN33 EQU   1033       STRING CONSTANT CANNOT EXCEED 15 CHARACTERS
+INLERN34 EQU   1034       MISPLACED LEFT PAREN --INVALID EXPRESSION
+INLERN35 EQU   1035       MISPLACED RIGHT PAREN --INVALID EXPRESSION
+INLERN36 EQU   1036       MISSING OR INCORRECT STRING VARIABLE OR
+*                         STRING CONSTANT
+INLERN37 EQU   1037       MISPLACED QUOTE --INVALID EXPRESSION
+INLERN38 EQU   1038       MISPLACED COMMA OR SEMICOLON --INVALID
+*                         EXPRESSION
+*              1039       INCORRECT CONSTANT IN EXPRESSION
+INLERN40 EQU   1040       MISSING RELATION OPERATOR --IN "IF"
+INLERN41 EQU   1041       "FOR", "NEXT", & NON-EXECUTABLE STMTS ILLEGAL
+*                         AFTER "THEN" --IN COMPOUND "IF"
+INLERN42 EQU   1                  FULL CONSTANT TABLE
+         EJECT
+*
+*********************** BRANCHES TO THE ERROR ROUTINE ************
+*
+INLER1   INLERR 01
+INLER2   INLERR 02
+INLER4   INLERR 04
+INLER5   INLERR 05
+INLER6   INLERR 06
+INLER7   INLERR 07
+INLER8   INLERR 08
+INLER9   INLERR 09
+INLER10  INLERR 10
+INLER11  INLERR 11
+INLER12  INLERR 12
+INLER13  INLERR 13
+INLER14  INLERR 14
+INLER15  INLERR 15
+INLER16  INLERR 16
+INLER17  INLERR 17
+INLER18  INLERR 18
+INLER19  INLERR 19
+INLER22  INLERR 22
+INLER23  INLERR 23
+INLER24  INLERR 24
+INLER25  INLERR 25
+INLER26  INLERR 26
+INLER27  INLERR 27
+INLER28  INLERR 28
+INLER29  INLERR 29
+INLER30  INLERR 30
+INLER31  INLERR 31
+INLER32  INLERR 32
+INLER33  INLERR 33
+INLER34  INLERR 34
+INLER35  INLERR 35
+INLER36  INLERR 36
+INLER37  INLERR 37
+INLER38  INLERR 38
+INLER40  INLERR 40
+INLER41  INLERR 41
+INLER42  INLERR 42
+         EJECT
+*
+************************* ERROR ROUTINE TO CALL 'RUNERR' ************
+*
+INLERROR LR    INLRWORK,INLRER    (INLRER EQU R1)       PRS  12/22/75   27021000
+         SENSE 2                  GET ADDR OF TWORK     PRS  12/22/75   27022000
+         L     R15,0(,R1)         DISPL FOR LOAD TEXT.  PRS  12/22/75   27023000
+         USING INLDSECT,R15       ADDRESS TWORK DSECT   PRS  12/22/75   27024000
+         LR    INLRER,INLRWORK    RESTORE PTR TO ERROR  PRS  12/22/75   27025000
+         CLI   SW1,X'01'          ATTENTION?            PRS  12/22/75   27026000
+         DROP  R15                                      PRS  12/22/75   27027000
+         BE    NOMSG                                    PRS  12/22/75   27028000
+         L     INLRWORK,INLAINFX  OBTAIN LINE NO. AND PUT IT
+         LH    INLR0,0(INLRWORK)  IN REG. 0 FOR RUNERR ROUTINE
+         L     INLR15,=V(RUNERR)
+         BALR  INLRLINK,INLR15
+NOMSG    LA    INLRLINK,INLSEQTB   RESTORE SEQUENCE TABLE TO ZEROES
+         LA    INLR15,INLXFOR      STARTING WITH ROW 8 ("FOR" ROW)
+         SLL   INLR15,INLXSHFT     TAKE ROW NO. * 8 AND COMPUTE ADDR OF
+         AR    INLRLINK,INLR15     "FOR" ROW
+         XC    0(INLXLN,INLRLINK),0(INLRLINK)   AND ZERO OUT REMAINDER
+*                                  OF TABLE (THROUGH "BLANK" ROW)
+         L     INLRO,INLAINFX     RESET OUTPUT PTR TO KEYWORD CODE
+         LA    INLRO,2(INLRO)     POSITION
+         LA    INLRC,INLKSNER     LOAD '--SYNTAX ERROR--' CODE
+         BAL   INLRLINK,INLSTOG3
+         SR    INLR0,INLR0   INDICATE BAD LINE, IGNORE--TO CONTROL
+*                            PROGRAM
+         L     INLRBAS1,INLSAVB1   INSURE ADDRESSABILITY WITH INLINE
+         B     INLRET1A      RETURN
+*
+*
+         TITLE 'LITERAL POOL'
+$LTORG   DS    (&MAXLITS)C   SAVE ROOM FOR LITERALS
+         TITLE 'INLXH--EXPRESSION HANDLER'
+*
+*        PURPOSE:
+*              TO SCAN EXPRESSIONS IN SOURCE CODE AND PRODUCE INFIX
+*              HALFWORDS, CHECKING TO MAKE SURE THE EXPRESSION IS
+*              SYNTACTICALLY CORRECT.  IF IT IS NOT, THE SCAN IS TERM-
+*              INATED AND AN ERROR MESSAGE IS ISSUED.
+*
+*
+*        METHOD:
+*              THE ELEMENTS OF THE INPUT EXPRESSION ARE EXAMINED FROM
+*              LEFT TO RIGHT TWO AT A TIME.  THEY ARE CHECKED FOR
+*              CORRECTNESS OF SEQUENCE BY ACCESSING THEIR CORRESPONDING
+*              SEQUENCE TABLE ENTRY.  THIS ENTRY CONTAINS A ZERO IF THE
+*              SEQUENCE IS SYNTACTICALLY INVALID; FOR EXAMPLE, AN OPER-
+*              ATOR CANNOT DIRECTLY FOLLOW ANOTHER OPERATOR (I.E., '*+'
+*              IS ILLEGAL), SO THE CORRESPONDING TABLE ENTRY IS ZERO.
+*
+*              ENTRIES FOR ACCEPTABLE SEQUENCES ARE SET TO ONE; ENTRIES
+*              FOR SEQUENCES WHICH TERMINATE AN EXPRESSION (E.G.,
+*              'ATHEN'--'THEN' BEING A KEYWORD) ARE SET TO TWO.
+*
+*              A PAREN STACK IS MAINTAINED FOR 2 PURPOSES:  TO CHECK
+*              THE CORRECTNESS OF SEQUENCE AND NUMBER OF PARENTHESES
+*              AND TO KEEP TRACK OF WHEN COMMAS ARE VALID (I.E., TO
+*              KEEP TRACK OF WHEN THE SCAN IS IN A SUBSCRIPT).
+*
+*
+*        INPUT:
+*              REG. 'INLRI' POINTS TO A STRING OF SOURCE LANGUAGE ELE-
+*              MENTS, THE FIRST OF WHICH IS THE FIRST ELEMENT IN THE
+*              EXPRESSION
+*
+*              REG 'INLRO' POINTS TO THE CURRENT END OF THE INPUT
+*              STRING
+*
+*
+*        OUTPUT:
+*
+*              REG. 'INLRI' POINTS TO THE ELEMENT WHICH TERMINATED THE
+*              EXPRESSION (NOTE THAT AT LEAST ONE ELEMENT MUST BE SET
+*              AS A TERMINATING ELEMENT IN THE SEQUENCE TABLE BEFORE
+*              CALLING 'INLXH')
+*
+*              REG. 'INLRC' CONTAINS THE HALFWORD CODE FOR THE TERMIN-
+*              ATING ELEMENT
+*
+*              REG. 'INLRL' CONTAINS THE LENGTH (IN BYTES) OF THE TER-
+*              MINATING ELEMENT
+*
+*              REG. 'INLRO' POINTS TO THE NEW END OF THE INFIX STRING;
+*              THE HALFWORD CODE FOR THE TERMINATING ELEMENT HAS NOT
+*              YET BEEN ADDED
+*
+*              THE WORD 'INLXPRIC' CONTAINS THE NUMBER OF PRIMARIES
+*              WHOLLY OUTSIDE OF SUBSCRIPTS; THIS COUNT IS USED BY THE
+*              CALLING ROUTINE WHEN IT SCANS SUBSCRIPTED VARIABLES IN
+*              CERTAIN I/O LISTS
+*
+*
+*        CALL:
+*                   SETTABL TERM,CODE1(,CODE2,CODE3,CODE4)   SET ONE
+*              *                     OR MORE ELEMENTS AS TERMINATORS
+*                   BAL   INLRLINK,INLXH      GO SCAN EXPRESSION
+*                   SETTABL ZERO,CODE1(,CODE2,CODE3,CODE4)   RESTORE
+*              *                     TABLE TO INITIAL STATE
+*
+*
+         EJECT
+*********************SEQUENCE TABLE FOR EXPRESSION HANDLER***********
+*
+*        THE SEQUENCE TABLE IS PRESET AS FOLLOWS (ALL TERMINATOR
+*        SETTINGS--ROWS 8 THROUGH 14--ARE ALSO GIVEN ALTHOUGH THEY
+*        ARE SET BY THE INDIVIDUAL STATEMENT HANDLERS BEFORE CALLING
+*        THE EXPRESSION HANDLER):
+*
+*
+**** PREVIOUS|  0   |  1   |  2   |  3   |  4   |  5   |  6   |  7   |
+*   ***      |A0-Z9 |FNA-Z | A-Z  |  (   |  )   |  *   |  +   | INIT |
+*      ***   |CONST.|SIN,  |      |      |      |  /   |  -   |      |
+* CURRENT ***|      |ETC.  |      |      |      |  **  |      |      |
+*---------------------------------------------------------------------
+* 0  A0-Z9   |      |      |      |      |      |      |      |      |
+*    CONST.  |  0   |  0   |  0   |  1   |  0   |  1   |  1   |  1   |
+*---------------------------------------------------------------------
+* 1  FNA-FNZ |      |      |      |      |      |      |      |      |
+*    SIN,ETC |  0   |  0   |  0   |  1   |  0   |  1   |  1   |  1   |
+*---------------------------------------------------------------------
+* 2  A-Z     |      |      |      |      |      |      |      |      |
+*            |  0   |  0   |  0   |  1   |  0   |  1   |  1   |  1   |
+*---------------------------------------------------------------------
+* 3   (      |      |      |      |      |      |      |      |      |
+*            |  0   |  1   |  1   |  1   |  0   |  1   |  1   |  1   |
+*---------------------------------------------------------------------
+* 4   )      |      |      |      |      |      |      |      |      |
+*            |  1   |  0   |  1   |  0   |  1   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 5   *  /   |      |      |      |      |      |      |      |      |
+*     **     |  1   |  0   |  1   |  0   |  1   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 6   +  -   |      |      |      |      |      |      |      |      |
+*            |  1   |  0   |  1   |  1   |  1   |  0   |  0   |  1   |
+*---------------------------------------------------------------------
+* 7   INIT.  |      |      |      |      |      |      |      |      |
+*            |  0   |  0   |  0   |  0   |  0   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 8   TO     |      |      |      |      |      |      |      |      |
+*   STEP, BY |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 9   THEN   |      |      |      |      |      |      |      |      |
+*    REL-OP* |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 10  =      |      |      |      |      |      |      |      |      |
+*            |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 11  '  "   |      |      |      |      |      |      |      |      |
+*            |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 12  ,      |      |      |      |      |      |      |      |      |
+*            |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 13  ;      |      |      |      |      |      |      |      |      |
+*            |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 14 -BLANK- |      |      |      |      |      |      |      |      |
+*            |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+* 15 GOTO    |      |      |      |      |      |      |      |      |
+*    GOSUB   |  2   |  0   |  2   |  0   |  2   |  0   |  0   |  0   |
+*---------------------------------------------------------------------
+*
+*         REL-OP* MEANS ALL RELATION-OPS EXCEPT '='
+*         NOTE:  THE TABLE MUST START ON A FULL WORD BOUNDARY
+*                AND SHOULD START ON A DOUBLE WORD BOUNDARY FOR
+*                MAXIMUM SPEED.
+*
+         EJECT
+         SPACE 3
+INLXH    ST    INLRBAS1,INLXSAVL   SAVE INLINE'S BASE REG. 1
+         STM   INLRLINK,R15,INLXSAVL+4 SAVE LINK REG & REG 15
+         BALR  INLRBAS1,0     ESTABLISH ADDRESSABILITY IN EXPRESSION
+         USING *,INLRBAS1     HANDLER
+         LA    INLRSTKP,INLXSTAK   SET STACK PTR TO STACK BEG
+         ST    INLRSTKP,INLXSTKB   SAVE BEG. OF STACK
+         SR    INLRLINK,INLRLINK
+         ST    INLRLINK,INLXPRIC   ZERO PRIMARY COUNTER
+         ST    INLRLINK,INLXLPCT   ZERO OUT LEFT PAREN COUNTER
+         XC    INLXSTAK(40),INLXSTAK    ZERO OUT PARENS STACK
+         TM    INLXINSW,X'FF' BRANCH TEST--TO SET CURRENT HERE OR NOT?
+         BO    *+8            BR IF NOT
+         LA    INLRCURR,INLXINIT   PRIME SEQUENCE WITH INITIAL CODE
+         MVI   INLXINSW,X'00'      RESET SWITCH
+         SPACE
+INLXBEG  LR    INLRPREV,INLRCURR    ADVANCE SEQUENCE
+         MVC   INLSPAC+3(1),0(INLRI)  TRANSLATE FIRST CHAR OF ELEMENT
+         TR    INLSPAC+3(1),INLXCTAB
+         TM    INLSPAC+3,X'FF'     IS IT VALID?
+         BO    INLER25       IF NOT, ERROR--UNRECOGNIZABLE OPERAND
+         L     INLRLINK,INLSPAC    COMPUTE INDEX IN ADDRESS TABLE
+         LA    INLRWORK,INLXAD00
+         L     INLRLINK,0(INLRLINK,INLRWORK)  PICK UP ADDRESS
+         BR    INLRLINK      BR TO APPROPRIATE ROUTINE
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A LETTER ***************
+**********************************************************************
+INLXLETR CLI   1(INLRI),C'0' IS CHAR+1 A DIGIT?
+         BL    INLXNTD1      NO, BRANCH
+         CLI   1(INLRI),C'9'
+         BH    INLXNTD1      NO, BR
+         MVC   INLSPAC+3(1),0(INLRI)    TRANSLATE LETTER FOR
+         TR    INLSPAC+3(1),INLLTAB     INLTRLD ROUTINE
+         BAL   INLRL2,INLTRLD      GO TRANSLATE <LETTER><DIGIT>
+*              HALF WORD CODE IS NOW ON INLRC AND LENGTH OF INPUT
+*              ELEMENT IS ON INLRL
+         LA    INLRCURR,INLXLDC    SET CURRENT CODE FOR <LETTER><DIGIT>
+         SPACE 2
+INLXPRCT C     INLRSTKP,INLXSTKB   IS STACK EMPTY?--I.E., ARE WE OUT-
+*                                  SIDE OF SUBSCRIPTS & ARGUMENTS?
+         BNE   INLXTEST      NO, BR
+         L     INLRLINK,INLXPRIC   YES, BUMP PRIMARY COUNTER
+         LA    INLRLINK,1(INLRLINK)  TO KEEP TRACK OF NO. OF
+         ST    INLRLINK,INLXPRIC   PRIMARIES NOT ENCLOSED BY PARENS
+         SPACE 2
+INLXTEST BAL   INLRLINK,INLXTT     GO TEST SEQUENCE VALIDITY--CAN
+*                                  'CURRENT' FOLLOW 'PREVIOUS'?
+         SPACE
+INLXSTO1 STH   INLRC,0(INLRO)      ADD HALFWORD CODE TO END OF INFIX
+         LA    INLRO,2(INLRO)      BUMP INFIX PTR
+         AR    INLRI,INLRL   BUMP INPUT PTR TO NEXT ELEMENT
+         B     INLXBEG       GO ANALYZE NEXT ELEMENT
+         SPACE 3
+INLXNTD1 MVC   INLSPAC+3(1),1(INLRI)  MOVE A CHAR TO TESTING SPACE
+         TR    INLSPAC+3(1),INLXCTAB  IS CHAR+1 A LETTER?
+         CLI   INLSPAC+3,INLXLDIS
+         BNE   INLXNTL1      BR IF NOT
+         CLC   0(2,INLRI),=CL2'FN'  WERE FIRST 2 LETTERS 'FN'?
+         BNE   INLXNTFN      BR IF NOT
+         MVC   INLSPAC+3(1),2(INLRI)  MOVE A CHAR TO TEST IT
+         TR    INLSPAC+3(1),INLLTAB   IS CHAR+2 A LETTER?
+         CLI   INLSPAC+3,X'FF'
+         BO    INLER25       ERROR IF NOT--OPERAND NOT RECOGNIZED
+         L     INLRC,INLSPAC LOAD TRANSLATED LETTER;
+         AH    INLRC,INLFNCD COMBINE WITH FN<LETTER> CODE
+         LA    INLRL,3       SET LENGTH TO 3
+         LA    INLRCURR,INLXF      SET CURRENT TO CODE FOR FN<LETTER>
+         B     INLXPRCT
+         SPACE
+****************             NEXT CHECK TO SEE IF ELEMENT IS EITHER A
+*                            SYSTEM FUNCTION OR 'TO', 'STEP', 'GOTO',
+*                            'GOSUB', OR 'BY'
+*
+INLXNTFN LA    INLRWORK,INLXFUN  INITIALIZE FUNCTION TABLE SCAN PTR
+         LA    INLR0,4       SET INDEX = TABLE ENTRY SIZE
+         LA    INLR1,INLXFUNE    SET LIMIT = LAST ENTRY IN TABLE
+         SPACE
+INLXLOOP CLC   0(3,INLRI),0(INLRWORK)  SEARCH FOR MATCH
+         BE    INLXOUT1          FOUND IT
+         BXLE  INLRWORK,INLR0,INLXLOOP
+         SPACE 2
+*        ELEMENT IS NOT A FUNCTION NAME, NEXT SEE IF IT IS A KEYWORD
+*        TERMINATOR
+         LA    INLRWORK,INLXG5T  INITIALIZE KEYWORD TERMINATOR TABLE
+*                                SCAN PTR
+         SR    INLRL,INLRL
+INLXLOP2 IC    INLRL,0(INLRWORK) PICK UP ENTRY LENGTH MINUS ONE
+         EX    INLRL,INLXCLC     FOR CLC AND COMPARE
+         BE    INLXOUT2          IF EQUAL, BRANCH
+         AR    INLRWORK,INLRL    ELSE ADVANCE TO NEXT ELEMENT
+         LA    INLRWORK,4(INLRWORK)
+         C     INLRWORK,=A(INLXG5TE)  END OF TABLE?
+         BL    INLXLOP2          NO, CONTINUE SEARCH
+*                                YES, ELEMENT IS NEITHER FUNCTION NOR
+*              KEYWORD TERMINATOR--THEREFORE ASSUME IT IS A <LETTER>
+         SPACE
+INLXNTL1 TR    0(1,INLRI),INLLTAB  ASSUME A-Z,TRANSLATE LETTER
+         CLI   1(INLRI),C'$'      IS IT STRING VARIABLE
+         BNE   INLXNTL3           NO, GO SET LETTER CODE
+         LR    INLRWORK,INLRO     NOW, FIND IF IN STRING FUNCTION
+         SH    INLRWORK,=H'4'      BY LOOKING AT WHATS COME BEFORE
+         CLI   0(INLRWORK),X'A0'  IS IT A FUNCTION
+         BNE   INLXNTLX           NOT HERE, BUT MAY BE SECOND ARG
+         CLI   1(INLRWORK),X'13'  IS THIS A FUNC. WHICH ALLOWS IT
+         BL    INLXNTL3           NO, GO SET LETTER CODE
+         CLI   1(INLRWORK),X'18'
+         BE    INLXNTL3
+         CLI   1(INLRWORK),X'1A'
+         BE    INLXNTL3
+         B     INLXNTL2           YES, GO SET STRING CODE
+INLXNTLX SH    INLRWORK,=H'4'     BACK UP AS IF 2 ARG. FUNC.
+         CLI   0(INLRWORK),X'A0'  A FUNCTION ?
+         BNE   INLXNTL3           NO, GO SET LETTER CODE
+INLXNTL2 LA    INLRL,2            SET ITEM LENGTH
+         LH    INLRC,INLL$CD      GET STRING CODE
+         IC    INLRC,0(INLRI)     AND ITS INDEX
+         LA    INLRCURR,INLXL     SET 'CURRENT' CODE
+         B     INLXPRCT           GO TEST SEQUENCE
+INLXNTL3 LA    INLRL,1            SET LENGTH
+         LH    INLRC,INLLCD       SET LETTER CODE
+         IC    INLRC,0(INLRI)     IND ITS INDEX
+         LA    INLRCURR,INLXL     SET 'CURRENT' CODE
+         B     INLXPRCT           GO TEST SEQUENCE
+         SPACE
+INLXOUT2 LA    INLRL,1(INLRL)    PUT ELEMENT LENGTH ON 'INLRL'
+         AR    INLRWORK,INLRL    PICK UP CODE
+         SR    INLRC,INLRC
+         IC    INLRC,1(INLRWORK)
+         SR    INLRCURR,INLRCURR PICK UP SEQUENCE TABLE INDEX
+         IC    INLRCURR,2(INLRWORK)
+         AH    INLRC,INLKG5   COMBINE KEYWORD CODE WITH GR 5 CODE
+         B     INLXTEST       GO TEST LEGALITY OF SEQUENCE
+*        (NOTE: ELEMENT LENGTH IS ON 'INLRL')
+         SPACE 2
+INLXOUT1 SR    INLRC,INLRC    PICK UP FUNCTION CODE
+         IC    INLRC,3(INLRWORK)
+         AH    INLRC,INLKG1   COMBINE FUNCTION CODE WITH GROUP 1 CODE
+         LA    INLRL,3        SET LENGTH=3
+         LA    INLRCURR,INLXF SET CURRENT CODE FOR FUNCTION
+         B     INLXPRCT       AND GO TEST SEQUENCE
+         SPACE 3
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS DIGIT OR DEC PT ********
+**********************************************************************
+INLXNUM  EQU   *              SET UP CALL TO 'CONVERT' ROUTINE WHICH
+*        SCANS THE EBCDIC NUMBER AND CONVERTS IT TO FL. PT., RETURNING
+*        IT IN FL. PT. R0
+         LR    CONRP,INLRI   SET SCAN PTR
+         LA    INLRWORK,CONWORKA  SET PTR TO WORKAREA
+         L     R15,=V(CONVERT)
+         BALR  R14,R15       BRANCH TO CONVERT ROUTINE
+         B     INLER11       ERROR RETURN--"INCORRECT CONSTANT"
+********************************************************************
+********************** CONSTANT STORE ROUTINE **********************
+********************************************************************
+         LH    INLRC,INLCNSV   FETCH NO OF CONSTANTS CURRENTLY IN TAB
+         LR    INLRWORK,INLRC
+         LA    INLRWORK,1(INLRWORK)  BUMP IT BY ONE
+         STH   INLRWORK,INLCNSV  AND SAVE IT
+         AH    INLRC,INLCNCD  FORM CONSTANT CODE
+         LR    INLRWORK,INLRO COMPUTE DISPLACEMENT OF THE POSITION
+         S     INLRWORK,INLAINFX   OF THE CONSTANT'S CODE IN THE
+*                                  'INFIX'
+         L     INLRL,INLCNPTR LOAD PTR TO CURRENT END OF CONSTANT
+*                             BUFFER
+         STH   INLRWORK,0(INLRL)   STORE DISPLACEMENT
+         LA    INLRWORK,4     STORE LENGTH OF CONSTANT=4
+         STH   INLRWORK,2(INLRL)
+         STE   FR0,4(INLRL)   STORE THE CONSTANT ITSELF
+         LA    INLRL,8(INLRL) AND SAVE THE NEW END OF CONSTANT
+         ST    INLRL,INLCNPTR BUFFER
+********************************************************************
+************** END OF  CONSTANT STORE ROUTINE **********************
+********************************************************************
+         LR    INLRL,CONRP   COMPUTE LENGTH TO SET UP FOR 'INLXSTO1'
+         SR    INLRL,INLRI
+         LA    INLRCURR,INLXLDC    SET CURRENT CODE
+         B     INLXPRCT      GO TEST SEQUENCE VALIDITY
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS LEFT PAREN *************
+**********************************************************************
+INLXLP   C     INLRSTKP,INLXSTKB   IS STACK EMPTY?
+         BNE   INLXLP1             BR IF NOT
+         L     INLRLINK,INLXLPCT   BUMP LEFT PAREN COUNTER BY ONE IF SO
+         LA    INLRLINK,1(INLRLINK)
+         ST    INLRLINK,INLXLPCT
+INLXLP1  LA    INLRSTKP,1(INLRSTKP)  BUMP STACK PTR
+         LA    INLRLINK,INLXL      WAS PREV ELEMENT AN ARRAY NAME?
+         CR    INLRPREV,INLRLINK
+         BNE   INLXNTAR      BR, IF NOT
+         OI    0(INLRSTKP),INLXON  SET SUBSCRIPT BIT IN STACK TO ONE
+INLXSLPS LA    INLRC,INLLPS  SET (S CODE
+         B     INLXTR4
+INLXNTAR NI    0(INLRSTKP),INLXOFF SET SUBSCRIPT BIT TO 0
+         LA    INLRLINK,INLXF      WAS PREV ELEMENT A
+         CR    INLRPREV,INLRLINK   FUNCTION NAME?
+         BE    INLXSLPS      GO SET (S CODE IF SO
+         LA    INLRC,INLLPA  OTHERWISE SET ( CODE
+         SPACE
+INLXTR4  AH    INLRC,INLKG4  COMBINE KEYWORD GROUP 4 CODE WITH OPERATOR
+*                            CODE
+         LA    INLRL,1       LOAD LENGTH
+         LA    INLRCURR,INLXLPR    SET CURRENT TO '('
+         B     INLXTEST      GO TEST SEQUENCE VALIDITY
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A RIGHT PAREN **********
+**********************************************************************
+INLXRP   MVI   0(INLRSTKP),X'00'  LEAVING THIS SUBSCRIPT LEVEL
+*        (IF WE WERE IN A SUBSCRIPT), SO RESET IT TO ZERO
+         BCTR  INLRSTKP,0    DECREMENT STACK PTR BY 1
+         C     INLRSTKP,INLXSTKB   IS STACK NEGATIVE?
+         BL    INLER23       ERROR IF SO--MISSING '('
+         LA    INLRC,INLRPA  SET ')' CODE
+         AH    INLRC,INLKG4  COMBINE WITH KEYWORD, GR 4 CODE
+         LA    INLRL,1       LOAD LENGTH
+         LA    INLRCURR,INLXRPR    SET CURRENT TO ')'
+         B     INLXTEST
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A COMMA ****************
+**********************************************************************
+INLXCOMA TM    0(INLRSTKP),X'80'   ARE WE CURRENTLY IN A SUBSCRIPT?
+         BO    INLXINSB      YES, BRANCH
+         LR    INLRWORK,INLRO     FIND IF STRING FUNCTION
+         SH    INLRWORK,=H'6'
+         CLI   0(INLRWORK),X'A0'  IS IT A FUNCTION
+         BNE   INLXCMA2           NO, THEN NO SPECIAL CASE
+         CLI   1(INLRWORK),X'13'  IS IT STRING FUNCTION
+         BNH   INLXCMA2           NO, COMMA A DELIM OR ILLEGAL
+         CLI   1(INLRWORK),X'18'  BELOW TWO ARGS O.K.
+         BL    INLXINSB
+INLXCMA2 TM    INLSW,INLLIST       IS THIS A LIST?
+         BZ    INLER38       NO, ERROR--MISPLACED COMMA
+         SPACE
+         SETTABL TERM,COM  SET COMMAS AS EXPRESSION TERMINATORS
+         LA    INLRC,INLCOMC LOAD COMMA CODE
+         AH    INLRC,INLKG5  COMBINE WITH KEYWORD GR5 CODE
+         B     INLXSTCU      GO SET 'CURRENT' CODE
+         SPACE
+INLXINSB SETTABL GOOD,COM   SET COMMA ROW TO O.K.
+         SR    INLRLINK,INLRLINK   BUMP COMMA COUNT FOR THIS SUBSCRIPT
+         IC    INLRLINK,0(INLRSTKP)  BY ONE
+         LA    INLRLINK,1(INLRLINK)
+         STC   INLRLINK,0(INLRSTKP)
+         CLC   0(1,INLRSTKP),INLCOMAX TOO MANY COMMAS IN THIS SUBSCR?
+         BH    INLER38       YES, ERROR--MISPLACED COMMA - OR TOO MANY
+*                            DIMENSIONS IN SUBSCRIPT
+         LA    INLRC,INLCOMS LOAD ',S' CODE
+         AH    INLRC,INLKG4  COMBINE WITH KEYWORD, GR4 CODE
+         SPACE
+INLXSTCU LA    INLRL,1       SET LENGTH
+         LA    INLRCURR,INLXCOM
+         BAL   INLRLINK,INLXTT     GO TEST SEQUENCE VALIDITY
+         SPACE
+INLXRSET LA    INLRCURR,INLXINIT   RESET 'CURRENT' CODE SO IT WILL
+*                            FIT IN TABLE WHEN IT BECOMES 'PREVIOUS'
+*                            (CAN DO THIS SINCE COMMA IN SUBSCRIPT IS
+*                            EQUIVALENT TO INIT)
+         SETTABL ZERO,COM    RESET TABLE
+         B     INLXSTO1
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS AN ASTERISK ************
+**********************************************************************
+INLXAST  LA    INLRCURR,INLXMOP    SET CURRENT TO '*' CODE
+         CLI   1(INLRI),C'*' IS CHAR+1 '*'?
+         BE    INLXEXP       IF SO, EXPONENTIATION
+         LA    INLRC,INLMULT LOAD MULT-OP CODE
+INLXLEL2 LA    INLRL,1       SET LENGTH TO ONE
+INLXCOM1 AH    INLRC,INLKG4  COMBINE WITH KEYWORD, GR4 CODE
+         B     INLXTEST      GO TEST SEQUENCE VALIDITY
+         SPACE
+INLXEXP  LA    INLRL,2       LOAD EXP-OP LENGTH
+         LA    INLRC,INLEXPO LOAD EXP-OP CODE
+         B     INLXCOM1
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A '/' ******************
+**********************************************************************
+INLXDIV  LA    INLRCURR,INLXMOP
+         LA    INLRC,INLDIV  SET UP DIV-OP CODE
+         B     INLXLEL2      AND GO TEST
+         SPACE
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A '+' ******************
+**********************************************************************
+INLXPL   LA    INLRCURR,INLXAOP   SET CURRENT TO ADD-OP
+         LA    INLRWORK,INLXINIT  DOES THIS '+' FOLLOW INIT?
+         CR    INLRWORK,INLRPREV
+         BNE   INLXPL2            BRANCH IF NOT
+INLXPL1  LA    INLRI,1(INLRI)     SKIP OVER LEADING '+'
+         B     INLXBEG            AND GO CONTINUE SCAN
+INLXPL2  LA    INLRWORK,INLXLPR   DOES THIS '+' FOLLOW A LEFT
+         CR    INLRWORK,INLRPREV  PARENTHESIS?
+         BE    INLXPL1            GO SKIP OVER IT IF SO
+         LA    INLRC,INLPLUS      LOAD '+' CODE
+         B     INLXLEL2           AND GO TEST SEQUENCE VALIDITY
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A '-' ******************
+**********************************************************************
+INLXMIN  LA    INLRC,INLMINUS      CHAR IS '-'
+         LA    INLRCURR,INLXAOP    SET CURRENT TO ADD-OP
+         B     INLXLEL2      AND GO TEST
+         SPACE
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS '=' ********************
+**********************************************************************
+INLXEQ   LA    INLRC,INLEQ   CHAR IS '='
+         LA    INLRCURR,INLXELET  SET CURRENT TO ASSIGNMENT '='
+         B     INLXLEL2      GO TEST SEQUENCE
+         SPACE
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS '<' ********************
+**********************************************************************
+INLXLT   CLI   1(INLRI),C'=' IS ELEMENT '<='?
+         BNE   INLXGTT       NO, BRANCH
+         LA    INLRC,INLLTE  '<=', SET CODE
+INLXG4L2 LA    INLRL,2       SET LENGTH TO 2
+INLXCUR  LA    INLRCURR,INLXIF     SET CURRENT TO REL-OP CODE
+         AH    INLRC,INLKG4  COMBINE CODE WITH KEYWORD, GR4 CODE
+         B     INLXTEST      GO TEST SEQUENCE VALIDITY
+         SPACE
+INLXGTT  CLI   1(INLRI),C'>' IS IT '<>'?
+         BNE   INLXSTLT
+         LA    INLRC,INLLTGT SET '<>' CODE
+         B     INLXG4L2
+         SPACE
+INLXSTLT LA    INLRC,INLLT   SET '<' CODE
+         LA    INLRL,1       SET LENGTH=1
+         B     INLXCUR       GO SET CURRENT
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS '>' ********************
+**********************************************************************
+INLXGT   CLI   1(INLRI),C'=' CHAR IS '>';  IS ELEMENT '>='?
+         BE    INLXSGTE      IF SO, BR
+         LA    INLRC,INLGT   ELEMENT IS '>', SET CODE
+         LA    INLRL,1       SET LENGTH TO 1
+         B     INLXCUR
+INLXSGTE LA    INLRC,INLGTE  SET '>=' CODE
+         B     INLXG4L2
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A ';' ******************
+**********************************************************************
+INLXSEM  LA    INLRC,INLSEMIC      CHAR IS ';'--SET CODE
+         LA    INLRCURR,INLXSEMI   SET CURRENT
+         LA    INLRL,1       SET LENGTH TO 1
+         AH    INLRC,INLKG5  FORM INFIX HALFWORD
+         B     INLXTEST
+         SPACE 2
+**********************************************************************
+*************** FIRST CHARACTER OF ELEMENT IS A BLANK ****************
+**********************************************************************
+INLXBLNK LA    INLRCURR,INLXBL
+         B     INLXTEST
+         SPACE 2
+**********************************************************************
+********* FIRST CHARACTER OF ELEMENT IS A SINGLE OR DOUBLE QUOTE *****
+**********************************************************************
+INLXSDQ  LR    INLRWORK,INLRO     CHECK FOR STRING FUNCTION
+         SH    INLRWORK,=H'4'      BY LOOKING AT WHATS COME BEFORE
+         CLI   0(INLRWORK),X'A0'   IS IT A FUNCTION
+         BNE   INLXSD1            NO, BUT MAY BE SECOND ARG
+         CLI   1(INLRWORK),X'19'  CHN FUNCTION CAN HAVE STRG. ARH
+         BE    INLXSD3
+         CLI   1(INLRWORK),X'13'  IS IT STRING FUNCTION
+         BL    INLXSD2            NOT STRING FUNCTION ALLOWED
+         B     INLXSD3            YES, OK TO HAVE STRING
+INLXSD1  SH    INLRWORK,=H'4'     GO BACK FURTHER
+         CLI   0(INLRWORK),X'A0'   IS THIS A FUNCTION
+         BNE   INLXSD2
+         CLI   1(INLRWORK),X'14'   CAN SEC. ARG BE STRING
+         BE    INLXSD3            YES, GO HANDLE IT
+         CLI   1(INLRWORK),X'17'
+         BE    INLXSD3
+INLXSD2  LA    INLRCURR,INLXQUO   CHAR IS SINGLE OR DOUBLE QUOTE
+         B     INLXTEST           GO TEST SEQUENCE
+INLXSD3  BAL   INLRLINK,INLSTRNG  GO PROCESS STRING
+         SR    INLRCURR,INLRCURR  PHONY CONSTANT CODE
+         LR    INLRL,INLRCURR     DUMMY LENGTH
+         B     INLXBEG            GO ANALYZE NEXT ELEMENT
+         SPACE 4
+INLXEND  C     INLRSTKP,INLXSTKB   DO THE NUMBER OF RIGHT PARENTHESES
+*                                 EQUAL THE NUMBER OF LEFT PARENTHESES?
+         BH    INLER24             IF NOT, ERROR--MISSING )
+         L     INLRBAS1,INLXSAVL   RESTORE INLINE'S BASE REG 1
+         LM    INLRLINK,R15,INLXSAVL+4 RESTORE LINK REG & REG 15
+         BR    INLRLINK      RETURN TO STATEMENT PROCESSOR
+         TITLE 'INLXTT--SEQUENCE TESTING ROUTINE FOR THE EXPRESSION HANC
+               DLER'
+*
+*****INLXTT*****
+*        PURPOSE:
+*              GIVEN 2 ELEMENTS, DETERMINE WHETHER THE SECOND CAN
+*              LEGALLY FOLLOW THE FIRST.  FOR EXAMPLE, 'A+' IS LEGAL,
+*              'SIN+' IS NOT.
+*
+*        METHOD:
+*
+*              EACH ELEMENT IS ASSIGNED A CODE, WHICH IS ITS ROW NO.
+*              AND COLUMN NO. ( IF IT HAS A COLUMN) IN AN "ACCEPTANCE
+*              TABLE".  THE 2 CODES ARE USED TO ACCESS A TABLE ENTRY
+*              (1 BYTE) WITH THE FOLLOWING POSSIBLE CONTENTS:
+*
+*              BYTE CONTENTS    MEANING          ACTION
+*                   0          ILLEGAL SEQUENCE  BR TO ERROR ROUTINE
+*                   1          LEGAL SEQUENCE    NORMAL RETURN--BR TO
+*                                                RETURN ADDR
+*                   2          LEGAL AND TERM-   BR TO END OF EXP-
+*                              INATING SEQUENCE  RESSION HANDLER
+*
+*
+*        INPUT:
+*              INLRPREV--A REG CONTAINING CODE FOR FIRST ELEMENT IN THE
+*                        SEQUENCE
+*              INLRCURR--A REG CONTAINING CODE FOR SECOND ELEMENT IN
+*                        SEQUENCE
+*              INLSEQTB--A PRE-SET TABLE
+*
+*        OUTPUT:
+*              NONE
+*
+*        CALL:
+*              BAL   INLRLINK,INLXTT
+*
+*        TABLES USED:
+*              INLSEQTB--ACCEPTANCE TABLE
+*              INLXERTB--ERROR CODE TABLE
+*
+*
+         DS    0H
+INLXTT   LR    INLRWORK,INLRCURR   PUT 'CURRENT' CODE ON WORK REG
+*
+         SLL   INLRWORK,INLXSHFT   MULTIPLY BY INLXDIM2
+         AR    INLRWORK,INLRPREV   ADD 'PREV'
+         LR    INLR15,INLRWORK     SAVE INDEX IN CASE OF ERROR
+         LA    INLR1,INLSEQTB FETCH TABLE ADDR
+         AR    INLRWORK,INLR1 ADD TABLE ADDR
+         CLI   0(INLRWORK),X'01'   TEST CODE
+         BCR   B'1000',INLRLINK    =1, NORMAL RETURN
+         BC    B'0010',INLXEND     =2, NORMAL TERMINATION OF EXPRESSION
+*                                  SCAN
+         A     INLR15,INLXAER      ERROR--ADD INDEX TO ERROR CODE TABLE
+*                                  TO FIND APPROPRIATE ERROR CODE
+         SR    INLRER,INLRER
+         IC    INLRER,0(INLR15)    PICK UP ERROR CODE
+         AH    INLRER,=H'1000'  ADJUST ERROR MESSAGE TO BE IN THE
+*                            "ONE-THOUSAND SERIES"
+         B     INLERROR      AND BR TO ERROR ROUTINE
+         SPACE 2
+*
+*****************************END OF EXPRESSION HANDLER****************
+*
+         TITLE 'WORK AREA DSECT'
+AREA     DSECT
+        COPY  AREA
+INLDSECT DSECT
+         COPY  TWORK
+INLWORKC EQU   INLWORKB+4         USED BY INLINE
+INLWORKD EQU   INLWORKB+8         USE BY PRINT IN EXECUTION ONLY
+INLWORKE EQU   INLWORKB+12        USE BY PRINT IN EXECUTION ONLY
+INLWORKF EQU   INLWORKB+16        USED BY INLINE
+INLWORKG EQU   INLWORKB+20        USED BY INLINE
+         TITLE 'LITERAL POOL---AT $LTORG'
+INLINE   CSECT
+         ORG   $LTORG
+         LTORG
+$LTORGE  EQU   *
+         ORG   ,             BACK TO CURRENT
+$LTORGY  EQU   $LTORG+&MAXLITS-$LTORGE  SURPLUS SPACE IN LITERAL BLOCK
+*        IF THE NEXT INSTRUCTION IS FLAGGED BY THE ASSEMBLER, MORE
+*        LITERALS HAVE BEEN GENERATED THAN SPACE WAS SET ASIDE FOR.
+*        OTHERWISE, THE VALUE OF $LTORGY IS THE SURPLUS SPACE IN THE
+*        LITERAL POOL
+         DC    Y($LTORGY)    TEST INSTRUCTION
+         ORG   *-2           ORIGIN BACK OVER TEST INSTRUCTION
+         END

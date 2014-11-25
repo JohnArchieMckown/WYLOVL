@@ -1,0 +1,543 @@
+;WYL.GG.LSO.LIB#SHOWTAPE
+;   created on 09/05/86 by Parker Gillespie, ITS Systems
+;   rewritten on 03/25/88 by Lincoln Ong, DC Systems
+;   updated on 08/14/90  Version 2.06
+;This EXEC file implements an extended version of the SHOW TAPE command that displays
+;TLMS Auto-Scratch/TOSS (Tape Off-Site Storage) information.  All options and
+;messages are in WYLBUR format.
+;   SHOW TAPE {tape-number [AUTOSCRATCH]|AUTOSCRATCH {LIKE string|PATTERN}}
+;             [account-options] [ALL|INTERNAL] [WAIT n] [NOPURGE] [DEBUG]
+;             [collect-options]
+;
+;Previous (native) command format:
+;   SHOW TAPE tape-number [account-options] [ALL|INTERNAL] [collect-options]
+;
+;Revision History:
+;   09/05/86 GG.PJG V1.00  Initial release.
+;   03/25/88 GG.LSO V2.00  Rewritten as a pseudo WYLBUR command.
+;   04/16/88 GG.LSO        Released for internal testing.
+;   05/01/88 GG.LSO V2.01  Added additional error handling.
+;   05/31/88 GG.LSO V2.02  Added additional debugging information.  Fixed and finalized
+;                          option processing, and changed LIST option to PATTERN option
+;                          and STEM option to LIKE option in proc Parse_Parm.
+;   06/01/88 GG.LSO V2.03  Improved error messages.
+;   06/07/88 GG.LSO V2.04  Improved ATTN handling.
+;   07/11/88 GG.LSO V2.05  Documentation changes.
+;   08/08/88 GG.LSO V2.06  Added ability to process collect-options and additional error
+;                          messages.
+;   08/14/90               Additional miscellaneous changes to better emulate a pseudo
+;                          WYLBUR command.
+;
+;Associated data sets:
+;
+xproc() begin
+   on attn command='pcall Ignore_ATTN'
+   on error command='pcall Error_Exit'
+
+   declare string X.ExecDsn            ;EXEC file data set name.
+   declare string X.ExecName           ;EXEC file name.
+   declare string X.ExecBanner         ;EXEC file banner.
+   declare string X.ExecVersion        ;EXEC file version.
+   declare string X.Contact            ;Contact person.
+   declare string X.DebugAcct          ;Maintenance account.
+   declare string X.PCmdName           ;Pseudo command name.
+   declare boolean X.Debug             ;Debug mode [see proc Parse_Parm].
+
+   declare number X.Delta              ;Original delta setting.
+   declare number X.OrigActNum         ;User's original active file number.
+   declare number X.TermHeight         ;Terminal page pause height setting.
+
+   declare number X.Delay              ;Job completion wait period [see proc Parse_Parm].
+   declare boolean X.All               ;ALL display option flag [see proc Parse_Parm].
+   declare boolean X.Internal          ;INTERNAL display option flag [see proc Parse_Parm].
+   declare boolean X.Like              ;LIKE option flag [see proc Parse_Parm].
+   declare boolean X.NoPurge           ;Job no purge flag [see proc Parse_Parm].
+   declare boolean X.Pattern           ;PATTERN option flag [see proc Parse_Parm].
+   declare boolean X.VolSer            ;Volume option flag [see proc Parse_Parm].
+
+   declare string DsnStem              ;Tape dsname string pattern.
+   declare string OwnerAcct            ;Tape owner account.
+   declare string TapeVolSer           ;Tape volume serial.
+
+   X.ExecDsn = 'WYL.GG.LSO.LIB#SHOWTAPE'
+   X.ExecName = 'SHOWTAPE'
+   X.ExecBanner = 'SHOWTAPE  Revised 08 August 1988  Version 2.06'
+   X.ExecVersion = 'V2.06 08/08/88'
+   X.Contact = 'Lincoln Ong, DC Systems'
+   X.DebugAcct = 'GG.LSO'
+   X.PCmdName = 'SHOW TAPES'
+
+   X.Delta = 1.0
+   X.OrigActNum = actno
+
+   X.Delay = 45                        ;Default time delay.
+
+   on attn command='pcall ATTN_Exit'
+
+   pcall Parse_Parm(parm_string,TapeVolSer,OwnerAcct,DsnStem)
+
+   pcall Inquiry(TapeVolSer,OwnerAcct,DsnStem)
+   pcall Process_Inquiry(OwnerAcct,TapeVolSer)
+
+   if (X.Debug) begin
+      comment
+      xpause msg='[DEBUG mode, execution pause.]'
+   end
+end
+
+
+
+;<.PAGE>
+proc ATTN_Exit() begin
+;Process any ATTNs entered during the execution of the EXEC file to stop processing.
+;
+   comment ...
+   if (X.Debug) begin
+      comment
+      xpause msg='[DEBUG mode, execution pause.]'
+   end
+
+   clear attn                          ;Reset ATTN environment.
+   on attn reenable
+   pcall Clean_Up
+   xreturn                             ;Exit the EXEC file.
+end
+
+
+;<.PAGE>
+proc Clean_Up() begin
+;Close any Active files and restore user to his original Active file.
+;
+   on attn command='pcall Ignore_ATTN'
+
+   if (actno ne X.OrigActNum) begin
+      close
+      pick &(X.OrigActNum)
+   end
+end
+
+
+;<.PAGE>
+proc Display(Status,Entry,Dsname) begin
+;Display the Auto-Scratch/TOSS data base information.
+;
+   declare string Info               ;Data set status.
+   declare string Control              ;Tape control status.
+   declare string ControlClass         ;Tape control status class.
+
+   if (substr(Dsname,size(Dsname),1) eq '.') Info = '(Qual) '
+   else Info = '         '
+
+   if (Status eq 'A') begin
+      ControlClass = substr(Entry,1,1)
+      cases begin
+         case (ControlClass eq '1') Control = 'catalog'
+         case (ControlClass eq '2') Control = 'date'
+         case (ControlClass eq '3') Control = 'manual'
+      end
+
+      if ((X.VolSer) and (X.All)) begin
+         comment          Control: &(Control)
+      end
+      else begin
+         Info = Info||Dsname||' is under '||Control||' control'
+         write Info
+      end
+   end
+   else begin
+      if (Status eq 'T') Control = 'TOSS'
+      else Control = 'Auto-Scratch/TOSS'
+
+      if ((X.VolSer) and (X.All)) begin
+         comment          Control: &(Control)
+      end
+      else begin
+         Info = Info||Dsname||' is under '||Control||' control'
+         write Info
+      end
+
+      if (X.All) begin
+         if (X.VolSer) comment          Location:
+         while (Entry ne '') pcall Disp_TOSSLoc(Entry)
+      end
+   end
+end
+
+
+;<.PAGE>
+proc Disp_TOSSLoc(Entry) begin
+;Display the detailed TOSS information.
+;
+   declare number TLMSLoc              ;TLMS location.
+   declare string Location             ;Tape location for time period.
+   declare string TLMSLocName          ;TLMS location name.
+   declare string PeriodType           ;Retention type.
+   declare string PeriodClass          ;Retention class.
+   declare string Period               ;Retention period.
+   declare string SubEntry             ;Retention period information.
+
+   SubEntry = substr(Entry,1,7)
+   Entry = substr(Entry,8)
+
+   if (substr(SubEntry,2) eq '100000') begin
+      Location = 'is then returned to the scratch pool'
+      Entry = ''
+   end
+   else begin
+      try quietly TLMSLoc = substr(SubEntry,2,2)
+      if (tryerror) return             ;Non-numeric location.
+
+      cases begin                      ;Get TLMS location name.
+         case (TLMSLoc eq 00) TLMSLocName = 'undefined location'
+         case (TLMSLoc eq 10) TLMSLocName = 'Forsythe'
+         case (TLMSLoc eq 15) TLMSLocName = 'Forsythe'
+         case (TLMSLoc eq 20) TLMSLocName = 'Information Desk'
+         case (TLMSLoc eq 25) TLMSLocName = 'Plotter [obsolete]'  ;* OBSOLETE *
+         case (TLMSLoc eq 40) TLMSLocName = 'ARCUS'
+         case (TLMSLoc eq 51) TLMSLocName = 'Searsville'  ;* OBSOLETE *
+         case (TLMSLoc eq 55) TLMSLocName = 'Production Services'
+         case (TLMSLoc eq 56) TLMSLocName = 'RLG'
+         case (TLMSLoc eq 75) TLMSLocName = 'RLG Shipping'
+         case (TLMSLoc eq 80) TLMSLocName = 'Archive Storage'
+         case (TLMSLoc eq 81) TLMSLocName = 'Forsythe -- Pending Archive'
+         case (TLMSLoc eq 82) TLMSLocName = 'Archive -- Pending Retrieve'
+         case (TLMSLoc eq 83) TLMSLocName = 'Forsythe -- No Archive'
+         case (TLMSLoc eq 90) TLMSLocName = "User's possession"
+         case (TLMSLoc eq 91) TLMSLocName = 'User controlled storage'
+         case (TLMSLoc eq 97) TLMSLocName = 'Xerox 4090 Printer'
+         case (TLMSLoc eq 99) TLMSLocName = 'Unknown'
+         case (true) begin       ;Unrecognized TLMS location code.
+            TLMSLocName = 'unrecognized location'
+            send &(X.DebugAcct) &(X.ExecName) EXEC (&(X.ExecVersion)): Tape = &(VolSer), TLMS Location = &(TLMSLoc).  \
+               Unrecognized TLMS location code.
+         end
+      end
+
+      Period = strip(substr(SubEntry,4,4),'L','0')
+      PeriodClass = substr(SubEntry,1,1)
+      cases begin
+         case (PeriodClass eq '1') PeriodType = ' generations'
+         case (PeriodClass eq '2') PeriodType = ' days'
+      end
+
+      Location = TLMSLocName||' for '||Period||PeriodType
+   end
+   if (X.VolSer) write '            '||Location
+   else begin
+      if (substr(Location,1,2) ne 'is') write '       is located at '||Location
+      else write '       '||Location
+   end
+   return (Entry)
+end
+
+
+;<.PAGE>
+proc Error_Exit() begin
+;Display the error condition and current variable settings when an error condition arises.
+;
+   on attn command='pcall Ignore_ATTN'
+
+   declare number SLine                ;Starting line line number for variable list.
+
+   write s'2F'||'An error has occurred in processing the &(X.PCmdName) command.'
+   open ErrorLog title='&(X.ExecName) EXEC file error log'
+   putline end &(X.ExecName) EXEC file
+   putline end &(X.ExecDsn)
+   putline end &(X.ExecVersion)
+   putline end
+   putline end Debugging information:
+   putline end    errmsg = '&(errmsg)'
+   putline end    errinfo = '&(errinfo)'
+   putline end
+   putline end    Variables:
+   SLine = end
+
+   dump variables type ses             ;Display session variables.
+   putline end
+   dump variables type X               ;Display global variables.
+   putline end
+   dump variables type error           ;Display variables at time of error.
+   change 1 to '   ' in &(SLine)/last nolist
+
+   if (xaccount ne X.DebugAcct) begin
+      try mail to &(X.DebugAcct) subject='&(X.ExecName) EXEC file error' quiet
+      close
+      write s'15'||'The programming staff has been notified about the problem.'
+      write 'Processing terminated.'
+      pcall Clean_Up
+      xreturn                          ;Exit the EXEC file.
+   end
+   xpause msg='[DEBUG mode; error condition occurred.  Execution pause.]'
+   clear error                         ;Reset error environment.
+   on error reenable
+   close
+end
+
+
+;<.PAGE>
+proc Ignore_ATTN() begin
+;Ignore and reset ATTN mode.
+;
+   clear attn                          ;Reset ATTN environment.
+   on attn reenable
+end
+
+
+;<.PAGE>
+proc Inquiry(VolSer,OwnerAcct,DsnStem) begin
+;Prepare and submit the job for inquiring the Auto-Scratch/TOSS data base.
+;
+   declare string Command              ;Tape inquiry command.
+
+   if (X.VolSer) Command = '001,&(VolSer)'
+   elseif (X.Pattern) Command = '002,&(OwnerAcct)'
+   elseif (X.Like) Command = '003,&(DsnStem)'
+
+   open InqTLMS title='Inquire Auto-Scratch/TOSS Data base' temporary
+   putline end //&#TLMS JOB ,'Inq AUTOSCR/TOSS DB',CLASS=F
+   if (not X.Debug) putline end /*JOBPARM LOG=NO,JCL=NO
+   putline end //*
+   putline end //* Job &(substr(xaccount,4,3))#TLMS created and submitted on &(xdate)
+   putline end //*    by &(lname) on account &(xaccount) via
+   putline end //*    &(X.PCmdName) (&(X.ExecVersion)) on system &(machine).
+   putline end //*
+   putline end //TLMSCMDS EXEC PGM=TAPCMDS,PARM='&(Command)'
+   if (X.Debug) begin
+      if (xaccount eq X.DebugAcct) putline end //STEPLIB  DD DSN=WYL.GG.LSO.LINKLIB,DISP=SHR
+      putline end //SYSABEND DD SYSOUT=C
+      putline end //SYSUDUMP DD SYSOUT=C
+   end
+   putline end //
+
+   try run unnumbered hold nonotify quiet
+   close
+   if (tryerror) begin
+      comment Unable to inquire Auto-Scratch/TOSS data base.  Processing terminated.
+      pcall Clean_Up
+      xreturn
+   end
+end
+
+
+;<.PAGE>
+proc Parse_OldCmdParm(Parms) begin
+;Eliminate internal options and process the command in "native" old-mode.
+;
+   declare string Options              ;"Native" mode options only.
+   declare string Token                ;Token from parm parsing.
+   declare string TokenType            ;Token type from parm parsing.
+
+   while (Parms ne '') begin
+      syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+      Token = upper(Token)
+
+      cases begin
+         case ((abbrev('DEBUG',Token,3)) and (xaccount eq X.DebugAcct))  ;Debug mode.
+
+         case (abbrev('WAIT',Token,3)) begin  ;WAIT option.
+            syscall scan(Token,Parms,TokenType,' ,=', ,=;')
+            if (TokenType ne 'NUMBER') Options = Options||' '||Token
+         end
+
+         case (abbrev('NOPURGE',Token,3))  ;NOPURGE option.
+
+         case (true) Options = Options||' '||Token  ;Collect all other options.
+      end
+   end
+
+   if (Parms eq '') Parms = Options
+   try show tape &(Parms)
+   xreturn
+end
+
+
+;<.PAGE>
+proc Parse_Parm(Parms,VolSer,OwnerAcct,DsnStem) begin
+;Parse the parameter that is passed to the XPROC when called.
+;
+   declare string Token                ;Token from parm parsing.
+   declare string TokenType            ;Token type from parm parsing.
+   declare boolean AutoScrMode         ;AUTOSCRATCH option flag.
+
+   if ((index(upper(' '||Parms),' AUT') eq 0) and (index(upper(' '||Parms),' TOS') eq 0)) \
+      pcall Parse_OldCmdParm(Parms)  ;Native SHOW TAPE command processing.
+
+   try syscall collect_scan(Parms)     ;Process any collect options.
+   if ((tryerror) or (tryattn)) begin
+      comment Command stopped.
+      xreturn
+   end
+
+   syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+   if (TokenType eq 'NULL') xreturn error errmsg='Missing tape volume.'
+   if ((abbrev('AUTOSCRATCH',upper(Token),3)) or (abbrev('TOSS',Token,3))) AutoScrMode = true
+   else begin                          ;Volume serial.
+      VolSer = upper(Token)
+      if (size(VolSer) lt 6) xreturn error errid=ERROR errmsg='Tape &(VolSer) not found.'
+      if (size(VolSer) gt 6) xreturn error errid=INVALID errmsg='&(Token): invalid.'
+      X.VolSer = true
+   end
+
+   while (Parms ne '') begin
+      syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+      Token = upper(Token)
+
+      cases begin
+         case ((abbrev('AUTOSCRATCH',Token,3)) or (abbrev('TOSS',Token,3))) begin  ;Auto-scratch/TOSS mode.
+            AutoScrMode = true
+            X.VolSer = false           ;Default mode.
+            if (VolSer ne '') X.VolSer = true  ;If volume specified, then in VolSer mode.
+         end
+
+         case ((not X.VolSer) and (abbrev('PATTERN',Token,3))) begin  ;PATTERN option.
+            OwnerAcct = xaccount           ;Default account setting.
+            X.Pattern = true
+            X.Like = false
+            X.VolSer = false
+         end
+
+         case ((not X.VolSer) and ((abbrev('LIKE',Token,3)) or (abbrev('DSNAME',Token,3)))) begin  ;LIKE option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=MISSDSN errmsg='Missing data set name.'
+            DsnStem = upper(Token)      ;Fully qualified dsname or dsname stem (if latter true, then make it fully qualified).
+            if (substr(DsnStem,1,4) ne 'WYL.') DsnStem = 'WYL.'||xaccount||'.'||DsnStem
+            if (substr(reverse(DsnStem),1,1) ne '.') DsnStem = DsnStem||'.'
+            X.Like = true
+            X.Pattern = false
+            X.VolSer = false
+         end
+
+         case ((abbrev('ACCOUNT',Token,3)) or (Token eq 'ACCT')) begin  ;ACCOUNT option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='ACCOUNT: Missing operand.'
+            cases begin
+               case (size(Token) ne 6) xreturn error errid=INVALID errmsg='&(Token): invalid.'
+               case (index(Token,'$') eq 3) OwnerAcct = substr(Token,1,2)||'.'||substr(Token,4,3)
+               case (index(Token,'$') eq 4) OwnerAcct = substr(Token,5,2)||'.'||substr(Token,1,3)
+               case (index(Token,'.') eq 3) OwnerAcct = upper(Token)
+               case (true) xreturn error errid=INVALID errmsg='&(Token): invalid.'
+            end
+         end
+
+         case ((abbrev('GROUP',Token,3)) or (Token eq 'GRP')) begin  ;GROUP option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='GROUP: Missing operand.'
+            if (size(Token) ne 2) xreturn error errid=INVGRP errmsg='&(Token): invalid group.'
+            OwnerAcct = Token||substr(xaccount,3,4)
+         end
+
+         case ((abbrev('USER',Token,3)) or (Token eq 'USR')) begin  ;USER option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='USER: Missing operand.'
+            if (size(Token) ne 3) xreturn error errid=INVUSER errmsg='&(Token): invalid user.'
+            OwnerAcct = substr(xaccount,1,3)||Token
+         end
+
+         case (abbrev('PUBLIC',Token,3)) xreturn error errid=INVALID errmsg='&(Token): invalid.'  ;PUBLIC option.
+
+         case (abbrev('ALL',Token,3)) begin  ;ALL option.
+            X.All = true
+            X.Internal = false
+         end
+
+         case (abbrev('INTERNAL',Token,3)) begin  ;INTERNAL option.
+            X.Internal = true
+            X.All = false
+         end
+
+         case ((abbrev('DEBUG',Token,3)) and (xaccount eq X.DebugAcct)) X.Debug = true  ;Debug mode.
+
+         case (abbrev('WAIT',Token,3)) begin  ;Job delay time.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='WAIT: Missing operand.'
+            if (TokenType ne 'NUMBER') xreturn error errid=INVALID errmsg='&(Token): invalid.'
+            X.Delay = Token
+         end
+
+         case (abbrev('NOPURGE',Token,3)) X.NoPurge = true  ;Job no purge option.
+
+         case (true) xreturn error errid=INVALID errmsg='&(Token): invalid.'  ;Unrecognized options.
+      end
+   end
+
+   if ((AutoScrMode) and (DsnStem eq '') and (not X.VolSer) and (not X.Pattern) and (not X.Like)) \
+      xreturn error errid=OPMISSNG errmsg='AUTOSCRATCH: Missing operand.'
+
+   return (Parms,VolSer,OwnerAcct,DsnStem)
+end
+
+
+;<.PAGE>
+proc Process_Inquiry(OwnerAcct,VolSer) begin
+;Process the result from the Auto-Scratch/TOSS data base inquiry job.
+;
+   declare number RC                   ;Job return code.
+   declare string JobMsg               ;Job status message.
+   declare string Info                 ;Tape data base information.
+   declare string Option               ;TOSS option.
+   declare string Entry                ;TOSS information.
+   declare string Dsname               ;Tape dsname.
+
+   sync * wait=&(X.Delay)
+   open TLMSInfo title='Auto-Scratch/TOSS Data base information'
+   quietly fetch * dd TLMSCMDS.SYSPRINT
+   if (not X.NoPurge) purge * quiet
+   if (lines eq 0) begin
+      comment Auto-Scratch/TOSS data base inquiry failed.  Processing terminated.
+      close
+      pcall Clean_Up
+      xreturn
+   end
+
+   read string JobMsg using=first delete  ;Job completion message.
+   RC = substr(JobMsg,1,3)             ;Job completion return code.
+   if (RC eq 4) begin
+      if ((X.Pattern) and (not X.VolSer) and (not X.Like)) comment No pattern dsnames exist for account &(OwnerAcct).
+      else begin
+         if ((X.VolSer) and (X.All)) begin
+            try show tape &(VolSer) all
+            comment          Control: None
+         end
+         else comment Tape &(VolSer) is not under Auto-Scratch/TOSS control.
+      end
+   end
+   elseif (RC gt 4) begin
+      close
+      pcall Clean_Up
+      xreturn error errmsg='ERROR: Return code = &(RC).  &(substr(JobMsg,5))'
+   end
+   else begin
+      while (lines gt 0) begin
+         read string Info using=first delete
+
+         if (X.VolSer) begin
+            Owner = substr(Info,8,6)
+            Dsname = strip(substr(Info,15,44))
+            read string Info using=first delete  ;Get the next line of continued information.
+            Option = substr(Info,1,1)
+            Entry = substr(Info,12,35)
+            if ((X.All) and (not X.Internal)) try show tape &(VolSer) all
+            elseif ((X.Internal) and (not X.All)) try show tape &(VolSer) internal
+            else write VolSer||' - Owner='||Owner
+         end
+
+         if (X.Pattern) begin
+            Option = substr(Info,1,1)
+            Entry = substr(Info,12,35)
+            Dsname = strip(substr(Info,48,44))
+         end
+
+         if (X.Like) begin
+            Dsname = substr(Info,1,44)
+            read string Info using=first delete  ;Get the next line of continued information.
+            Option = substr(Info,1,1)
+            Entry = substr(Info,12,35)
+         end
+
+         pcall Display(Option,Entry,Dsname)
+      end
+   end
+   close
+end
+
+

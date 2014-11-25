@@ -1,0 +1,170 @@
+;
+;  MAIL ESCORT EXEC FILE.
+;
+;     This exec file is invoked by a virtual terminal session which
+;     processes "background" mail.
+;
+;
+;  Written, 12/82, Niz
+;
+;  Modifications:
+;     02/01/83  Niz   Handle cases where mail can't be sent.
+;     02/26/83  Niz   Handle case where ESCORT account has a funny
+;                     mailbox status.
+;     01/03/84  LSO   Now handles mail addressed to SYSA (CIT) and
+;                     SYSB (RLG).
+;     01/06/84  LSO   Deletes mail addressed improperly to an
+;                     unknown host.
+;
+
+
+;**********************
+;*  Initialization    *
+;**********************
+;
+set escape &
+clear values
+set delta 1
+set volume catalog
+wri sub(dat,1,17)||' Starting...'
+wri ''
+;
+set value s0 'CIT'                                                              ; account for our mail
+if (machine eq 'RLG') set value s0 'RLG'
+comment Enter keyword for &s0 mailbox...
+set account hi.&s0 keyword
+;
+;
+;**********************
+;*  Save Queued Mail  *
+;**********************
+;
+dump mail hi.&s0 all internal delete
+if (* lt 0) exec 200                                                            ; nothing new
+point '*'1 and ~'*:'1 and ~'**'1 (1) in first+.001/last n
+set val w0 *-.001
+if (* lt 0) set val w0 last
+set val s8 s0
+p c'*:X-Route:'1 (1) in f/&w0 n
+if (* ge 0) set val s8 sub(lin(*),12)                                           ; host name
+      then set val s8=sub(s8,1,ind(s8,';')-1)
+if (ind('A.ALPHA.SYSA.',s8||'.') ne 0) set val s8='CIT'
+if (ind('B.BETA.SYSB.',s8||'.') ne 0) set val s8='RLG'
+set val s9 sub(lin(f),30)                                                       ; "FROM xxx" part of header line
+if (size(s9) gt 42) set val s9 sub(s9,1,42)
+set val s7 ''
+set val n0 index(s9,"'")
+if (n0 ne 0) set val s7 s7||sub(s9,1,n0)||"'"                                   ; double the quote
+   then set val s9 sub(s9,n0+1)
+   then exec 126
+set val s9 s7||s9
+wri ''
+wri sub(dat,1,8)||' '||s9
+save wyl.gs.wyl.&s8mail#&(sub(dat,13,2)||nco(timebin*10)) lines f/&w0 on catalog title '&s9'
+delete first/&w0
+if (lines ne 0) exec 121
+;
+
+
+;**********************
+;*  Send Queued Mail  *
+;**********************
+;
+dump directory in wyl.gs.wyl.&s0mail all clear
+delete first(3)
+if (lines ne 0) delete '*** Problems ***'
+if (lines ne 0) number
+if (lines eq 0) exec 300
+ch 9/235 to '' nolist
+;
+set val w0 first
+set val w1 last
+;
+set val s1 line(w0)
+copy from wyl.gs.wyl.&s0mail#&s1 to 1000
+p ~'*'1 or '**'1 (1) in 1000/l n
+set val w2 *                                                                    ; first line of msg or -1 if send
+set val w3 last
+10000,
+set val s6 sub(lin(1000),12,17)                                                 ; time/date originally sent
+set val s4 sub(lin(1000),35)
+set val s4 sub(s4,1,index(s4||' ',' ')-1)                                       ; sender
+if (sub(s4,size(s4)) eq ':') set val s4 sub(s4,1,size(s4)-1)
+set val n6 find(line(1000),'"')
+set val s5 ''                                                                   ; assume no user name
+if (n6 ne 0)
+   then set val s5 sub(lin(1000),n6+1)
+   then set val s5 sub(s5,1,index(s5||'"','"')-1)                                  ; user name
+set val s3 sub(lin(1000),35)
+set val s3 sub(s3,ind(s3,':')+2)                                                ; title
+set val s9 ''
+set val n0 index(s3,"'")
+if (n0 ne 0) set val s9 s9||sub(s3,1,n0)||"'"                                   ; double the quote
+   then set val s3 sub(s3,n0+1)
+   then exec 223.2
+set val s3 s9||s3
+;
+set val w9 1001
+set val s2 lin(w9)
+if (sub(s2,1,2) ne '*:') exec 237
+set val s2 sub(s2,3)
+if (sub(s2,1,14) eq 'X-Route: &s0; ') set val s2 sub(s2,15)
+if (w2 lt 0)
+   then 0 &s3
+   then try mai 0 to (&s2) sen '&s4' nam "&s5" dat "&s6" col end
+   then delete 0
+   then exec 232.1
+if (siz(s3) gt 163) set val s3 sub(s3,1,160)||'...'
+try mai &w2/&w3 to (&s2) tit '&s3' sen '&s4' nam "&s5" dat "&s6" col end
+ch 1 to '&(sub(dat,1,8)) ' in 10001/l n nolen
+l 10000/l unn
+ch 1/9 to '' in 10001/l n nolen
+set val w9 w9+1
+if (sub(lin(w9),1,2) eq '*:') exec 228
+delete 'Note: ' in 10000/last n
+delete 'Mail sent '1 in 10000/last n
+delete 'Mail will be sent '1 in 10000/last n
+delete 'Mail for '1 in 10000/last n
+if (last le 10000) scratch wyl.gs.wyl.&s0mail#&s1                               ; delete sucessfully mailed item
+   then exec 250
+;
+;*****************************************************************
+;*  Process mail which was (not entirely) sucessfully delivered  *
+;*****************************************************************
+if (s4 eq 'ESCORT')
+   then save wyl.gs.wyl.&s0mail#&s1 replace title '*** Problems ***' lines 1000/last
+   then exec 250
+;
+9999.0,     To:  &s5 <&s4>
+9999.1,
+9999.2,   From:  ESCORT (the inter-machine mail program)
+9999.3,
+9999.4,Subject:  Undelivered Mail
+9999.5,
+9999.6,
+9999.7,The mail addressed to:
+9999.8,  &s2
+9999.9,
+10000,could not be sent because:
+ch 1 to '  ' in 10001/l n
+end,
+end,---------------------------
+end,
+ch 1/11 to '' in '*'1 in 1000 n                                                 ; undo INTERNAL format
+ch '*:'1 to '' in 1001 n
+try mail 9999/last,1000/9998.999 to &s4 sen 'ESCORT' nam '' tit 'Undelivered Mail'
+scratch wyl.gs.wyl.&s0mail#&s1                                                  ; delete mail
+;
+delete 1000/last
+set val w0 w0+1
+if (w0 le w1) exec 212
+clear active
+
+
+;****************************
+;*  Wait for a few minutes  *
+;****************************
+;
+SHO DATE
+$wait &(3*60)
+exec 119

@@ -1,0 +1,1731 @@
+VGP      TITLE 'ORVYL''S FILE SYSTEM SERVICE PROCESSOR'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 2
+         HIBAL ,
+         SPACE 2
+* MODIFICATIONS
+*
+         EJECT ,
+VGP      CSECT
+         IDENT 00
+         SPACE 2
+         COPY  ORVDEFN
+         SPACE 3
+         REGS  ,,SR,TR,QR,FSUBR,BRR,BR,WAR,RAR,CLWR,,GPWR
+         EJECT ,
+         MACRO ,
+&LABEL   LSCAN &GETADC,&SAME       SO WE CAN PUT SCKWS AT END
+&LABEL   L     R1,=A(&GETADC)
+         SCAN  (1),&SAME
+         MEND
+         SPACE 2
+         MACRO ,
+&LABEL   ERRXT &P1,&P2,&P3
+&LABEL   SEG   &P1,&P2
+         AIF   (T'&P3 EQ 'O').NXT
+         B     &P3
+         MEXIT ,
+.NXT     ANOP  ,
+         B     4(,BR)
+         MEND  ,
+*
+         MACRO
+&L       BTD   &LOC,&LEN,&WORD,&SW,&COMMAS=NO
+         LCLC  &CM
+         AIF   ('&COMMAS' NE 'YES').NOCM
+&CM      SETC  'C'
+.NOCM    ANOP
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN,TYPE=&SW
+         SYSLR 1,&LOC
+         XCALL BTD&CM
+         MEND
+         EJECT ,
+*GEN
+         COPY  SCP
+         EJECT ,
+         COPY  CLW
+         EJECT ,
+         COPY  WYLMDWD
+         EJECT ,
+         COPY  GPW
+         EJECT ,
+         COPY  PRGCAT
+         SPACE 3
+         COPY  DENTRY
+         SPACE 3
+         COPY  DIRB
+         SPACE ,
+WA       RECORD BEGIN
+         VSA   2,11
+WADEVFL  DS    X
+WADEVPR  DS    X
+WADEVNM  DS    44X
+WADEVINF EQU   WADEVFL,*-WADEVFL,C'X'
+         END   ,
+         EJECT ,
+*NOGEN
+VGP      CSECT ,
+         USING CLW,CLWR                ##
+         USING GPW,GPWR                ##
+         USING WA,WAR                  ##
+         SPACE ,
+FILES    VENTER  2,11,L'WA
+         LM    BRR,BR,=A(BASE+4096,BASE)
+         USING BASE,BR,BRR             ##
+         LR    SR,R0                   SAVE KEYWORD LENGTH
+         LR    TR,R15                  SAVE ENTRY CODE
+         STM   BRR,WAR,CLWQRET         PROVIDE QUICK RETURN
+         FSCALL FILSETUP
+         B     SETUPRTN
+BASE     EQU   *
+*
+* EXIT BRANCH TABLE
+         B     EXIT                    NORMAL EXIT
+         B     TYPERR                  ERROR MESSAGE EXIT
+*
+EXIT     LABEL ,
+         LR    R15,SR                  RETURN CODE
+         LR    R0,TR
+         VEXIT 2,11,LTR
+         LTORG
+*
+TYPERR   VCALL TYPEIT
+         B     FILEXIT                 DROP FILES
+         EJECT ,
+SETUPRTN LABEL ,
+*GEN
+         VGPTAB GPTAB,TR               BRANCH ON CODE
+*NOGEN
+         EJECT ,
+*  ERASE A FILE
+*
+ERASE    LABEL ,
+         FSCALL GETMEMBR               LOOK FOR A LIBRARY MEMBER
+         BZ    ERASEMEM                FOUND ONE
+         FSCALL GETNAME                GET FILE NAME
+         LSCAN ERASEOPT,CLWKWCB        SCAN ERASE OPTIONS
+         BNZ SCRET                     ERROR
+         FSCALL ASMBLNAM               PUT NAME TOGETHER
+         FSCALL ATTOLDE                ATTACH FILE
+         IF    GPWUILIB,BEGIN
+         IF    ^GPWFELIB,BEGIN
+         SEG   'No member specified in '
+         FSCALL SEGNAME
+         VMARK ,
+         SEG   'Erase entire library'
+         FSCALL RDERASE
+         IF    ^GPWFERS,NOACTION
+         END  ,
+         END   ELSE,BEGIN              NOT A LIBRARY
+         IF    GPWFELIB,NOTLIB
+         END   ,
+         IF    GPWFCON,BEGIN           CONTENTS OPTION ?
+         IF    (GPWFNIXR,AND,^GPWFHYBR),NIXNIXR NOT ALLOWED
+         LCALL DELETE                  CLEAR FILE
+         SEG   'Contents of '          TELL IT
+         END   ELSE,BEGIN              ERASE OPTION
+         FSCALL DOERASE                ZOT THE FILE
+         CLEAR GPWFATT                 ERASE DETACHES FILE
+         END   ,
+         FSCALL SEGNAME                FORMAT
+         SEG   'erased '               ANSWER
+         B     VFMSG
+         SPACE ,
+ERASELIB SET   GPWFELIB                SET LIBRARY BIT
+         SCRTN (15)
+         SPACE ,
+CONTENTS SET   GPWFCON                 SET CONTENTS BIT
+         SCRTN (15)                    AND RETURN TO SCAN
+         EJECT ,
+ERASEMEM LABEL ,                       ERASE MEMBER OF LIBRARY
+         LSCAN ERAS#MEM,CLWKWCB        USER OR GROUP?
+         FSCALL ASMBLNAM               PUT NAME TOGETHER
+         FSCALL ATTOLDE                ATTACH FILE OLD,EXCLUSIVE
+         FSCALL DELMEM                 DELETE MEMBER SPECIFIED
+         BM    MEMNFND                 ERROR IF MEMBER NOT FOUND
+         IF    GPWALIAS,BEGIN          IF ALIAS REPORT REAL NAME TOO
+         FSCALL SEGMEMB                SET ALIAS NAME IN MESSAGE
+         SEG   'alias for '            IT WAS AN ALIAS
+         CLEAR GPWALIAS                CLEAR FLAG FOR SEGMEMB
+         END   ,
+         FSCALL SEGMEMB                REPORT DELETED MEMBER
+         SEG   'erased in '            'MEMBER' ERASED IN 'LIB'
+         FSCALL SEGNAME                REPORT FILENAME
+         B     QIETEXIT                RETURN WITH QUIET OPTION
+         EJECT ,
+*  RENAME A FILE
+*
+RENAME   LABEL ,
+         SET   GPWOSFOK                OS/FILES POSSIBLE
+         IF    ('FSCALL GETMEMBR',NZ),'FSCALL GETNAME'
+         LSCAN RENAMCMD,CLWKWCB        PAST PREPOSITION
+         B     SCRET                   BAD NEWS
+RENEW    FSCALL ASMBLNAM               PUT NAME TOGETHER
+         IF    (GPWLMNL,NE,0),RENAMEMB RENAME LIBRARY MEMBER
+         IF    GPWFVOSF,BEGIN          OS/FILE RENAME
+         FSCALL CHECKOS                FILE EXIST?
+         IF    M,OSNOTFND              COULDN'T FIND IT..SORRY
+         END   ELSE,BEGIN              ORVYL FILE RENAME
+         FSCALL ATTOLDE                ATTACH EXCULSIVE
+         END   ,
+         MVC   GPWAFILE,GPWFCB         MOVE TO ALTERNATE FCB
+         FSCALL FNINIT                 CLEAR FILE-NAME AREA
+         MVC   GPWPFFL(2),GPWAFFL      RESET FLAGS AND FILE ID
+         CLEAR GPWAFFL.GPWFATT         DONT WANT ALTERNATE ATTACHED
+         CLEAR GPWFFFN                 CLEAR FULL FILENAME
+         FSCALL GETNAME                GET FILENAME
+         LSCAN USRGPTB0,CLWKWCB        AND USER AND GROUP
+         FSCALL ASMBLNAM               PUT IT TOGETHER
+         IF    (^GPWFFFN,AND,GPWFVOSF),BEGIN
+         MVC   GPWFILN(3),=C'WYL'      RESET WYL. PREFIX
+         END   ,
+         FSCALL DORENAME               RENAME THE FILE
+         B     CRMSG                   DONE
+         EJECT ,
+*
+*  RENAME LIBRARY MEMBER
+*
+RENAMEMB LABEL ,
+         SCAN  ,CLWKWCB                GET MEMBER NAME
+         BZ    MISSING                 MUST BE SOMETHING
+         BM    UNREC                   INVALID STRING
+RENAMB   IF    (R0,GT,8),INVALMEM      TOO LONG
+         MVC   GPWLMN2,=CL8' '         BLANK IT OUT
+         LR    SR,R0                   PUT LENGTH WHERE USEABLE
+         DEX   SR,'OC  GPWLMN2(0),@R1'
+         LSCAN QUIETBL,CLWKWCB         LOOK FOR QUIET
+         BNZ   SCRET
+         SET   OSFUPD                  OPEN FOR UPDATE
+         FSCALL ATTOLDE                ATTACH OLD FILE
+         FSCALL RNAMEMEM               RENAME MEMBER OR ALIAS
+         BM    MEMNFND                 MEMBER NOT FOUND
+         BH    N2EXISTS                NEW NAME ALREAD EXISTS
+         SET   GPWALIAS
+         B     CREATMBS                ADD 'X CREATED IN LIB' ..DONE
+*
+N2EXISTS LABEL ,
+         SET   GPWALIAS
+         FSCALL SEGMEMB
+         SEG   'already exists in '
+         FSCALL SEGNAME
+         B     ERROR
+         EJECT ,
+*  CREATE A FILE
+*
+CREATE   LABEL ,                       GET FILE NAME
+         IF    ('FSCALL GETMEMBR',NZ),'FSCALL GETNAME'
+         SET   GPWFCREF
+         LSCAN CREATBLF,CLWKWCB        SCAN CREATE OPTIONS
+         BNZ   SCRET                   ERROR
+         IF    GPWFAPP,APPILLEG        APPEND WITHOUT FROM ILLEGAL
+         FSCALL ASMBLNAM               GET FILENAME
+         IF    (GPWLMNL,NE,0),CREAMBNO PDS MEMBER CREATION ILLEGAL
+         IF    ^GPWFVOSF,BEGIN         CREATE ORVYL FILE
+         LCALL ATTFPUT
+         VCALL SETFMT                  SET FORMAT FIELD
+         IF    GPWFELIB,'SET GPWUILIB'
+         FSCALL SETUINFO
+         B     CRMSG                   DONE.
+         END
+         IF    GPWFVOSF,BEGIN          CREATE OS FILE (PDS)
+         FSCALL CHECKOS                IF OS FILE EXISTS, ABORT
+         BZ    REQABORT
+         IF    GPWFELIB,'SET OSFPO'    LIBRARY
+         SET   OSFNEW
+         FSCALL ATTOUTOS               OS/FILE CREATE
+         B     CRMSG
+         END
+*
+CREFROM  FSCALL ASMBLNAM                GET FIRST FILENAME
+         IF    (GPWLMNL,NE,0),CREAMBNO
+         MVC   GPWAFNL,GPWFNL          SAVE FILE NAME
+         MVC   GPWAFN,GPWFILN
+         CLEAR GPWFCB
+         FSCALL FNINIT
+         FSCALL GETNAME                GET SECOND FILENAME
+         LSCAN CREATBL,CLWKWCB         SCAN CREATE OPTIONS
+         BNZ   SCRET                   ERROR
+         FSCALL ASMBLNAM                GET SECOND FILENAME
+         FSCALL ATTOLD                 GET 'FROM' FILE
+         FSCALL SENLDF                 IS IT CLPONLY?
+         IF    NZ,NORDPRIV             YES, FORGET IT
+         FSCALL DOSENCLP               SENSE CLP ACCESS
+         IF    NZ,NOACCLP
+         FSCALL CHKSPIRE               AVOID SPIRES ONLY
+         IF    (GPWUILIB,AND,GPWFAPP),CRAPLIB  APPEND
+         MVC   GPWAFID,GPWFID          'FROM' BECOMES ALTERNATE
+         CLEAR GPWFATT
+         SET   GPWAFFL.GPWFATT         MARK ALTERNATE ATTACHED
+         IC    R1,GPWFNL               SWAP 'FROM' & CREATE FILE NAMES
+         MVC   @R13(L'GPWFN),GPWFFN    'FROM' NAME TO SAVE AREA
+         MVC   GPWFNL,GPWAFNL
+         MVC   GPWFILN(L'GPWFN),GPWAFN
+         STC   R1,GPWAFNL
+         MVC   GPWAFN,@R13
+         MVC   GPWABKSZ,GPWBLKSZ       Block size
+         LCALL ATTFPUT                 ATTACH FOR PUTTING
+         CLC   GPWABKSZ,GPWBLKSZ       Block sizes same?
+         BNE   CREBLKSZ                Error if not
+         SET   GPWFALTF                INDICATE ALTERNATE FILE
+         SET   GPWFFMT                 ASSUME FORMAT
+         FSCALL SENUINFO               GET USER INFO
+         ST    R1,GPWUINFO             SAV UINFO
+         BZ    *+8                     SKIP IF FORMAT
+         CLEAR GPWFFMT                 NOT A FORMAT
+         CLEAR GPWFALTF                PRIMARY FILE
+         FSCALL SETUINFO               GO SET USER INFO
+         L     TR,GPWBN                TR IS FIRST BLOCK TO WRITE
+         IF    ^GPWFAPP,'CLEAR TR'     BLOCK ZERO IF NOT APPEND
+         DECR  TR                      DECREMENT
+         CLEAR SR                      ZERO SR (INPUT BLOCK NO)
+CRELOOP  ST    SR,GPWBN                BLOCK TO READ
+         SET   GPWFALTF                FROM ALT FILE
+         FSCALL READ                    GET 1 BLOCK
+         BNZ   CREEND                  NO MORE BLOCKS TO READ
+         LR    R15,1                   BLOCK LENGTH
+         L     SR,GPWBN                BLOCK NUMBER
+         LR    R1,SR                   COMPUTE OUTPUT BLOCK NO
+         AR    R1,TR                   ADD OFFSET
+         ST    R1,GPWBN                BLOCK TO BE WRITTEN
+         CLEAR GPWFALTF                WRITE TO PRIMARY FILE
+         IF    (R15,GE,4),BEGIN        ENOUGH DATA TO WRITE?
+         FSCALL WRITE                   YES, DO IT
+         END   ELSE,BEGIN
+         FSCALL CREC                   OTHERWISE, DO A CREATE BLOCK
+         END   ,
+         B     CRELOOP
+*
+CREEND   LABEL ,
+         CLEAR GPWFALTF                STOP ALT FILE PROCESSING
+CRMSG    FSCALL SEGNAME                FORMAT
+         SEG   'created '              ANSWER
+         B     VFMSG
+         EJECT ,
+CRAPLIB  LABEL ,
+         SEG   'Cannot append from a library'
+         B     ERROR
+*
+CRALREDY FSCALL SEGNAME
+         SEG   'already exists.'
+         B     ERROR
+*
+NOACCLP  FSCALL SEGNAME
+         SEG   'may not be accessed by CLP'
+         B     ERROR
+*
+CREAMBNO SEG   'Library member creation not available'
+         B     ERROR
+*
+CREBLKSZ SEG   'Cannot complete "CREATE FROM", blocksize incompatible'
+         B     ERROR
+         EJECT ,
+*
+*  CREATE ALIAS FOR LIBRARY MEMBER
+*
+CREALIAS LABEL ,
+         FSCALL ASMBLNAM                PUT NAME TOGETHER
+         IF    (GPWLMNL,EQ,0),MEMNTSPC
+         L     R1,=A(ALIASFTB)
+         SCAN  (1),CLWKWCB             GET MEMBER NAME
+         B     MISSING
+CRENAMB  LABEL ,
+         MVC   GPWLMN2(8),GPWLMN
+         IF    (R0,GT,8),INVALMEM      TOO LONG
+         MVC   GPWLMN,=CL8' '          BLANK IT OUT
+         LR    SR,R0                   PUT LENGTH WHERE USEABLE
+         DEX   SR,'OC  GPWLMN(0),@R1'
+         LSCAN QUIETBL,CLWKWCB         LOOK FOR QUIET
+         BNZ   SCRET
+         SET   OSFUPD                  OPEN FOR UPDATE
+         FSCALL ATTOLDE                ATTACH OLD FILE
+         FSCALL ADDALIAS               RENAME MEMBER OR ALIAS
+         BM    MEMNFND                 MEMBER NOT FOUND
+         BH    N2EXISTS                NEW NAME ALREADY EXISTS
+         SEG   'Alias '
+         SET   GPWALIAS
+CREATMBS FSCALL SEGMEMB
+         SEG   'created '
+         B     PUTESEND                GENERATE MESSAGE
+*
+CREATAFO LABEL ,                      BYPASS 'FOR'
+         SCRTN (15)
+         EJECT ,
+*  GET FILE
+*
+GET      LABEL ,
+         IF    ('FSCALL GETMEMBR',NZER),'FSCALL GETNAME'
+         SET   GPWGPFBK                STOP BLOCK
+         LSCAN GETTBL,CLWKWCB          GET OPTIONS
+         BNZ   SCRET
+*
+         FSCALL ASMBLNAM                PUT NAME TOGETHER
+         TM    CLWWLMOD+3,WSSBRK+WPRHBT CHANGES OK?
+         BNZ   BLOCKED                 NO
+         FSCALL SENSWDS                 ANYTHING THERE
+         LTR   R1,1
+         BZ    GETSET                  NO
+         IF    (GPWFCLR+GPWFMRG,NZ),GETSET   CLEAR OR MERGE?
+         SEG   'OK to clear'
+         FSCALL RDERASE                 ASK USER
+         IF    (GPWFCLR+GPWFMRG,Z),NOACTION  OK?
+*
+GETSET   LABEL ,
+         FSCALL ATTOLD                 GET FILE
+         FSCALL SENLDF                 IS IT CLPONLY?
+         IF    NZ,NORDPRIV             YES, FORGET IT
+         FSCALL DOSENCLP               SENSE CLP ACCESS
+         IF    NZ,NOACCLP
+         FSCALL CHKSPIRE               AVOID SPIRES ONLY
+         VCALL GETFMT                   CHECK USER INFO FOR ATTRIBTES
+         IF    GPWGPFLR,GETLREC        LRECL?
+         IF    GPWGPFHX,NIXHEX         HEX?
+         LA    SR,2                    SET INSERT ONLY OPTION
+         IF    GPWFMRG,'CLEAR SR'      SET MERGE CODE
+         IF    GPWGPFV,GETCOM          VARIABLE?
+         FSCALL SETPREST                SET EDIT FORMAT
+         B     GETCOM                  CONTINUE
+*
+GETLREC  LABEL ,
+         IF    (GPWGPFHX,AND,('TM GPWLREC+1,1',O)),HEXNEVEN
+         IF    (GPWLREC,Z),ZRLREC      CAN'T HAVE THIS
+         IF    GPWFRNUM,NIXRENUM       RENUMBER?
+         LA    SR,4                    SET CODE
+         IF    ^GPWGPFN,GETCOM         NUMBERED?
+         CLC   GPWLREC(2),=Y(80)       VALID?
+         BNE   GETCOM                  NO
+         LA    SR,5                    SET NUMBERED
+         IF    ^GPWGPFIN,GETCOM        INTEGER?
+         LA    SR,6                    SET INTEGER
+*
+GETCOM   LABEL ,
+         STH   SR,GPWOPT
+         IF    GPWUILIB,BEGIN         PRIME IF L
+         IF    (GPWLMNL,EQ,0),MEMNTSPC
+         FSCALL GETMEM                 INITIALIZE MEMBER READ
+         BM    MEMNFND                 NOT THERE
+         END   ,
+         ELSE  BEGIN
+         IF    (GPWLMNL,NE,0),NOTLIB
+         END   ,
+         IF    GPWFMRG,GETCLR          MERGE?
+         FSCALL CLRWDS                  DO CLEAR TEXT
+*
+GETCLR   IF    ^GPWGPFSK,GETLOOP       SKIP?
+         CLEAR R1
+         L     QR,GPWSKIP              SKIP COUNT
+         LH    SR,GPWLREC              LRECL
+GETSKIP  IF    (R1,NP),BEGIN           NO MORE IN THIS BUFFER
+         FSCALL READ                   GET NEXT BLOCK
+         BNZ   FILEXIT                 QUIT IF END OF FILE
+         L     TR,GPWDATAD             INPUT POINTER
+         END   ,
+         IF    GPWGPFLR,GSLRECL        LRECL OR EDIT/VARIABLE
+         LC    SR,@TR+4                LINE LENGTH
+         CH    SR,=Y(251)              REALLY EDIT?
+         BH    BADFORM                 NO
+         LA    SR,@SR+5                FULL LENGTH
+GSLRECL  SR    R1,SR                   REMAINING LENGTH IN BUFFER
+         LA    TR,@TR(SR)              NEW INPUT POINTER
+         BCT   QR,GETSKIP
+         LTR   R1,1                    ANY LEFT?
+         BNP   GETLOOP                 START FRESH IF NOT
+         STH   R1,GPWWBL               SET WRITE LENGTH
+         LR    R1,TR                   AND CURRENT POINTER
+         B     GETWRITE                ANS SEND TO WYLBUR
+*
+GETLOOP  FSCALL READ                    GET A BLOCK
+         BNZ   GETDONE                 DONE?
+         IF    (R1,Z),GETDONE
+         STH   R1,GPWWBL               SET LEN
+         L     R1,GPWDATAD             LOCATION OF TEXT
+GETWRITE IF    ^GPWGPFLR,WREDIT        LRECL?
+         SPACE ,
+* IF LRECL THEN PAD OUT BUFFER TO MULTIPLE OF BLOCK LENGTH
+         LH    R15,GPWWBL              CURRENT BUFFER SIZE
+         CLEAR R14
+         LH    R0,GPWLREC
+         IF    ^GPWGPFHX,WRW1          HEX?
+         SRL   R0,R1
+WRW1     DR    R14,0                   BUFFER LEN/LRECL
+         STH   R15,GPWWBLK
+         LTR   R14,14                  EVEN DIVISION?
+         BZ    WHEXCV                  YES
+         LA    R15,@R15+1              ADJUST FOR PADDING LAST LINE
+         STH   R15,GPWWBLK
+         LR    R15,0                   LRECL
+         SR    R15,R14                 PAD LENGTH
+         LH    R0,GPWWBL
+         LR    R14,0
+         AR    R0,R15                  NEW BUFF LEN
+         STH   R0,GPWWBL
+         LA    R14,@R14(R1)
+         MVI   @R14,C' '               PAD CHARACTER
+         BCT   R15,WRWPAD
+         B     WHEXCV
+WRWPAD   DEX   R15,'MVC  @R14+1(0),@R14'     PAD
+         SPACE 2
+*
+* MOVE AND TRANSLATE INTO HEX IF REQUESTED
+* -ASSUME LRECL IS EVEN
+WHEXCV   IF    ^GPWGPFHX,GOWRWDS       HEX?
+         LH    TR,=Y(L'GPWHXBUF)        HEX BUFFER LEN
+         CLEAR SR
+         LH    R0,GPWLREC
+         DR    SR,R0
+         STH   TR,GPWWBLK              BLOCKS IN A BUFFER
+         LCR   SR,SR
+         AH    SR,=Y(L'GPWHXBUF)        ROUND BUFFER SIZE DOWN
+         LH    TR,GPWWBL               SOURCE BUFFER LEN
+         STH   SR,GPWWBL               NEW OUTPUT LEN
+         SRL   SR,R1                   SOURCE LEN
+         LCALL WHEXLOOP                SKIP THIS
+*
+WHEXRET  L     R1,CLWTEMP              SOURCE POINTER
+WHEXLOOP LA    R14,7
+         LR    R15,1
+         AR    R15,SR                  SOURCE END
+         ST    R15,CLWTEMP
+         SR    R15,R14                 WARNING POINT
+         DECR  R15
+         LA    QR,GPWHXBUF             DESTINATION
+         LA    R0,14
+UPLOOP   UNPK  @QR(15),@R1(8)          14 GOOD BYTES, 1 BAD
+         AR    QR,R0
+         BXLE  R1,14,UPLOOP
+         UNPK  @R13(15),@R1(8)         FINAL UNPK (IN SAVE STACK)
+         LA    R15,@R15+1(R14)
+         SR    R15,R1                  RESIDUAL COUNT
+         AR    R15,15                  DOUBLES AFTER UNPK
+         DEX   R15,'MVC  @QR(0),@R13'  MOVE LAST BIT
+         LA    R1,GPWHXBUF
+         LA    R14,256
+         LR    R15,1
+         AH    R15,GPWWBL              BUFFER END
+         LR    QR,R15
+         SR    R15,R14                 WARNING POINT
+         BL    LASTTR
+TR256    TR    @R1(256),HEXTR
+         BXLE  R1,14,TR256
+LASTTR   SR    QR,R1                   RESIDUAL
+         IF    NZ,'DEX  QR,"TR  @R1(0),HEXTR"'
+         LA    R1,GPWHXBUF
+         SR    TR,SR                   REMAINING WRITE COUNT
+         IF    H,'FSCALL WRITEWDS ; B WHEXRET' RET TO HEXLOOP
+         AR    TR,SR                   LAST WRITE
+         AR    TR,TR
+         STH   TR,GPWWBL               WRITE LENGTH
+         LH    QR,GPWLREC
+         CLEAR SR
+         DR    SR,QR                   NUMBER OF BLOCKS IN TR
+         STH   TR,GPWWBLK
+         B     GOWRWDS                 GO SEND TO WYLBUR
+         SPACE 2
+WREDIT   LABEL ,                      WRITE EDIT FORMAT
+         IF    ^GPWFRNUM,GOWRWDS       RENUMBER?
+         L     QR,GPWLINCT             GET LINE NO
+         LR    TR,R1                   TR POINT TO DATA
+         LH    R0,GPWWBL               LENGTH OF DATA
+         AR    R0,R1                   POINT TO END OF DATA
+         CLEAR SR                      ZERO SR FOR IC'S
+         WHILE (TR,LT,R0),BEGIN        LOOP TO RENUMBER
+*         A     QR,=F'1000'             INCREMENT LINE COUNT
+         A     QR,GPWDELTA
+         ST4   QR,@TR                  SET LINE NO
+         IC    SR,@TR+4                GET LINE LENGTH
+         CH    SR,=Y(251)              REALLY EDIT?
+         BH    BADFORM                 VERIFY NOT TOO LONG
+         LA    TR,@TR+5(SR)            GO TO NEXT LINE
+         END   ,
+         ST    QR,GPWLINCT             SAVE UPDATE LINE NO
+         IF    (TR,NE,R0),BADFORM      IF NOT RIGHT ON, BAD FORMAT
+GOWRWDS  FSCALL WRITEWDS                TO WYLBUR
+         B     GETLOOP
+*
+* HEX CONVERSION AIDS
+*
+HEXTR    EQU   *-C'0'
+         DC    C'0123456789ABCDEF'
+*
+GETDONE  LABEL ,
+         IF    ^GPWFTRN,GETDLAST       ANY TRUNCATED?
+         SEG   'One or more lines truncated to 235 characters'
+         VWRITE ,
+GETDLAST IF    (GPWFMRG+GPWFRNUM,Z),FILEXIT  MERGE OR RENUMBER?
+         VCALL SHOWLAST                TELL USER LAST LINE
+         B     FILEXIT                 DONE
+         EJECT ,
+*  PUT A FILE
+*
+PUT      LABEL ,
+*
+*                                      PUT RANGE SCAN HERE
+*
+         IF    ('FSCALL GETMEMBR',NZER),'FSCALL GETNAME'
+         LSCAN PUTTBL,CLWKWCB          GET PUT OPTIONS
+         BNZ   SCRET
+         FSCALL ASMBLNAM                PUT NAME TOGETHER
+*
+         FSCALL SENSWDS                 ANYTHING IN WYLBUR?
+         IF    (R1,Z),VOID             NO
+         IF    GPWFVOSF,'LCALL ATTOSPUT'   O.S ATTACH FOR PUT
+         ELSE  'LCALL ATTFPUT'             ORVYL ATTACH FOR PUT
+*   IF A FORMAT IS SPECIFIED,
+         IF    GPWGPFLR+GPWGPFV+GPWGPFE,BEGIN
+*     IF NO DATA IN FILE AND NOT APPEND, SET NEW FORMAT
+         IF    (GPWBN,Z),PUT1
+         IF    ((GPWBN,NE,1),OR,^GPWUILIB),PUT2
+PUT1     IF    GPWFAPP,PUT2
+         VCALL SETFMT                   USE NEW FORMAT
+         FSCALL SETUINFO               GO SET INFO
+         B     PUT3
+*     OTHERWISE, FORMATS MUST MATCH
+PUT2    LABEL ,
+         IF    GPWUILDF,PUTLOAD
+*   MAKE SURE FORMATS MATCH
+         IF    (GPWGPFLR,AND,GPWUIFE+GPWUIFV),INCFORM
+         IF    (GPWGPFE,AND,GPWUIFLR+GPWUIFV),INCFORM
+         IF    (GPWGPFV,AND,                                           *
+               GPWUIFE+GPWUIFLR),INCFORM
+         END   ,
+* IF NO FORMAT GIVEN, GET FILE FORMAT
+         ELSE  'VCALL GETFMT'
+PUT3     LABEL ,
+         IF    GPWGPFLR,PUTLREC        LRECL?
+         IF    GPWGPFHX,NIXHEX         HEX?
+         CLEAR SR                   SET OPTION TYPE
+         IF    GPWGPFV,PUTRANGE        VARIABLE?
+         FSCALL SETPREST                SET EDIT FORMAT
+         B     PUTRANGE                SO RANGE
+*
+PUTLREC  LABEL ,
+         IF    (GPWGPFHX,AND,('TM GPWLREC+1,1',O)),HEXNEVEN
+         LA    SR,200                  SET CODE
+         IF    ^GPWGPFN,PUTRANGE       NUMBERED?
+         CLC   GPWLREC(2),=Y(80)       VALID?
+         BNE   PUTRANGE                NO
+         LA    SR,300                  SET NUMBERED
+         IF    ^GPWGPFIN,PUTRANGE      INTEGER?
+         LA    SR,400                  SET INTEGER
+*
+PUTRANGE LABEL ,
+         LA    SR,@SR+3                SET CODE
+         STH   SR,GPWOPT
+         LH    R1,GPWBLKSZ             LENGTH
+         IF    GPWGPFHX,BEGIN          HEX BUFFER LENGTH
+         SRL   R1,1                     IS HALF A BLOCK
+         END
+         IF    GPWFVOSF,'LH  R1,OSFBLKSZ'    O.S. FILE BLKSZ LENGTH
+         STH   R1,GPWRBL               LEN OF BUFFER
+         FSCALL READWDS                 GET FIRST BUFFER
+         BNZ   VOID                    NOTHING TO PUT
+         LR    TR,R1                   SAVE LEN
+         DECR  R15
+         ST    R15,GPWFWDS             SET NEXT LINE
+         EJECT ,
+         IF    GPWGPFHX,PUTHEX         HEX?
+         LR    R15,TR                  SET LEN FOR WRITE
+         B     PUTOUT
+PUTLOOP  FSCALL READWDS                 GET A BLOCK
+         BNZ   PUTDONE                 END OF WDS
+         LR    R15,1                   SET LEN
+PUTOUT   FSCALL WRITE                   PUT IT
+         B     PUTLOOP
+         EJECT ,
+* ORVYL ATTACH FOR PUT
+*
+ATTFPUT  VPUSH RAR,,*                  SAVE RETURN
+         SET   GPWFANW                 CREATE FILE IF NOT THERE
+         FSCALL ATTOLDE                EXCLUSIVE USE
+         FSCALL CHKSPIRE               AVOID SPIRES ONLY
+         IF    (^GPWFNEW,AND,GPWFNIXR,AND,^GPWFHYBR),NIXNIXR
+         IF    GPWUILIB,BEGIN          LIBRARY
+         IF    GPWFAPP,NOLIBAPP        NO APPEND
+         IF    GPWFCREF,BEGIN
+         IF    GPWFELIB,ATTFP1
+         CLEAR GPWFERS                 CLEAR ERASE
+         SEG   'Replace library '
+         FSCALL SEGNAME
+         FSCALL RDERASE
+         IF    ^GPWFERS,NOACTION
+         B     ATTFP1
+         END ,
+         IF    GPWUILDF,PUTLOAD
+         IF    (GPWLMNL,EQ,0),MEMNTSPC NO MEMBER
+         IF    (GPWUIDA+GPWUIUND+GPWUIVBS,NZ),INCFRM2
+         END   ,
+         IF    (GPWLMNL,EQ,0),ATTFP1   NOT FOR LIB
+         IF    (GPWFNEW,OR,('FSCALL SENLREC',NZ)),BEGIN
+         SET   GPWLNEWD                LIBRARY IS NEW
+         VCALL SETFMT
+         FSCALL SETUINFO
+         END   ,
+         SPACE 3
+         IF    GPWFERS,BEGIN
+         SET   GPWLREP                 IF ERASE, MEMBER REPLACE OK
+         END   ,
+         ELSE  BEGIN
+         FSCALL CHECKMEM               IF NOT ERASE, DOES MEMBER EXIST
+         BM    PPUTMEM                 NO, GO PUT MEMBER
+         FSCALL ASKMBERS               YES, ASK IF ERASE OK
+         IF    ^GPWFERS,NOACTION
+         SET   GPWLREP                 ERASE, REPLACE OK
+         END   ,
+PPUTMEM  LABEL ,
+         FSCALL PUTMEM                 INITIALIZE MEMBER FOR OUTPUT
+         B     ATTPGO1
+ATTFP1   IF    GPWFNEW,ATTPGO          NEW
+         FSCALL SENLREC                GET LAST
+         BNZ   ATTPGO                  NOTHING TO ERASE
+         LA    R1,@R1+1                IN CASE OF APPEND
+         ST    R1,GPWBN
+         IF    (GPWFERS+GPWFAPP,NZ),ATTPERS  ERASE OR APPEND?
+         IF    (GPWFCREF,AND,^GPWAFFL.GPWFATT),CRALREDY
+         FSCALL ASKERASE
+         IF    (GPWFERS+GPWFAPP,Z),NOACTION  ERASE OR APPEND?
+ATTPERS  IF    ^GPWFERS,ATTPGO1        ERASE?
+         LCALL DELETE                  CLEAR FILE
+         SET   GPWSFER                 SET ERASED
+ATTPGO   XC    GPWBN,GPWBN             NOT APPEND
+ATTPGO1  VPOP  RAR,,*
+         BR    RAR
+         EJECT ,
+*
+*  O.S. OUTPUT FILE ATTACH ETC.
+*
+*  WE PROCESS THE FOLLOWING CASES
+*      1. EXISTING FILES; PDS AND SEQUENTIAL
+*      2. NEW FILES; PDS AND SEQUENTIAL
+*
+ATTOSPUT LABEL ,                       ATTACH FOR O.S. PUT
+         VPUSH RAR,,*
+         IF    (GPWGPFE+GPWGPFLR,Z),BEGIN    ONLY EDIT AND LRECL
+         SEG   'Invalid format for O.S. file PUT'
+         B     ERROR
+         END   ,
+         FSCALL CHECKOS                CHECK IF FILE EXISTS
+         BZ    NOTTHERE                NO EXISTING FILE ->
+* FILE EXISTS
+         MVI   OSFDSORG,X'00'          CLEAR OLD DSORG
+         VCALL GETFMT                  SET FORMAT FROM EXISTING
+         IF    (GPWGPFLR,AND,GPWUIFE+GPWUIFV),INCFORM
+         IF    (GPWGPFE,AND,GPWUIFLR+GPWUIFV),INCFORM
+         IF    (GPWGPFV,AND,GPWUIFE+GPWUIFLR),INCFORM
+         IF    OSFPO,BEGIN             LIBRARY
+         IF    GPWFAPP,NOLIBAPP        NO APPEND
+         IF    GPWUILDF,PUTLOAD        NO LOADFILES
+         IF    (GPWLMNL,EQ,0),MEMNTSPC       NO MEMBER
+         FSCALL ATTOUTOS
+         IF    GPWFERS,BEGIN
+         SET   GPWLREP                 IF ERASE, MEMBER REPLACE OK
+         END   ,
+         ELSE BEGIN
+         FSCALL CHECKMEM               IF NOT ERASE, DOES MEMBER EXIST
+         BM    PUTMEMS                 NO, GO PUT MEMBER
+         FSCALL ASKMBERS               YES, ASK IF ERASE OK
+         IF    ^GPWFERS,NOACTION
+         SET   GPWLREP                 ERASE, REPLACE OK
+         END
+PUTMEMS  LABEL ,
+         FSCALL PUTMEM                 INITIALIZE MEMBER FOR OUTPUT
+         B     ATTOSRET                RETURN
+         END   ,
+* EXISTING SEQUENTIAL FILE
+         IF    OSFPS,BEGIN            ATTACH EXISTING SEQUENTIAL FILE
+         IF    (GPWFERS+GPWFAPP,Z),BEGIN     IF NOT ERA/APP, ASK
+         FSCALL SEGNAME
+         FSCALL ASKERASE
+         IF    (GPWFERS+GPWFAPP,Z),NOACTION  NO, ABORT REQUEST
+         END
+         IF    GPWFERS,'SET OSFOLD'        ERASE
+         IF    GPWFAPP,'SET OSFMOD'   APPEND
+         FSCALL ATTOUTOS               ATTACH FOR OUTPUT
+         B     ATTOSRET                EXISTING SEQUENTIAL DONE
+         END   ,
+* FILE DOES NOT EXIST
+NOTTHERE LABEL ,                      FILE DOES NOT EXIST
+         VCALL SETFMT                  GET FORMAT INFO FOR ATTACH
+         SET   OSFNEW                  NEW O.S. FILE ATTACH
+         FSCALL ATTOUTOS               ATTACH FILE
+         IF    OSFPO,'FSCALL PUTMEM'   IF LIB, INIT MEMBER FOR PUT
+ATTOSRET LABEL ,
+         IF    GPWGPFE,'SET GPWOSFED'  IF EDIT, SET O.S. EDIT FLAG
+         VPOP  RAR,,*
+         BR    RAR                     RETURN
+         EJECT ,
+*  PUT HEX CONVERSION
+*
+PUTHEX   LABEL ,
+         LA    QR,4                    RATIO - WYLBUR/FILE
+         L     SR,GPWBUFA              STARTING OUTPUT LOCATION
+         B     PHSTART                 ENTER LOOP
+PHREAD   FSCALL READWDS                 GET A BLOCK
+         BNZ   PHEND                   DONE
+         LR    TR,R1                   SAVE TOTAL LENGTH
+PHSTART  LA    R1,GPWHXBUF             INPUT POINTER
+PHCLOOP  LA    R0,8                    COUNT
+         CR    R0,TR                   THAT MUCH LEFT?#
+         BH    PHFRAG                  NO
+         XCALL XTB                     CONVERT
+         LTR   R0,0                    COMPLETE OK?
+         BNZ   PHERR                   NO
+         LA    R0,4                    STORE COUNT
+PHOUT    SLDL  R14,8                   FIRST BYTE
+         STC   R14,@SR                 INTO OUTPUT BUFFER
+         LA    SR,@SR+1                INCREMENT
+         BCT   R0,PHOUT                DO ALL
+         SH    TR,=Y(8)                GET REMAINING
+         BP    PHCLOOP                 CONVERT ALL OF INPUT
+PHNEXT   BCT   QR,PHREAD               GET NEXT INPUT BUFFER
+         LR    R15,SR                  SET LEN
+         SL    R15,GPWBUFA             LENGTH TO WRITE
+         FSCALL WRITE                   WRITE BLOCK
+         L     SR,GPWBUFA              RESET OUTPUT LOCATION
+         LA    QR,4                    RATIO - WYLBUR/FILE
+         B     PHREAD                  CONTINUE
+*
+PHFRAG   LTR   R0,TR                   REALLY SOME THERE?
+         BNP   PHNEXT                  NO
+         XCALL XTB                     CONVERT
+         LTR   R0,0                    COMPLETE OK?
+         BNZ   PHERR                   NO
+         LA    R1,8                    SHIFT UP REMAINDER
+         SR    R1,TR                   EMPTY HEX DIGITS
+         SLL   R1,2                    TO BIT COUNT
+         SLL   R15,@R1                 PUSH TO TOP
+         LR    R0,TR                   SET COUNT FOR STORE LOOP
+         SRL   R0,R1                   IN BYTES
+         B     PHOUT                   PUT IN OUTPUT BUFFER
+*
+PHEND    LABEL ,                      ANY?
+         SL    SR,GPWBUFA              COMPUTE LENGTH
+         LTR   R15,SR                  ANY CHARACTERS THERE?
+         BZ    PUTDONE                 DONE IF NOT
+         FSCALL WRITE                   SEND LAST
+         B     PUTDONE                 AND A MESSAGE
+*
+PHERR    LA    R0,1
+         B     UNREC
+         EJECT ,
+PUTDONE  LABEL ,
+         IF    GPWFNEW,BEGIN          SET FORMAT ON NEW FILE
+           VCALL SETFMT                 SET FORMAT INTO USER INFO
+           FSCALL SETUINFO             SET USER INFO
+         END   ,
+         IF    GPWUILIB,BEGIN
+           FSCALL  EOFMEM          EOF ON MEMBER PUT
+         END   ,
+         FSCALL SEGMEMB                FILE NAME OR MEMBER
+         IF    (GPWFAPP+GPWFERS,Z),PUTEND    ERASE OR APPEND?
+         IF    GPWFNEW,PUTDNEW         NEW?
+         IF    GPWFAPP,PUTDAPP         APPEND?
+         IF    ^GPWSFER,PUTEND         ERASE DONE?
+         SEG   'replaced '
+         B     PUTESEND                SEND IT
+*
+PUTDAPP  SEG   'appended '             TELL USER
+         B     PUTESEND                ALL
+*
+PUTDNEW  SEG   'not found'
+         IF    ^GPWFAPP,PUTDNER        APPEND?
+         SEG   ' to append, '
+         B     PUTEMSG
+*
+PUTDNER  SEG   ' to replace, '
+*
+PUTEMSG  LABEL ,
+*
+PUTEND   SEG   'Put '
+*
+PUTESEND LABEL ,
+         IF    ^GPWUILIB,VFMSG
+         IF    (GPWLMNL,EQ,0),VFMSG
+         SEG   'in '                   IN LIBRARY
+         FSCALL SEGNAME
+         B     QIETEXIT
+*
+NOLIBAPP SEG   'Libraries may not be appended'
+         B     ERROR
+         EJECT ,
+*  GET AND PUT SCAN ROUTINES
+*
+CLRERASE IF    GPWFAPP,UNREC           APPEND SPECIFIED?
+         SET   GPWFERS                 SET ERASE
+IGNORE   SCRTN (15)
+*
+EDIT     IF    (GPWGPFV+GPWGPFLR+GPWGPFHX+GPWGPFN,NZ),UNREC
+         SET   GPWGPFE                 SET EDIT
+         SCRTN (15)
+*
+PRINT    LA    SR,133                  SET LEN
+         B     LRECL1                  COMMON
+*
+CARD     LA    SR,80                   SET LEN
+         B     LRECL1
+*
+LRECL    BZ    MISSING                 NO PARM
+         L     SR,@R15                 KWVAL
+         CH    SR,=Y(4)                OF MINIMAL VALUE?
+         BL    UNREC                   ERROR IF NOT
+LRECL1   IF    (GPWGPFV+GPWGPFE,NZ),UNREC
+         IF    ^GPWGPFLR,SETLREC       LRECL SET?
+         CH    SR,GPWLREC              REPEATING?
+         SCRTN (15),BC=E               YES
+         B     UNREC
+SETLREC  SET   GPWGPFLR                SET LRECL
+         STH   SR,GPWLREC              SAVE LENGTH
+         IF    GPWGPFHX,HEXCHECK       HEX?
+         IF    ^GPWGPFN,'SCRTN (15)'   NUMBERED?
+         B     NUMCHECK                CHECK LEN
+*
+VARIABLE IF    (GPWGPFE+GPWGPFLR+GPWGPFHX+GPWGPFN,NZ),UNREC
+         SET   GPWGPFV                 SET VARIABLE
+         SCRTN (15)
+*
+HEX      IF    (GPWGPFV+GPWGPFE+GPWGPFN,NZ),UNREC
+         SET   GPWGPFHX                SET HEX
+         IF    ^GPWGPFLR,'SCRTN (15)'  LRECL ALREADY SET?
+HEXCHECK TM    GPWLREC+1,1             EVEN COUNT?
+         SCRTN (15),BC=Z               YES
+         B     HEXNEVEN                ILLEGAL IF NOT
+*
+SKIP     BZ    MISSING                 NO PARM
+         IF    GPWGPFSK,UNREC          ALREADY?
+         SET   GPWGPFSK                SET SKIP
+         MVC   GPWSKIP,@R15            COUNT FROM KWVAL
+         SCRTN (15)
+*
+NUMB     IF    (GPWGPFV+GPWGPFE+GPWGPFHX,NZ),UNREC
+NUMBINT  SET   GPWGPFN                 SET NUMBERED
+         IF    GPWGPFLR,NUMCHECK       LRECL?
+         SET   GPWGPFLR                ASSUME LRECL=80
+         MVC   GPWLREC(2),=Y(80)
+         SCRTN (15)
+NUMCHECK CLC   GPWLREC(2),=Y(80)
+         SCRTN (15),BC=E
+         B     UNREC
+*
+APPEND   IF    GPWFERS,UNREC           ERASE SPECIFIED?
+         SET   GPWFAPP                 SET APPEND
+         SCRTN (15)
+*
+INTEGER  IF    (GPWGPFV+GPWGPFE+GPWGPFHX,NZ),UNREC
+         SET   GPWGPFIN                SET INTEGER BIT
+         B     NUMBINT                 AND TREAT LIKE NUMBERED
+*
+RENUMBER IF    (GPWGPFHX+GPWGPFLR,NZ),UNREC  ANY BAD GUYS?
+         SET   GPWFRNUM                SET RENUMBER
+         LR    QR,R14                  SAVE RETURN TO SCANNER
+         LR    SR,R15                  AND WORK AREA POINTER
+         FSCALL GETDELTA
+         IF    (R1,Z),'LA R1,1000'     Mikey is not ready yet
+         ST    R1,GPWDELTA             SAVE
+         LR    R14,QR
+         SCRTN (SR)
+         EJECT ,
+BLKSIZE  IF    GPWGPFBK,UNREC          ALREADY?
+         CLI   @R1,C'('                BLOCKSIZE?
+         BNE   UNREC                   NO
+         LR    SR,R0                   CHECK END
+         AR    SR,R1
+         DECR  SR
+         CLI   @SR,C')'                END PROPER?
+         BNE   UNREC
+         CH    R0,=Y(2)                LEN OK?
+         BNH   UNREC
+         DECR  R0
+         DECR  R0                      RIGHT LEN
+         LA    R1,@R1+1                RIGHT LOC
+         LR    QR,R14                  SAVE RETURN TO SCANNER
+         LR    SR,R15                  AND WORK AREA POINTER
+         XCALL DTB                     CONVERT
+         BNZ   UNREC
+         STH   R15,GPWBLK              SAVE BLKSIZE
+         SET   GPWGPFBK                SET BLOCKSIZE
+         LR    R14,QR
+         SCRTN (SR)
+         EJECT
+*
+NIXHEX   ERRXT 'Hex requires lrecl format'
+         SPACE ,
+NIXNIXR  ERRXT 'Unable to access non-IXR file'
+         SPACE ,
+NIXRENUM ERRXT 'Renumber requires edit or variable format'
+         SPACE ,
+INCFORM  SEG   'Specified '
+INCFRM2  ERRXT 'Format inconsistent with file format'
+         SPACE ,
+HEXNEVEN ERRXT 'Hex requires even lrecl'
+         SPACE ,
+ZRLREC   ERRXT 'File has invalid lrecl 0'
+         SPACE ,
+PUTLOAD  ERRXT 'Cannot put to a loadfile'
+         EJECT ,
+*
+*MOVEBLOCK EXPECTS 1 - TO LOCATION
+*                 14 - FROM LOCATION
+*                 15 - 0 MEANING READ FROM 1 UNTIL EOF
+*                      OR THE # OF BLOCKS TO MOVE
+*
+* RETURNS R1 -> NEXT BLOCK THAT WOULD HAVE BEEN WRITTEN TO
+*
+* MOVEBLOK WILL NOT ALLOW AN IDLE ATTENTION*******
+*
+MOVEBLOK LABEL ,
+         VPUSH R2,R11,*
+         LR    R2,R1                   TO LOCATION
+         LR    R3,R14                  FROM LOCATION
+         LR    R4,R15                  HOW MANY TO DO OR 0
+MOVBLOOP LABEL ,
+         ST    R3,GPWBN
+         FSCALL REDNOIDL               GET SOMETHING TO MOVE
+         BZ    MOVEBOK                 GOOD READ
+         IF    ^GPWFNSKP,MOVEEOF       TEST FOR NO SKIP
+         LA    R3,1(,R3)               KEEP TRYING FOR MEMBER
+         B     MOVEBUMP
+MOVEBOK  LR    R11,R3                  WE WILL DELETE BLOCK READ
+         L     R3,GPWBN                NEXT ONE WE WILL READ
+         LR    R15,R1                  HOW MUCH TO WRITE OUT
+         ST    R2,GPWBN
+         FSCALL WRITE
+         LR    R15,R11                 BLOCK TO DELETE
+         FSCALL DELREC
+MOVEBUMP LA    R2,@R2+1                NEXT TO WRITE
+         IF    (R4,NZ),'DECR  R4'      ONE LESS TO DO
+         IF    (R4,P),MOVBLOOP
+MOVEEOF  LABEL ,
+         LR    R1,R2
+         VPOP  R2,R11,*
+         BR    RAR
+         EJECT ,
+*  SHRINK FILE
+*
+SHRINK   LABEL ,
+         FSCALL GETNAME                GET FILENAME
+         LSCAN USRGPTB0,CLWKWCB        SCAN USER AND GROUP
+         BNZ   SCRET                   SCAN ERROR
+*
+         FSCALL ASMBLNAM                PUT NAME TOGETHER
+         FSCALL ATTOLDE                ATTACH EXCLUSIVE
+         IF    GPWUILIB,SHRLIB         SHRINKING LIBRARY?
+         FSCALL SENFREC                GET FIRST REC NO
+         CLEAR R3                   WHERE FIRST SHOULD START
+         LTR   R2,R1                   FIRST REC 0?
+         BNZ   SHRL2                   NO - GO SHRINK
+SHRSENLP LA    R2,@R2+1                CHECK FOR NEXT REC
+         LR    R15,R2
+         FSCALL SENREC                 IS IT THERE?
+         BZ    SHRSENLP                YES, TRY NEXT
+         LR    R3,R2                   DEST OF FIRST RECORD
+SHRL2    CLEAR R15                     PUSH WHOLE FILE DOWN
+         LR    R14,R2                  LOCATION OF FIRST RECORD
+         LR    R1,R3                   DESTINATION OF 1ST RECORD
+         LCALL MOVEBLOK
+SHREND   FSCALL SEGNAME                WRITE FILENAME
+         SEG   'Shrunk '
+         B     VFMSG
+         EJECT ,
+*  SHRINK A LIBRARY
+*
+SHRLIB   LABEL ,
+         FSCALL GETDIR                  BRING IN DIRECTORY
+         L     R1,GPWDIRAP             DIRECTORY ADDRESS
+         USING DIRB,R1                 ##
+         LT    R1,DIRBLINK
+         DROP  R1                      ##
+         BNZ   NOSHRINK                CAN'T PROCESS IF > A BLOCK
+*
+*  SCAN THE DIRECTORY MEMBERS TO LOCATE THE MEMBER WITH THE
+*  LOWEST START BLOCK ABOVE THE THRESHOLD VALUE.
+*
+         CLEAR R4                   INITIALIZE THRESHOLD BLOCK
+SHRSCN   LABEL ,
+         CLEAR R1
+         L     R2,GPWDIRAP             DIRECTORY ADDRESS
+         USING DIRB,R2                 ##
+         LA    R0,DIRBLEN(,R2)         END OF MEMBERS
+         LA    R2,DIRBDENT             FIRST MEMBER ENTRY
+         USING DENTRY,R2               ##
+SHRSCNL  CLI   DNAME,C' '              DONE WITH ENTRYS?
+         BE    SHRSCNM                 YES
+         IF    ('CLI  DFLG1,DALICD',LT),BEGIN
+         L3    R15,DFBN                MEMBER START
+         IF    (R4,LE,R15),BEGIN       THRESHOLD REACHED
+         IF    (R1,Z),'LR  R1,R2'      FIRST CANDIDATE
+         LA    R14,@R14
+         ICM   R14,B'0111',DFBN-DENTRY(R1)
+         IF    (R15,LT,R14),'LR R1,R2' THIS IS BETTER
+         END   ,
+         END   ,
+SHRSCNM  LA    R2,DNEXT                BUMP TO NEXT
+         IF    (R2,LT,R0),SHRSCNL      AND CHECK
+         DROP  R2                      ##
+*  SCAN COMPLETE,  R1 LOCATES NEW CANDIDATE
+SHRSCNX  IF    (R1,Z),SHRLFIN          FINISH UP
+         USING DENTRY,R1               ##
+         LR    R15,R4                  POSSIBLE DELETE BLOCK
+         L3    R14,DFBN                START BLOCK
+         IF    (R4,NE,R14),'LA R4,@R4+1'    BUMP THRESHOLD BLOCK
+         L3    R2,DBCT                 NUMBER OF BLOCKS
+         IF    (R4,LT,R14),BEGIN      BLOCKS MUST BE MOVED
+         ST3   R4,DFBN                 RESET THRESHOLD
+         IF    (R15,NZ),'FSCALL DELREC'   ENSURE A HOLE
+         LR    R1,R4                   NEW START BLOCK
+         LR    R15,R2                  NUMBER OF BLOCKS
+         SET   GPWFNSKP                NO MODE SKIP ON READ
+         LCALL MOVEBLOK                MOVE THEM
+         FSCALL PUTDIR                 REWRITE DIRECTORY
+         END   ,
+         AR    R4,R2                   GET PAST MEMBER
+         DROP  R1                      ##
+         VCALL CHKATTN
+         IF    NZ,REQABORT             ATTN?
+         B     SHRSCN                  GO TRY ANOTHER
+*
+*  ALL MEMBERS PROCESSED - FINISH UP
+SHRLFIN  FSCALL SENLREC                SENSE LAST RECORD
+         IF    ((R1,NZ),AND,(R1,GE,R4)),BEGIN
+         LR    R15,R4                  RANGE START
+         LR    R14,R1                  LAST BLOCK
+         FSCALL DELLOTS                DELETE RECORDS TO END
+         END   ,
+         B     SHREND
+         EJECT ,
+*  SET FILE PRIVILEGES
+*
+SETPERMI LABEL ,
+         LCALL CHECKFOR                TEST FOR ACCT OR FILENAME
+         B     *+4(15)                 RETURN CODE IS IN 15
+         B     MISSING                 0  NOTHING THERE
+         B     SETPERFL                4  FILENAME
+         B     SETPRACC                8  ACCT
+         B     SETPRACF                12 FOR WAS FOUND
+*
+SETPERFL FSCALL GETNAME                GET FILENAME
+         LSCAN FORTBL,CLWKWCB          LOOK FOR 'FOR' (MUST BE)
+         B     MISSING                 'FOR' NOT FOUND
+SETPRFOR LCALL FOR                     FOUND 'FOR'
+*
+         CLI   GPWPERM,L'GPWPRMEX      EXTEND ONLY?
+         BE    NOEXTEND                ILLEGAL IF SO
+         CLI   GPWFNL,0                ANY FILE NAME?
+         BE    SETPERAC                NO: PERMIT ACCOUNT
+*
+         SET   GPWFNSF                 DO NOT SENSE USER INFO
+         FSCALL ASMBLNAM
+         FSCALL ATTOLDE                GET FILE EXCLUSIVELY
+         IF    ^GPWFACC,SETPRFOK       GROUP SPECIFIED?
+         CLPSERV DEVINFO,WADEVINF,L'WADEVINF,LC:GPWFID
+         CLC   GPWACCT,WADEVNM+4       FILE OWNER?
+         BE    ACCTINC                 YES - SHOULD USE SET FILEMASK
+SETPRFOK FSCALL DOPERM                 ORVYL
+         B     FILEXIT                 DONE
+*
+SETPRACC FSCALL FORGROUP                FOUND ACCT
+         CLEAR GPWFACC                 UNSET THE ACCT BIT
+         MVC   GPWAACCT,GPWACCT        SAVE ACCT
+         SET   GPWFAACC                SET ALT ACCT
+SETPRACF LSCAN FORTBL1,CLWKWCB         NEXT THING MUST BE 'FOR'
+         B     MISSING                 IF NOT ...
+*
+SETPERAC LABEL ,
+         IF    (GPWFACC+GPWFPUB,Z),MISSING   COMPLETE COMMAND?
+         IF    ^GPWFACC,SETPRCKA       GROUP SPECIFIED?
+         IF    ^GPWFAACC,SETPRCKG      TWO GROUPS?
+         CLC   GPWACCT,GPWAACCT        ARE THEY THE SAME?
+         BNE   SETPRAOK
+         CLC   GPWACCT+L'GG+1(L'UUU),=C'PUB'  ALLOW GROUP PERMITS
+         BNE   ACCTINC                 NOT GROUP
+         B     SETPRAOK
+SETPRCKA IF    GPWFAACC,NOPUBPER       SET ACC FOR PUBLIC?
+         B     SETPRAOK
+SETPRCKG CLC   GPWACCT+L'GG+1(L'UUU),CLWUSER     USER MATCH
+         BNE   SETPRAOK                NO - OK
+         CLC   GPWACCT(L'GG),CLWGROUP            GROUP MATCH?
+         BE    ACCTINC                 YES - ERROR
+SETPRAOK FSCALL MEMBER                 GO SET MEMBER
+         B     FILEXIT                 DONE
+*
+PERMRD   SET   GPWPRMRD                SET READ ALLOWED
+         SCRTN (15)
+*
+PERMAPP  SET   GPWPRMAP                SET APPEND ALLOWED
+         SCRTN (15)
+*
+PERMWR   SET   GPWPRMWR                SET WRITE ALLOWED
+         SCRTN (15)
+*
+PERMNONE IF    GPWPRMWR,UNREC          ANY SET?
+         SCRTN (15)
+*
+PERMEXT  IF    GPWFPUB,UNREC           PUBLIC?
+         SET   GPWPRMEX                SET EXTEND ALLOWED
+         SCRTN (15)
+*
+PERMRA   SET   GPWPRMAP+GPWPRMRD       SET READ AND APPEND
+         SCRTN (15)
+         EJECT ,
+*  SET FILE SHARE ONLY
+*
+SETSHARE LABEL ,
+         FSCALL GETNAME                GET FILENAME
+         LSCAN USRGPTBL,CLWKWCB        GET USER AND GROUP
+         FSCALL ASMBLNAM                PUT IT TOGETHER
+         LA    SR,4                    SET FOR SHARE ONLY
+         B     SETSHRCM                CONTINUE
+*
+*  SET FILE ATTACHABLE EXCLUSIVE
+*
+SETNOSHA LABEL ,
+         FSCALL GETNAME                GET FILENAME
+         LSCAN USRGPTBL,CLWKWCB        GET USER AND GROUP
+         FSCALL ASMBLNAM                PUT IT TOGETHER
+         CLEAR SR                   SET FOR NORMAL ATTACH
+*
+SETSHRCM LABEL ,
+         SET   GPWFNSF                 DO NOT SENSE USER INFO
+         FSCALL ATTOLD                 GET FILE(NOT EXCLUSIVE)
+         LR    R15,SR                  SET TYPE OF CALL
+         FSCALL SETSHR                 SET STATUS
+         B     FILEXIT                 DONE
+         EJECT ,
+* CLP/NOCLP FILE ATTRIBUTE
+*
+SETCLP   LABEL ,
+         FSCALL GETNAME                GET FILE NAME ROOT
+         LSCAN USRGPTBL,CLWKWCB        LOOK FOR USER OR GROUP
+         BNZ   SCRET                   ERROR IN SCAN
+         FSCALL ASMBLNAM                GET FILENAME
+         CLEAR SR                   INDICATE SET CLP
+         B     SETCLPCM                DO IT
+*
+SETNOCLP LABEL ,
+         FSCALL GETNAME                GET FILENAME ROOT
+         LSCAN USRGPTBL,CLWKWCB        LOOK FOR USER OR GROUP
+         BNZ   SCRET                   ERROR IN SCAN
+         FSCALL ASMBLNAM                GET FILENAME
+         LA    SR,4                    INDICATE SET NOCLP
+*
+SETCLPCM SET   GPWFNSF                 DO NOT SENSE USER INFO
+         FSCALL ATTOLD                 ATTACH FILE(NOT EXCLUSIVE)
+         LR    R15,SR                  INDICATE SET OR NOT
+         FSCALL DOSETCLP                AND GO DO IT
+         B     FILEXIT
+         EJECT ,
+* SET/CLEAR SPIRES ONLY FILE ATTRIBUTE
+*
+SETSPIFI LABEL ,
+         FSCALL GETNAME                GET FILE NAME ROOT
+         LSCAN USRGPTBL,CLWKWCB        LOOK FOR USER OR GROUP
+         BNZ   SCRET                   ERROR IN SCAN
+         FSCALL ASMBLNAM                GET FILENAME
+         LA    SR,4                    INDICATE SET SPIRES ONLY
+         B     SETSPICM                DO IT
+*
+SETNOSPI LABEL ,
+         FSCALL GETNAME                GET FILENAME ROOT
+         LSCAN USRGPTBL,CLWKWCB        LOOK FOR USER OR GROUP
+         BNZ   SCRET                   ERROR IN SCAN
+         FSCALL ASMBLNAM                GET FILENAME
+         CLEAR SR                      INDICATE SET NO SPIRES ONLY
+*
+SETSPICM SET   GPWFNSF                 DO NOT SENSE USER INFO
+         FSCALL ATTOLD                 ATTACH FILE(NOT EXCLUSIVE)
+         LR    R15,SR                  INDICATE SET OR NOT
+         FSCALL DOSETSPI                AND GO DO IT
+         B     FILEXIT
+         EJECT
+* SET FILEMASK (OLD OWNERS PERMITS)
+SETFILEM FSCALL GETNAME                GET FILENAME
+         LSCAN MASKTBL,CLWKWCB         SCAN PERMITS
+         FSCALL ASMBLNAM                PUT NAME TOGETHER
+         SET   GPWFNSF                 DO NOT SENSE USER INFO
+         FSCALL ATTOLDE                ATTACH FILE FIRST
+         FSCALL DOPERM                 NO GROUP SET UP
+         B     FILEXIT
+         SPACE 5
+* SET FILE FORMAT
+*
+SETFORMA LABEL ,
+         FSCALL GETNAME
+         LSCAN FORMTTBL,CLWKWCB
+         FSCALL ASMBLNAM
+         FSCALL ATTOLD
+         FSCALL CHKSPIRE               AVOID SPIRES ONLY
+         VCALL SETFMT                   SET FORMAT
+         FSCALL SETUINFO               SET USER INFO
+         B     FILEXIT                 DONE
+         EJECT ,
+* RESET PROGRAM CATALOG
+*
+SETPROGR LABEL ,
+         VCALL PRIVTEST
+         BNZ   FILEXIT                 NOT PRIVILEGED
+         L     QR,CLWSCP
+         WITH  (SCP,QR),'L  QR,SCPPCAT'     POINT TO CATALOG
+         SETMSG 'PROGRAM CATALOG'      NAME TO ENQ ON
+         FSCALL ENQ                    ENQ ON IT
+         CLPSERV PGPRTOFF,(QR),4095    UNPROTECT THE PAGE
+         USING PRGCAT,QR               ##
+         CLEAR PCATPTR                 ZERO PROG CAT POINTERS
+         CLEAR PCATEND
+         DROP  QR
+         FSCALL DEQ                    DEQ IT
+         FSCALL GETCAT
+         FSCALL RELCAT
+         B     FILEXIT
+         EJECT ,
+*   CHECK BLOCKS ACCOUNTED FOR USER AGAINST TOTAL BLOCKS IN ALL FILES
+*
+FBAL     LABEL ,
+         VCALL PRIVTNOM                USER HAVE PRIVS?
+         IF    NZ,BEGIN                NOPE -- I DIDN'T UNDERSTAND
+         LR    R0,SR                   RESET COMMAND LENGTH
+         LA    R1,CLWIBUF              AND COMMAND ADDRESS
+         B     UNREC                   LATERAL SHUFFLE
+         END   ,
+         SCAN  ,CLWKWCB                GET ACCOUNT
+         BNP   SCRET                   NG
+         C     R0,=A(L'ACCT)           RIGHT LENGTH?
+         BNE   UNREC                   NG
+         IF    ('$',EQ,@R1+3),BEGIN
+         MVC   GPWACCT,@R1
+         END   ELSE,BEGIN              '.' FORM
+         IF    ('.',NE,@R1+2),BADACCT  BAD ACCOUNT FORMAT
+         MVC   GPWACCT(L'UUU),@R1+3    SET USER
+         MVC   GPWACCT+L'UUU+1(L'GG),@R1     SET GROUP
+         MVI   GPWACCT+L'UUU,C'$'            SET $ IN ACCOUNT
+         END   ,
+         SET   GPWFACC                 SET ACCOUNT FLAG
+         MVI   GPWFILN,C' '            BLANK OUT FILENAME
+         MVC   GPWFILN+1(L'GPWFILN-1),GPWFILN
+         MVC   GPWFILN(12),=C'ORV.GG.UUU.A' SET PREFIX
+         MVC   GPWFUSR,GPWACCT         SET USER
+         MVC   GPWFGRP,GPWACCT+L'UUU+1 SET GROUP
+         LSCAN FBALSCKW,CLWKWCB        ANY PARM?
+         BNZ   SCRET                   NG
+         FSCALL SENSP                  CHECK FOR NO SPACE
+         IF    (R14,Z),BEGIN
+         SEG   'No blocks accounted'
+         VWRITE ,
+         END   ,
+         CLEAR QR                      ZERO BLOCK COUNTER
+         SET   GPWFFRST                SET FIRST PASS FLAG
+         MVI   GPWFNL,44               SET MAX LENGTH
+FBAOLOOP FSCALL SENFILE                GET A BUNCH OF FILE NAMES
+         IF    GPWFFRST,BEGIN          FOR FIRST PASS
+         CLEAR GPWFFRST                CLEAR FIRST TIME FLAG
+         L     SR,GPWBUFA              SET POINTER
+         END   ELSE,BEGIN
+         IF    (R1,EQ,1),FBADONE       FINISHED
+         L    SR,GPWBUFA               SET POINTER TO BUFFER
+         LA    SR,@SR+56               SKIP FIRST FILE
+         END   ,
+         DECR  R1                      REDUCE COUNT
+         MH    R1,=Y(56)               CALCULATE LENGTH
+         L     TR,GPWBUFA              BEGINNING POINTER
+         AR    TR,R1                   END POINTER
+FBAILOOP MVC   GPWFILN(44),@SR         SET FILE NAME
+         FSCALL ATTOLDX                ATTACH THE FILE
+         FSCALL SENNREC                SENSE THE NUMBER OF RECORDS
+         AR    QR,R14                  BUMP COUNTER
+         FSCALL DETACH                 DETACH THE FILE
+         LA    SR,@SR+56               BUMP POINTER
+         CR    SR,TR                   FINISHED WITH THE BUFFER?
+         BL    FBAILOOP                NO
+         B     FBAOLOOP                GET MORE FILENAMES
+         SPACE 3
+FBADONE  FSCALL SENSP                  GET TOTAL SPACE AGAIN
+         LR    TR,R14                  SAVE BLOCKS ACCOUNTED
+         IF    (R14,NZ),BEGIN
+         SEGDC 0,(TR)                  SEG IT
+         SEG   ' Blocks accounted, '
+         END   ,
+         SEGDC 0,(QR)
+         SEG   ' Blocks total in files for '
+         SEG   GPWACCT,L'GPWACCT
+         IF    (QR,NE,TR),BEGIN
+         SEG   ' ** Error **'
+         IF    GPWFRST,BEGIN
+         LR    15,QR                   PROPER SPACE
+         LA    R0,104                  RESET SPACE
+         LA    R1,GPWACCT              POINT AT GROUP
+         FSCALL STAT3OR4               GO DO STATUS
+         SEG   ' Reset'                INDICATE FIXED
+         END   ,
+         END   ,
+         B     WRITEXIT
+         SPACE 2
+DFBRES   SET   GPWFRST                 SET RESET FLAG
+         SCRTN (15)
+         EJECT ,
+* MISCELLANEOUS KEYWORD PROCESSING
+*
+* DETECT WHETHER FILENAME OR ACCOUNT OR NOTHING IS SPECIFIED
+*
+CHECKFOR SCTELL CLWKWCB                SAVE OLD SCAN
+         LR    TR,R0
+         LR    QR,R1                   SAVE IN TR AND QR
+         LSCAN CKFORTBL,CLWKWCB        LOOK FOR 'FOR'
+         BNZ   SCRET                   ERROR IN SCAN
+         LA    R15,0                   FOUND NOTHING  RC=0
+         BR    RAR
+*
+CKVALFOR LABEL ,                      FOUND VALID 'FOR'
+         SCINIT (QR),(TR),CLWKWCB      RESTORE SCAN
+         LA    R15,12                  FOUND 'FOR'  RC=12
+         BR    RAR
+*
+CKFNDFIL LABEL ,                      FOUND FILE NAME
+         SCINIT (QR),(TR),CLWKWCB      RESTORE SCAN
+CKVALFIL LA    R15,4                   FOUND PROBABLE FILENAME  RC=4
+         BR    RAR
+*
+CKFNDACC LABEL ,                      ACCOUNT SPECIFIED
+         CH    R0,=Y(L'ACCT)           TEST LENTH
+         BNE   BADACCT                 NO GOOD
+         CLI   L'UUU(1),C'$'           CHECK DELIMITER TYPE
+         BE    CKVALACC
+         CLI   L'GG(1),C'.'            OTHER OPTION
+         BNE   BADACCT                 BAD
+         B     CKVALACC
+*
+CKACCT   LABEL ,                      SCAN DIDN'T FIND 'FOR'
+         CH    R0,=Y(L'ACCT)           RIGHT LENGTH FOR ACCT?
+         BNE   CKFNDFIL                NO - TRY FILE
+         CLI   L'UUU(1),C'$'           $ IN RIGHT PLACE?
+         BNE   CKFNDFIL                NO - TRY FILE
+CKVALACC LA    R15,8                   FOUND ACCT  RC=8
+         BR    RAR
+*
+         EJECT ,
+*  FIND GROUP NAME
+*
+FOR      LABEL ,                      FOR FOUND
+         VPUSH RAR,,*                  SAVE RETURN
+         MVC   GPWACCT(L'ACCT),GPWGRP  SAVE EXISTING ACCOUNT
+         MVC   GPWGRP(L'ACCT),=C'  .   '
+         LSCAN FORTBL4,CLWKWCB
+         BNZ   SCRET
+*  RESTORE THE FILE ACCOUNT TO ITS PROPER PLACE
+         LA    R1,GPWAFN               SET UP SAVE ADDRESS
+         CLI   GPWUSER,C' '            USER SPECIFIED?
+         BNE   FORUSR                  JUMP IF SO
+         CLI   GPWGRP,C' '             HOW ABOUT GROUP?
+         BE    MISSING                 NOT THERE
+         MVC   GPWUSER(L'UUU),=C'PUB'  SET GROUP LEVEL
+FORUSR   CLI   GPWGRP,C' '             CHECK FOR GROUP
+         BNE   FORUSG                  IT IS THERE
+         MVC   GPWGRP,CLWGROUP         SIGNED ON GROUP
+FORUSG   MVC   @R1(L'ACCT),GPWGRP
+         MVC   GPWGRP(L'ACCT),GPWACCT  RESTORE ACCOUNT
+         IF    GPWFPUB,FORRET          PUBLIC?
+         LA    R0,L'ACCT
+         FSCALL FORGROUP                CHECK ACCOUNT
+FORRET   VPOP  RAR,,*
+         BR    RAR
+         EJECT ,
+* FILE ERROR MESSAGES
+*
+         SPACE ,
+NOEXTEND ERRXT 'No privileges to extend'
+MEMNTSPC ERRXT 'Member not specified'
+LIBFULL  ERRXT 'No more directory space in library'
+BLOCKED  ERRXT 'Command blocked by Orvyl'
+NOSHRINK ERRXT 'The library has too many members to shrink'
+NORDPRIV ERRXT 'Cannot read loadfile containing private program'
+NOPUBPER ERRXT 'Non-owner cannot give public permits'
+MISSING  ERRXT 'Operand missing'
+APPILLEG SETMSG 'Append'
+UNREC    SEG   (1),(0)
+         ERRXT ': Invalid'
+         SPACE ,
+ACCTINC  LA    R1,GPWACCT              PRINT ACCT
+         FSCALL SEGACCT
+         ERRXT ' Invalid in this context'
+         EJECT
+SCRET    LPR   R0,0
+         BZ    MISSING
+ILLSTR   SEG   (1),(0)
+         ERRXT ': Invalid string'
+FILEXIT  LABEL ,
+         FSCALL FILEXIT                DOES NOT RETURN HERE
+REQABORT ERRXT 'Request aborted'
+VFMSG    LABEL ,
+         IF    GPWFVOSF,BEGIN         OS/FILE MESSAGE
+         SEG   'on '                   GRAMMAR COUNTS
+         SEG   OSFVOL,L'OSFVOL         SET VOLUME
+         END   ELSE,BEGIN            ORVYL FILE MESSAGE
+         SEG   'in Orvyl File System'
+         END   ,
+         B     QIETEXIT
+         SPACE ,
+BADACCT  LABEL ,
+         SYSQS 15,14,'ACCOUNT'
+         SEG   (1),(0)
+         SEG   ': Invalid '
+         SEG   (15),(14)
+         B     4(,BR)
+         SPACE ,
+BADFORM  SEG   'File not '
+         IF    ^GPWGPFV,BADEDIT        FILE VARIABLE FORMAT?
+         SEG   'variable'
+         B     BADFCOM
+BADEDIT  SEG   'edit'
+         IF    ^GPWGPFLR,BADFCOM       EDIT OR CARD?
+         SEG   ' or card'
+BADFCOM  LABEL ,
+         SEG   ' format'
+         B     4(,BR)                  TAKE ERROR EXIT
+         SPACE ,
+VOID     LABEL ,
+         SEG   'Void range'
+         B     4(,BR)
+         SPACE ,
+NOTLIB   LABEL ,
+         FSCALL SEGNAME
+         SEG   'is not a library'
+         B     4(,BR)
+         SPACE ,
+INVALMEM ERRXT 'Invalid member name specified'
+         SPACE ,
+ERROR    LABEL ,
+         B     4(,BR)
+         SPACE ,
+         SPACE ,
+MEMNFND  LABEL ,
+         FSCALL SEGMEMB
+         SEG   'not in '
+         FSCALL SEGNAME
+         B     4(,BR)
+         SPACE
+NOACTION SEG   'No action taken'
+         B     WRITEXIT
+         EJECT ,
+*  SET MESSAGE, CLEAN UP AND LEAVE
+*
+MSGEXIT  LABEL ,
+         SEG   (1),(0)
+WRITEXIT LABEL ,
+         VWRITE ,                      SEND MESSAGE
+         B     FILEXIT                 RETURN
+QIETEXIT LABEL ,
+         IF    ^GPWFQIET,WRITEXIT
+         CLEAR (CLWOBUF,4)             CLEAR OUTPUT BUFFER
+         B     FILEXIT
+         SPACE 2
+*
+*  OS/FILE ERROR MESSAGES
+*
+OSNOTFND LABEL ,
+         FSCALL SEGNAME                SET FILE FILE IN MSG
+         SEG   'not on '
+         SEG   OSFVOL,L'OSFVOL         SET PRESUMED VOLUME
+         B     4(,BR)                  TAKE ERROR RETURN
+         SPACE 2
+*  SPACE-SAVING SEG  ROUTINE
+*
+*
+SEG      VPUSH RAR,,*
+         VSEG  (1),(0)
+         VPOP  RAR,,*
+         BR    RAR
+         SPACE ,
+*
+* FILE SUBROUTINE LINKAGE
+*
+         SPACE ,
+         FSCALL GOSUB
+         EJECT ,
+* THIS PAGE HAS BEEN CONTRIBUTED AS A TRIBUTE TO THE JTM MEMORIAL
+* FILE BUG. HE DIDN'T CREATE IT, BUT HE DIDN'T FIX IT (YET).
+*
+DELETE   LABEL ,                      CLEAR ALL BLOCKS FROM FILE
+         VPUSH RAR,,*                  SAVE RETURN
+DELET1   FSCALL SENLREC                GET LAST REC NO
+         BNZ   DELETED                 NO MORE TO ERASE
+         LR    R14,1                   PUT LAST BLOCK NO IN 14
+         FSCALL SENFREC                GET FIRST BLOCK NO
+         LR    R15,1                   PUT FIRST BLOCK NO IN 15
+         FSCALL DELLOTS                DELETE ALL BLOCKS
+         B     DELET1                  OVERKILL
+*
+DELETED  VPOP  RAR,,*
+         BR    RAR
+         EJECT ,
+*  CONSTANTS AND WORK AREA
+*
+         GENMSGS
+         EJECT ,
+*  GET FILE FORMAT FROM USER INFO
+*
+         ENTRY GETFMT
+GETFMT   LABEL ,
+         VPUSH BR,RAR,*
+         BALR  BR,0                    OBTAIN ADDR
+         USING *,BR                    ##
+         IF    (GPWGPFV+GPWGPFLR+GPWGPFE,NZ),GETFMTEX  ANYTHING?
+         IF    ^GPWFFMT,GETFMTEX       CLP INFO?
+         IF    ^GPWUIFLR,GETFMTVE      LRECL?
+         IF    (GPWUIFN+GPWUIFI,Z),GETFMTLR   NUM OR INT?
+         CLC   GPWUILRC,=Y(80)         RIGHT LRECL FOR NUM OR INT?
+         BNE   GETFMTEX                NO - FORGET IT
+         IF    ^GPWUIFI,GETFMTN        INTEGER?
+         SET   GPWGPFIN                SET INTEGER BIT
+GETFMTN  SET   GPWGPFN                 SET NUMBERED BIT
+GETFMTLR CLC   GPWUILRC,=Y(235)        LRECL OK?
+         BH    GETFMTEX                NO - FORGET IT
+         MVC   GPWLREC,GPWUILRC        SET LRECL
+         SET   GPWGPFLR                AND BIT
+         B     GETFMTEX                RETURN
+*
+GETFMTVE OC    GPWUILRC,GPWUILRC       LRECL IS 0 FOR VAR OR EDIT
+         BNZ   GETFMTEX                ISN'T - FORGET IT
+         IF    ^GPWUIFV,GETFMTE        VARIABLE FORMAT?
+         SET   GPWGPFV                 SET VAR BIT
+         B     GETFMTEX                 AND RETURN
+GETFMTE  IF    ^GPWUIFE,GETFMTEX       IS IT EDIT?
+         SET   GPWGPFE                 SET EDIT BIT
+         SPACE ,
+GETFMTEX LABEL ,
+         VPOP  BR,RAR,*
+         BR    RAR                     RETURN
+         EJECT ,
+* SET FILE FORMAT INTO USER INFO FIELD
+*
+         ENTRY SETFMT
+SETFMT   LABEL ,
+         VPUSH BR,RAR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         XC    GPWUINFO,GPWUINFO       CLEAR INFO FIELD
+         IF    (GPWLMNL,NE,0),BEGIN   LIB # NAME IMPLIES LIB
+           SET GPWUILIB
+          END ,
+         IF    ^GPWGPFLR,SETFMTVE      LRECL SPECIFIED?
+         IF    ^GPWGPFN,SETFMTLR       NUM (OR INT)?
+         IF    ^GPWGPFIN,SETFMTN       INTEGER?
+         SET   GPWUIFI                 SET INTEGER BIT
+         B     SETFMTLR                  AND TREAT LIKE LRECL
+SETFMTN  SET   GPWUIFN                 SET NUMBERED BIT
+SETFMTLR SET   GPWUIFLR                SET LRECL BIT
+         MVC   GPWUILRC,GPWLREC        MOVE IN LRECL
+DOSETFMT SET   GPWFFMT                 INDICATE MODE=SETFORM
+SETFMTEX LABEL ,
+         VPOP  BR,RAR,*
+         BR    RAR                     RETURN
+*
+SETFMTVE IF    ^GPWGPFV,SETFMTE        VARIABLE FORMAT?
+         SET   GPWUIFV                 SET VARIABLE BIT
+         B     DOSETFMT                GO SET THE FORMAT
+SETFMTE  SET   GPWUIFE                 SET EDIT BIT
+         B     DOSETFMT                GO SET THE FORMAT
+         SPACE ,
+         LTORG ,
+         EJECT ,
+*  SCAN TABLES
+*
+         SPACE ,
+         EXTRN QUIET                   EXTERNAL SCAN EXITS
+         EXTRN KWFNOPT
+         EXTRN FORACT
+         EXTRN FORPUB
+         EXTRN OSOPTS
+         EXTRN OSCREATE
+         SPACE ,
+ERASEOPT SCKW  CONTENTS,CONTENTS,A     ERASE COMMAND
+         SCKW  ,LIBOPTS,PUSH
+ERAS#MEM SCKW  ,USRGPTB0,PUSH
+         SPACE ,
+RENAMCMD SCKW  TO,RENEW                RENAME COMMAND
+         SCKW  ,OSOPTS,PUSH
+         SCKW  ,USRGPTB0,PUSH
+         SPACE ,
+CREATBLF SCKW  FROM,CREFROM,A          CREATE COMMAND
+         SCKW  ALIAS,CREALIAS,A
+CREATBL  SCKW  APPEND,APPEND,A
+         SCKW  REPLACE,CLRERASE,A
+         SCKW  ,FORMATS,PUSH
+         SCKW  ,LIBOPTS,PUSH
+         SCKW  ,USRGPTB0,PUSH
+         SPACE ,
+ALIASFTB SCKW  FOR,CREATAFO            FOR
+         SCKW  ,CRENAMB                ALIAS NAME
+         SPACE ,
+GETTBL   SCKW  CLEAR,CLRERASE,A
+         SCKW  CLR,CLRERASE
+         SCKW  SKIP,SKIP,(P,PI,A),999999
+         SCKW  MERGE,APPEND,A
+         SCKW  REPLACE,IGNORE,A
+         SCKW  ERASE,IGNORE,A
+         SCKW  SCRATCH,IGNORE,A
+         SCKW  APPEND,IGNORE,A
+         SCKW  RENUMBER,RENUMBER,A
+         SPACE ,
+PUTTBL   SCKW  REPLACE,CLRERASE,A
+         SCKW  ERASE,CLRERASE,A
+         SCKW  SCRATCH,CLRERASE,A
+         SCKW  APPEND,APPEND,A
+         SCKW  QUIET,QUIET,A
+         SCKW  HEX,HEX
+         SCKW  ,FORMATS,PUSH
+         SCKW  ,KWFNOPT,PUSH
+         SCKW  ,BLKSIZE
+         EJECT ,
+LIBOPTS  SCKW  LIBRARY,ERASELIB,A
+         SCKW  PDS,ERASELIB,A
+         SCKW  ,,POP
+         SPACE ,
+USRGPTB0 SCKW  QUIET,QUIET,A
+USRGPTBL SCKW  ,KWFNOPT,PUSH
+         SCKW  ,UNREC
+         SPACE ,
+QUIETBL  SCKW  QUIET,QUIET,A
+         SCKW  ,UNREC
+         SPACE ,
+FORMATS  SCKW  CARD,CARD,A
+         SCKW  PRINT,PRINT,A
+         SCKW  VARIABLE,VARIABLE,A
+         SCKW  LRECL,LRECL,(P,PI,A),235
+         SCKW  EDIT,EDIT,A
+         SCKW  NUMBERED,NUMB,A
+         SCKW  INTEGER,INTEGER,A
+         SCKW  ,,POP
+         SPACE ,
+MASKTBL  SCKW  ,KWFNOPT,PUSH
+         SCKW  ,PERMOPT,PUSH
+         SCKW  ,UNREC
+         SPACE ,
+PERMOPT  SCKW  NONE,PERMNONE,A
+         SCKW  READ,PERMRD,A
+         SCKW  WRITE,PERMWR,A
+         SCKW  APPEND,PERMAPP,A
+         SCKW  ,,POP
+         SPACE ,
+CKFORTBL SCKW  FOR,CKVALFOR
+         SCKW  ACCOUNT,CKFNDACC,(A,P)
+         SCKW  FILE,CKVALFIL
+         SCKW  ACCT,CKFNDACC,P
+         SCKW  ,CKACCT
+         SPACE ,
+FORTBL   SCKW  ,KWFNOPT,PUSH
+FORTBL1  SCKW  FOR,SETPRFOR
+         SCKW  ,UNREC
+         SPACE ,
+FORTBL4  SCKW  PUBLIC,FORPUB,A
+         SCKW  ,KWFNOPT,PUSH
+         SCKW  EXTEND,PERMEXT,A
+         SCKW  ,PERMOPT,PUSH
+         SCKW  ,FORACT
+         SPACE ,
+FORMTTBL SCKW  ,FORMATS,PUSH
+         SCKW  ,KWFNOPT,PUSH
+         SCKW  ,UNREC
+         SPACE ,
+FBALSCKW SCKW  RESET,DFBRES,A
+         SCKW  ,UNREC
+         END   .

@@ -1,0 +1,120 @@
+;  wylback - backup wylbur, testwyl, and milten
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLBACK as  "xcall wyl.gs.wyl.lib#wylback /" rep
+;
+;  This xproc has no parameters.  It uses today's date in the tape
+;  data set name, so don't run twice in one day unless you uncatalog
+;  and release the tape.
+;
+;  The job WYL#BACK will run under account gs.wyl; make sure your
+;  account can run jobs under this account.  The job will normally
+;  get a return code of 4 because the load libs are always enqueued;
+;  unfortunately many cases in which a data set is not backed up
+;  also return only a return code of 4, so you'll have to check the
+;  DSS output to make sure the backup was successful.
+;
+;  Updated:
+;
+;  07/22/94  slp  Added Milten to backups
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl string dsndate
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; initialize variables
+  dsndate = 'DT'||substr(date,16,2)||substr(date,10,2)||\
+                  substr(date,13,2)
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wylback tit 'wylback temporary active' temp
+  x.temp = actno                   ; save temp active file number
+
+  putend //WYL#BACK JOB WYL$GS,'WYLBUR BACKUP'
+  putend /*SETUP T3480=1, OUTPUT=SCRTCH
+  putend //*
+  putend //* DSS DUMP -- SELECTIVE (DATA SET) DUMP.
+  putend //*
+  putend //DSS      EXEC PGM=ADRDSSU,REGION=1024K
+  putend //SYSPRINT DD SYSOUT=A
+  putend //TAPE     DD UNIT=T3480,DSN=WYL.GS.WYL.TAPE.BACKUPS.&(dsndate),
+  putend //            LABEL=(1,SL),DISP=(,CATLG)
+  putend //SYSIN    DD *
+  putend   DUMP    OUTDDNAME(TAPE) -
+  putend           TOLERATE(ENQF) -
+  putend           DATASET(INCLUDE(WYL.GS.WYL.WYLBUR.**,     -
+  putend                           WYL.GS.WYL.TESTWYL.**,    -
+  putend                           WYL.GS.MIL.MILTEN.**,     -
+  putend                           WYL.GS.MIL.TESTMIL.**     ))
+
+  run unn hold
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Exec wylback failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WASMERR errmsg='&(msg)'
+  end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=wasmerr errmsg="wylback failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

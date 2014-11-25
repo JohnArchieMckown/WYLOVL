@@ -1,0 +1,1750 @@
+;WYL.GA.PUB.LIB#RECOVERX
+;   created on 12/26/90 by Lincoln Ong, DC Operations/OTS
+;   updated on 04/30/92  Version 1.13
+;This EXEC file prepares and mails a list of OS datasets and/or ORVYL files to be
+;recovered from the disk backup tapes.
+;
+;Revision History:
+;   12/26/90 GG.LSO V1.00  Initial release.
+;   02/20/91 GG.LSO        Miscellaneous minor bug fixes.  Added ability to backup to the
+;                          previous prompt, rather than restart from the beginning.
+;   04/17/91 GG.LSO        Numerious changes in preparation for public consumption.
+;   04/30/91 GG.LSO        More changes in preparation for public consumption.
+;   06/17/91 GG.LSO        Improved proc Get_PhoneNums to better handle the various types of
+;                          telephone numbers.
+;   06/20/91 GG.LSO        Minor additional changes in proc Get_PhoneNums.
+;   06/25/91 GG.LSO        Added proc Verify_DumpDate to verify the availability of a disk
+;                          backup for the specified date.
+;   07/05/91 GG.LSO        Corrected minor error in date calculation in proc Verify_DumpDate.
+;   07/10/91 GG.LSO        Added proc Get_ORVYLFS to determine the ORVYL File System
+;                          affiliation. Changed procs Get_Dsnames and Get_Filenames to use
+;                          the restore date instead of the current date for the new
+;                          dsname/filename generation. Implemented the changes per the
+;                          initial testing feedback.
+;   08/08/91 GG.LSO        Added group KQ to the INFACCES file system in proc Get_ORVYLFS.
+;   08/12/91 GG.LSO        Changed proc Get_Names to handle non-existent accounts.
+;   08/15/91 GG.LSO        Rewritten proc Verify_Filename and added proc fnformat (similiar
+;                          in function to the WYLBUR EXEC file function 'dsnformat'), to
+;                          fully handle ORVYL filenames.  Numerious documentation changes.
+;                          Changed procs Get_Dsnames and Get_Filenames to allow the changing
+;                          of the recovery date.
+;   08/27/91 GG.LSO        Keep the current screen height unchanged.  Rewrote proc Verify_Dsname
+;                          to handle VSAM filenames.  Added proc Parse_Parms.  Request message
+;                          changes.
+;   08/29/91 GG.LSO        Changed proc Verify_Dsname to always return a '$' prefixed dsname
+;                          (fully qualified), proc Get_DsnInfo to use a fully qualified dsname,
+;                          and proc Get_Dsnames to strip off the '$' on output.
+;   09/03/91 GG.LSO        Numerious internal documentation changes.  Added volume search flag
+;                          to variable VolSer (set to '?' when the volume is a best guess source
+;                          volume).
+;   09/17/91 GG.LSO        Installed into production as WYL.GA.PUB.LIB#RECOVERX
+;                          (WYL.GA.PUB.LIB#RECOVER is the old-style EXEC front end).
+;   09/23/91 GG.LSO V1.01  Added the ability to pause during entry of dsnames, filenames, and
+;                          dates.  Changed the recovery date format in the sent message from
+;                          mm/dd/yy to yyyy/mm/dd for easier internal use.
+;   10/09/91 GG.LSO V1.02  Fixed bug with line numbers and messaging in the main loop.  Minor
+;                          documentation change in proc Get_Date.
+;   11/05/91 GG.LSO V1.03  Changed proc Get_DsnInfo to,
+;                             (1) better guess for non-WYLBUR dsname stems ('$IPO1' and
+;                                 '$SYS').
+;                             (2) prompt the user for the source volume when a "best" try comes
+;                                 up empty.
+;                          Miscellaneous internal documentation changes.
+;   11/06/91 GG.LSO V1.04  Corrected date change bug in procs Get_Dsnames and Get_Filenames.
+;   11/16/91 GG.LSO V1.05  Corrected bug in the recovery notification.
+;   11/20/91 GG.LSO V1.06  Changed proc Get_ORVYLFS to exit if the SYSA INFACCES file system is
+;                          specified (no Operations maintained backups available).
+;   12/10/91 GG.LSO V1.07  Changed proc Get_DsnInfo to always prompt user for verification of
+;                          best-guess volume.  Changed proc Get_FileInfo to better handle the
+;                          use of '*' (asterisk) in filenames -- determine if the user really
+;                          wanted to use it as part of the 'real' filename.  Miscellaneous
+;                          internal changes and cleanup.
+;   01/02/92 GG.LSO V1.08  Corrected a date calculation bug in proc Verify_DumpDate and added
+;                          the handling of the century date boundary.  Additional minor WYLBUR
+;                          bug fixes.  Minor message text changes.  Corrected an error in
+;                          handling special ORVYL filenames in proc Get_Filenames.
+;   01/16/92 GG.LSO V1.09  Fixed (hopefully finally) the continuing active file switching bug in
+;                          the xproc with appending the OS and ORVYL active files into the message
+;                          active file.  Fixed a volume search bug in proc Get_DsnInfo.
+;   01/22/92 GG.LSO        Changed proc Get_ORVYLFS to exit if the SYSA PSYCINFO file system is
+;                          specified (no Operations maintained backups available).
+;   02/26/92 GG.LSO V1.10  Changed proc Get_ORVYLFS to exit if the SYSA INFACC2 file system is
+;                          specified (no Operations maintained backups available).
+;   02/28/92 GG.LSO V1.11  Disabled OS data set recovery processing if the system is either the
+;                          SYSC or SYSF systems.  For those system, SUH needs to be contacted,
+;                          since they maintain their own OS DASD backups.
+;   02/29/92 GG.LSO V1.12  Added RLG ORVYL file systems, CITADEL and BKSRES3 to proc Get_ORVYLFS.
+;   04/30/92 GG.LSO V1.13  Added procs Is_PhonNum and Fmt_PhoneNum, and revised proc Get_PhoneNums
+;                          to better handle the entry and validation of the telephone numbers.
+;
+;Associated data set:
+;   WYL.GA.PUB.LIB#RECOVER             -- Old-style EXEC file front end (need for UTIL command).
+;
+xproc () begin
+   on attn command='pcall ATTN_Exit'
+   on error command='pcall Error_Exit'
+
+   declare string X.ExecDsn            ;EXEC file data set name.
+   declare string X.ExecName           ;EXEC file name.
+   declare string X.ExecBanner         ;EXEC file banner.
+   declare string X.ExecVersion        ;EXEC file version.
+   declare string X.Contact            ;Contact person.
+   declare string X.DebugAcct          ;Maintenance account.
+   declare boolean X.Debug             ;Debug mode [see proc Parse_Parm].
+
+   declare number X.Delta              ;Original delta setting.
+   declare number X.OrigActNum         ;User's original active file number.
+   declare number X.TermHeight         ;Terminal page pause height setting.
+
+   declare string X.CmdPrefix          ;Command prefix [see proc Parse_Parm].
+   declare string X.DiskMaintAcct      ;Disk Maintenance account.
+
+   declare number ORVYLActNum          ;ORVYL file list active file number.
+   declare number OSActNum             ;OS data set list active file number.
+   declare number RestActNum           ;Restore request active file number.
+   declare string OwnerAcct            ;Data set owner account.
+   declare string Phone1               ;Daytime phone number (0800 - 1700).
+   declare string Phone2               ;Nighttime phone number (1700 - 2300).
+   declare string UserName             ;Account's user name.
+   declare boolean ORVYLRequest        ;ORVYL recovery request flag.
+   declare boolean OSRequest           ;OS recovery request flag.
+
+   X.ExecDsn = 'WYL.GA.PUB.LIB#RECOVERX'
+   X.ExecName = 'RECOVER'
+   X.ExecBanner = 'RECOVER  Revised 30 April 1992  Version 1.13'
+   X.ExecVersion = 'V1.13 04/30/92'
+   X.Contact = 'Lincoln Ong, DC Operations/OTS'
+   X.DebugAcct = 'GG.LSO'
+
+   X.DiskMaintAcct = 'GW.DSK@STANFORD'
+
+   X.Delta = delta
+   X.OrigActNum = actno
+   X.TermHeight = height
+
+   pcall Parse_Parm(parm_string)
+
+   set delta 1.0
+
+   write ''
+   write X.ExecBanner
+   write ''
+   if ((machine eq 'SYSC') or (machine eq 'SYSF')) begin
+      comment Recovers only lost or damaged ORVYL files.  For recovery of OS data sets,
+      comment please contact Tom Sims at 5-4530.  Enter a '?' for help at any prompt.
+   end
+   else begin
+      comment Recovers lost or damaged OS (WYLBUR, VSAM) data sets and/or ORVYL files.  Enter
+      comment a '?' for help at any prompt.
+   end
+   comment
+
+INSTRUCT:
+   pcall Instructions
+
+RESTART:
+   try pcall Get_Acct('Owner',OwnerAcct)
+   if (tryattn) goto INSTRUCT
+
+GETNAME:
+   try pcall Get_Name(OwnerAcct,UserName)
+   if (tryattn) begin
+      comment
+      goto RESTART
+   end
+
+GETPHONE:
+   try pcall Get_PhoneNums(Phone1,Phone2)
+   if (tryattn) begin
+      comment
+      goto GETNAME
+   end
+
+   if ((machine ne 'SYSC') and (machine ne 'SYSF')) begin
+GETOS:
+      if (OSActNum eq 0) begin
+         open OSDList title='OS data set list' temporary
+         OSActNum = actno
+         pick &(X.OrigActNum)
+      end
+      try pcall Get_OSDatasets(OwnerAcct,OSActNum)
+      if (tryattn) goto GETPHONE
+   end
+
+   if (ORVYLActNum eq 0) begin
+      open ORVFLst title='ORVYL file list' temporary
+      ORVYLActNum = actno
+      pick &(X.OrigActNum)
+   end
+   try pcall Get_ORVYLFiles(OwnerAcct,ORVYLActNum)
+   if (tryattn) begin
+      if ((machine ne 'SYSC') and (machine ne 'SYSF')) goto GETOS
+      else goto GETPHONE
+   end
+
+;Generate the restoration request...
+   if ((machine ne 'SYSC') and (machine ne 'SYSF')) begin
+      pick &(OSActNum)                 ;OS requests...
+      if (lines gt 0) begin
+         quietly sort columns=1/22 descending
+         if (lines gt 0) begin
+            putline 0.0
+            OSRequest = true
+         end
+      end
+   end
+
+   pick &(ORVYLActNum)                 ;ORVYL requests...
+   if (lines gt 0) begin
+      quietly sort columns=1/22 descending
+      if (lines gt 0) begin
+         putline 0.0
+         ORVYLRequest = true
+      end
+   end
+
+   open RestList title='Data recovery request for account &(OwnerAcct)'
+   RestActNum = actno                  ;04/30/91 temporary bug fix...
+   putline end Date:    &(xdate)
+   putline end From:    &(lname)  <&(xaccount)@&(machine)>
+   putline end To:      Disk Maintenance  <&(X.DiskMaintAcct)>
+
+   if (OwnerAcct ne xaccount) putline end cc:      &(UserName)  <&(OwnerAcct)@&(machine)>
+
+   putline end Subject: Data recovery request
+   putline end
+   putline end [This message generated via EXEC &(X.ExecName) (&(X.ExecVersion))]
+   putline end
+   putline end If your recovery request requires tapes that are currently offsite, the work
+   putline end will take approximately two business days; otherwise, the recovery work will
+   putline end normally be done in one business day.  You will receive an electronic mail
+   putline end message notifying you when the recovery request has been processed.
+   putline end
+   if (OwnerAcct ne xaccount) putline end >Requestor:     &(lname)  <&(xaccount)@&(machine)>
+   putline end >Owner:         &(UserName)  <&(OwnerAcct)@&(machine)>
+   putline end >Phone Number:  08:00 - 17:00, &(Phone1); 17:00-23:00, &(Phone2)
+
+   if ((machine ne 'SYSC') and (machine ne 'SYSF')) begin
+      quietly try copya &(OSActNum): all to &(RestActNum): append
+      ;....v....1....v....2....v....3....v....4....v....5....v....6....v....7....v....8....v....9....v....A....v....B..
+      ;/vvvvvv   f yyyy/mm/dd oooooooooooooooooooooooooooooooooooooooooooo nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+      ;^^        ^ ^          ^                                            ^
+      ;||        | |          |                                            |
+      ;||        | |          Original OS dsname                           New OS dsname (optional)
+      ;||        | Recovery date
+      ;||        Original volume flag
+      ;||           blank -- true
+      ;||               E -- best guess by EXEC
+      ;||               U -- user's best guess
+      ;||               ? -- unknown
+      ;|Original data set volume serial
+      ;OS volume
+      ;
+   end
+
+   quietly try copya &(ORVYLActNum): all to &(RestActNum): append
+   ;....v....1....v....2....v....3....v....4....v....5....v....6....v....7....v....8....v....9....v....A....v....B..
+   ;:ffffffff x yyyy/mm/dd oooooooooooooooooooooooooooooooooooooooooooo nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+   ;^^        ^ ^          ^                                            ^
+   ;||        | |          |                                            |
+   ;||        | |          Original filename                            New filename (optional)
+   ;||        | Recovery date
+   ;||        File system flag (unused)
+   ;|File System name
+   ;ORVYL File System
+   ;
+
+   pick &(RestActNum)                  ;04/30/91 temporary WYLBUR bug fix...
+   if ((OSRequest) or (ORVYLRequest)) begin
+      number all start=1 by 1 quiet
+      comment
+      list unnumbered
+      comment
+      if (OwnerAcct ne xaccount) begin
+         &(X.CmdPrefix) try mail to (&(X.DiskMaintAcct) &(OwnerAcct) &(xaccount) &(X.DebugAcct)) subject='Account &(OwnerAcct) \
+            restore request' quiet
+         comment A copy of the &(X.ExecName) request has been sent to accounts &(xaccount) and
+         comment &(OwnerAcct), and the Disk Maintenance account, &(X.DiskMaintAcct).  You should
+         comment receive an electronic mail message notifying you when the recovery request
+         comment has been processed.  This will usually be within one business day of your
+         comment request.
+      end
+      else begin
+         &(X.CmdPrefix) try mail to (&(X.DiskMaintAcct) &(OwnerAcct) &(X.DebugAcct)) subject='Account &(OwnerAcct) restore \
+            request' quiet
+         comment A copy of the &(X.ExecName) request has been sent to account &(OwnerAcct) and
+         comment the Disk Maintenance account, &(X.DiskMaintAcct).  You should receive an
+         comment electronic mail message notifying you when the recovery request has been
+         comment processed.  This will usually be within one business day of your request.
+      end
+   end
+   else begin
+      if ((machine ne 'SYSC') and (machine ne 'SYSF')) comment No OS data sets or ORVYL files were requested to be recovered.
+      else comment No ORVYL files were requested to be recovered.
+   end
+   comment
+
+   if (X.Debug) xpause msg="&(s'15')[DEBUG mode, execution pause.]"
+   close
+
+   if ((machine ne 'SYSC') and (machine ne 'SYSF')) begin
+      pick &(OSActNum)
+      close
+   end
+   pick &(ORVYLActNum)
+   close
+   pcall Clean_Up('')
+end
+
+
+
+;<.PAGE>
+proc ATTN_Exit() begin
+;Process any ATTNs entered during the execution of the EXEC file to stop processing.
+;
+   declare string Answer               ;Answer to prompts.
+
+   if (X.Debug) xpause msg="&(s'15')[DEBUG mode, execution pause.]"
+
+   while (Answer eq '') begin
+      comment Press the ATTN or BREAK key again to exit &(X.ExecName); otherwise, press
+      comment the RETURN key to continue processing.
+      comment
+      Answer = input('Action: ','ATTN')
+      Answer = upper(strip(Answer))
+
+      if ((ioresult eq 'ATTN') or (abbrev('QUIT',Answer,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+      elseif ((Answer eq '') or (abbrev('CONTINUE',Answer,1))) return attn
+      else begin
+         comment Enter one of the following:
+         comment CONTINUE   To continue the recovery process.
+         comment QUIT       To quit the recovery process.
+         comment <ATTN>     Press the ATTN or BREAK key to quit the recovery process.
+         comment <CR>       Press the RETURN key to continue the recovery process.
+         comment
+         Answer = ''
+      end
+   end
+end
+
+
+;<.PAGE>
+proc Clean_Up(Option) begin
+;Close any Active files and restore user to his original Active file, and return
+;back to original environmental settings.
+;
+   Option = upper(strip(Option))
+
+   set delta &(X.Delta)
+   if (actno ne X.OrigActNum) begin
+      close
+      pick &(X.OrigActNum)
+   end
+   set terminal height=&(X.TermHeight)
+
+   if (Option eq 'EXIT') xreturn
+end
+
+
+;<.PAGE>
+proc Error_Exit() begin
+;Display the error condition and current variable settings when an error condition arises.
+;
+   declare number SLine                ;Starting line line number for variable list.
+
+   write s'2F'||'An error has occurred in EXEC &(X.ExecName).'
+   open ErrorLog title='&(X.ExecName) EXEC file error log' temporary
+   putline end &(X.ExecName) EXEC file
+   putline end &(X.ExecDsn)
+   putline end &(X.ExecVersion)
+   putline end
+   putline end Debugging information:
+   putline end    errmsg = '&(errmsg)'
+   putline end    errinfo = '&(errinfo)'
+   putline end
+   putline end    Variables:
+   SLine = end
+
+   dump variables type ses             ;Display session variables.
+   putline end
+   dump variables type X               ;Display global variables.
+   putline end
+   dump variables type error           ;Display variables at time of error.
+   change 1 to '   ' in &(SLine)/last nolist
+   if (X.Debug) list unnumbered
+
+   if ((xaccount ne X.DebugAcct) and (not X.Debug)) begin
+      try mail to &(X.DebugAcct) subject='&(X.ExecName) EXEC file error' quiet
+      close
+      write s'15'||'The programmer (&(X.Contact)) has been notified about the'
+      write 'problem.  Processing terminated.'
+      pcall Clean_Up('EXIT')
+   end
+   xpause msg='[DEBUG mode; error condition occurred.  Execution pause.]'
+   clear error                         ;Reset error environment.
+   on error reenable
+   close
+end
+
+
+;<.PAGE>
+proc fnformat(Filename,ValidFn) begin
+;Format the ORVYL filename as following the ORVYL file naming conventions.  Similiar in
+;function to the WYLBUR EXEC file function 'dsnformat'.
+;
+   ValidFn = false
+
+   declare string FnAcct               ;Filename account.
+   declare string FnPrefix             ;Filename prefix (potential account specification).
+   declare string FnSuffix             ;Filename suffix.
+   declare string NewFilename          ;New filename.
+   declare string RawFn                ;Raw filename.
+   declare string Token                ;Token from filename parsing.
+   declare string TokenType            ;Token type from filename parsing.
+
+   FnSuffix = upper(strip(Filename))
+   if ((left(FnSuffix,4) eq 'ORV.') and (substr(FnSuffix,7,1) eq '.') and (substr(FnSuffix,11,1) eq '.')) begin
+      FnPrefix = 'ACCOUNT &(substr(FnSuffix,5,6))'
+      FnSuffix = substr(FnSuffix,12)
+   end
+
+   ;Using 'dsnformat' to quickly format the potential filename failed, so we have to do our own checking.
+   if (dsnformat('&(FnSuffix) &(FnPrefix)') eq 'BAD DSN') begin
+      while (FnSuffix ne '') begin     ;First get any account specification.
+         syscall scan(Token,FnSuffix,TokenType,' ,=',' ,=;')
+         Token = upper(Token)
+
+         if (TokenType ne 'NULL') begin
+            cases begin
+               case ((abbrev('ACCOUNT',Token,3)) or (Token eq 'ACCT')) begin  ;ACCOUNT option.
+                  syscall scan(Token,FnSuffix,TokenType,' ,=',' ,=;')
+                  if ((TokenType eq 'NULL') or (size(Token) ne 6)) return (ValidFn)
+
+                  if ((index(Token,'.') eq 3) or (index(Token,'$') eq 4) or (index(Token,'$') eq 3)) \
+                     FnAcct = FnAcct||' ACCOUNT '||Token
+                  else return (ValidFn)
+               end
+
+               case ((abbrev('GROUP',Token,3)) or (Token eq 'GRP')) begin  ;GROUP option.
+                  syscall scan(Token,FnSuffix,TokenType,' ,=',' ,=;')
+                  if ((TokenType eq 'NULL') or (size(Token) ne 2)) return (ValidFn)
+                  FnAcct = FnAcct||' GROUP '||Token
+               end
+
+               case ((abbrev('USER',Token,3)) or (Token eq 'USR')) begin  ;USER option.
+                  syscall scan(Token,FnSuffix,TokenType,' ,=',' ,=;')
+                  if ((TokenType eq 'NULL') or (size(Token) ne 3)) return (ValidFn)
+                  FnAcct = FnAcct||' USER '||Token
+               end
+
+               case (abbrev('PUBLIC',Token,3)) FnAcct = FnAcct||' PUBLIC'
+
+               case (true) RawFn = RawFn||' '||Token  ;Collect the various portions that comprises the filename.
+            end
+         end
+      end
+
+      if (FnSuffix eq '') FnSuffix = RawFn  ;Only the filename suffix is left...
+      FnSuffix = strip(FnSuffix)
+
+      ;Check for any use of '@' and/or '&'.  This order must be maintained.
+      if (index(FnSuffix,'@') eq 1) begin  ;Group specifier.
+         if ((substr(FnSuffix,2,1) eq '.')  and (substr(FnSuffix,4,1) ne '.')) return (ValidFn)
+
+         AcctCharPos = index(FnSuffix,'@') + 1  ;Must be able to handle '@' or '@gg'.
+         FnPrefix = 'GROUP '||substr(FnSuffix,AcctCharPos,index(substr(FnSuffix,AcctCharPos),'.') - 1)
+         FnSuffix = substr(FnSuffix,index(FnSuffix,'.') + 1)
+      end
+      if (index(FnSuffix,'&') eq 1) begin  ;User specifier.
+         if ((substr(FnSuffix,2,1) ne '.') and (substr(FnSuffix,5,1) ne '.')) return (ValidFn)
+
+         AcctCharPos = index(FnSuffix,'&') + 1  ;Must be able to handle '&' or '&uuu'.
+         FnPrefix = FnPrefix||' USER '||substr(FnSuffix,AcctCharPos,index(substr(FnSuffix,AcctCharPos),'.') - 1)
+         FnSuffix = substr(FnSuffix,index(FnSuffix,'.') + 1)
+      end
+
+      ;Now validate the filename suffix portion...
+      if ((verify(FnSuffix,'.*_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') gt 0) or (size(FnSuffix) gt 33) \
+         or (verify(left(FnSuffix,1),'.*_0123456789') eq 0)) return (ValidFn)
+
+      Filename = 'ORV.'||substr(dsnformat('DUMMY &(FnPrefix) &(FnAcct)'),5,6)||'.'||FnSuffix
+      ValidFn = true
+   end
+   else begin                          ;The entire verification process is a lot easier otherwise...
+      NewFilename = dsnformat('&(FnSuffix) &(FnPrefix)')  ;Tricky eh?
+      if (index(NewFilename,'(') gt 0) NewFilename = left(NewFilename,index(NewFilename,'(') - 1)
+      Filename = 'ORV.'||substr(NewFilename,5)  ;Replace 'WYL.' with 'ORV.'.
+      ValidFn = true
+   end
+
+   return (Filename,ValidFn)
+end
+
+
+proc Fmt_PhoneNum(PhoneNum) begin
+;Format the telephone number in one of the following formats:
+;  n-nnnn          campus extension
+;  (nnn) nnn-nnnn  off-campus telephone number
+;
+   declare string AreaCode             ;Telephone area code.
+
+   PhoneNum = chstr(translate(PhoneNum,'',' .(+)-/'),' ','')
+   if (size(PhoneNum) ge 5) PhoneNum = left(PhoneNum,size(PhoneNum) - 4)||'-'||right(PhoneNum,4)
+   if (size(PhoneNum) ge 8) begin
+      AreaCode = strip(right(left(PhoneNum,size(PhoneNum) - 8),3))
+      if (AreaCode ne '') PhoneNum = '('||AreaCode||') '||right(PhoneNum,8)
+   end
+
+   return (PhoneNum)
+end
+
+
+;<.PAGE>
+proc Get_Acct(AcctType,AcctCode) begin
+;Get the specified account and return the account code in the preferred format of gg.uuu.
+;
+   AcctCode = ''
+
+   comment
+   while (AcctCode eq '') begin
+      AcctCode = input("&(AcctType) account (Q=quit, <CR>='&(xaccount)'): ",'ATTN')
+      AcctCode = upper(strip(AcctCode))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if (AcctCode eq '') AcctCode = xaccount
+      elseif ((abbrev('HELP',AcctCode,3)) or (AcctCode eq '?')) begin
+         comment Enter the account owner of the data sets and/or files that you would like to be
+         comment restored.  The account is in the format of:
+         comment
+         comment    gg.uuu
+         comment
+         comment where 'gg' is the group code, and 'uuu' is the user code.  Or enter one of the
+         comment following:
+         comment
+         comment PREVIOUS   To go back to the previous prompt.
+         comment QUIT       To quit the recovery process.
+         comment <CR>       To use the default account code show in the prompt.
+         comment
+         AcctCode = ''
+      end
+      elseif (abbrev('PREVIOUS',AcctCode,3)) return attn
+      elseif ((abbrev('EXIT',AcctCode,3)) or (abbrev('QUIT',AcctCode,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+      else begin
+         if (size(AcctCode) eq 6) begin  ;Convert account into 'gg.uuu' form...
+            AcctCode = upper(translate(AcctCode,'.','$'))
+            if (substr(AcctCode,4,1) eq '.') AcctCode = right(AcctCode,2)||'.'||left(AcctCode,3)
+         end
+         else begin
+            comment The account "&(AcctCode)" is an invalid account.  Please enter a valid account.
+            comment
+            AcctCode = ''
+         end
+      end
+   end
+
+   return (AcctCode)
+end
+
+
+;<.PAGE>
+proc Get_Date(RestDate,ORVYLReq) begin
+;Get the recovery date that the data set or file was damaged.
+;
+   declare number CurrActNum           ;Current active file number.
+   declare string PrevDate             ;Previously entered date (mm/dd/yy).
+   declare boolean Available           ;Dump available flag.
+   declare boolean Valid               ;Valid date.
+
+   CurrActNum = actno
+   PrevDate = upper(strip(RestDate))
+
+   while (not Valid) begin
+      if (PrevDate ne '') RestDate = input('      Recovery date [mm/dd/yy] (P=previous, Q=quit, <CR>=&(PrevDate)): ','ATTN')
+      else RestDate = input('      Recovery date [mm/dd/yy] (P=previous, Q=quit): ','ATTN')
+      RestDate = upper(strip(RestDate))
+      if (ioresult eq 'ATTN') return attn
+
+      if (RestDate eq '') RestDate = PrevDate
+      elseif ((abbrev('HELP',RestDate,3)) or (RestDate eq '?')) begin
+         comment Enter the date that you would like the OS data set or ORVYL file to be
+         comment recovered.  The date is in the format of:
+         comment
+         comment    mm/dd/yy
+         comment
+         comment where 'mm' is the month, 'dd' is the day of the month, and 'yy' is the last two
+         comment digits of the year.  Or enter one of the following:
+         comment
+         comment    PAUSE      To pause the execution of the recovery process.  To continue,
+         comment               enter 'CONTINUE' at the WYLBUR command prompt.
+         comment    PREVIOUS   To go back to the previous prompt.
+         comment    QUIT       To quit the recovery process.
+         if (PrevDate ne '') comment    <CR>       To use the default date.
+         comment
+         comment The OS data set or ORVYL file will be restored from the most recent backup
+         comment before or on the date that you will specify.  See DOC#SCHEDULE PUBLIC for the
+         comment backup schedule.
+         comment
+         RestDate = ''
+      end
+      elseif ((abbrev('EXIT',RestDate,3)) or (abbrev('QUIT',RestDate,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+      elseif (abbrev('PAUSE',RestDate,3)) begin
+         define CONTINUE as 'xgo ;' abbreviate replace system
+         open Temp title='Scratch active file' temporary
+         xpause msg="&(s'15')[Type CONTINUE when you are ready to continue.]&(s'15')"
+
+         close
+         undefine CONTINUE
+         pick &(CurrActNum)
+         RestDate = ''
+      end
+      elseif (abbrev('PREVIOUS',RestDate,1)) return attn
+
+      if (RestDate ne '') begin
+         pcall Verify_Date(RestDate,Valid)
+         if (Valid) begin
+            Available = false
+            pcall Verify_DumpDate(RestDate,ORVYLReq,Available)
+            if (not Available) begin
+               comment There is no available backups dated near &(RestDate).  Please enter a different
+               comment date.
+               comment
+               Valid = false
+            end
+         end
+         else begin
+            comment The date "&(RestDate)" is invalid.  Please enter a valid date.
+            comment
+         end
+      end
+   end
+
+   return (RestDate)
+end
+
+
+;<.PAGE>
+proc Get_Dsnames(OwnerAcct,OSActNum) begin
+;Generate the data set restore list.
+;
+   declare number CurrActNum           ;Current active file number.
+   declare number Year                 ;Year (yyyy format).
+   declare string DsnInfo              ;Data set information.
+   declare string Dsname               ;Data set name.
+   declare string FullDate             ;Date (yyyy/mm/dd format).
+   declare string NewDsname            ;New data set name.
+   declare string RestDate             ;Data set destroyed date (mm/dd/yy).
+   declare string VolSer               ;Original data set disk volume serial.
+   declare boolean FirstPass           ;First pass prompt.
+   declare boolean Valid               ;Valid data set name flag.
+
+   FirstPass = true
+   CurrActNum = actno
+
+   pick &(OSActNum)
+   while (Dsname eq '') begin
+      repeat begin
+         while (Dsname eq '') begin
+DSNAME:
+            if (FirstPass) Dsname = input('   Dsname (P=previous): ','ATTN')
+            else Dsname = input('   Next dsname (<CR>=no more dsnames, P=previous): ','ATTN')
+            Dsname = upper(strip(Dsname))
+            if (ioresult eq 'ATTN') begin
+               try pcall ATTN_Exit
+               if (tryattn) return attn
+            end
+
+            if (Dsname eq '') return
+            elseif ((abbrev('HELP',Dsname,3)) or (Dsname eq '?')) begin
+               comment Enter the name of the data set that you would like to recover.  The dsname
+               comment can be of the form:
+               comment
+               comment    WYL.gg.uuu.name
+               comment
+               comment where 'gg.uuu' is the owner account that you have previously entered, and
+               comment 'name' is the name by which you refer to the data set.  If you omit the
+               comment 'WYL.gg.uuu.' prefix, it will be automatically added to the data set name
+               comment suffix you enter.  If the data set you would like to recover is a VSAM file,
+               comment please enter the complete VSAM cluster name.  The cluster name should be of the
+               comment form:
+               comment
+               comment    Vaaa.gg.uuu.name
+               comment
+               comment where 'Vaaa' is the prefix of the defined VSAM community.  If the name is a TSO
+               comment or a "special" data set that does not comply with the Data Center data set
+               comment naming conventions, precede the data set name with a dollar sign.  For example:
+               comment
+               comment    $gg$uuu.name
+               comment
+               comment would indicate that the following data set is a TSO data set.
+               comment
+               comment If you would like to pause the EXEC file to check on a data set, enter
+               comment
+               comment    PAUSE
+               comment
+               comment at the Dsname prompt.  To continue from where you left off, enter the command:
+               comment
+               comment    CONTINUE
+               comment
+               comment at the WYLBUR command prompt.
+               comment
+               Dsname = ''
+            end
+            elseif ((abbrev('EXIT',Dsname,3)) or (abbrev('QUIT',Dsname,1))) begin
+               comment Processing terminated.
+               pcall Clean_Up('EXIT')
+            end
+            elseif (abbrev('PAUSE',Dsname,3)) begin
+               define CONTINUE as 'xgo ;' abbreviate replace system
+               open Temp title='Scratch active file' temporary
+               xpause msg="&(s'15')[Type CONTINUE when you are ready to continue.]&(s'15')"
+
+               close
+               undefine CONTINUE
+               pick &(OSActNum)
+               Dsname = ''
+            end
+            elseif (abbrev('PREVIOUS',Dsname,1)) begin
+               if (not FirstPass) begin  ;Allow to go back to change the date on the previous entry.
+                  pick &(OSActNum)
+                  read string DsnInfo using=last delete
+                  Dsname = strip(substr(DsnInfo,24,44))
+                  NewDsname = strip(substr(DsnInfo,69,44))
+                  comment [Changing recovery date...]
+                  goto DSNDATE
+               end
+               else begin
+                  pick &(CurrActNum)
+                  return attn
+               end
+            end
+         end
+
+         Dsname = Dsname||' account '||OwnerAcct
+         pcall Verify_Dsname(Dsname,Valid)
+         if (not Valid) Dsname = ''
+      end
+      until (Valid)
+
+DSNDATE:
+      try pcall Get_Date(RestDate,false)
+      if (tryattn) begin
+         Dsname = ''
+         goto DSNAME
+      end
+
+      try pcall Get_DsnInfo(VolSer,Dsname,RestDate,NewDsname)
+      if (tryattn) goto DSNDATE
+      FirstPass = false          ;Change the dsname prompt.
+
+      Year = 1900 + right(RestDate,2)  ;currently the 20th century!
+      if ((right(RestDate,2) ge 0) and (right(RestDate,2) lt 67)) Year = 2000 + right(RestDate,2)
+      FullDate = Year||'/'||left(RestDate,2)||'/'||substr(RestDate,4,2)
+
+      putline end /&(left(VolSer,11)) &(left(FullDate,10)) &(substr(Dsname,2,44)) &(substr(NewDsname,2,44))
+
+      Dsname = ''
+   end
+
+   if (lines gt 0) quietly sort delete
+   pick &(CurrActNum)
+   comment
+end
+
+
+;<.PAGE>
+proc Get_DsnInfo(VolSer,Dsname,RestDate,NewDsname) begin
+;Retrieve the original DASD volume serial and if necessary, a new dsname.  The dsname is prefixed
+;with a '$' as it is already a fully qualified dsname.
+;
+   VolSer = ''
+   NewDsname = ''
+
+   declare string Answer               ;Answer to prompts.
+   declare string CC                   ;Condition code.
+   declare string DateStamp            ;Date stamp suffix.
+   declare string Volume               ;Volume serial.
+   declare string SearchFlag           ;Volume search status flag (?, E, or U).
+   declare boolean Valid               ;Valid dsname flag.
+
+   DateStamp = 'DT&(right(RestDate,2))&(left(RestDate,2))&(substr(RestDate,4,2))'
+   Volume = '??????'
+   SearchFlag = '?'
+
+   CC = dsnverify(Dsname)
+   cases begin
+      case (CC eq 'IN USE') begin
+         comment Data set "&(substr(Dsname,2))" is in use (dsname
+         comment enqueue).  Please enter a unique new data set name.
+         comment
+
+         while (not Valid) begin
+            NewDsname = input('New dsname (P=previous): ','ATTN')
+            NewDsname = upper(strip(NewDsname))
+            if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+            if (abbrev('PREVIOUS',NewDsname,1)) return attn
+            elseif ((abbrev('EXIT',NewDsname,3)) or (abbrev('QUIT',NewDsname,1))) begin
+               comment Processing terminated.
+               pcall Clean_Up('EXIT')
+            end
+
+            pcall Verify_Dsname(Dsname,Valid)
+         end
+
+         Volume = left(strip(dsninfo(Dsname)),6)
+         SearchFlag = ' '
+      end
+
+      case (CC eq 'OK') begin   ;Data set already exists...
+         comment Data set "&(substr(Dsname,2))" already exists and
+
+         if ((size(Dsname) + 9) le 45) begin  ;..can append the time stamp for a unique dsname.
+            comment will be restored and renamed as "&(substr(Dsname,2)).&(DateStamp)".
+            comment
+            NewDsname = Dsname||'.'||DateStamp
+         end
+         else begin
+            comment cannot be renamed with a date suffix of ".&(DateStamp)".  Please enter a new
+            comment unique dsname.
+            comment
+
+            while (not Valid) begin
+               NewDsname = input('New dsname (P=previous): ','ATTN')
+               NewDsname = upper(strip(NewDsname))
+               if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+               if (abbrev('PREVIOUS',NewDsname,1)) return attn
+               elseif ((abbrev('EXIT',NewDsname,3)) or (abbrev('QUIT',NewDsname,1))) begin
+                  comment Processing terminated.
+                  pcall Clean_Up('EXIT')
+               end
+
+               pcall Verify_Dsname(NewDsname,Valid)
+            end
+         end
+
+         Volume = left(strip(dsninfo(Dsname)),6)
+         SearchFlag = ' '
+      end
+
+      case (CC eq 'NOT THERE') begin   ;OK to restore the data set.
+         ;Try to guess the potential volume by looking at which volume 'WYL.gg.uuu.LIB' is saved on...
+         if ((left(Dsname,5) eq '$WYL.') and (substr(Dsname,8,1) eq '.') and (substr(Dsname,12,1) eq '.')) \
+            Volume = strip(left(dsninfo('&(left(Dsname,11)).LIB'),6))
+         ;...or by dropping off the last segment from the dsname and search on the new dsname...
+         elseif (((left(Dsname,5) eq '$IPO1') or (left(Dsname,4) eq '$SYS')) and (index(reverse(Dsname),'.') gt 0)) \
+            Volume = strip(left(dsninfo("&(substr(Dsname,1,size(Dsname) - index(reverse(Dsname),'.')))"),6))
+
+         if (strip(Volume) eq '') Volume = '??????'
+         if (Volume ne '') SearchFlag = 'E'
+
+         Answer = ''                           ;Try to fine tune the volume location...
+         while (Answer eq '') begin
+            comment What disk volume was '&(substr(Dsname,2))' previously
+            write 'located on (<CR>=' nonl
+            if (Volume eq '??????') Answer = input('Unknown): ','ATTN')
+            else Answer = input('&(Volume)): ','ATTN')
+            Answer = upper(strip(Answer))
+            if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+            if (Answer eq '') Answer = Volume  ;...totally unknown; leave volume as '??????'.
+            elseif ((size(Answer) ne 6) or (verify(Volume,'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') gt 0)) begin
+               comment Disk volume '&(Answer)' is an invalid disk name.  Please enter a valid disk
+               comment name.  The currently available disk volumes are:
+               show volumes
+               comment
+               Answer = ''
+            end
+            else begin
+               Volume = left(Answer,6)
+               SearchFlag = 'U'
+            end
+         end
+      end
+   end
+   VolSer = left(strip(Volume),6)||'    '||left(strip(SearchFlag),1)
+
+   return (VolSer,NewDsname)
+end
+
+
+;<.PAGE>
+proc Get_FileInfo(Filename,RestDate,NewFilename) begin
+;Get a new filename if necessary.
+;
+   NewFilename = ''
+
+   declare string Answer               ;Answer to prompts.
+   declare string DateStamp            ;Date stamp suffix.
+   declare boolean Valid               ;Valid filename flag.
+
+   DateStamp = 'DT&(right(RestDate,2))&(left(RestDate,2))&(substr(RestDate,4,2))'
+
+   open FileInfo title='Get the file information' temporary
+   quietly try dump files like &(Filename) all
+   if (tryerror) begin
+      comment Perhaps account &(substr(Filename,5,6)) has not been allowed to have ORVYL access.  If this is
+      comment is true, you may want to verify which STS system is the primary host.  The
+      comment primary host is where the account would normally read and receive electronic
+      comment mail.  If the current host, &(machine), is not the primary host, you should
+      comment redo your &(X.ExecName) request on your primary host.
+      comment
+   end
+
+   delete c'ORVYL File System' 1 (1)   ;Remove header.
+   if (lines eq 0) begin
+      if (verify('.*',FileName) eq 0) begin
+         while (Answer eq '') begin
+            Answer = input('  Is filename "&(Filename)" a filename prefix (<CR>=yes): ','ATTN')
+            Answer = upper(strip(Answer))
+            if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+            if ((abbrev('HELP',Answer,3)) or (Answer eq '?')) begin
+               comment Enter one of the following:
+               comment YES        To re-specify the filename; do not use the '*' (asterisk) as part of
+               comment            the filename.
+               comment NO         To use the 'special' filename as specified.
+               comment QUIT       To quit the recovery process.
+               comment
+               Answer = ''
+            end
+            elseif ((abbrev('YES',Answer,1)) or (Answer eq '')) return attn
+            elseif (abbrev('NO',Answer,1))  ;Use the 'special' filename.
+            elseif ((abbrev('EXIT',Answer,3)) or (abbrev('QUIT',Answer,1))) begin
+               comment Processing terminated.
+               pcall Clean_Up('EXIT')
+            end
+         end
+      end
+   end
+   else begin
+      point '&(Filename) ' 1 (1) nolist
+      if (current ne -1) begin         ;File already exists...
+         comment File "&(Filename)" already exists and
+
+         if ((size(Filename) + 9) le 44) begin
+            comment will be restored and renamed as "&(Filename).&(DateStamp)".
+            comment
+            NewFilename = Filename||'.'||DateStamp
+         end
+         else begin
+            comment cannot be renamed with a date suffix of ".&(DateStamp)".  Please enter a new
+            comment unique filename.
+            comment
+
+            while (not Valid) begin
+               NewFilename = input('New filename (P=previous): ','ATTN')
+               NewFilename = upper(strip(NewFilename))
+               if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+               if (abbrev('PREVIOUS',NewFilename,1)) return attn
+               elseif ((abbrev('EXIT',NewFilename,3)) or (abbrev('QUIT',NewFilename,1))) begin
+                  comment Processing terminated.
+                  pcall Clean_Up('EXIT')
+               end
+
+               pcall Verify_Filename(NewFilename,Valid)
+            end
+         end
+      end
+   end
+   close
+
+   return (NewFilename)
+end
+
+
+;<.PAGE>
+proc Get_Filenames(OwnerAcct,ORVYLActNum) begin
+;Generate the file restore list.
+;
+   declare number CurrActNum           ;Current active file number.
+   declare number Year                 ;Year (yyyy format).
+   declare string FileInfo             ;File information.
+   declare string Filename             ;Data set name.
+   declare string FileSystem           ;Name of the ORVYL File System.
+   declare string FullDate             ;Date (yyyy/mm/dd format).
+   declare string NewFilename          ;New data set name.
+   declare string RestDate             ;Data set destroyed date (mm/dd/yy).
+   declare boolean FirstPass           ;First pass prompt.
+   declare boolean Valid               ;Valid file name flag.
+
+   FirstPass = true
+   CurrActNum = actno
+
+   pick &(ORVYLActNum)
+   while (Filename eq '') begin
+      repeat begin
+         while (Filename eq '') begin
+FILENAME:
+            if (FirstPass) Filename = input('   Filename (P=previous): ','ATTN')
+            else Filename = input('   Next filename (<CR>=no more filenames, P=previous): ','ATTN')
+            Filename = upper(strip(Filename))
+            if (ioresult eq 'ATTN') begin
+               try pcall ATTN_Exit
+               if (tryattn) return attn
+            end
+
+            if (Filename eq '') begin
+               if (FirstPass) return attn
+               else return
+            end
+            elseif ((abbrev('HELP',Filename,3)) or (Filename eq '?')) begin
+               comment Enter the name of the ORVYL file that you would like to recover.  The
+               comment filename can be of the form:
+               comment
+               comment    ORV.gg.uuu.name
+               comment
+               comment where 'gg.uuu' is the owner account that you have previously entered, and
+               comment 'name' is the name by which you refer to the ORVYL file.  If you omit the
+               comment 'ORV.gg.uuu.' prefix, it will be automatically added to the file name suffix
+               comment you enter.
+               comment
+               comment If you would like to pause the EXEC file to check on a file, enter
+               comment
+               comment    PAUSE
+               comment
+               comment at the Filename prompt.  To continue from where you left off, enter the
+               comment command:
+               comment
+               comment    CONTINUE
+               comment
+               comment at the WYLBUR command prompt.
+               comment
+               Filename = ''
+            end
+            elseif ((abbrev('EXIT',Filename,3)) or (abbrev('QUIT',Filename,1))) begin
+               comment Processing terminated.
+               pcall Clean_Up('EXIT')
+            end
+            elseif (abbrev('PAUSE',Filename,3)) begin
+               define CONTINUE as 'xgo ;' abbreviate replace system
+               open Temp title='Scratch active file' temporary
+               xpause msg="&(s'15')[Type CONTINUE when you are ready to continue.]&(s'15')"
+
+               close
+               undefine CONTINUE
+               pick &(ORVYLActNum)
+               Filename = ''
+            end
+            elseif (abbrev('PREVIOUS',Filename,1)) begin
+               if (not FirstPass) begin  ;Allow to go back to change the date on the previous entry.
+                  pick &(ORVYLActNum)
+                  read string FileInfo using=last delete
+                  Filename = strip(substr(FileInfo,24,44))
+                  NewFileName = strip(substr(FileInfo,69,44))
+                  comment [Changing recovery date...]
+                  goto FILEDATE
+               end
+               else begin
+                  pick &(CurrActNum)
+                  return attn
+               end
+            end
+         end
+
+         Filename = Filename||' account '||OwnerAcct
+         pcall Verify_Filename(Filename,Valid)
+         if (not Valid) Filename = ''
+      end
+      until (Valid)
+
+FILEDATE:
+      try pcall Get_Date(RestDate,true)
+      if (tryattn) begin
+         Filename = ''
+         goto FILENAME
+      end
+
+      try pcall Get_FileInfo(Filename,RestDate,NewFilename)
+      if (tryattn) begin
+         comment Filename "&(Filename)" will not be used.  Please enter a new filename.
+         comment
+      end
+      else begin
+         pcall Get_ORVYLFS(OwnerAcct,FileSystem)
+         FirstPass = false          ;Change the filename prompt.
+
+         Year = 1900 + right(RestDate,2)  ;currently the 20th century!
+         if ((right(RestDate,2) ge 0) and (right(RestDate,2) lt 67)) Year = 2000 + right(RestDate,2)
+         FullDate = Year||'/'||left(RestDate,2)||'/'||substr(RestDate,4,2)
+
+         putline end :&(left(FileSystem,11)) &(left(FullDate,10)) &(left(Filename,44)) &(left(NewFilename,44))
+      end
+
+      Filename = ''
+   end
+
+   if (lines gt 0) quietly sort delete
+   pick &(CurrActNum)
+   comment
+end
+
+
+;<.PAGE>
+proc Get_Name(AcctCode,AcctName) begin
+;Determine the user name of the account.
+;
+   AcctName = ''
+
+   declare string UserName             ;User name.
+
+   open GetName title='Determine the user name' temporary
+   try dump name &(AcctCode)
+   if (tryerror) begin
+      comment Account &(AcctCode) does not exist.  Please enter a different account.
+      close
+      return attn
+   end
+   read string UserName using=last delete
+   close
+   if ((substr(UserName,3,1) eq '.') and (substr(UserName,7,3) eq ' - ')) UserName = substr(UserName,10)
+
+   while (AcctName eq '') begin
+      AcctName = strip(input("Name (P=previous, Q=quit, <CR>='&(UserName)'): ",'ATTN'))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if (AcctName eq '') AcctName = UserName
+      elseif ((abbrev('HELP',upper(AcctName),3)) or (AcctName eq '?')) begin
+         comment Enter the name of the account holder.
+         comment
+         AcctName = ''
+      end
+      elseif (abbrev('PREVIOUS',upper(AcctName),1)) return attn
+      elseif ((abbrev('EXIT',upper(AcctName),3)) or (abbrev('QUIT',upper(AcctName),1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+   end
+
+   return (AcctName)
+end
+
+
+;<.PAGE>
+proc Get_ORVYLFiles(OwnerAcct,ORVYLActNum) begin
+;Prompt and process for an ORVYL file restore request.
+;
+   declare string Answer               ;Answer to prompt.
+
+ORVYL:
+   comment
+   Answer = ''
+   while (Answer eq '') begin
+      Answer = input('Do you want to recover ORVYL files (Yes or No): ','ATTN')
+      Answer = upper(strip(Answer))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if ((abbrev('HELP',Answer,3)) or (Answer eq '?')) begin
+         comment ORVYL files are where EMS (your EMS mailbox) and SPIRES (data base) type files
+         comment are kept; however, other types are also kept as ORVYL files.  EMS and SPIRES
+         comment files are special in that they both use multiple files for a particular
+         comment application.  Therefore, in order to recover a "complete" backup version of an
+         comment EMS or SPIRES file, you must specify the all the associated files.  Here is an
+         comment example of the files used for EMS:
+         comment
+         comment    MSGFILE.CKPT
+         comment    MSGFILE.DEFQ
+         comment    MSGFILE.MSTR
+         comment    MSGFILE.REC1
+         comment    MSGFILE.REC2
+         comment    MSGFILE.RES
+         comment
+         comment However, this is not a complete list of the possible files use by EMS for any
+         comment account as the number of files may change depending on the size of the
+         comment particular account's mailbox.  Similarly, SPIRES must be handled in the same
+         comment manner.
+         comment
+         comment Enter one of the following:
+         comment YES        To request the recovery of lost or damaged ORVYL files.
+         comment NO         To not recover any ORVYL files.
+         comment PREVIOUS   To go back to the previous prompt.
+         comment QUIT       To quit the recovery process.
+         comment
+         Answer = ''
+      end
+      elseif ((abbrev('YES',Answer,1)) or (Answer eq 'OK')) begin
+         putline end
+         try pcall Get_Filenames(OwnerAcct,ORVYLActNum)
+         if (tryattn) goto ORVYL
+      end
+      elseif (abbrev('NO',Answer,1))
+      elseif (abbrev('PREVIOUS',Answer,1)) return attn
+      elseif ((abbrev('EXIT',Answer,3)) or (abbrev('QUIT',Answer,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+      else Answer = ''
+   end
+end
+
+
+;<.PAGE>
+proc Get_ORVYLFS(OwnerAcct,FileSystem) begin
+;Determine the account's ORVYL File System affliation.  This is very dependent on the current
+;account assignments to the various file systems as documented in the ORVYL MPINIT data set on
+;the various systems.
+;
+   OwnerAcct = upper(strip(OwnerAcct))
+
+   declare string OwnerGrp             ;Owner account's group.
+   declare string OwnerSubGrp          ;Owner account's super-group.
+   declare string OwnerSupGrp          ;Owner account's sub-group.
+
+   OwnerGrp = left(OwnerAcct,2)
+   OwnerSupGrp = left(OwnerAcct,1)
+   OwnerSubGrp = right(OwnerAcct,1)
+
+   if (machine eq 'SYSA') begin
+      FileSystem = 'GENERAL'
+      if (index('AM AP AS ',OwnerGrp) gt 0) FileSystem = 'FIS'
+      elseif (OwnerGrp eq 'JQ') begin
+         FileSystem = 'INFACCES'
+         comment ORVYL file recovery requests cannot be processed for this file system.  Please
+         comment contact the Info Access programming staff in DSG/CIR.
+         comment
+         pcall Clean_Up('EXIT')
+      end
+      elseif (OwnerGrp eq 'KR') begin
+         FileSystem = 'INFACC2'
+         comment ORVYL file recovery requests cannot be processed for this file system.  Please
+         comment contact the Info Access programming staff in DSG/CIR.
+         comment
+         pcall Clean_Up('EXIT')
+      end
+      elseif (OwnerSupGrp eq 'G') FileSystem = 'ITS'
+      elseif (index('AN CD CK ',OwnerGrp) gt 0) FileSystem = 'NSI'
+      elseif (index('CT CX CY ',OwnerGrp) gt 0) FileSystem = 'OOD'
+      elseif (OwnerGrp eq 'KQ') begin
+         FileSystem = 'PSYCINFO'
+         comment ORVYL file recovery requests cannot be processed for this file system.  Please
+         comment contact the Info Access programming staff in DSG/CIR.
+         comment
+         pcall Clean_Up('EXIT')
+      end
+      elseif (OwnerGrp eq 'Z8') FileSystem = 'SDCACCT'
+      elseif (index('EC ED EE ',OwnerGrp) gt 0) FileSystem = 'SOCRATES'
+   end
+
+   if (machine eq 'RLG') begin
+      FileSystem = 'RLIN'
+      if (OwnerGrp eq 'HB') FileSystem = 'BKSINDEX'
+      elseif (OwnerGrp eq 'H1') FileSystem = 'BKSRES1'
+      elseif (OwnerGrp eq 'H2') FileSystem = 'BKSRES2'
+      elseif (OwnerGrp eq 'H3') FileSystem = 'BKSRES3'
+      elseif (OwnerGrp eq 'HC') FileSystem = 'CITADEL'
+      elseif (OwnerGrp eq 'DQ') FileSystem = 'DEFQ'
+      elseif (OwnerGrp eq 'HN') FileSystem = 'NONBKS'
+      elseif (OwnerGrp eq 'HP') FileSystem = 'PFILES'
+
+      elseif (OwnerGrp eq 'JZ') FileSystem = 'USERS'
+      elseif ((OwnerSupGrp eq 'P') and (index('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',OwnerSubGrp) gt 0))) FileSystem = 'USERS'
+      elseif ((OwnerSupGrp eq 'X') and (index('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',OwnerSubGrp) gt 0))) FileSystem = 'USERS'
+      elseif ((OwnerSupGrp eq 'Y') and (index('ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567.9',OwnerSubGrp) gt 0))) FileSystem = 'USERS'
+      elseif ((OwnerSupGrp eq 'Z') and (index('AB.DEFG.IJKLMNOP.RS.UVWXYZ0123456789',OwnerSubGrp) gt 0))) FileSystem = 'USERS'
+   end
+
+   if ((machine eq 'SYSC') or (machine eq 'SYSF')) begin
+      FileSystem = 'SUH'
+      if ((OwnerSupGrp eq 'G') and (index('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',OwnerSubGrp) gt 0))) FileSystem = 'INTSUH'
+   end
+
+   return (FileSystem)
+end
+
+
+;<.PAGE>
+proc Get_OSDatasets(OwnerAcct,OSActNum) begin
+;Prompt and process for an OS data set restore request.
+;
+   declare string Answer               ;Answer to prompt.
+
+OS:
+   comment
+   Answer = ''
+   while (Answer eq '') begin
+      Answer = input('Do you want to recover OS (WYLBUR and/or VSAM) data sets (Yes or No): ','ATTN')
+      Answer = upper(strip(Answer))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if ((abbrev('HELP',Answer,3)) or (Answer eq '?')) begin
+         comment OS (Operating System) data sets can be a WYLBUR accessible data sets (eg, your
+         comment LIB data set where your Logon file is kept), or a VSAM file (a keyed indexed
+         comment organized file used to increase the access time to the information).  Most
+         comment probably, the majority of your data sets are WYLBUR accessible data sets.  If
+         comment you are trying to recover your EMS files, you would need to goto the ORVYL file
+         comment recovery section.
+         comment
+         comment Enter one of the following:
+         comment YES        To request the recovery of lost or damaged OS data sets.
+         comment NO         To not recover any OS data sets.
+         comment PREVIOUS   To go back to the previous prompt.
+         comment QUIT       To quit the recovery process.
+         comment
+         Answer = ''
+      end
+      elseif ((abbrev('YES',Answer,1)) or (Answer eq 'OK')) begin
+         try pcall Get_Dsnames(OwnerAcct,OSActNum)
+         if (tryattn) goto OS
+      end
+      elseif (abbrev('NO',Answer,1))
+      elseif (abbrev('PREVIOUS',Answer,1)) return attn
+      elseif ((abbrev('EXIT',Answer,3)) or (abbrev('QUIT',Answer,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+      else Answer = ''
+   end
+end
+
+
+;<.PAGE>
+proc Get_PhoneNums(Daytime,Nighttime) begin
+;Get the user's telephone numbers.
+;
+   Daytime = ''
+   Nighttime = ''
+
+   declare boolean ValidNum            ;Valid telephone number flag.
+
+DAY:
+   comment Telephone numbers:
+   while (Daytime eq '') begin
+      Daytime = input('   Daytime   [08:00am - 05:00pm] (P=previous, Q=quit): ','ATTN')
+      Daytime = upper(strip(Daytime))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if ((abbrev('HELP',Daytime,3)) or (Daytime eq '?')) begin
+         comment Enter the daytime telephone number where you can be reached if there are any
+         comment questions or problems.  The telephone number should be in the format of a
+         comment campus extension or the full telephone number including the area code.  For
+         comment example,
+         comment
+         comment    3-1611                    campus extension
+         comment
+         comment    (408) 555-1212            off-campus telephone number
+         comment
+         Daytime = ''
+      end
+      elseif (abbrev('PREVIOUS',Daytime,1)) return attn
+      elseif ((abbrev('EXIT',Daytime,3)) or (abbrev('QUIT',Daytime,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+
+      pcall Is_PhonNum(Daytime,ValidNum)
+      if (not ValidNum) begin
+         comment "&(Daytime)" is an invalid telephone number.  Please re-enter.
+         comment
+         Daytime = ''
+      end
+   end
+   pcall Fmt_PhoneNum(Daytime)
+
+   while (Nighttime eq '') begin
+      Nighttime = input('   Nighttime [05:00pm - 11:00pm] (P=previous, Q=quit, <CR>=none): ','ATTN')
+      Nighttime = upper(strip(Nighttime))
+      if (ioresult eq 'ATTN') begin
+         Daytime = ''
+         goto DAY
+      end
+
+      if ((Nighttime eq '') or (abbrev('NONE',Nighttime,1))) Nighttime = '[NONE]'  ;No night time telephone number.
+      elseif ((abbrev('HELP',Nighttime,3)) or (Nighttime eq '?')) begin
+         comment Optionally, enter the nighttime telephone number that you would like to be
+         comment contacted if there are any questions or problems.  The telephone number should
+         comment be in the format of a campus extension or the full telephone number including
+         comment the area code.  For example,
+         comment
+         comment    3-1611                    campus extension
+         comment
+         comment    (408) 555-1212            off-campus telephone number
+         comment
+         Nighttime = ''
+      end
+      elseif (abbrev('PREVIOUS',Nighttime,1)) goto DAY
+      elseif ((abbrev('EXIT',Nighttime,3)) or (abbrev('QUIT',Nighttime,1))) begin
+         comment Processing terminated.
+         pcall Clean_Up('EXIT')
+      end
+
+      if ((size(Nighttime) gt 0) and (Nighttime ne '[NONE]')) begin
+         pcall Is_PhonNum(Nighttime,ValidNum)
+         if (not ValidNum) begin
+            comment "&(Nighttime)" is an invalid telephone number.  Please re-enter.
+            comment
+            Nighttime = ''
+         end
+         else pcall Fmt_PhoneNum(Nighttime)  ;Reformat the telephone number.
+      end
+   end
+
+   return (Daytime,Nighttime)
+end
+
+
+;<.PAGE>
+proc Ignore_ATTN() begin
+;Reset ATTN environment.
+;
+   clear attn
+   on attn reenable
+end
+
+
+;<.PAGE>
+proc Ignore_Error() begin
+;Reset Error condition.
+;
+   clear error
+   on error reenable
+end
+
+
+;<.PAGE>
+proc Instructions() begin
+;Display the instructions if requested.
+;
+   declare string Answer               ;Answer to prompts.
+
+   while (Answer eq '') begin
+      Answer = input('Instructions (Q=quit, <CR>=no): ','ATTN')
+      Answer = upper(strip(Answer))
+      if (ioresult eq 'ATTN') pcall ATTN_Exit
+
+      if (Answer eq '') return
+   end
+
+   if ((abbrev('YES',Answer,1)) or (Answer eq 'OK') or (abbrev('HELP',Answer,3)) or (Answer eq '?')) begin
+      if ((machine ne 'SYSC') and (machine ne 'SYSF')) begin
+         comment All OS data sets and ORVYL files are copied to magnetic tape on a periodic
+         comment basis -- this is called a 'backup'.  A backup can be either 'full' (everything
+         comment on the particular disk volume) or 'incremental' (only the changed OS data sets
+         comment or ORVYL files are backed up).  Different types of files have different backup
+         comment schedules.
+         comment
+         comment For OS data sets ("files"), which include WYLBUR data sets and VSAM files,
+         comment there is only a weekly full backup.  The tapes from each of the most recent
+         comment eight weeks are available; prior to that, only the first set of each previous
+         comment month is kept for the previous six months.  The most recent and third most
+         comment recent week's backup tapes are kept onsite, and the other tapes are kept
+         comment offsite.
+         comment
+         comment For ORVYL files, there is a weekly full backup and a daily incremental backup.
+         comment ORVYL full file backups are only available for the past twelve weeks (eight
+         comment weeks on the RLG system) and incremental backups are available for the past
+         comment fourteen day period.  The four most recent weeks and the twelfth week (eighth
+         comment week on the RLG system) backup tapes are kept onsite, and the other tapes are
+         comment kept offsite.
+      end
+      else begin
+         comment All ORVYL files are copied to magnetic tape on a periodic basis -- this is
+         comment called a 'backup'.  A backup can be either 'full' (everything on the particular
+         comment file system) or 'incremental' (only the changed ORVYL files are backed up).
+         comment ORVYL full file backups are only available for the past twelve weeks and
+         comment incremental backups are available for the past fourteen day period.  The four
+         comment most recent weeks and the twelfth week backup tapes are kept onsite, and the
+         comment other tapes are kept offsite.
+      end
+      comment
+      comment If your recovery request requires tapes that are currently offsite, the work
+      comment will take approximately two business days; otherwise, the recovery work will
+      comment normally be done in one business day.  For further information on the backup
+      comment schedule, see DOC#SCHEDULE PUBLIC.
+      comment
+   end
+   elseif ((abbrev('EXIT',Answer,3)) or (abbrev('QUIT',Answer,1))) begin
+      comment Processing terminated.
+      pcall Clean_Up('EXIT')
+   end
+end
+
+
+;<.PAGE>
+proc Is_PhonNum(PhoneNum,Valid) begin
+;Validate if the telephone number is comprised of the legal character set
+;' .(+)-/0123456789'.
+;
+   PhoneNum = chstr(translate(PhoneNum,'',' .(+)-/'),' ','')
+   if ((size(PhoneNum) gt 0) and ((verify(PhoneNum,' .(+)-/0123456789') gt 0) \
+      or (size(PhoneNum) lt 5) or (size(PhoneNum) gt 10))) Valid = false
+   else Valid = true
+
+   return (Valid)
+end
+
+
+;<.PAGE>
+proc Parse_Parm(Parms) begin
+;Parse the parameter that is passed to the XPROC when called.
+;
+   declare string Token                ;Token from parm parsing.
+   declare string TokenType            ;Token type from parm parsing.
+
+   while (Parms ne '') begin           ;Parse and get any parameters specified.
+      syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+      Token = upper(Token)
+
+      if (TokenType ne 'NULL') begin
+         cases begin
+            case (abbrev('DEBUG',Token,3)) X.Debug = true   ;Debug mode.
+
+            case ((abbrev('SIMULATE',Token,3)) or (Token eq 'TEST')) X.CmdPrefix = 'comment '
+
+            case (abbrev('VERSION',Token,3)) begin  ;Version information.
+               write X.ExecBanner
+               xreturn                 ;Exit the EXEC file.
+            end
+
+            case (true) write s'2F'||'ERROR: "&(Token)", unknown option.'||s'15'
+         end
+      end
+   end
+end
+
+
+;<.PAGE>
+proc Verify_Date(Date,Valid) begin
+;Verify the date ('mm/dd/yy', 'mm-dd-yy', or 'mm dd yy') and return the date reformatted and
+;Valid=TRUE if it is good.  (Based upon XPROCS#CHKDATE PUBLIC.)
+;
+   Valid = false
+
+   if (verify(Date,' -/0123456789') gt 0) return (Valid)
+   Date = translate(Date,' ','-/')
+   ;; -or- use "syscall scan(Month,Date,TokenType,' (-)/',' (-)/')" which may become obsolete...
+
+   declare string Day                  ;Day.
+   declare number Days[12]             ;Days per month.
+   declare string Month                ;Month.
+   declare string Year                 ;Year.
+
+   syscall scan(Month,Date)
+   if ((Month lt 1) or (Month gt 12)) return (Valid)
+   Month = right(Month,2,'0')
+
+   syscall scan(Day,Date)
+   if ((Day le 0) or (Day gt 31)) return (Valid)
+   Day = right(Day,2,'0')
+
+   syscall scan(Year,Date)
+   if ((Year lt 0) or (Year gt 99)) return (Valid)
+   Year = right(Year,2,'0')
+
+   Days[1]  = 31
+   Days[2]  = 28
+   if ((Year / 4) eq int(Year / 4)) Days[2] = 29  ;Leap year correction.
+   Days[3]  = 31
+   Days[4]  = 30
+   Days[5]  = 31
+   Days[6]  = 30
+   Days[7]  = 31
+   Days[8]  = 31
+   Days[9]  = 30
+   Days[10] = 31
+   Days[11] = 30
+   Days[12] = 31
+   if (Day le Days[Month]) begin
+      Date = Month||'/'||Day||'/'||Year
+      Valid = true
+   end
+   else return (Valid)
+
+   return (Date,Valid)
+end
+
+
+;<.PAGE>
+proc Verify_Dsname(Dsname,Valid) begin
+;Verify the OS dsname or VSAM filename as following the OS data set naming conventions.  If the
+;OS dsname or VSAM filename is valid, reformat the name in one of the following formats:
+;
+;   $WYL.gg.uuu.name
+;   $Vaaa.gg.uuu.name
+;   $gg$uuu.name
+;   $SYSn.name
+;   $name
+;
+   Valid = false
+
+   declare number ColWidth             ;Column position on the display of the VSAM prefixes.
+   declare string DsnAcct              ;Dataset name account.
+   declare string DsnPrefix            ;Dataset name prefix.
+   declare string DsnSuffix            ;Dataset name suffix.
+   declare string NewDsname            ;Reformatted VSAM filename.
+   declare string VSAMPrefix           ;VSAM prefix.
+   declare string VSAMPrefixes         ;List of valid VSAM prefixes.
+
+   VSAMPrefixes = 'VAIS. VBIS. VCIC. VDIS. VFIS. VLMS. VNOT. VNSI. VNTG. VNTR. VNTT. VODV. VOOD. VSAM. VSPI. VSYS. VUPD. '
+
+   DsnSuffix = upper(strip(Dsname))
+   VSAMPrefix = left(DsnSuffix,5)
+
+   if ((left(VSAMPrefix,1) eq 'V') and (right(VSAMPrefix,1) eq '.')) begin  ;VSAM?
+      if ((index(VSAMPrefixes,VSAMPrefix) gt 0) and (substr(DsnSuffix,8,1) eq '.') and (substr(DsnSuffix,12,1) eq '.')) begin
+         DsnPrefix = 'ACCOUNT &(substr(DsnSuffix,6,6))'
+         DsnSuffix = substr(DsnSuffix,13)
+
+         NewDsname = dsnformat('&(DsnSuffix) &(DsnPrefix)')
+         if (NewDsname ne 'BAD DSN') begin
+            if (index(NewDsname,'(') gt 0) NewDsname = left(NewDsname,index(NewDsname,'(') - 1)
+            Dsname = '$'||VSAMPrefix||substr(NewDsname,5)
+            Valid = true
+         end
+      end
+      else begin
+         if (index(upper(Dsname),' ACCOUNT ') gt 0) Dsname = left(Dsname,index(upper(Dsname),' ACCOUNT ') - 1)
+
+         comment "&(Dsname)" is an invalid VSAM filename.  VSAM filename
+         comment prefix "&(left(VSAMPrefix,4))" is an unknown community.  Please enter a valid VSAM prefix.  The
+         comment defined VSAM community prefixes are:
+         comment
+
+         ColWidth = 3 + 4                    ;Display the list of known VSAM communities.
+         while (strip(VSAMPrefixes) ne '') begin
+            write '   '||left(VSAMPrefixes,4) nonl
+            VSAMPrefixes = strip(substr(VSAMPrefixes,6))
+            ColWidth = ColWidth + 3 + 4
+
+            if (ColWidth ge width) begin
+               comment
+               ColWidth = 3 + 4
+            end
+         end
+         comment
+         comment
+         comment Please enter a new and valid VSAM filename.
+         comment
+
+         &(X.CmdPrefix) send &(X.DebugAcct) &(X.ExecName) (&(X.ExecVersion)): VSAM prefix "&(VSAMPrefix)" is unknown.  \
+            Dsname = "&(Dsname)", DsnSuffix = "&(DsnSuffix)".
+      end
+   end
+   elseif (dsnformat(Dsname) eq 'BAD DSN') begin
+      comment "&(Dsname)" is an invalid data set name.  Please enter
+      comment a valid data set name.
+      comment
+   end
+   elseif ((index(Dsname,'(+') gt 0) or (index(Dsname,'(0)') gt 0) or (index(Dsname,'(-') gt 0)) begin
+      comment "&(dsnformat(Dsname))" is a GDG data set name.  Please enter the full
+      comment data set name in the form of:
+      comment   dsname.GnnnnV00
+      comment
+   end
+   else begin                          ;Regular OS dsname...
+      Dsname = '$'||dsnformat(Dsname)
+      if (index(Dsname,'(') gt 0) Dsname = left(Dsname,index(Dsname,'(') - 1)
+      Valid = true
+   end
+
+   return (Dsname,Valid)
+end
+
+
+;<.PAGE>
+proc Verify_DumpDate(Date,ORVYLDump,Valid) begin
+;Validate the specified date (mm/dd/yy) against the available backup dump dates available.
+;
+   Valid = false
+
+   declare number BackupCycles         ;Number of backup weekly cycles available.
+   declare number Century              ;Current century.
+   declare number CurrSerialDate       ;Current serial day number (ie. 1991.176).
+   declare number DaysInYear           ;Number of days in the year (ie. 365 or 366).
+   declare number DayOfYear            ;Day number of the year.
+   declare number DaysDiff             ;Number of DaysDiff between the restore request and the current date.
+   declare number Days[12]             ;Days per month.
+   declare number I                    ;Increment.
+   declare number SerialDate           ;Serial date (19yy.nnn).
+   declare number Weeks                ;Number of weeks.
+   declare string Day                  ;Day.
+   declare string Month                ;Month.
+   declare string Year                 ;Year.
+
+   Month = left(Date,2)
+   Day = substr(Date,4,2)
+   Year = right(Date,2)
+   DaysInYear = 365
+
+   Days[1]  = 31
+   Days[2]  = 28
+   if ((Year / 4) eq int(Year / 4)) begin  ;Leap year correction.
+      Days[2] = 29
+      DaysInYear = 366
+   end
+   Days[3]  = 31
+   Days[4]  = 30
+   Days[5]  = 31
+   Days[6]  = 30
+   Days[7]  = 31
+   Days[8]  = 31
+   Days[9]  = 30
+   Days[10] = 31
+   Days[11] = 30
+   Days[12] = 31
+   I = 1
+   while (I lt Month) begin
+      DayOfYear = DayOfYear + Days[I]
+      I = I + 1
+   end
+   DayOfYear = DayOfYear + Day
+
+
+   Century = 1900
+   if (substr(sys.date,20,2) le 71) Century = 2000  ;21st century!
+   CurrSerialDate = Century + substr(sys.date,20,6)
+   SerialDate = Century + Year + (DayOfYear / 1000)
+
+   if ((int(CurrSerialDate) - int(SerialDate)) eq 1) \
+      DaysDiff = DaysInYear + (substr(CurrSerialDate,5) * 1000) - (substr(SerialDate,5) * 1000)
+   else DaysDiff = abs(int(CurrSerialDate) - int(SerialDate)) * 365 + (abs(substr(CurrSerialDate,5) - substr(SerialDate,5)) * 1000)
+   Weeks = int(DaysDiff / 7)
+
+   if ((SerialDate le CurrSerialDate) and (DaysDiff ge 0) and (DaysDiff lt 366)) begin  ;Less than a year difference.
+      if (ORVYLDump) begin
+         ;ORVYL full backup dumps are available only for the past 12 or 8 contiguous weeks.  The
+         ;incremental backup dumps are available for the current 14 day period.
+         BackupCycles = 12
+         if (machine eq 'RLG') BackupCycles = 8
+
+         if (Weeks le BackupCycles) Valid = true
+      end
+      else begin
+         ;OS full backup dumps are available for the past contiguous 8 weeks; afterwards the first
+         ;week of each month for the subsequent four months (for a total of the past six months).
+         if (Weeks le 8) Valid = true  ;First 8 weeks...
+         elseif ((Weeks gt 8) and (Weeks le 30) and (Day ge 1) and (Day le 7)) Valid = true  ;...next 5 months (one month overlap).
+      end
+   end
+
+   return (Valid)
+end
+
+
+;<.PAGE>
+proc Verify_Filename(Filename,Valid) begin
+;Verify the the filename as following the ORVYL file naming conventions.  If the filename
+;is valid, reformat the filename.
+;
+   Valid = false
+
+   pcall fnformat(Filename,Valid)
+   if (not Valid) begin
+      comment "&(Filename)" is an invalid file name.  Please enter a
+      comment valid file name.
+      comment
+   end
+   return (FileName,Valid)
+end
+
+
+

@@ -1,0 +1,208 @@
+//&QSERV JOB ,'QSERV SVC'
+// EXEC PURGEOLD
+// EXEC HIBALCL
+//ASM.SYSLIB DD DSN=SYS3.IS.MACLIB,DISP=SHR
+//           DD DSN=WYL.GG.SYS.MACLIB,DISP=SHR (Hibal)
+//           DD DSN=SYS1.MACLIB,DISP=SHR
+//           DD DSN=SYS1.AMACLIB,DISP=SHR
+IGC0024A TITLE 'QSERV SVC'
+         HIBAL
+         GBLC  &$DATE,&$TIME       (See HIBAL macro)
+*box
+*
+*   QSERV SVC
+*
+*     Copyright 1990, Stanford University.  All rights reserved.
+*
+*     This SVC will queue a server request.  The QTASK job will
+*     periodically process the requests on the queue.  The queue
+*     entries are in ECSA, linked off of the SCIPCVT.
+*
+*     The QSERV macro can be used to make the request.  For
+*     example:
+*                  QSERV  queue-type,location,length
+*                           (R15)      (R1)    (R0)
+*
+*                  generates:
+*                           LA    R15,=CL16'queue-type'
+*                           LA    R1,location
+*                           LA    R0,length
+*                           SVC   &SVCSERV
+*                           LTR   R15,R15
+*
+*     Return code (in register R15):
+*      -12 - can't queue request, QSERV facility disabled
+*       -8 - can't queue request, control blocks not set up
+*       -4 - can't queue request, busy (all queue entries used)
+*        0 - normal completion (request queued)
+*        4 - unrecognized queue type
+*        8 - invalid SVC parameters passed
+*
+*
+*     Written on 4/90, by Jim Nisbet
+*
+*     Modifications:
+*        04/04/90  Niz  Initial version.
+*        04/07/90  Niz  Add JOBNAME and APF flag to queue entry.
+*
+         PUSH  DSECTS
+         CVT   DSECT=YES
+*
+         IHAASCB
+*
+         IKJTCB
+*
+         IEZJSCB
+*
+USERCVT  RECORD 'USERCVT'
+         POP   DSECTS
+         EJECT
+         COPY  QSVT                QSERV Vector Table
+         EJECT
+BR       REG   R12                 Base register
+*
+IGC0024A CSECT
+         USING CVT,R3              SVC entry assumption
+         USING TCB,R4              SVC entry assumption
+         USING ASCB,R7             SVC entry assumption
+*
+         BASE
+SVCBASE  LABEL
+*
+         B     SKIPID
+         DC    C'QSERV SVC &$DATE &$TIME'
+SKIPID   LABEL
+*-
+*-       Save SVC parameters.
+*-
+         LR    R8,R1               Save message location
+         LR    R9,R0               Save message length
+         LR    R10,R15             Save type ptr
+*-
+*-       Verify that QSERV control blocks have been initialized.
+*-
+         LH    R5,=H'-8'           Assume the worst
+         LT    R2,CVTUSER          User CVT ptr
+         BZ    RETURN              None, scram
+*
+         WITH  (USERCVT,R2),BEGIN
+         IF    (USERCVT,NE,'SCIP'),RETURN  Not correct, scram
+         LT    R11,USEQSVT         Get our QSVT ptr
+         IF    Z,BEGIN             Build the QSVT...
+*-
+*-       First time... make a new QSVT in ECSA linked from SCIPCVT.
+*-
+         GETMAIN RU,LV=L'QSVT,SP=241,LOC=ANY  Get ECSA storage
+*-
+*-       Initialize QSVT.
+*-
+         LR    R11,R1
+         WITH  (QSVT,R11)
+         CLEAR QSVT                Initialize QSVT
+         MVC   QSID,=C'QSVT'       Set control block id
+         MVI   QSVER,QSVER#        Set vector table version number
+         MVC   QSMAXCT,=A(QSMAXCT#)  Set max allowed byte count
+*
+         ST    R11,USEQSVT         Save QSVT ptr in SCIPCVT
+         END
+         END
+*
+         USING QSVT,R11
+         IF    (QSVT,NE,'QSVT'),'LH R5,=H"-8"; B RETURN'  Not good
+*
+         IF    (R9,LGT,QSETMAX#),'LA R5,8; B RETURN'  Bad parms
+*-
+*-       Force any addressing exception now.
+*-
+         CLC   @R10(16),@R10       Check queue type
+         LTR   R2,R9
+         IF    POS,BEGIN           Check the first 256 bytes...
+         CEIL  R2,256
+         DEX   R2,'CLC @R8,@R8'    Check it
+         END
+*-
+*-       Make a new queue entry.
+*-
+         IF    (QSCURCT,GE,QSMAXCT),BEGIN  All full...
+         LH    R5,=H'-4'           Reject request
+         B     RETURN
+         END
+*-
+*-       Get QSENTRY from ECSA.
+*-
+         LA    R0,L'QSENTRY
+         AR    R0,R9               Total QSENTRY length
+         GETMAIN RU,LV=(0),SP=241,LOC=ANY  Get ECSA storage
+         LR    R6,R1
+*-
+*-       Fill in the QSENTRY.
+*-
+         WITH  (QSENTRY,R6),BEGIN
+         CLEAR QSENTRY
+         MVC   QSEID,=C'QSRV'      Set QSENTRY id
+         MVC   QSETYPE,@R10        Set type
+*
+         LT    R5,TCBTIO           TIOT ptr (contains jobname)
+         IF    Z,'LA R5,=CL8"_UNKNOWN"'
+         ELSE  BEGIN               Valid jobname ptr...
+         IF    (@R5,EQ,=CL8' '),'LA R5,=CL8"_UNKNOWN"'
+         IF    (@R5,EQ,=XL8'00'),'LA R5,=CL8"_UNKNOWN"'
+         END
+         MVC   QSEJBNM,@R5         Save jobname
+*
+         LT    R5,TCBJSCB          JSCB ptr from TCB
+         IF    NZ,BEGIN            It exists...
+         WITH  (IEZJSCB,R5)
+         IF    JSCBOPTS.JSCBAUTH,'SET QSEFAUTH'  Authorized
+         END
+*
+         STH   R9,QSELEN           Save message length
+         LA    R0,QSETEXT
+         LR    R1,R9
+         MVCL  R0,R8               Save message text
+*-
+*-       Add the request to the end of the current queue.
+*-
+         LOOP  BEGIN
+         LM    R8,R9,QSCURQH       Get current queue head, tail
+         IF    (R8,Z),'LR R0,R6; LR R1,R6'  We are the only entry
+         ELSE  BEGIN               Add us to the end of the queue...
+         ST    R6,QSELINK-QSENTRY(,R9)  Link previous tail to us
+         LR    R0,R8               Queue head stays unchanged
+         LR    R1,R6               We are the new queue tail
+         END
+*
+         CDS   R8,R0,QSCURQH       Update queue ptrs
+         UNTIL Z                   Loop back if something changed
+         END
+*-
+*-       Keep the total byte count accurate.
+*-
+         LOOP  BEGIN
+         L     R8,QSCURCT          Current byte count
+         LR    R9,R8
+         AL    R9,=A(L'QSENTRY)    Add in length of QSE hdr
+         AH    R9,QSELEN           Add in length of text
+         CS    R8,R9,QSCURCT       Update current byte count
+         UNTIL Z
+         END
+         END
+*
+         CLEAR R0,R1               Neatness
+         CLEAR R5                  We did it
+*
+RETURN   LTR   R15,R5              Set rc
+         BR    R14
+*
+         DROP  BR,CVT,QSVT
+*
+         LTORG
+         END   .
+//LKED.SYSLMOD DD DSN=SYS1.LPALIBD(IGC0024A),
+//     DISP=SHR,SPACE=
+//*LKED.SYSLMOD DD DSN=WYL.GG.JDN.LINKLIB,DISP=SHR,SPACE=
+//LKED.SYSIN DD *
+ ENTRY IGC0024A
+ MODE  AMODE(31),RMODE(ANY)
+ SETCODE AC(1)
+ NAME  IGC0024A(R)

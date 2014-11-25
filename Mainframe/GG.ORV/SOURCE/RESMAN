@@ -1,0 +1,3229 @@
+RESMAN   TITLE 'ORVYL''S Resource Management Services'
+         COPY  HEADER
+RESMAN   MODULE TRCNUM=7
+         SPACE 4
+DISABLE  EQU   X'04'                   Disable 'AND' mask
+         EJECT
+         COPY  PZERO
+         USING PZERO,R0
+         EJECT
+         COPY  MAT
+         EJECT
+         COPY  ASB
+         EJECT
+         COPY  SLISTMAC
+         EJECT
+         COPY  QLISTMAC
+         EJECT
+         COPY  GRPARM
+         EJECT
+         COPY  SBPARM
+         EJECT
+         COPY  VMPARM
+         EJECT
+         COPY  DISPPARM
+         EJECT
+         COPY  SIGPARM
+         EJECT
+         COPY  XITPARM
+         EJECT
+         COPY  LOCKPARM
+         EJECT
+         COPY  LISTPARM
+         EJECT
+         COPY  SEGPARM
+         EJECT
+         COPY  PARMPARM
+         EJECT
+         COPY  PAGEPARM
+         TITLE 'ORVYL''S General Resource Services'
+*******************************************************************
+*                                                                 *
+* This is the parameter list used in the PLO instruction. Refer   *
+* to the Principals of Operation for the format of this area.     *
+*                                                                 *
+*******************************************************************
+#QUEPLO RECORD BEGIN
+         DS    XL(4*36)            PLO parm list
+         END   ,
+
+*******************************************************************
+*                                                                 *
+* Generic record for a double linked list head used in the list   *
+* manipulation routines.                                          *
+*                                                                 *
+*******************************************************************
+#QUEW   RECORD BEGIN               Work record
+#QUE     QHEAD
+         END   ,
+
+         COPY  GRCOPY              Needed for VFILES display also
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRINI - Initialize a General Resource Control Table           *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*     This table is anchored out of the MAT. Modifications to     *
+*     this control block are serialized using the PLO, CDS and    *
+*     CS instruchtions.                                           *
+*                                                                 *
+*******************************************************************
+GRINIT   PROC  SCOPE=GLOBAL
+         WITH  (GRCT,RX)
+         VMGET L'GRCT,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RX,RVR',ZERO),'ABORT NOGRCTMEM'
+         CLEAR GRCT
+         MVC   GRCBID,=CL4'GRCT'   Set block id
+         L     R1,MATPTR
+         WITH  (MAT,R1),'ST RX,MATGRCT' Set GRCT pointer
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRCRE - Create a new General Resource item                    *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*     Output - General Resource ID (pointer to the table item)    *
+*                                                                 *
+*     This table is anchored out of the GRCT in a double linked   *
+*     list. It is not really necessary to have these items linked *
+*     together and this may be changed later. This feature will   *
+*     assist in problem determination during this phase of        *
+*     development. It may also be used in gathering performance   *
+*     statistics in which case it would not be removed.           *
+*     Modifications to this memory block are serialized using the *
+*     PLO instruction.                                            *
+*                                                                 *
+*******************************************************************
+GRCRE    PROC  @GRES,SCOPE=GLOBAL
+
+         WITH  ((GRCT,RX),(GRITEM,RJ))
+
+         L     R1,MATPTR
+         WITH  (MAT,R1),'L RX,MATGRCT' Get control block ptr
+
+         SAVAIL HEAD=GRCAR,LEN=L'GRITEM,FIX=YES Get an avail res item
+         LR    RJ,RVR              Set pointer
+
+         CLEAR GRITEM              Clear the item
+         MVC   GRIBID,=CL4'GRES' Set id
+         MVC   GRICID,@GRCID       Set caller id
+
+         LA    R1,GRIHL            Initialize list
+         ST    R1,GRIHLFP
+         ST    R1,GRIHLBP
+
+         LA    RVR,GRITEM          Set return
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRDEL - Delete a General Resource item (oposite of create)    *
+*                                                                 *
+*     Input - General Resource ID (pointer to the table item)     *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*******************************************************************
+GRDEL    PROC  @GRES,SCOPE=GLOBAL
+
+         WITH  ((GRCT,RX),(GRITEM,RJ))
+         L     RJ,@GRID            Set item base
+         L     R1,MATPTR
+         WITH  (MAT,R1),'L RX,MATGRCT' Get control block ptr
+
+         CLEAR GRITEM              Clear the avail item
+* Note: GRIBID is not used here because of free list chain address
+         MVC   GRICID,=CL4'gRES'   Set id
+
+         SPUSH HEAD=GRCAR,ITEM=GRITEM Add to avail res item list
+
+         CLEAR RVR                 Set return ok
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRGET - Get a hold of a General Resource item                 *
+*                                                                 *
+*     Input - General Resource ID (pointer to the table item)     *
+*                                                                 *
+*     Output - General Resource Hold ID (pointer to hold item)    *
+*                                                                 *
+*                    -- or --                                     *
+*                                                                 *
+*              Zero under two conditions:                         *
+*                                                                 *
+*               WAIT=NO and a wait for hold would be required     *
+*                                                                 *
+*               WAIT=YES and the hold request was cancelled       *
+*                        while it was waiting for hold            *
+*                                                                 *
+*******************************************************************
+#GRGET  RECORD BEGIN
+#GRGETF  FLAG  ,
+         FLAG  #GRGETW             Wait flag
+         END   ,
+
+GRGET    PROC  @GRES,#GRGET,SCOPE=GLOBAL
+
+         WITH  ((GRCT,RX),(GRITEM,RJ),(GRHITM,RM))
+         WITH  (GRHITM,RK),LABEL=H Last hold item in list
+
+         LR    RY,R14              Save return address
+         L     RJ,@GRID            Set res item base
+         IF    (GRIBID,NE,=CL4'GRES'),'ABORT BADGRGET1'
+         L     R1,MATPTR
+         WITH  (MAT,R1),'L RX,MATGRCT' Get control block ptr
+
+         SAVAIL HEAD=GRCAH,LEN=L'GRHITM,FIX=YES Get an avail hold item
+         LR    RM,RVR              Set pointer
+         CLEAR GRHITM
+         MVC   GRHBID,=CL4'GRH'
+         ST    RJ,GRHGRIT          set GRITEM ptr
+         MVC   GRHASB,PZCURASB     set addr space id
+         ST3   RY,GRHRTN           save return addr (dump clue)
+         IF    (@GREXCL),'SET GRHXEXCL' set to exclusive hold
+
+         PSET  @QUE
+         LM    RA,RB,GRIHLSEQ
+         STM   RA,RB,@QUESEQ       Set sequence stuff
+         PMOV  @QUEITM,LA:GRHITM   Set item to add
+         PMOV  @QUELHD,LA:GRIHL    Set list head
+
+         LOOP  BEGIN
+
+         IF    (GRIBID,NE,=CL4'GRES'),'ABORT BADGRGET2'
+
+         L     RK,GRIHLBP          Point to last item
+
+* Check if new entry needs to wait
+
+* First, empty hold list
+         IF    (GRIHLCNT,EQ,=A(0)),'SET GRHXHOLD' Empty list
+* Second, last item waiting
+         ELSEIF (^H:GRHXHOLD),'CLEAR GRHXHOLD' must wait too
+* Third, resource held exclusive or this wants excl
+         ELSEIF (H:GRHXEXCL,OR,GRHXEXCL),'CLEAR GRHXHOLD'
+* Fourth, resource held in share mode
+         ELSE   'SET GRHXHOLD'     It is nice to share
+
+         CLEAR RN                  Init return value
+         CLEAR #GRGETW             Clear wait flag
+
+         IF    (^@GRWAIT,AND,^GRHXHOLD),EXIT must wait but can't
+
+         LR    RN,RM               Set return value
+         IF    (^GRHXHOLD),'SET #GRGETW' Set to wait necessary
+
+         ACALL QUEUE               Add to the end of the list
+
+         UNTIL (RVR,Z),END
+
+         IF    (#GRGETW),BEGIN     must wait
+         AWAIT GRHPIDP,LEN=LONG    wait for hold
+         PSET  @SYSRDEL            Release system routine ID
+         PMOV  @SYSRDID,(RVR)
+         VCALL SYSRDEL
+
+* Note: item not anchored if cancelled (see grcan)
+         IF    (GRHXCANC),BEGIN
+         CLEAR RN                  Posted by cancel request
+         END   ,                   End if
+         ELSE  'INCRS GRIWCNT'     Count number of waits
+         END
+
+         IF    (RN,Z),BEGIN        No hold, put it back
+         CLEAR GRHITM
+         MVC   GRHBID,=CL4'gRH'
+         SPUSH HEAD=GRCAH,ITEM=GRHITM Add to avail hold item list
+         END   ,
+         ELSE  BEGIN
+         INCRS GRIHCNT             Count number of holds
+         END   ,
+
+         LR    RVR,RN              Set return value
+
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRREL - Release a general resource hold                       *
+*                                                                 *
+*     Input - General Resource Hold ID (pointer to hold item)     *
+*             or General Resource ID (not valid to release holds  *
+*             obtained in share mode)                             *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*******************************************************************
+#GRREL  RECORD BEGIN
+         DS    XL(L'GRHXBS)          Work record
+         END   ,
+
+GRREL    PROC  @GRES,#GRREL,SCOPE=GLOBAL
+         WITH  ((GRCT,RX),(GRITEM,RJ),(GRHITM,RM))
+         WITH  (GRHITM,RN),LABEL=N Next item
+         WITH  (GRHXBS,RK),LABEL=W Work flags
+
+         L     RM,@GRID            Set hold item pointer
+         LR    RJ,RM               Might be a Resource id
+
+         IF    (GRIBID,EQ,=CL4'GRES'),BEGIN
+* Must be exclusive or had been exclusive changed to share
+* so that the item is necessarily the first on the hold list
+         L     RM,GRIHLFP          Get first hold item
+         IF    (GRIHLCNT,EQ,=A(0)),'ABORT BADGRREL0'
+         IF    (^GRHXEXCL,AND,^GRHXX2S),'ABORT BADGRREL1'
+         END   ,                   End if
+         ELSE  'L RJ,GRHGRIT'      Set res item base
+
+         IF    (GRHBID,NE,=CL4'GRH'),'ABORT BADGRREL2'
+         IF    (GRHASB,NE,PZCURASB),'ABORT BADGRREL3' not allowed
+
+         L     R1,MATPTR
+         WITH  (MAT,R1),'L RX,MATGRCT' Get control block ptr
+         Q_REM HEAD=GRIHL,ITEM=GRHITM Remove item from hold list
+         CLEAR GRHITM
+         MVC   GRHBID,=CL4'gRH'
+         SPUSH HEAD=GRCAH,ITEM=GRHITM Add to avail hold item list
+
+* The hold is released. Now see if the hold can be given to any
+* waiting items. There must be no other holds in effect (the released
+* resource was not being held in share mode). If the first waiting
+* resource is for hold exclusive, then only that one gets the hold.
+* Otherwise, all the next items waiting for hold share get the hold.
+
+         LA    RK,#GRREL           Set work pointer
+         L     RA,GRIHLSEQ         Get sequence stuff
+         LA    R1,GRIHL            Lock token
+
+GRREL4   BEGIN ,
+         CLEAR R0                         Compare and load
+         PLO   RA,GRIHLSEQ,RM,GRIHLFP     First hold item
+         IF    (NZ),'NEXT GRREL4'         Take it from the top
+         IF    (RM,EQ,R1),'EXIT GRREL4'   Empty list
+         L     RX,GRHXBS                  Get the flags
+         ST    RX,W.GRHXBS                Set work flags
+         IF    (W:GRHXHOLD),'EXIT GRREL4' Aready holding
+* Give this guy the hold
+         SET   W:GRHXHOLD            Set to hold status
+         L     RY,W.GRHXBS           Get new flags
+         LA    RB,1(RA)              Increment sequence
+         LA    R0,8                  Double compare and swap
+         PLO   RA,GRIHLSEQ,RX,GRHXBS Set the new flags
+         IF    (NZ),'NEXT GRREL4'    Take it from the top
+         LR    RA,RB                 Set new sequence stuff
+
+* Note: The new item to get the hold is 'locked' by the logic because
+*       the only code that touches an item with hold is in this routine
+*       and this routine can only be called by the requestor of the
+*       hold which has not awaken yet.
+
+         IF    (^GRHXEXCL),BEGIN        If willing to share
+* Set all the next waits for hold share to hold
+         LOOP  BEGIN                    Forever
+         CLEAR R0                       Compare and load
+         PLO   RA,GRIHLSEQ,RN,GRHFP     Point to next item
+         IF    (NZ),NEXT                Take it from the top
+         IF    (RN,EQ,R1),EXIT          End of list
+         L     RX,N.GRHXBS              Get the flags
+         ST    RX,W.GRHXBS              Save flags
+* Next wants exclusive or is already holding
+         IF    (W:GRHXEXCL,OR,W:GRHXHOLD),EXIT
+         SET   W:GRHXHOLD               Set to hold status
+         L     RY,W.GRHXBS              Get new flags
+         LA    RB,1(RA)                 Increment sequence
+         LA    R0,8                     Double compare and swap
+
+         PLO   RA,GRIHLSEQ,RX,N.GRHXBS  Set the new flags
+         IF    (NZ),NEXT                Take it from the top
+
+         LR    RA,RB                    Set new sequence
+* Now the 'next' item is 'locked'
+         LR    RM,RN               Point to next item
+
+         END   ,                   End loop
+         END   ,                   End if
+
+* Signal these guys
+         LOOP  BEGIN
+         L     RN,GRHBP            Get back pointer
+         PSET  @SYSRNEW            Get system routine ID
+         VCALL SYSRNEW
+         LR    R15,RVR
+         SIGNL GRHPIDP,(R15),GRHASB,(R15) wake up post haste!!!
+         LR    RM,RN               point back
+         UNTIL (RM,EQ,R1),END
+         END   ,                   End begin GRREL4
+
+         LR    RVR,RJ              Return the resource id
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRX2S - Change an exclusive hold to a share hold              *
+*                                                                 *
+*     Input - General Resource Hold ID (pointer to hold item)     *
+*             or General Resource ID (not valid to release holds  *
+*             obtained in share mode)                             *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*******************************************************************
+GRX2S    PROC  @GRES,#GRREL,SCOPE=GLOBAL
+         WITH  ((GRCT,RX),(GRITEM,RJ),(GRHITM,RM))
+         WITH  (GRHITM,RN),LABEL=N Next item
+         WITH  (GRHXBS,RK),LABEL=W Work flags
+
+         L     RM,@GRID            Set hold item pointer
+         LR    RJ,RM               Might be a Resource id
+
+         IF    (GRIBID,EQ,=CL4'GRES'),BEGIN
+         L     RM,GRIHLFP          Get first hold item
+         IF    (GRIHLCNT,EQ,=A(0)),'ABORT BADGRX2S0'
+         END   ,                   End if
+         ELSE  'L RJ,GRHGRIT'      Set res item base
+
+         IF    (^GRHXEXCL),'ABORT BADGRX2S1'
+         IF    (GRHBID,NE,=CL4'GRH'),'ABORT BADGRX2S2'
+         IF    (GRHASB,NE,PZCURASB),'ABORT BADGRX2S3' not allowed
+
+         CLEAR GRHXEXCL            Set to shared mode
+         SET   GRHXX2S             Note that this has occured
+
+* The hold is shared. Now the hold can be given to any of the next
+* items waiting for a shared hold.
+
+         LA    RK,#GRREL           Set work pointer
+         L     RA,GRIHLSEQ         Get sequence stuff
+         LA    R1,GRIHL            Lock token
+
+* Set all the next waits for hold share to hold
+         LOOP  BEGIN                    Forever
+         CLEAR R0                       Compare and load
+         PLO   RA,GRIHLSEQ,RN,GRHFP     Point to next item
+         IF    (NZ),NEXT                Take it from the top
+         IF    (RN,EQ,R1),EXIT          End of list
+         L     RX,N.GRHXBS              Get the flags
+         ST    RX,W.GRHXBS              Save flags
+* Next wants exclusive or is already holding
+         IF    (W:GRHXEXCL,OR,W:GRHXHOLD),EXIT
+         SET   W:GRHXHOLD               Set to hold status
+         L     RY,W.GRHXBS              Get new flags
+         LA    RB,1(RA)                 Increment sequence
+         LA    R0,8                     Double compare and swap
+
+         PLO   RA,GRIHLSEQ,RX,N.GRHXBS  Set the new flags
+         IF    (NZ),NEXT                Take it from the top
+
+         LR    RA,RB                    Set new sequence
+* Now the 'next' item is 'locked'
+         LR    RM,RN               Point to next item
+
+         END   ,                   End loop
+
+* Signal these guys
+         WHILE (RM,NE,GRIHLFP),BEGIN While not the first one
+         L     RN,GRHBP            Get back pointer
+         PSET  @SYSRNEW            Get system routine ID
+         VCALL SYSRNEW
+         LR    R15,RVR
+         SIGNL GRHPIDP,(R15),GRHASB,(R15) wake up post haste!!!
+         LR    RM,RN               point back
+         END   ,                   End while
+
+         LR    RVR,RM              return hold id
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   GRCAN - Cancel any waiting resource holds for this addr space *
+*                                                                 *
+*     Input -  General Resource ID (pointer to the table item)    *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*     All outstanding waits for holds that were requested for     *
+*     this address space are cancelled.                           *
+*                                                                 *
+*******************************************************************
+#GRCAN  RECORD BEGIN
+         DS    XL(L'GRHITM)        Work record
+         END   ,
+
+GRCAN    PROC  @GRES,#GRCAN,SCOPE=GLOBAL
+         WITH  ((GRITEM,RJ),(GRHITM,RM))
+
+         L     RJ,@GRID            Set res item base
+         IF    (GRIBID,NE,=CL4'GRES'),'ABORT BADGRCAN1'
+
+         LA    R1,GRIHL            Lock token
+         LA    RK,#GRCAN           Work record
+         WITH  (GRHITM,RK),LABEL=W Work record
+
+         PSET  @QUE
+         PMOV  @QUELHD,LA:GRIHL    Set list head
+
+GRCAN2   BEGIN
+         LM    RA,RB,GRIHLSEQ      Get sequence and count
+         STM   RA,RB,@QUESEQ       Set sequence stuff
+         CLEAR R0                  Compare and load
+         PLO   RA,GRIHLSEQ,RM,GRIHLFP Point to first one
+         IF    (NZ),'NEXT GRCAN2'  Take it from the top
+
+         WHILE (RM,NE,R1),BEGIN    While not end of the list
+         MVC   W.GRHITM,GRHITM     Copy Record
+         PLO   RA,GRIHLSEQ,RN,GRHFP Get next item pointer
+         IF    (NZ),'NEXT GRCAN2'  Take it from the top
+
+         IF    ^W:GRHXHOLD,BEGIN   Item waiting
+* AS option and item does not belong to this address space
+         IF    (@GRCANAS,AND,(PZCURASB,NE,W.GRHASB)),EXIT
+         PMOV  @QUEITM,LA:GRHITM   Set item to remove
+         ACALL QUEREM
+         IF    (RVR,NZ),'NEXT GRCAN2' Take it from the top
+         LM    RA,RB,@QUESEQ       Pick up new sequence stuff
+         MVC   GRHBID,=CL4'GRXX'   Incase of subsequent release
+         SET   GRHXCANC            Set to cancelled
+* Note: the wait item is not anchored at this point (see grget)
+         PSET  @SYSRNEW            Get system routine ID
+         VCALL SYSRNEW
+         LR    R15,RVR
+         SIGNL GRHPIDP,(R15),GRHASB,(R15) wake up post haste!!!
+         END   ,                   End if
+         LR    RM,RN               Point to next one
+         END   ,                   End while
+         END   ,                   End begin
+
+         CLEAR RVR                 set return code
+
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   QUEUE - Add an item to the end of a list                      *
+*                                                                 *
+*     Input -  @QUESEQ  Sequence value                            *
+*              @QUEITM  Address of item                           *
+*              @QUELHD  Address of list head                      *
+*                                                                 *
+*     Output - Zero if remove successfull, one if not             *
+*                                                                 *
+*     Serialization for memory manipulation is achived using the  *
+*     PLO instruction.                                            *
+*                                                                 *
+*     The list is double linked and the head includes a list item *
+*     count and a list access count used as a serialization field.*
+*                                                                 *
+*                                                                 *
+*******************************************************************
+QUEUE    PROC  @QUE,#QUEPLO,SCOPE=GLOBAL
+
+         WITH  (#QUEW,R1),LABEL=I Add item
+         WITH  (#QUEW,RA),LABEL=H Head of list
+         WITH  (#QUEW,RB),LABEL=L Last item on list
+
+         L     R1,@QUEITM          Item to add
+         L     RA,@QUELHD          Head of list
+         L     RB,H.#QUEBP         Last item on list
+
+         CLEAR #QUEPLO
+
+         LM    RX,RY,@QUESEQ       Sequence value
+         STM   RX,RY,#QUEPLO+(4*2)  Compare value
+         LA    RX,1(RX)            Increment sequence value
+         LA    RY,1(RY)            Increment count
+         STM   RX,RY,#QUEPLO+(4*6)  Replacement value
+
+         ST    R1,#QUEPLO+(4*19)          Item
+         MVC   #QUEPLO+(4*14)(4),L.#QUEFP Item FP
+         MVC   #QUEPLO+(4*15)(4),H.#QUEBP Item BP
+
+         IF    (RA,EQ,RB),BEGIN    Empty list
+
+         ST    RA,#QUEPLO+(4*27)          Head of list
+         ST    R1,#QUEPLO+(4*22)          Head FP
+         ST    R1,#QUEPLO+(4*23)          Head BP
+
+         LA    R0,17         Compare double & swap & store double
+
+         END   ,                   end if
+         ELSE  BEGIN
+
+         ST    RA,#QUEPLO+(4*27)          Head of list
+         MVC   #QUEPLO+(4*22)(4),H.#QUEFP Head FP (same)
+         ST    R1,#QUEPLO+(4*23)          Head BP
+
+         ST    RB,#QUEPLO+(4*35)          Last item on list
+         ST    R1,#QUEPLO+(4*30)          Last FP
+         MVC   #QUEPLO+(4*31)(4),L.#QUEBP Last BP (same)
+
+         LA    R0,21         Compare double & swap & store triple
+
+         END   ,                   end else
+
+         LA    R1,H.#QUEW    Lock token
+
+         PLO   0,H.#QUESEQ,0,#QUEPLO      Hard to explain
+
+         IF    (Z),'CLEAR RVR'
+         ELSE  'LA RVR,1'
+
+         MVC   @QUESEQ,#QUEPLO+(4*2)      Reset sequence value
+
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   QUEPUSH - Add an item to the beginning of a list              *
+*                                                                 *
+*     Input -  @QUESEQ  Sequence value                            *
+*              @QUEITM  Address of item                           *
+*              @QUELHD  Address of list head                      *
+*                                                                 *
+*     Output - Zero if remove successfull, one if not             *
+*                                                                 *
+*     Serialization for memory manipulation is achived using the  *
+*     PLO instruction.                                            *
+*                                                                 *
+*     The list is double linked and the head includes a list item *
+*     count and a list access count used as a serialization field.*
+*                                                                 *
+*                                                                 *
+*******************************************************************
+QUEPUSH  PROC  @QUE,#QUEPLO,SCOPE=GLOBAL
+
+         WITH  (#QUEW,R1),LABEL=I Add item
+         WITH  (#QUEW,RA),LABEL=H Head of list
+         WITH  (#QUEW,RB),LABEL=F First item on list
+
+         L     R1,@QUEITM          Item to add
+         L     RA,@QUELHD          Head of list
+         L     RB,H.#QUEFP         First item on list
+
+         CLEAR #QUEPLO
+
+         LM    RX,RY,@QUESEQ       Sequence value
+         STM   RX,RY,#QUEPLO+(4*2)  Compare value
+         LA    RX,1(RX)            Increment sequence value
+         LA    RY,1(RY)            Increment count
+         STM   RX,RY,#QUEPLO+(4*6)  Replacement value
+
+         ST    R1,#QUEPLO+(4*19)          Item
+         MVC   #QUEPLO+(4*14)(4),H.#QUEFP Item FP
+         MVC   #QUEPLO+(4*15)(4),F.#QUEBP Item BP
+
+         IF    (RA,EQ,RB),BEGIN    Empty list
+
+         ST    RA,#QUEPLO+(4*27)          Head of list
+         ST    R1,#QUEPLO+(4*22)          Head FP
+         ST    R1,#QUEPLO+(4*23)          Head BP
+
+         LA    R0,17         Compare double & swap & store double
+
+         END   ,                   end if
+         ELSE  BEGIN
+
+         ST    RA,#QUEPLO+(4*27)          Head of list
+         ST    R1,#QUEPLO+(4*22)          Head FP
+         MVC   #QUEPLO+(4*23)(4),H.#QUEBP Head BP (same)
+
+         ST    RB,#QUEPLO+(4*35)          First item on list
+         MVC   #QUEPLO+(4*30)(4),F.#QUEFP First FP (same)
+         ST    R1,#QUEPLO+(4*31)          First BP
+
+         LA    R0,21         Compare double & swap & store triple
+
+         END   ,                   end else
+
+         LA    R1,H.#QUEW   Lock token
+
+         PLO   0,H.#QUESEQ,0,#QUEPLO      Hard to explain
+
+         IF    (Z),'CLEAR RVR'
+         ELSE  'LA RVR,1'
+
+         MVC   @QUESEQ,#QUEPLO+(4*2)      Reset sequence value
+
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   QUEREM - Remove an item from a list                           *
+*                                                                 *
+*     Input -  @QUESEQ  Sequence value                            *
+*              @QUEITM  Address of item                           *
+*              @QUELHD  Address of list head                      *
+*                                                                 *
+*     Output - Zero if remove successfull, one if not             *
+*                                                                 *
+*     Serialization for memory manipulation is achived using the  *
+*     PLO instruction.                                            *
+*                                                                 *
+*     The list is double linked and the head includes a list item *
+*     count and a list access count used as a serialization field.*
+*                                                                 *
+*                                                                 *
+*******************************************************************
+QUEREM   PROC  @QUE,#QUEPLO,SCOPE=GLOBAL
+
+         WITH  (#QUEW,R1),LABEL=I Remove item
+         WITH  (#QUEW,RA),LABEL=H Head of list
+         WITH  (#QUEW,RB),LABEL=B Item before remove item
+         WITH  (#QUEW,RJ),LABEL=F Item after remove item
+
+         L     R1,@QUEITM          Item to remove
+         L     RA,@QUELHD          Head of list
+         L     RB,I.#QUEBP         Item before remove item
+         L     RJ,I.#QUEFP         Item after remove item
+
+         CLEAR #QUEPLO
+
+         LM    RX,RY,@QUESEQ       Sequence value
+         STM   RX,RY,#QUEPLO+(4*2)  Compare value
+         LA    RX,1(RX)            Increment sequence value
+         BCTR  RY,0                Decrement count
+         STM   RX,RY,#QUEPLO+(4*6)  Replacement value
+
+         ST    R1,#QUEPLO+(4*19)          Item
+*                                  Clear Item FP
+*                                  Clear Item BP
+
+         IF    (RB,EQ,RJ),BEGIN    Item to remove is the last one
+
+         ST    RB,#QUEPLO+(4*27)          Item before remove item
+         MVC   #QUEPLO+(4*22)(4),I.#QUEFP Item FP
+         MVC   #QUEPLO+(4*23)(4),I.#QUEBP Item BP
+
+         LA    R0,17         Compare double & swap & store double
+
+         END   ,                   end if
+         ELSE  BEGIN
+
+         ST    RB,#QUEPLO+(4*27)          Item before remove item
+         MVC   #QUEPLO+(4*22)(4),I.#QUEFP Item FP
+         MVC   #QUEPLO+(4*23)(4),B.#QUEBP Item BP (same)
+
+         ST    RJ,#QUEPLO+(4*35)          Item after remove item
+         MVC   #QUEPLO+(4*30)(4),F.#QUEFP Item FP (same)
+         MVC   #QUEPLO+(4*31)(4),I.#QUEBP Item BP
+
+         LA    R0,21         Compare double & swap & store triple
+
+         END   ,                   end else
+
+         LA    R1,H.#QUEW   Lock token
+
+         PLO   0,H.#QUESEQ,0,#QUEPLO      Hard to explain
+
+         IF    (Z),'CLEAR RVR'
+         ELSE  'LA RVR,1'
+
+         MVC   @QUESEQ,#QUEPLO+(4*2)      Reset sequence value
+
+         PEND
+         LTORG ,
+         TITLE 'ORVYL''S System Buffer Services'
+SBCNTRL RECORD BEGIN               System buffer pool control area
+SBCBID   DC    CL4'SBCB'
+SBCLEN   DS    A                   Length of a buffer
+SBCFIX   EQU   SBCLEN,X'80'        1 = Area in fixed mem, 0 = not
+SBCHII   DS    A                   Inuse high-water mark
+SBCHIW   DS    A                   Wait queue high-water mark
+SBCW     QHEAD ,                   Waiting for a free buffer
+SBCF     SHEAD ,                   Free buffers
+SBCFCNT  DS    A                   Free count
+SBCTCNT  DS    A                   Total blocks
+SBCBSTRT DS    A                   Buffer area start *** temp ***
+SBCBLEN  DS    A                   Length of buffer area *** temp ***
+         END   ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   SBUFGET - Get a buffer from the buffer pool                   *
+*                                                                 *
+*     Input - @SBFGET                                             *
+*                                                                 *
+*     Output - A buffer fixed in memory                           *
+*                                                                 *
+*******************************************************************
+SBUFGET  PROC  @SBGET,SCOPE=GLOBAL
+         WITH  (SBCNTRL,RA)
+         L     RA,@SBGPOO          Point to pool control
+         L     R15,SBCLEN          Get buffer length
+         LA    R15,@R15            Clear high order bit
+         ST    R15,@SBGLEN         Set length
+         SPOP  HEAD=SBCF           Get a buffer
+         IF    (RVR,NZ),BEGIN
+         ST    RVR,@SBGADR         Set buffer address
+         DECRS SBCFCNT             One less free buffer
+         L     R15,SBCTCNT         Get total count of blocks
+         S     R15,SBCFCNT         Calc count inuse
+         L     R14,SBCHII          Get high-water
+         LOOP  BEGIN
+         IF    (R14,GE,R15),EXIT   Not a new high-water mark
+         CS    R14,R15,SBCHII      Set new high-water mark
+         UNTIL Z,END
+         IF    ('TM SBCFIX,L"SBCFIX',Z),BEGIN Not in fixed core
+         PSET  @PAGE
+         PMOV  @PAGLOC,(RVR)       Buffer address
+         PMOV  @PAGLEN,SBCLEN      Buffer length
+         VCALL PAGFIX              Fix in core
+         END   ,
+         END   ,
+         ELSE  BEGIN               Must wait for buffer
+         L     RY,MATPTR           Point to MAT
+         WITH  (MAT,RY),'L RY,MATSBWB' Point to free buff waits
+         WITH  (SLDUMMY,RY)
+         SAVAIL HEAD=SLDUM,LEN=L'SBWAIT Get a buffer wait block
+         LR    RX,RVR              Get pointer
+         WITH  (SBWAIT,RX)
+         CLEAR SBWAIT
+         MVC   SBWBID,=CL4'SBUF'
+         MVC   SBWASB,PZCURASB     Our address space
+         Q_QUE HEAD=SBCW,ITEM=SBWAIT Put on the wait queue
+         L     R14,SBCHIW          Get high-water count
+         L     R15,SBCWCNT         Get wait count
+         LOOP  BEGIN
+         IF    (R14,GE,R15),EXIT   Not a new high-water mark
+         CS    R14,R15,SBCHIW      Set new high-water mark
+         UNTIL Z,END
+         AWAIT SBWECB,LEN=LONG     Wait for hold
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,(RVR)
+         VCALL SYSRDEL
+         MVC   @SBGADR,SBWADR      Set buffer address (still fixed)
+         CLEAR SBWAIT
+         MVC   SBWBID,=C'sBWB'
+         SPUSH HEAD=SLDUM,ITEM=SBWAIT Put away the wait block
+         END   ,                   End else
+         L     R14,@SBGADR         Get buffer address
+         CLEAR (@R14,8)            Clear out free list stuff
+
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   SBUFREE - Give a buffer back to the pool                      *
+*                                                                 *
+*     Input - @SBFAPI                                             *
+*                                                                 *
+*     Output - None                                               *
+*                                                                 *
+*******************************************************************
+SBUFREE  PROC  @SBFREE,SCOPE=GLOBAL
+         WITH  (SBCNTRL,RA)
+         L     RA,@SBFPOO          Point to buffer pool control
+         L     RM,@SBFADR          Returned buffer address
+         L     RN,SBCLEN           Get buffer length
+         LA    RN,@RN              Clear high order bit
+         CLEAR R1
+         MVCL  RM,R0               Clean the buffer
+SBUFREE3 BEGIN ,
+         LM    R14,R15,SBCWSEQ     Get queue sequence stuff
+         IF    (R15,NZ),BEGIN      Someone waiting for buffer
+         PSET  @QUE,CLEAR=NO
+         STM   R14,R15,@QUESEQ     Set sequence stuff
+         PMOV  @QUELHD,LA:SBCW
+         PMOV  @QUEITM,SBCWFP
+         ACALL QUEREM              Remove from queue
+         IF    (RVR,NZ),'NEXT SBUFREE3' Take it from the top
+         L     RX,@QUEITM          Point to the wait block
+         WITH  (SBWAIT,RX)
+         PSET  @SYSRNEW            Get system routine ID
+         VCALL SYSRNEW
+         LR    R15,RVR
+         L     R14,SBWASB          Get the address space
+* Note: SBWASB and SBWADR overlap
+         MVC   SBWADR,@SBFADR      They can have this one
+         SIGNL SBWECB,(R15),(R14),(R15) wake up post haste!!!
+         END   ,                   End if
+         ELSE  BEGIN
+         IF    ('TM SBCFIX,L"SBCFIX',Z),BEGIN Not in fixed core
+         PSET  @PAGE
+         PMOV  @PAGLOC,@SBFADR     Buffer address
+         PMOV  @PAGLEN,SBCLEN      Buffer length
+         VCALL PAGUFIX             Unfix in core
+         END   ,                   End if
+         L     RM,@SBFADR
+         MVC   4(4,RM),=C'BUFF'
+         SPUSH HEAD=SBCF,ITEM=@RM  Put back on free list
+         INCRS SBCFCNT             Increment count
+         END   ,                   End else
+         END   ,                   End begin
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   SBUFINIT - Initialize a system buffer pool                    *
+*              No buffer will straddle a page boundry             *
+*                                                                 *
+*     Input - @SBINIT                                             *
+*                                                                 *
+*     Output - System buffer pool contorl address                 *
+*                                                                 *
+*******************************************************************
+SBUFINIT PROC  @SBINIT,SCOPE=GLOBAL
+         WITH  (SBCNTRL,RA)
+         VMGET L'SBCNTRL,LOC=GLOBHI,FIX=YES
+         IF    ('LTR RA,RVR',Z),'ABORT NOBUFCNTMEM'
+         CLEAR SBCNTRL             Clear buffer pool control
+         MVC   SBCBID,=CL4'SBCB'   Set id
+         LA    RS,SBCW
+         ST    RS,SBCWFP           Init wait queue head
+         ST    RS,SBCWBP
+         L     RS,@SBILEN
+         LA    RS,@RS+7            Round up to even dword
+         ST    RS,SBCLEN           Set buffer length
+         NI    SBCLEN+L'SBCLEN-1,B'11111000'
+         L     RS,SBCLEN           Get it back
+         IF    (SBCLEN,GT,=A(4096)),'ABORT BADBIGBUFFER' Do your own
+         IF    @SBFIX,'OI SBCFIX,L"SBCFIX' Set fixed memory
+         CLEAR R14
+         L     R15,=A(4096)
+         DR    R14,RS              Calc buffers per page
+         L     RS,@SBICNT          Get count of buffers
+         CLEAR R0
+         DR    R0,R15              Calc number of pages
+         IF    (R0,NZ),'INCR RS'   Round up
+         LR    RB,RS               Save for loop count later
+         SLL   RS,12               Calc number of bytes
+         ST    RS,SBCBLEN          Save *** temp ***
+         IF    @SBLSYS,BEGIN
+         VMGET (RS),LOC=LOCSYS,PAGE=YES
+         END   ,
+         ELSEIF @SBGLHI,BEGIN
+         IF    @SBFIX,BEGIN
+         VMGET (RS),LOC=GLOBHI,FIX=YES,PAGE=YES
+         END
+         ELSE  BEGIN
+         VMGET (RS),LOC=GLOBHI,FIX=NO,PAGE=YES
+         END   ,
+         END   ,
+         ELSE  'ABORT BADBUFFLOCATION' No default, be specific
+         IF    ('LTR RX,RVR',Z),'ABORT NOBUFFERMEMORY'
+         CLEAR R15
+         MVCL  R0,R14              Clear the area
+         ST    RX,SBCFFP           Set free list pointer
+         ST    RX,SBCBSTRT         Save *** temp ***
+         L     RY,SBCLEN           Length of a buffer
+         LA    RY,@RY              Clear high order bit
+         CLEAR R0
+         L     RS,=A(4096)
+         DR    R0,RY               Calc count of buffers per page
+         CLEAR RM
+         LR    RN,RB               Get count of pages
+         MR    RM,RS               Calc count of buffers
+         ST    RN,SBCTCNT          Set total count
+         ST    RN,SBCFCNT          Set free count
+         LOOP  BEGIN               String'em up
+         LR    R14,RX              Point to first buff this page
+         LR    R0,RS               Count of buffers per page
+         LR    R15,R14             Init
+         LOOP  BEGIN
+         LR    R14,R15             Point to next buffer
+         LA    R15,@R14(RY)        Point to next next buffer
+         ST    R15,@R14            Set fwd pointer
+         MVC   4(4,R14),=C'BUFF'
+         UNTIL (BCT,R0),END        Until this page is linked
+         A     RX,=A(4096)         Point to next page
+         ST    RX,@R14             Reset this one
+         UNTIL (BCT,RB),END        Until all pages are linked
+         ST    RB,@R14             Last one is zero
+         LA    RVR,SBCNTRL         Return pointer
+         PEND  ,
+         LTORG ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    LOCKCT - Lock manager CT -- Pointed to by MAT                *
+*                                                                 *
+*******************************************************************
+         SPACE
+LOCKCT   RECORD BEGIN
+         DS    CL4'LKCT'
+LOCKFCNT DS    A             Number of free lock elements we have
+         DS    0D
+LOCKFLQE DS    A             Queue of free LQEs
+         DS    A             | control word
+LOCKECHN DS    A             Queue of all LQEs
+         DS    A             | control word
+LOCKSCNT DS    A             Number of times to 'spin' for lock
+LOCKFL   FLAG  ,             Lock flags
+         FLAG  LKFINIT       Initialization
+*
+LOCKECNT EQU   40            Number of elements to get at first
+CLKSCNT  EQU   50            Number of times to spin for s-locks
+         END   ,
+         SPACE 2
+*******************************************************************
+*                                                                 *
+*    LOCKCB - Lock Control Block                                  *
+*                                                                 *
+*******************************************************************
+         SPACE
+LOCKCB   RECORD BEGIN
+         DC    CL4'LOCK'     Control block id
+LOCKNAME DS    CL16          Name of this lock
+LOCKCHN  DS    A             Pointer to LOCKCB chain
+*
+*  Spin style lock
+*
+LOCKCTL  DS    D             Control word for spin locks
+*
+*  Suspend style lock
+*
+         ORG   LOCKCTL
+LOCKPLUM DS    A             Pointer to the 'plum' LQE
+LOCKOWNR DS    A             Lock owner's LQE address
+         ORG   ,
+*
+LOCKCNT  DS    A             Number of 'obtains' by this task
+LOCKSRID DS    A             System Routine ID for this lock
+*
+*  Stats, etc
+*
+LOCKWCNT DS    A             Count of waits
+LOCKRCNT DS    A             Count of requests
+LOCKCFL  FLAG
+         FLAG  LCFSPIN       Spin lock
+         FLAG  LCFOWNED      Suspend lock owned
+         END   ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    LQE - Lock Queue Element
+*                                                                 *
+*******************************************************************
+         SPACE
+LQE      RECORD BEGIN
+LQEID    DC    CL4'LQE'      Control block id
+LQELOCK  DS    A             Pointer to the LOCKCB for the lock
+LQEECB   DS    D             Synchronization word
+LQEPID   DS    0D            Owning Process ID - Zero if free
+LQEASB   DS    A             | Address space block
+LQETID   DS    A             | Task ID
+LQENEXT  DS    A             Next on free queue/Element to post
+LQECHAIN DS    A             Chain of all LQES
+         END   ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   LOCKCRE - Create a lock.                                      *
+*                                                                 *
+*     Input - @LOCKCRE                                            *
+*                                                                 *
+*    Output - Returns a 32 bit lock id.                           *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+LKCRE    PROC  @LOCKCRE,SCOPE=GLOBAL
+         L     RY,MATPTR               MAT POINTER
+         WITH  (MAT,RY),'L RY,MATLCT'  Get the LOCKCT
+         WITH  (LOCKCT,RY)             Address it
+         IF    @LFSPIN,BEGIN
+         VMGET L'LOCKCB,LOC=GLOBHI,FIX=YES   Get space for the lock
+         END   ELSE,BEGIN
+         VMGET L'LOCKCB,LOC=GLOBHI    Get space for the lock
+         END
+         IF    ('LTR  RX,RVR',Z),'ABORT LOCKCB'
+         WITH  (LOCKCB,RX)              and address it
+         CLEAR LOCKCB
+         MVC   LOCKCB(4),=C'LOCK'      Move in the cb id
+         MVC   LOCKNAME,@LOCKNAM       save the name
+         IF    @LFSPIN,BEGIN           Spin style lock init
+         SET   LCFSPIN
+         END   ,                       OF Spin style lock init
+*
+*  Suspend style lock initialization
+*
+         ELSE  BEGIN
+*
+*  Get 2 LQEs per suspend lock
+*
+         LA    RS,2
+         LOOP  BEGIN
+         LCALL LQEALL
+         UNTIL (BCT,RS),END
+*
+*  Get an LQE for the 'plum' of this lock.
+*
+         LM    RA,RB,LOCKFLQE          Get first free
+         LOOP  BEGIN                   |
+         IF    (RA,ZERO),'ABORT NOLQE' -->
+         WITH  (LQE,RA),'L RJ,LQENEXT' Next in the queue
+         LA    RK,1
+         ALR   RK,RB                   Update the control word
+         CDS   RA,RJ,LOCKFLQE          Do the actual removal
+         UNTIL EQUAL,END               OF Get first free
+*
+*  Get System routine ID for this lock
+*
+         PSET  @SYSRNEW
+         VCALL SYSRNEW
+         ST    RVR,LOCKSRID
+*
+*  Post this lock ECB
+*
+         WITH  (LQE,RA),BEGIN
+         ST    RX,LQELOCK              -->
+         PSET  @SIGNAL                 Post in this AS
+         PMOV  @SGECB,LA:LQEECB        | zero post code
+         VCALL SIGNAL                  |
+         ST    RA,LOCKPLUM             Save as the current
+         ST    RA,LOCKOWNR             And owner (free owner = plum)
+         END   ,                       OF LQE addr
+         END   ,                       OF Suspend style lock init
+*
+* Time to return to caller
+*
+         LR    RVR,RX                  Get the lock id (address)
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   LKDEL - Delete a lock.                                        *
+*                                                                 *
+*     Input - @LOCKS                                              *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+LKDEL    PROC  @LOCKS,SCOPE=GLOBAL
+         L     RY,MATPTR               MAT POINTER
+         WITH  (MAT,RY),'L RY,MATLCT'  Get the LOCKCT
+         WITH  (LOCKCT,RY)             Address it
+         L     RX,@LOCKID
+         WITH  (LOCKCB,RX)
+         IF    (LOCKCB,NE,'LOCK'),'ABORT LOCKDEL'
+         MVI   LOCKCB,C'l'             Change ID
+*
+*  Delete a spin lock
+*
+         IF    LCFSPIN,BEGIN           Delete a spin lock
+         LM    RA,RB,LOCKCTL           Get
+*
+*  This must be a free lock, and not waited on
+         IF    ((RA,NZ),OR,(RB,NZ)),'BAS RS,BADSPIN'
+         L     RJ,=X'FFFFFFFF'         Set this lock going away
+         CLEAR RK                      | none waiting
+         CDS   RA,RJ,LOCKCTL
+         IF    NZ,'BAS RS,BADSPIN'     Couldn't get it - error
+         VMFREE L'LOCKCB,A=LA:LOCKCB,LOC=GLOBHI,FIX=YES
+         END   ,                       OF Delete a spin lock
+*
+*  Delete a suspend lock
+*
+         ELSE  BEGIN                   Delete a suspend lock
+*
+*  Put a zero as 'plum'
+         CLEAR RK
+         L     RJ,LOCKPLUM
+         CS    RJ,RK,LOCKPLUM
+         IF    NZ,'BAS RS,BADSUSP'     Still action on lock
+*
+*  Check for ID
+         WITH  (LQE,RJ),BEGIN          LQE addr
+         IF    (LQEID,NE,=CL4'LQE'),'BAS RS,BADSUSP'
+         L     RK,LQEECB
+         N     RK,=X'40000000'
+         IF    ZERO,'BAS RS,BADSUSP'   Still action on lock
+*
+*  Release system routine ID
+*
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,LOCKSRID
+         VCALL SYSRDEL
+*
+*  Put LQE on free list again
+         LM    RA,RB,LOCKFLQE
+         LOOP  BEGIN
+         ST    RA,LQENEXT
+         LA    RK,1
+         ALR   RK,RB
+         CDS   RA,RJ,LOCKFLQE
+         UNTIL EQUAL,END
+         END   ,                       OF LQE addr
+*
+*  Deallocate LQEs (so we don't have to VMGET more of them)
+*
+         LA    RS,2
+         LOOP  BEGIN
+         LCALL LQEDALL
+         UNTIL (BCT,RS),END
+*
+*  Release lock memory
+         VMFREE L'LOCKCB,A=LA:LOCKCB,LOC=GLOBHI
+         END   ,                       OF Delete a suspend lock
+         PEND  ,
+         SPACE ,
+BADSUSP  ABORT LOCKDEL                 Bad suspend lock delete
+         SPACE
+BADSPIN  ABORT LOCKDEL                 Bad spin lock delete
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   LKOB  - Obtain a lock.                                        *
+*                                                                 *
+*     Input - @LOCKS                                              *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE ,
+#SLOCK   RECORD BEGIN
+#SLKPSWM FLAG  ,                       Check for "disabled" PSW
+         FLAG  (PSWPER,X'40')
+         FLAG  (PSWIO,X'02')
+         FLAG  (PSWEX,X'01')
+         END   ,
+         SPACE 3
+LKOB     PROC  @LOCKS,#SLOCK,SCOPE=GLOBAL
+         L     RX,@LOCKID              Get the lock id
+         WITH  (LOCKCB,RX)
+         IF    (LOCKCB,NE,'LOCK'),LKOBKAP
+*--------------
+*  Get a spin lock
+*--------------
+         IF    LCFSPIN,BEGIN           Get a spin lock
+         L     RM,PZCPUMSK             CPU mask
+         LR    RN,RM                   Complement of CPU mask
+         X     RN,=X'FFFFFFFF'
+         LM    RA,RB,LOCKCTL
+NOTOWN   BEGIN ,
+         IF    (RA,EQ,RM),EXIT,NOTOWN  This CPU does own lock
+         IF    (RA,NZ),'INCR RS,LOCKWCNT'       One more "wait"
+*
+*  Check that caller is disabled
+*
+         STOSM #SLKPSWM,0              Check for disabled
+         IF    PSWPER+PSWIO+PSWEX,SLKKAP
+         L     RY,MATPTR               Get addr to lock CT
+         WITH  (MAT,RY),'L RY,MATLCT'  |
+         WITH  (LOCKCT,RY)             |
+*
+*  Try for lock 1st time
+*
+TRY1ST   BEGIN ,                       Try for lock 1st time
+         LOOP  BEGIN
+         L     RVR,LOCKSCNT
+         IF    (RA,NZ),TRYSPIN
+*
+*  Try to take the lock - no CPUs have it now
+*
+TRYTAKE  LOOP  BEGIN
+         LR    RJ,RM                   Mask bit of this CPU
+         LR    RK,RB                   Same old waiting bits
+         NR    RK,RN
+         CDS   RA,RJ,LOCKCTL           Try taking lock
+         IF    EQUAL,EXIT,TRY1ST       ** WE OWN LOCK NOW **
+         IF    (RA,^ZERO),EXIT         If not available - exit
+         END   ,                       Always try again if available
+*
+*  Spin on unavailable lock
+*
+TRYSPIN  IF    (RVR,NZ),BEGIN          More spinning
+         LOOP  BEGIN                   Spin on unavailable
+         LM    RA,RB,LOCKCTL
+         IF    (RA,ZERO),TRYTAKE
+         UNTIL (BCT,RVR),END           OF Spin on unavailable
+         END   ,                       OF More spinning
+*
+*  Indicate we want this lock as we 'spin'
+*
+         LOOP  BEGIN
+         LR    RJ,RA
+         LR    RK,RB                   Mask of 'spinning' CPUs
+         OR    RK,RM                   | put ourselves in 'spin'
+         CDS   RA,RJ,LOCKCTL           | say we want lock
+         IF    EQUAL,EXIT              Marked as 'spinning'
+         IF    (RA,ZERO),TRYTAKE
+         UNTIL FALSE,END
+*
+*  Now we can 'spin'
+*
+         LRA    RVR,LOCKCB
+         SYSCTL TYPE=SPIN
+*
+*  After 'spinning', try to get lock again.
+*
+         LM    RA,RB,LOCKCTL           Try for lock again
+         UNTIL FALSE,END               Keep trying
+         END   ,                       OF Try for lock 1st time
+*
+*  Get CPU lock
+*
+         VCALL CPLOCK                  Get CPU lock 1st time
+         END   ,                       OF Not owned by this CPU
+         INCR  RS,LOCKRCNT             One more lock request
+         INCR  RS,LOCKCNT              One more lock-obtain
+         END   ,                       OF Get a spin lock
+         EJECT
+*--------------
+*  Get a suspend lock
+*--------------
+         ELSE  BEGIN
+LOCKASL  BEGIN ,                       ASLOCK portion of code
+*    Get local dispatch lock to prevent any other level of control
+*  in this address space from becoming active.
+*  (PIs/SVCs may still become active - be warned!)
+         VCALL ASLOCK
+*    Does this task currently own the lock?  If this task owns
+*  the lock already, by virtue of ASLOCK being held,
+*  this will be the only level of control active in the lock update
+*  portion of code.
+*
+         L     RS,LOCKOWNR
+         WITH  (LQE,RS),BEGIN
+         IF    (LCFOWNED,AND,(RS,NZ),AND,(LQEPID,EQ,PZCURPID)),BEGIN
+         INCR  RA,LOCKCNT
+*        VCALL ASULOCK                 --> task +
+         EXIT  LOCKASL
+         END   ,                       OF This task owns lock now
+         END   ,                       OF LQE addr
+*        VCALL ASULOCK                 --> task +
+*
+*  First get an element off the free queue
+*
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATLCT'
+         WITH  (LOCKCT,RY)
+         LM    RA,RB,LOCKFLQE          Get first free and control
+         LOOP  BEGIN                   |
+         IF    (RA,ZERO),'ABORT NOLQE' -->
+         WITH  (LQE,RA),'L RJ,LQENEXT' Next in the queue
+         LA    RK,1
+         ALR   RK,RB                   Update the control word
+         CDS   RA,RJ,LOCKFLQE          Do the actual removal
+         UNTIL EQUAL,END               OF Get first free and control
+*
+*  Tell dispatcher not to swap us while we hold the lock
+*
+         PSET  @DISPSWP
+         PMOV  @DISPSAS,PZCURASB
+         VCALL DISPSHLD
+*
+* Exchange the free one we just got with the 'plum'
+*
+         L     RB,LOCKPLUM             Get the current plum
+         WITH  (LQE,RA),BEGIN          -->
+         ST    RX,LQELOCK              -->
+         CLEAR LQENEXT                 -->
+         END   ,                       -->
+         LOOP  BEGIN
+         CS    RB,RA,LOCKPLUM          And replace with our free
+         UNTIL EQUAL,END
+*
+* Now we update our element
+*
+         WITH  (LQE,RB)                Address it
+         ST    RA,LQENEXT              Address of who we must signal
+         ST    RX,LQELOCK              LQE is for this lock
+         MVC   LQEPID,PZCURPID         Mark it as belonging to us
+*
+* Wait for the lock
+*
+         L     RM,PZCURASB             -->
+         WITH  (ASB,RM),BEGIN          --> ASB addr
+*        PMOV  ASBLW,LA:LOCKCB         --> Waiting
+         IF    ^LQEECB.X'40','INCR RS,LOCKWCNT'
+         AWAIT LQEECB,TYPE=AS          Wait for it --> task -
+*        AWAIT LQEECB                  Wait for it --> task +
+*        PMOV  ASBLH,LA:LOCKCB         --> Hold this one
+*        CLEAR ASBLW                   --> Not waiting
+         END   ,                       --> OF ASB addr
+*
+* When we get the lock, mark the LOCKCB then return to the user
+*
+         MVC   LOCKCNT,=A(1)           Mark us as first owner
+         SET   LCFOWNED                |
+         INCR  RS,LOCKRCNT             Count the request
+         END   ,                       OF ASLOCK portion of code
+         END   ,                       OF Suspend style locks
+         PEND                          Return to caller, lock held
+         SPACE ,
+LKOBKAP  ABORT LOCKCB
+         SPACE
+SLKKAP   ABORT LOCKDIS                 Not disabled for spin locks
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   LKREL - Release a lock.                                       *
+*                                                                 *
+*     Input - @LOCKS                                              *
+*                                                                 *
+*    Output - SUSPEND locks: none                                 *
+*           - SPIN    locks: RVR = the number of lock obtains     *
+*                            still outstanding for this lock.     *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+LKREL    PROC  @LOCKS,SCOPE=GLOBAL
+*
+* Get and validity check the parm and calling circumstances
+*
+         L     RX,@LOCKID              GET THE LOCK IDENTITY
+         WITH  (LOCKCB,RX)
+*--------------
+*  Free a spin style lock
+*--------------
+         IF    LCFSPIN,BEGIN           Free spin style lock
+         IF    ('CLC PZCPUMSK,LOCKCTL',NE),LKRKAP2
+         DECR  RVR,LOCKCNT             Do we keep lock?
+*
+*  Lock needs to be freed - any waiting let in
+*
+         IF    (RVR,ZERO),BEGIN        Free lock
+         LM    RA,RB,LOCKCTL
+         LOOP  BEGIN                   Try to free lock
+         CLEAR RJ                      Free lock code
+         CLEAR RS                      Init CPU address counter
+         LTR   RK,RB
+*
+*  If any CPU is 'spinning', find out who and notify
+*
+         IF    ^ZERO,BEGIN             There is a 'spinning' CPU
+         WHILE (RK,^NEG),BEGIN         Find 'spinning' CPU
+         INCR  RS
+         SLL   RK,1
+         END   ,                       OF Find 'spinning' CPU
+         N     RK,=X'7FFFFFFF'
+         SRL   RK,@RS
+         END   ,                       OF There is a 'spinning' CPU
+*
+*  Do free of lock
+*
+         CDS   RA,RJ,LOCKCTL
+         UNTIL EQUAL,END               OF Try to free lock
+*
+*  A CPU was 'spinning', so we notify it
+*
+         IF    (RB,NZ),BEGIN           Notify 'spinning'
+         SYSCTL RS,TYPE=NOSPIN         RS = CPU addr
+         END   ,                       OF Notify 'spinning'
+*
+*  Free CPU lock
+*
+         VCALL CPULOCK                 Free CPU lock
+         CLEAR RVR
+         END   ,                       OF Free lock
+         END   ,                       OF Free spin style lock
+         EJECT
+*--------------
+*  Free a suspend style lock
+*--------------
+         ELSE  BEGIN
+*  Get LQE ID of owner
+         IF    ('LT RA,LOCKOWNR',ZERO),LKRKAP
+         IF    (@RA,NE,'LQE '),LKRKAP
+         WITH  (LQE,RA)
+         IF    (PZCURPID,NE,LQEPID),LKRKAP2
+         EJECT ,
+LKRASL   BEGIN ,                       ASLOCK portion of code
+*        VCALL ASLOCK                  --> task +
+         DECR  RS,LOCKCNT              One less lock count
+         IF    (RS,NZ),BEGIN           | still held by task
+*        VCALL ASULOCK                 --> task +
+         EXIT  LKRASL
+         END   ,
+*
+* Clean up info
+*
+         IF    LQEECB.X'40','ABORT LQEPOSTFREE'
+         L     RS,LQENEXT              Get the fellow we must signal
+         ST    RS,LOCKOWNR             Disconnect this LQE and lock
+         CLEAR LCFOWNED                |
+*        VCALL ASULOCK                 --> task +
+*
+         CLEAR LQELOCK                 | LQE ptr to LOCKCB
+         CLEAR LQEPID                  | LQE free now
+*
+* Free our element
+*
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATLCT'
+         WITH  (LOCKCT,RY)
+         LM    RJ,RK,LOCKFLQE          First on the free chain
+         LOOP  BEGIN                   Free our element
+         ST    RJ,LQENEXT              Update pointer
+         LA    RB,1
+         ALR   RB,RK                   Update the control field
+         CDS   RJ,RA,LOCKFLQE          Free the LQE
+         UNTIL EQUAL,END               OF Free our element
+*
+* Signal the next fellow - RS contains his LQE addr
+*
+         WITH  (LQE,RS),BEGIN          LQE of one to signal
+         IF    (LQELOCK,NE,RX),'ABORT BADLKPOST'        -->
+         SIGNL LQEECB,TYPE=AS                           --> task -
+*        SIGNL LQEECB,,LQEASB,LOCKSRID,TYPE=TASK        --> task +
+         END   ,                       OF LQE of one to signal
+*
+*  Tell dispatcher we can be swapped now that we have freed the lock
+*
+         PSET  @DISPSWP
+         PMOV  @DISPSAS,PZCURASB
+         VCALL DISPSREL
+         END   ,                       OF ASLOCK portion of code
+*
+*  Free local dispatch lock
+*
+         VCALL ASULOCK                 --> task -
+         END   ,                       OF Free a suspend style lock
+         PEND  ,                       Return to caller
+         SPACE ,
+LKRKAP   ABORT BADLQID                 Bad LQE ID
+LKRKAP2  ABORT BADOWNR                 Bad lock owner
+*    Output - RVR = the number of lock obtains still outstanding  *
+*                   for this lock.                                *
+         TITLE 'ORVYL''S Resource Management Services'
+*******************************************************************
+*                                                                 *
+*   LOCKINIT - Initialize the Lock Manager                        *
+*                                                                 *
+*     Input - Init parm pointer                                   *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+LKIPARM  RECORD BEGIN
+LKIPWA   DS    XL(L'PARMIN)
+         DS    3CL8                    Room for 3 keys
+LKIECNT  DS    A                       LQE count
+         END   ,
+         SPACE 3
+LKINIT   PROC  SCOPE=GLOBAL
+*
+* First thing we do is allocate the Lockct
+*
+         VMGET L'LOCKCT,LOC=GLOBHI,FIX=YES   Get the storage
+         IF    ('LTR  RY,RVR',Z),'ABORT LOCKCB'
+         WITH  (LOCKCT,RY)
+         CLEAR LOCKCT
+         MVC   LOCKCT(4),=CL4'LKCT'    Control block id
+         SET   LKFINIT                 Note initialization
+*
+*  Set Lock CT anchor
+*
+         L     RA,PZMATP               MAT POINTER
+         WITH  (MAT,RA),'ST  RY,MATLCT'  Save our roots
+*
+*  Get our initialization parameters
+*
+         VMGET L'LKIPARM,LOC=GLOBHI,FIX=YES
+         LR    RM,RVR
+         WITH  (LKIPARM,RM),BEGIN
+         WITH  (PARMIN,LKIPWA)
+         GETPARM2 KEY=(RESOURCE,SPINCNT),REGS=(RVR,RAR)
+         LA    RB,CLKSCNT              Default
+         IF    ZERO,'LR RB,RVR'        Supplied parameter
+         ST    RB,LOCKSCNT             Save it
+*
+*  Get some LQEs
+*
+         GETPARM2 KEY=(,LQECNT),REGS=(RVR,RAR)
+         LA    RX,LOCKECNT             Default
+         IF    ZERO,'LR RX,RVR'        Supplied parameter
+*
+         PSET  @LQEGET
+         PMOV  @LQENUM,(RX)
+         LCALL LQEGET
+*
+*  Update free count
+*
+         L     RA,LOCKFCNT             This many free ones
+         LOOP  BEGIN
+         LR    RB,RA
+         ALR   RB,RX                   This many more
+         CS    RA,RB,LOCKFCNT
+         UNTIL EQUAL,END
+*
+*  Free parameter work area
+*
+         VMFREE L'LKIPARM,A=LA:LKIPARM,LOC=GLOBHI,FIX=YES
+         END   ,                       OF Addr to LKIPARM
+         PEND  ,
+         TITLE 'LQE allocation/deallocation'
+*********************************************************************
+*  Allocate and add new LQEs to free queue                          *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+LQEALL   PROC  SCOPE=GLOBAL
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATLCT'
+         WITH  (LOCKCT,RY)
+*
+*  One less free LQE
+*
+         L     RA,LOCKFCNT
+         LOOP  BEGIN
+         LR    RB,RA
+         DECR  RB
+         CS    RA,RB,LOCKFCNT
+         UNTIL EQUAL,END
+*
+         IF    (RB,^POS),BEGIN         Need more cells
+         LA    RX,1                    Number to get
+         PSET  @LQEGET
+         PMOV  @LQENUM,(RX)
+         LCALL LQEGET
+*
+*  Update free count
+*
+         L     RA,LOCKFCNT             This many free ones
+         LOOP  BEGIN
+         LR    RB,RA
+         ALR   RB,RX                   This many more
+         CS    RA,RB,LOCKFCNT
+         UNTIL EQUAL,END
+         END   ,                       OF Need more cells
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  Deallocate a cell - make it available                            *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+LQEDALL  PROC  SCOPE=GLOBAL
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATLCT'
+         WITH  (LOCKCT,RY)
+*
+*  One more available LQE - update free count
+*
+         L     RA,LOCKFCNT             This many free ones
+         LOOP  BEGIN
+         LR    RB,RA
+         INCR  RB                      This many more
+         CS    RA,RB,LOCKFCNT
+         UNTIL EQUAL,END
+         PEND  ,
+         TITLE 'Allocate LQEs'
+         SPACE ,
+@LQEGET  RECORD BEGIN
+@LQENUM  DS    A                       Number of LQEs to get
+         END   ,
+         SPACE ,
+#LQEGET  RECORD BEGIN
+         DS    XL(L'LQE)
+         END   ,
+         SPACE ,
+LQEGET   PROC  @LQEGET,#LQEGET
+         L     RY,MATPTR
+         WITH  (MAT,RY),'L RY,MATLCT'
+         WITH  (LOCKCT,RY)
+*
+*    Now allocate some lock elements for suspend locks.
+*
+         L     RK,@LQENUM              Number of LQEs to get
+         LR    RX,RK                   | save for updating later
+         LA    RS,#LQEGET
+         LOOP  BEGIN                   Get a few LQEs
+         WITH  (LQE,RS)
+         VMGET L'LQE,LOC=GLOBHI,FIX=YES ,SP=01   Long term allocate
+         IF    (RVR,Z),'ABORT LQE'
+         ST    RVR,LQECHAIN            Link up all LQEs
+         ST    RVR,LQENEXT             | all free to start
+         LR    RS,RVR                  Address the new one
+         CLEAR LQE
+         MVC   LQE(4),=CL4'LQE'        Move in the ID
+         UNTIL (BCT,RK),END            Continue till we get em all
+*
+         WITH  (LQE,#LQEGET),BEGIN
+         L     RJ,LQENEXT              RJ=first of new/RS=last of new
+         END   ,
+*
+*  Put elements on chain of all LQEs
+*
+         LM    RA,RB,LOCKECHN          Old list of all LQEs
+         LOOP  BEGIN
+         WITH  (LQE,RS),'ST RA,LQECHAIN'
+         LA    RK,1
+         ALR   RK,RB
+         CDS   RA,RJ,LOCKECHN
+         UNTIL EQUAL,END
+*
+*  Put elements on chain of free LQEs
+*
+         LM    RA,RB,LOCKFLQE          Old list of free LQEs
+         LOOP  BEGIN
+         WITH  (LQE,RS),'ST RA,LQENEXT'
+         LA    RK,1
+         ALR   RK,RB
+         CDS   RA,RJ,LOCKFLQE
+         UNTIL EQUAL,END
+         PEND  ,
+         AGO   .NOLIST
+         TITLE 'RESMAN - Add items to a list'
+*********************************************************************
+*  Add items to a list                                              *
+*                                                                   *
+*  Input - @LADD                                                    *
+*                                                                   *
+*  Output - NONE                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+LADD     PROC  @LADD,SCOPE=GLOBAL
+         L     RY,@LAHEAD              List head addr
+         WITH  (LHEAD,RY)              |
+         L     RK,LHBP                 Old last one on list
+         L     RA,@LALAST              New last on list
+         ST    RA,LHBP                 | point backwards to new last
+         WITH  (LELEM,RA),'ST RY,LFP'  | and fwd to header
+         L     RB,@LA1ST               First being added
+         WITH  (LELEM,RB),'ST RK,LBP'  | point back to old last
+         WITH  (LELEM,RK),'ST RB,LFP'  | and fwd to first being added
+         L     RS,LHCNT                Increment count
+         AL    RS,@LACNT               |
+         ST    RS,LHCNT                |
+         PEND  ,
+         TITLE 'RESMAN - Remove items from a list'
+*********************************************************************
+*  Remove items from a list                                         *
+*                                                                   *
+*   Input - @LREM                                                   *
+*                                                                   *
+*  Output - @LREM                                                   *
+*           RVR also contains the address of the first element      *
+*           removed.  If RVR contains 0, then there wern't enough   *
+*           elements in the list to satisfy the request             *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+LREM     PROC  @LREM,SCOPE=GLOBAL
+         L     RY,@LRHEAD              List head addr
+         WITH  (LHEAD,RY)              |
+         CLEAR RVR                     Preset as not enough avail
+         L     RS,LHCNT                Check for count
+         L     RX,@LRCNT               | number desired
+         IF    (RX,NPOS),EXIT,LREM     | must remove positive number
+         SR    RS,RX                   |
+         IF    (RS,NEG),EXIT,LREM      | not enough
+         ST    RS,LHCNT                |
+         LT    RA,@LR1ST               First element
+         IF    ZERO,'L RA,LHFP'        | default to 1st in list
+         LR    RVR,RA                  | save pointer
+         WITH  (LELEM,RA),'L RJ,LBP'   |
+         LOOP  BEGIN                   Get all elements
+         WITH  (LELEM,RA)
+         L     RA,LFP                  next element
+         UNTIL (BCT,RX),END            OF Get all elements
+         WITH  (LELEM,RA),BEGIN        One past the last being rem
+         MVC   @LRLAST,LBP             Save last being removed
+         ST    RJ,LBP                  Point back around remove
+         END   ,                       OF One past the last being rem
+         WITH  (LELEM,RJ),'ST RA,LFP'  Point fwd around remove
+         PEND  ,
+         AGO   .NOLRF
+         TITLE 'RESMAN - Remove a single item from a list'
+*********************************************************************
+*  Remove a single item from a list                                 *
+*                                                                   *
+*   Input - @LREM                                                   *
+*                                                                   *
+*  Output - RVR contains the address of the first element           *
+*           removed.  If RVR contains 0, then there wern't enough   *
+*           elements in the list to satisfy the request             *
+*                                                                   *
+*********************************************************************
+LREMS    PROC  @LREM,SCOPE=GLOBAL
+         L     RY,@LRHEAD              List head addr
+         WITH  (LHEAD,RY)              |
+         CLEAR RVR                     Preset as not enough avail
+         L     RS,LHCNT                Check for count
+         DECR  RS                      |
+         IF    (RS,NEG),EXIT,LREMS     | not enough
+         ST    RS,LHCNT                |
+         L     RA,@LR1ST               First to remove
+         IF    (RA,ZERO),BEGIN         Remove from first of list
+         L     RA,LHFP                 First element
+         LR    RJ,RY                   | previous element
+         END   ELSE,BEGIN              Remove from elsewhere
+         WITH  (LELEM,RA),'L RJ,LBP'   | previous element
+         END   ,                       OF Remove from elsewhere
+         LR    RVR,RA                  | save pointer
+         WITH  (LELEM,RA),BEGIN        Fix pointers
+         L     RA,LFP                  | next element
+         ST    RJ,LBP                  | point back to previous
+         END   ,                       OF Fix pointers
+         WITH  (LELEM,RJ),BEGIN        Point fwd to next element
+         ST    RA,LFP                  |
+         END   ,                       OF Point fwd to next element
+         PEND  ,
+         TITLE 'RESMAN - Search for a list item'
+*********************************************************************
+*  Search for a specific item in a list                             *
+*                                                                   *
+*  Input - @LFIND                                                   *
+*                                                                   *
+*  Output - RVR                                                     *
+*      RVR contains the address of the list element if found, or    *
+*    a 0 if not found                                               *
+*                                                                   *
+*********************************************************************
+@LFIND   RECORD BEGIN                  Search for list element
+@LFHEAD  DS    A                       Header block of list
+@LFOFF   DS    H                       Offset of search ID from start
+@LFLEN   DS    H                       Length of search ID
+@LFVAL   DS    A                       Value to search for
+         END   ,
+         SPACE ,
+LFIND    PROC  @LFIND,SCOPE=GLOBAL     Find element in list
+         L     RM,@LFHEAD              List header addr
+         WITH  (LHEAD,RM)              |
+         CLEAR (RVR)                   Preset return - not found
+         LH    RX,@LFOFF               Offset of search ID
+         L     RA,LHFP                 Start w/ 1st element of block
+         WITH  (LELEM,RA),BEGIN
+LFLOOP   WHILE (RA,NE,RM),BEGIN        Look through list
+         LA    RB,LELEM(RX)            this search ID
+         IF    ('CLC @LFVAL,@RB',EQUAL),BEGIN   Element found
+         LR    RVR,RA                  Return address - element found
+         EXIT  LFLOOP                  |
+         END   ,                       OF Element found
+         L     RA,LFP                  Next element
+         END   ,                       OF Look through list
+         END   ,                       OF Addr to LELEM
+         PEND  ,
+.NOLRF   ANOP  ,
+.NOLIST  ANOP  ,
+         EJECT
+         LTORG
+         TITLE 'ORVYL''S Enqueue/Dequeue Services'
+         COPY  ENQPARM
+         SPACE 3
+         COPY  HASHPARM
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    ENQDWORK - Enqueue dump work area                            *
+*                                                                 *
+*******************************************************************
+         SPACE
+ENQDWORK RECORD BEGIN
+EQDUMPCB DS    A                       DUMP CB
+         END   ,
+         EJECT
+         COPY  QCB                 Enqueue control blocks
+         EJECT
+*******************************************************************
+*                                                                 *
+*    @ENQWAIT - Enqueue suspend routine parameters                *
+*                                                                 *
+*******************************************************************
+         SPACE
+@ENQWAIT RECORD BEGIN
+@EQWQOE  DS    A                       Pointer to QOE
+@EQWFLG  FLAG  ,
+         FLAG  @EQWFHD                 Request to head of queue
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    @ENQPOST - Enqueue post routine parameters                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+@ENQPOST RECORD BEGIN
+@EQPQRB  DS    A                       Pointer to QRB
+@EQPCODE DS    A                       Post code
+@EQPFLG  FLAG  ,
+         FLAG  @EQPFSHR                Post share waiters
+         FLAG  @EQPFALL                Post all waiters
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    @ENQASCN - Address space table search parameters             *
+*                                                                 *
+*******************************************************************
+         SPACE
+@ENQASCN RECORD BEGIN
+@EQSQNM  DS    A                       Pointer to Queue Name
+@EQSRNM  DS    A                       Pointer to Resource name
+@EQSID   DS    A                       Enqueue Id
+@EQSFLG  FLAG  ,
+         FLAG  @EQSFADD                Add QAO if not there
+         FLAG  @EQSFDEL                Delete QAO if found
+         FLAG  @EQSFSHR                Mark QAO shared
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    @FINDQCB - Enqueue QCB scan parameters                       *
+*                                                                 *
+*******************************************************************
+         SPACE
+@FINDQCB RECORD BEGIN
+@ENQCQNM DS    CL8                     Queue name
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    @FREEQRB - Add QRB to free list parameters                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+@FREEQRB RECORD BEGIN
+@FRQRBP  DS    A                       Queue name
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    @FREEQOE - Add QOE to free list parameters                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+@FREEQOE RECORD BEGIN
+@FRQOEP  DS    A                       Queue name
+         END   ,
+         SPACE 3
+*******************************************************************
+*                                                                 *
+*    @FREEQAO - Add QAO to free list parameters                   *
+*                                                                 *
+*******************************************************************
+         SPACE
+@FREEQAO RECORD BEGIN
+@FRQAOP  DS    A                       Queue name
+         END   ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQINIT - Initialize the Enqueue - Dequeue Service            *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQINIT  PROC  SCOPE=GLOBAL
+*
+*  Create the QCT
+*
+         VMGET L'QCT,LOC=GLOBHI        Get the storage
+         IF    ('LTR  RY,RVR',Z),'ABORT QCT'
+         WITH  (QCT,RY)
+         CLEAR QCT
+         MVC   QCT(4),=CL4'QCT'        Control block id
+         LKCRE ENQUEUE
+         ST    RVR,QCTLOCK             Set lock id
+*
+*  Set anchor
+*
+         L     RA,PZMATP               MAT POINTER
+         WITH  (MAT,RA),'ST  RY,MATQCT'  Save our roots
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   ENQUEUE - Enqueue a resource                                  *
+*                                                                 *
+*     Input - @ENQUEUE                                            *
+*                                                                 *
+*    Output - RVR contains enqueue id                             *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQUEUE  PROC  @ENQUEUE,SCOPE=GLOBAL
+         VCALL ASLOCK                  Get address space lock
+*
+*  First search address space table
+*
+         PSET  @ENQASCN
+         L     RS,@ENQID               ENQUEUE ID
+         IF    (@ENQTEST,AND,(RS,NZ)),'ST  RS,@EQSID'   TEST ONLY
+         ELSE  BEGIN
+         LA    RS,@ENQQNM              QNAME POINTER
+         ST    RS,@EQSQNM               TO PARAMETER LIST
+         LA    RS,@ENQRNM              RESOURCE NAME POINTER
+         ST    RS,@EQSRNM               TO PARAMETER LIST
+         END   ,
+         IF    ^@ENQTEST,'SET  @EQSFADD'    ADD TYPE REQUEST
+         IF    @ENQSHR,'SET  @EQSFSHR'    SHARE TYPE REQUEST
+         LCALL ENQASCN                 CALL SCAN ROUTINE
+         WITH  (QAO,RK)
+         EJECT
+*
+*  Process test mode requests
+*
+         IF    @ENQTEST,BEGIN
+         IF    ('LTR RK,RVR',NZ),BEGIN
+         IF    QAOSHR,'SET  @ENQSHR'   NOTE SHARED
+         ELSE  'CLEAR @ENQSHR'          OR EXCLUSIVE
+         END   ,
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LR    RVR,RK
+         EXIT  ENQUEUE
+         END   ,
+*
+*  QAO found (already enqueued)
+*
+         IF    ('LTR RK,RVR',M),BEGIN
+         IF    QAOSHR,'SET  @ENQSHR'   NOTE SHARED
+         ELSE  'CLEAR @ENQSHR'          OR EXCLUSIVE
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LR    RVR,RK
+         EXIT  ENQUEUE
+         END   ,
+*
+*  BUILD OWNERSHIP ELEMENT
+*
+         ACALL GETQOE                  GET AN ELEMENT
+         LR    RJ,RVR
+         WITH  (QOE,RJ)
+         IF    @ENQSHR,'SET  QOESHR'   WANTS IT SHARED
+         ST    RJ,QAOQOE               SET POINTER IN QAO
+         EJECT
+*
+*  Find the Queue Control Block and get QCB lock
+*
+         PSET  @FINDQCB
+         MVC   @ENQCQNM,@ENQQNM        Queue name
+         ACALL FINDQCB
+         LR    RX,RVR                  QCB POINTER
+         WITH  (QCB,RX)
+         LKOB  QCBLOCK
+*
+*  Hash resource name to determine chain
+*
+         PSET  @HASH
+         LA    RS,@ENQRNM              RESOURCE NAME
+         ST    RS,@HSHSTR              SET STRING POINTER
+         LA    RS,L'@ENQRNM            NAME LENGTH
+         ST    RS,@HSHLEN               SET
+         LA    RS,QCBNQRB              HASH VALUE
+         ST    RS,@HSHVAL
+         SET   @HSHBLNK                STRIP TRAILING BLANKS
+         VCALL HASHIT                  MUNCH A BUNCH
+*
+*  Search resource chain QRBs
+*
+         SLL   RVR,3                   INDEX INTO QRB CHAINS
+         LA    RY,QCBQRBS              QRB chain
+         ALR   RY,RVR                  PROPER ONE
+         LR    RA,RY                   Chain ANCHOR
+         WITH  (QRB,RY)
+         LOOP  BEGIN
+         L     RY,QRBFP                GET NEXT ENTRY
+         IF    (RY,EQ,RA),EXIT         End of chain
+         IF    (QRBNAME,EQ,@ENQRNM),EXIT     Found Queue element
+         END   ,
+*
+*  Create QRB and add it to the chain
+*
+         IF    (RY,EQ,RA),BEGIN
+         LCALL GETQRB
+         LR    RY,RVR
+         ST    RX,QRBQCB               Queue pointer
+         MVC   QRBNAME,@ENQRNM         Resource name
+*
+*  SET QOE IN OWNER CHAIN
+*
+         LA    RS,QRBOWNF              QRB OWNER POINTER
+         ST    RS,QOEFP                 TO QOE
+         ST    RS,QOEBP
+         ST    RJ,QRBOWNF              SET FORWARD POINTER
+         ST    RJ,QRBOWNB               AND BACK POINTER
+         ST    RY,QOEQRB               CONNECT QRB TO QOE
+*
+*  GET ENQUEUE NUMBER
+*
+*         IF    @ENQAEN,BEGIN
+*         MVC   QRBFNT,@ENQFNT          Set FNT for enqueue number
+*         PSET  @DSIFN
+*         PMOV  @DSIFNA,QRBFNT          Pass the pointer along
+*         VCALL DSIFNEW                 GET ENQUEUE NUMBER
+*         IF    (RVR,Z),'ABORT BADFN'
+*         ST    RVR,QRBNUM              SET
+*         SET   QRBAEN                  NOTE ENQUEUE NUMBER ASSIGNED
+*         MVC   @ENQNUM,QRBNUM          RETURN NUMBER TO USER
+*         END   ,
+*
+*  Add QRB to the end of the chain
+*
+         ST    RA,QRBBP                ANCHOR IS OUR BACK POINTER
+         L     RS,@RA                  PREVIOUS FORWARD IS NOW
+         ST    RS,QRBFP                 OUR FORWARD POINTER
+         WITH  (QRB,RS),'ST  RY,QRBBP'  PREVIOUS POINTS BACK HERE
+         ST    RY,@RA                  ANCHOR FORWARD POINTS HERE
+         LKREL QCBLOCK                 RELEASE THE QUEUE LOCK
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LR    RVR,RK                  ENQUEUE ID
+         END   ,
+*
+*  QRB found - try to get on the band wagon
+*
+         ELSE  BEGIN
+         ST    RY,QOEQRB               CONNECT QRB TO QOE
+*         IF    @ENQAEN,BEGIN
+*         IF    (^QRBAEN,OR,('LT RS,QRBNUM',Z)),'ABORT QRBFNERR'
+*         IF    (@ENQFNT,NE,QRBFNT),'ABORT QRBFNT_NE_ENQFNT'
+*         MVC   @ENQNUM,QRBNUM          RETURN NUMBER TO USER
+*         END   ,
+         LA    RS,QRBWFP                WAIT QUEUE HEAD
+*
+* IF NO ONE IS WAITING CHECK FOR SHARE
+*
+         IF    (RS,EQ,QRBWFP),BEGIN
+         IF    ^QOESHR,EXIT            THIS CALLER ISN'T SHARE
+         L     RS,QRBOWNF              FIRST OWNER
+         WITH  (QOE,RS),LABEL=FIRST
+         IF    ^FIRST:QOESHR,EXIT      FIRST OWNER ISN'T SHARE
+*
+*  RESOURCE CAN BE SHARED - ADD QOE TO OWNERSHIP CHAIN
+*
+         LA    R14,QRBOWNF             END OF CHAIN ANCHOR
+         ST    R14,QOEFP                TO THIS ELEMENT
+         L     R14,QRBOWNB             LAST ELEMENT IN CHAIN
+         ST    R14,QOEBP                IS NOW PREVIOUS
+         ST    RJ,QRBOWNB              PUT THIS ONE AT END
+         WITH  (QOE,R14),'ST  RJ,QOEFP'   (BEHIND PREVIOUS)
+         ST    RY,QOEQRB               CONNECT QRB TO QOE
+         LKREL QCBLOCK                 RELEASE THE QUEUE LOCK
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LR    RVR,RK                  ENQUEUE ID
+         EXIT  ENQUEUE
+         END   ,
+*
+*  RESOURCE NOT AVAILABLE AND CALLER WILL WAIT
+*
+         IF    @ENQSUSP,BEGIN
+         PSET  @ENQWAIT
+         ST    RJ,@EQWQOE              QOE POINTER
+         LCALL ENQWAIT                 WAIT FOR IT
+*
+*  CALLER NOW HAS RESOURCE
+*
+         IF    (RVR,Z),BEGIN
+         LR    RVR,RK                  Return QAO pointer
+         EXIT  ENQUEUE
+         END   ,
+         VCALL ASLOCK                  Get address space lock
+         END   ,
+*
+*  CALLER DOESN'T WANT TO WAIT
+*
+         ELSE  'LKREL QCBLOCK'         RELEASE THE QUEUE LOCK
+*
+*  RESOURCE CANCELLED OR CALLER WOULDN'T WAIT
+*
+         PSET  @ENQASCN
+         ST    RK,@EQSID               QAO POINTER TO PARAMETER LIST
+         SET   @EQSFDEL                DELETE REQUEST
+         LCALL ENQASCN                 CALL SCAN ROUTINE
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+*
+*  RELEASE QAO
+*
+         PSET  @FREEQAO
+         ST    RK,@FRQAOP              QAO pointer
+         ACALL FREEQAO                 Free it
+*
+*  RELEASE QOE
+*
+         PSET  @FREEQOE
+         ST    RJ,@FRQOEP
+         ACALL FREEQOE
+         CLEAR RVR
+         END   ,
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   DEQUEUE - Dequeue a resource                                  *
+*                                                                 *
+*     Input - @DEQUEUE                                            *
+*                                                                 *
+*    Output - RVR = 0  Dequeue complete                           *
+*             RVR = 4  Dequeue error                              *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+DEQUEUE  PROC  @DEQUEUE,SCOPE=GLOBAL
+         VCALL ASLOCK                  Get address space lock
+*
+*  Remove QAO from address space table
+*
+         PSET  @ENQASCN
+         L     RS,@DEQID               ENQUEUE ID
+         IF    (RS,NZ),'ST  RS,@EQSID'    TO PARAMETER LIST
+         ELSE  BEGIN
+         LA    RS,@DEQQNM              QNAME POINTER
+         ST    RS,@EQSQNM               TO PARAMETER LIST
+         LA    RS,@DEQRNM              RESOURCE NAME POINTER
+         ST    RS,@EQSRNM               TO PARAMETER LIST
+         END   ,
+         SET   @EQSFDEL                DELETE REQUEST
+         LCALL ENQASCN                 CALL SCAN ROUTINE
+         LR    RK,RVR                  QAO RETURNED
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+*
+*  QAO NOT FOUND - RESOURCE NOT ENQUEUED
+*
+         IF    (RK,Z),BEGIN
+         LA    RVR,4                   RESOURCE NOT ENQUEUED
+         EXIT  DEQUEUE
+         END   ,
+         EJECT
+*
+*  GET QOE POINTER
+*
+         WITH  (QAO,RK),'L  RX,QAOQOE'    OWNERSHIP ELEMENT
+         IF    (RX,Z),'ABORT DEQOEP'
+         WITH  (QOE,RX)
+*
+*  GET QRB POINTER
+*
+         L     RJ,QOEQRB               RESOURCE BLOCK
+         IF    (RJ,Z),'ABORT DEQRBP'
+*
+*  RELEASE QAO
+*
+         PSET  @FREEQAO
+         ST    RK,@FRQAOP              QAO pointer
+         ACALL FREEQAO                 Free it
+*
+*  LOCK QCB CHAIN
+*
+         WITH  (QRB,RJ)
+         IF    (QRBID,NE,=CL4'QRB'),'ABORT  DEQRBID'
+         L     RB,QRBQCB               QCB POINTER
+         WITH  (QCB,RB)
+         IF    (QCBID,NE,=CL4'QCB'),'ABORT  DEQCBID'
+         LKOB  QCBLOCK                 GET QUEUE LOCK
+*
+*  REMOVE CALLER FROM RESOURCE
+*
+         LM    R14,R15,QOEFP           FORWARD AND BACKWARD POINTERS
+         WITH  (QOE,R14),'ST  R15,QOEBP'  NEXT POINTS TO PREVIOUS
+         WITH  (QOE,R15),'ST  R14,QOEFP'  PREVIOUS POINTS TO NEXT
+*
+*  RELEASE QOE
+*
+         PSET  @FREEQOE
+         ST    RX,@FRQOEP
+         LCALL FREEQOE
+*
+*  NO MORE OWNERS - CHECK STATUS
+*
+         LA    RA,QRBOWNF
+         IF    (RA,EQ,QRBOWNF),BEGIN
+*
+*  REMOVE QRB IF CANCEL REQUEST OR NO WAITERS
+*
+         LA    RA,QRBWFP
+         IF    (@DEQCAN,OR,(RA,EQ,QRBWFP)),BEGIN
+         LM    R14,R15,QRBFP           FORWARD AND BACKWARD POINTERS
+         WITH  (QRB,R14),'ST  R15,QRBBP'  NEXT POINTS TO PREVIOUS
+         WITH  (QRB,R15),'ST  R14,QRBFP'  PREVIOUS POINTS TO NEXT
+*
+*  FREE ENQUEUE NUMBER
+*
+*         IF    QRBAEN,BEGIN            ENQUEUE NUMBER WAS ASSIGNED
+*         PSET  @DSIFN
+*         MVC   @DSIFNO,QRBNUM          SET NUMBER
+*         MVC   @DSIFNA,QRBFNT          SET TABLE PTR
+*         VCALL DSIFNFRE                 AND RELEASE IT
+*         END   ,
+*
+*  POST WAITERS ON CANCEL REQUESTS
+*
+         IF    @DEQCAN,BEGIN
+         IF    (RA,EQ,QRBWFP),EXIT     NONE WAITING
+         PSET  @ENQPOST
+         ST    RJ,@EQPQRB              QRB POINTER
+         MVC   @EQPCODE,=A(4)          POST CODE
+         SET   @EQPFALL                POST ALL WAITERS
+         LCALL ENQPOST                 GO FOR IT
+         END   ,
+*
+*  RELEASE THE QRB
+*
+         PSET  @FREEQRB
+         ST    RJ,@FRQRBP
+         LCALL FREEQRB
+         END   ,
+*
+*  POST WAITERS
+*
+         ELSE  BEGIN
+         PSET  @ENQPOST
+         ST    RJ,@EQPQRB              QRB POINTER
+         MVC   @EQPCODE,=A(0)          POST CODE
+*
+*  FIRST TASK IS SHARE - POST ALL WAITING SHARERS
+*
+         L     RS,QRBWFP               FIRST QOE ON WAIT QUEUE
+         WITH  (QOE,RS)
+         IF    QOESHR,'SET  @EQPFSHR'  POST ALL SHARE WAITERS
+         LCALL ENQPOST                 GO FOR IT
+         END   ,
+         END   ,
+         LKREL QCBLOCK                 RELEASE QCB LOCK
+         CLEAR RVR
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   REQUEUE - Requeue a resource from share to exclusive          *
+*               or vice versa                                     *
+*                                                                 *
+*     Input - @REQUEUE                                            *
+*                                                                 *
+*    Output - RVR = 0  Requeue complete                           *
+*             RVR = 4  Requeue error                              *
+*             RVR = 8  Resource already owned as requested        *
+*             RVR =12  Resource being shared - requeue needs wait *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+REQUEUE  PROC  @REQUEUE,SCOPE=GLOBAL
+*
+*  Find QAO in address space table
+*
+         PSET  @ENQASCN
+         L     RS,@REQID               ENQUEUE ID
+         IF    (RS,NZ),'ST  RS,@EQSID'    TO PARAMETER LIST
+         ELSE  BEGIN
+         LA    RS,@REQQNM              QNAME POINTER
+         ST    RS,@EQSQNM               TO PARAMETER LIST
+         LA    RS,@REQRNM              RESOURCE NAME POINTER
+         ST    RS,@EQSRNM               TO PARAMETER LIST
+         END   ,
+         VCALL ASLOCK                  Get address space lock
+         LCALL ENQASCN                 CALL SCAN ROUTINE
+*
+*  QAO NOT FOUND - RESOURCE NOT ENQUEUED
+*
+         IF    ('LTR  RK,RVR',Z),BEGIN
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LA    RVR,4                   RESOURCE NOT ENQUEUED
+         EXIT  REQUEUE
+         END   ,
+         EJECT
+*
+*  GET QOE POINTER
+*
+         WITH  (QAO,RK)
+         L     RX,QAOQOE               OWNERSHIP ELEMENT
+         IF    (RX,Z),'ABORT REQOEP'
+         WITH  (QOE,RX)
+*
+*  SEE IF RESOURCE ALREADY IN REQUESTED MODE
+*
+         IF    ((@REQSHR,AND,QOESHR),OR,                               *
+               (^@REQSHR,AND,^QOESHR)),BEGIN
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LA    RVR,8                   ALREADY ENQUEUED AS REQUESTED
+         EXIT  REQUEUE
+         END   ,
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+*
+*  GET QRB POINTER
+*
+         L     RJ,QOEQRB               RESOURCE BLOCK
+         IF    (RJ,Z),'ABORT REQRBP'
+         WITH  (QRB,RJ)
+         IF    (QRBID,NE,=CL4'QRB'),'ABORT  REQRBID'
+*
+*  LOCK QCB CHAIN
+*
+         L     RB,QRBQCB               QCB POINTER
+         WITH  (QCB,RB)
+         IF    (QCBID,NE,=CL4'QCB'),'ABORT  REQCBID'
+         LKOB  QCBLOCK                 GET QUEUE LOCK
+*
+*  CHANGE CALLER FROM EXCLUSIVE TO SHARE
+*
+         IF    ^QOESHR,BEGIN
+         SET   QOESHR                  MARK RESOURCE SHARED
+         SET   QAOSHR
+*
+*  POST WAITING TASKS
+*
+         PSET  @ENQPOST
+         ST    RJ,@EQPQRB              QRB POINTER
+         MVC   @EQPCODE,=A(0)          POST CODE
+         SET   @EQPFSHR                POST ALL SHARE WAITERS
+         LCALL ENQPOST                 GO FOR IT
+         END   ,
+*
+*  CHANGE CALLER FROM SHARE TO EXCLUSIVE
+*
+         ELSE  BEGIN
+*
+*  NO OTHERS SHARING - SO CALLER GETS IT EXCLUSIVE
+*
+         IF    ((RX,EQ,QRBOWNF),AND,(RX,EQ,QRBOWNB)),BEGIN
+         CLEAR QOESHR                  NOW OWNS IT EXCLUSIVE
+         CLEAR QAOSHR
+         END   ,
+*
+*  STILL SOME SHARING
+*
+         ELSE  BEGIN
+*
+*  CALLER WON'T WAIT - RETURN
+*
+         IF    ^@REQSUSP,BEGIN
+         LA    RVR,12                  RESOURCE NOT REQUEUED
+         EXIT  REQUEUE
+         END   ,
+*
+*  CALLER WILL WAIT - REMOVE ELEMENT FROM OWNER CHAIN
+*
+         LM    R14,R15,QOEFP           FORWARD AND BACKWARD POINTERS
+         WITH  (QOE,R14),'ST  R15,QOEBP'   NEXT POINTS TO PREV
+         WITH  (QOE,R15),'ST  R14,QOEFP'   PREV POINTS TO NEXT
+         IF    @REQSHR,BEGIN           REQUEUE SHARED
+         SET   QAOSHR
+         SET   QOESHR
+         END   ,
+         ELSE  BEGIN
+         CLEAR QOESHR                  WANTS IT EXCLUSIVE
+         CLEAR QAOSHR
+         END   ,
+*
+*  WAIT CALLER - AT HEAD OF QUEUE
+*
+         PSET  @ENQWAIT
+         ST    RX,@EQWQOE              QOE POINTER
+         SET   @EQWFHD                 PUT AT QUEUE HEAD
+         LCALL ENQWAIT                 WAIT FOR IT
+         END   ,
+         END   ,
+         LKREL QCBLOCK                 RELEASE QCB LOCK
+         CLEAR RVR
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQHALT - Cancel a waiting enqueue request                    *
+*                                                                 *
+*     Input - @ENQHALT                                            *
+*                                                                 *
+*    Output - RVR = 0  Enqhalt complete                           *
+*             RVR = 4  Enqhalt error                              *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQHALT  PROC  @ENQHALT,SCOPE=GLOBAL
+*
+*  Find QAO in address space table
+*
+         PSET  @ENQASCN
+         LA    RS,@EQHQNM              QNAME POINTER
+         ST    RS,@EQSQNM               TO PARAMETER LIST
+         LA    RS,@EQHRNM              RESOURCE NAME POINTER
+         ST    RS,@EQSRNM               TO PARAMETER LIST
+         VCALL ASLOCK                  Get address space lock
+         LCALL ENQASCN                 CALL SCAN ROUTINE
+*
+*  QAO NOT FOUND - RESOURCE NOT ENQUEUED
+*
+         IF    ('LTR  RK,RVR',Z),BEGIN
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LA    RVR,4                   RESOURCE NOT ENQUEUED
+         EXIT  ENQHALT
+         END   ,
+         EJECT
+*
+*  GET QOE POINTER
+*
+         WITH  (QAO,RK),'L  RX,QAOQOE'    OWNERSHIP ELEMENT
+         IF    (RX,Z),'ABORT HLTQOEP'
+         WITH  (QOE,RX)
+*
+*  GET QRB POINTER
+*
+         L     RJ,QOEQRB               RESOURCE BLOCK
+         IF    (RJ,Z),'ABORT HLTQRBP'
+*
+*  LOCK QCB CHAIN
+*
+         WITH  (QRB,RJ)
+         IF    (QRBID,NE,=CL4'QRB'),'ABORT  HLTQRBID'
+         L     RB,QRBQCB               QCB POINTER
+         WITH  (QCB,RB)
+         IF    (QCBID,NE,=CL4'QCB'),'ABORT  HLTQCBID'
+         LKOB  QCBLOCK                 GET QUEUE LOCK
+*
+*  IF QOE NOT WAITING - UNLOCK AND RETURN
+*
+         IF    ^QOEWAIT,BEGIN
+         LKREL QCBLOCK                 RELEASE QUEUE LOCK
+         VCALL ASULOCK                 RELEASE ADDRESS SPACE LOCK
+         LA    RVR,4                   RESOURCE NOT WAITING
+         EXIT  ENQHALT
+         END   ,
+*
+*  REMOVE THIS REQUEST FROM WAIT QUEUE
+*
+         LM    R14,R15,QOEFP           FORWARD AND BACKWARD POINTERS
+         WITH  (QOE,R14),'ST  R15,QOEBP'  NEXT POINTS TO PREVIOUS
+         WITH  (QOE,R15),'ST  R14,QOEFP'  PREVIOUS POINTS TO NEXT
+*
+*  POST THIS REQUEST WITH ERROR
+*
+         SIGNL QOEECB,=A(4),QOEASB,QOESYR
+*
+*  OWNER IS SHARE - CHECK STATUS OF WAITERS
+*
+         L     RX,QRBOWNF
+         IF    QOESHR,BEGIN
+*
+*  FIRST TASK IS SHARE - POST ALL WAITING SHARERS
+*
+         L     RX,QRBWFP               FIRST QOE ON WAIT QUEUE
+         IF    ^QOESHR,EXIT
+         PSET  @ENQPOST
+         ST    RJ,@EQPQRB              QRB POINTER
+         MVC   @EQPCODE,=A(0)          POST CODE
+         SET   @EQPFSHR                POST ALL SHARE WAITERS
+         LCALL ENQPOST                 GO FOR IT
+         END   ,
+         LKREL QCBLOCK                 RELEASE QCB LOCK
+*
+*  HALT PROCESSING COMPLETE
+*
+         VCALL ASULOCK                 RELEASE THE ASLOCK
+         CLEAR RVR
+         PEND
+         EJECT
+         LTORG
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   ENQASTRM - Enqueue Address space termination cleanup          *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQASTRM PROC  ,SCOPE=GLOBAL
+         L     RA,PZCURASB             CURRENT ASB
+         WITH  (ASB,RA),'L  RA,ASBENQ'   LOCAL ENQUEUE CONTROL
+         WITH  (QAS,RA)
+         IF    (RA,NZ),BEGIN
+         VCALL ASLOCK                  GET ADDRESS SPACE LOCK
+*
+*  LOOP THROUGH RESOURCE LIST AND RELEASE
+*
+         WHILE ('LT  RB,QASCHN',NZ),BEGIN
+         PSET  @DEQUEUE
+         ST    RB,@DEQID               SET ID
+         ACALL DEQUEUE
+         END   ,
+         VCALL ASULOCK                 UNLOCK ADDRESS SPACE
+         END
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQASCN - Scan address space table for resource               *
+*                                                                 *
+*     Input - @ENQASCN                                            *
+*             Address space lock held                             *
+*                                                                 *
+*    Output - RVR contains QAO pointer if found                   *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQASCN  PROC  @ENQASCN,SCOPE=LOCAL
+*
+*  Set address space table
+*
+         L     RX,PZCURASB             ASB POINTER
+         WITH  (ASB,RX),'L  RX,ASBENQ'   Address space Enqueue table
+         WITH  (QAS,RX)
+*
+*  ADDRESS TABLE NOT YET CREATED
+*
+         IF    (RX,Z),BEGIN
+*
+*  IF NOT ADD REQUEST - RETURN NOT FOUND
+*
+         IF    ^@EQSFADD,BEGIN
+         CLEAR RVR                     RESOURCE NOT ENQUEUED
+         EXIT  ENQASCN
+         END   ,
+*
+*  CREATE ADDRESS SPACE TABLE
+*
+         VMGET L'QAS,LOC=LOCSYS
+         IF    ('LTR  RX,RVR',Z),'ABORT ENQQAS'
+         CLEAR QAS
+         MVC   QASID,=CL4'QAS'         SET ID
+         L     RS,PZCURASB             ASB POINTER
+         WITH  (ASB,RS),'ST  RX,ASBENQ'   SET POINTER IN ASB
+         END   ,
+*
+*  VALIDATE QAS
+*
+         ELSE  BEGIN
+         IF    (QASID,NE,=CL4'QAS'),'ABORT ENQAST'
+         END   ,
+*
+*  CALLER SUPPLIED ENQUEUE ID - FIND IT IN CHAIN
+*
+         L     RK,@EQSID               GET RESOURCE ID
+         WITH  (QAO,RK)
+         IF    (RK,NZ),BEGIN
+         IF    (QAOID,NE,=CL4'QAO'),'ABORT QAOID'
+         LA    RJ,QASCHN-(QAOCHN-QAO)   Chain ANCHOR
+         LOOP  BEGIN
+         WITH  (QAO,RJ)
+         IF    (RK,EQ,QAOCHN),EXIT     FOUND IT
+         L     RJ,QAOCHN               GET NEXT ENTRY
+         IF    (RJ,NZ),NEXT            Go to end of chain
+*
+*  RESOURCE NOT IN QAO CHAIN
+*
+         CLEAR RVR                     RESOURCE NOT ENQUEUED
+         EXIT  ENQASCN
+         END   ,
+         END   ,
+*
+*  SEARCH ADDRESS SPACE ENQUEUE CHAIN
+*
+         ELSE  BEGIN
+         LA    RK,QASCHN-(QAOCHN-QAO)  Chain ANCHOR
+         WITH  (QAO,RK)
+         L     RA,@EQSQNM              Queue name pointer
+         L     RB,@EQSRNM              Resource name pointer
+         LOOP  BEGIN
+         LR    RJ,RK                   SAVE PREVIOUS POINTER
+         L     RK,QAOCHN               GET NEXT ENTRY
+         IF    (RK,Z),EXIT             END OF CHAIN
+         IF    (QAOQNAME,NE,@RA),NEXT    NOT THIS ONE
+         IF    (QAORNAME,EQ,@RB),EXIT    FOUND IT
+         END   ,
+         END   ,
+*
+*  RESOURCE NOT IN QAO CHAIN
+*
+         IF    (RK,Z),BEGIN
+*
+*  IF NOT ADD REQUEST - RETURN NOT FOUND
+*
+         IF    ^@EQSFADD,BEGIN
+         CLEAR RVR                     RESOURCE NOT ENQUEUED
+         EXIT  ENQASCN
+         END   ,
+*
+*  Get a QAO and add it to the chain
+*
+         LCALL GETQAO
+         LR    RK,RVR
+         MVC   QAOQNAME,@RA            Queue name
+         MVC   QAORNAME,@RB            Resource name
+         IF    @EQSFSHR,'SET  QAOSHR'  Shared
+         MVC   QAOCHN,QASCHN           PUT THIS ONE
+         ST    RK,QASCHN                AT THE HEAD
+         END   ,
+*
+*  RESOURCE WAS FOUND IN QAO CHAIN
+*
+         ELSE  BEGIN
+*
+*  REMOVE QAO FROM ADDRESS SPACE CHAIN
+*
+         IF    @EQSFDEL,BEGIN
+         MVC   QAOCHN-QAO(4,RJ),QAOCHN   REMOVE THIS ELEMENT
+         END   ,
+*
+*  FOR ADD REQUESTS - NOTE ALREADY IN LIST
+*
+         IF    @EQSFADD,BEGIN
+         O     RK,=X'80000000'
+         END   ,
+         END   ,
+         LR    RVR,RK                  RETURN QAO POINTER
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQWAIT - Enqueue wait routine                                *
+*                                                                 *
+*     Input - @ENQWAIT                                            *
+*             Queue lock held                                     *
+*                                                                 *
+*    Output - RVR contains post code                              *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQWAIT  PROC  @ENQWAIT,SCOPE=LOCAL
+         L     RK,@EQWQOE              QOE POINTER
+         WITH  (QOE,RK)
+         L     RJ,QOEQRB               QRB POINTER
+         WITH  (QRB,RJ)
+         SET   QOEWAIT                 MARK ELEMENT AS WAITING
+*
+*  ADD WAIT ELEMENT TO END OF QRB WAIT CHAIN
+*
+         IF    ^@EQWFHD,BEGIN
+         LA    RS,QRBWFP               END OF CHAIN ANCHOR
+         ST    RS,QOEFP                 TO THIS ELEMENT
+         L     RS,QRBWBP               LAST ELEMENT IN CHAIN
+         ST    RS,QOEBP                 IS NOW PREVIOUS
+         ST    RK,QRBWBP               PUT THIS ONE AT END
+         WITH  (QOE,RS),'ST  RK,QOEFP'   (BEHIND PREVIOUS)
+         END   ,
+         EJECT
+*
+*  ADD WAIT ELEMENT TO HEAD OF QRB WAIT CHAIN
+*
+         ELSE  BEGIN
+         LA    RS,QRBWFP               END OF CHAIN ANCHOR
+         ST    RS,QOEBP                 TO THIS ELEMENT
+         L     RS,QRBWFP               FIRST ELEMENT IN CHAIN
+         ST    RS,QOEFP                 IS NOW SECOND
+         WITH  (QOE,RS),'ST  RK,QOEBP'    SECOND POINTS BACK
+         ST    RK,QRBWFP               PUT THIS ONE AT HEAD
+         END   ,
+*
+*  FORCE CALLER TO WAIT
+*
+         L     RS,QRBQCB               QCB POINTER
+         WITH  (QCB,RS),BEGIN
+         LKREL QCBLOCK                 Release the QCB lock
+         END   ,
+         VCALL ASULOCK                 Release address space lock
+         AWAIT QOEECB
+*
+*  WAIT HAS ENDED DELETE SYSR
+*
+         L     RVR,QOESYR              IF SYSR CREATED
+         IF    (RVR,NZ),BEGIN           DELETE IT
+         PSET  @SYSRDEL,CLEAR=NO
+         ST    RVR,@SYSRDID            SET SYSR ID
+         VCALL SYSRDEL                 DELETE THE EXIT
+         END   ,
+         L     RVR,QOEECB+4            COMPLETION CODE
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQPOST - Enqueue post routine                                *
+*                                                                 *
+*     Input - @ENQPOST                                            *
+*             Queue lock held                                     *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQPOST  PROC  @ENQPOST,SCOPE=LOCAL
+         L     RJ,@EQPQRB              QRB POINTER
+         WITH  (QRB,RJ)
+         LA    RA,QRBWFP               WAIT CHAIN
+*
+*  POST WAITER
+*
+         WHILE (RA,NE,QRBWFP),BEGIN
+         L     RK,QRBWFP               GET FIRST WAITEE
+         WITH  (QOE,RK)
+*
+*  PROCESSING ONLY SHARE WAITERS
+*
+         IF    (@EQPFSHR,AND,^QOESHR),EXIT,ENQPOST    RETURN DONE
+*
+*  REMOVE ELEMENT FROM WAIT CHAIN
+*
+         LM    R14,R15,QOEFP           FORWARD AND BACKWARD POINTERS
+         WITH  (QOE,R14),'ST  R15,QOEBP'   NEXT POINTS TO PREV
+         WITH  (QOE,R15),'ST  R14,QOEFP'   PREV POINTS TO NEXT
+         CLEAR QOEWAIT                 NO LONGER WAITING
+         EJECT
+*
+*  ADD ELEMENT TO END OF QRB OWNERSHIP CHAIN
+*
+         L     RS,@EQPCODE             COMPLETION CODE
+         IF    (RS,Z),BEGIN
+         LA    R14,QRBOWNF             END OF CHAIN ANCHOR
+         ST    R14,QOEFP                TO THIS ELEMENT
+         L     R14,QRBOWNB             LAST ELEMENT IN CHAIN
+         ST    R14,QOEBP                IS NOW PREVIOUS
+         ST    RK,QRBOWNB              PUT THIS ONE AT END
+         WITH  (QOE,R14),'ST  RK,QOEFP'   (BEHIND PREVIOUS)
+         END   ,
+*
+*  CREATE SYSTEM ROUTINE IF POSTEE IN ANOTHER ADDRESS SPACE
+*
+         L     RS,PZCURASB             CURRENT ASB
+         IF    (RS,NE,QOEASB),BEGIN    POSTEE ANOTHER ASB
+         VCALL SYSRNEW
+         ST    RVR,QOESYR              SYSR ID
+         END   ,
+*
+*  POST THE WAITEE
+*
+         SIGNL QOEECB,@EQPCODE,QOEASB,QOESYR
+         IF    (@EQPFALL+@EQPFSHR,Z),EXIT
+         END   ,
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   FINDQCB - Enqueue QCB Search Service                          *
+*                                                                 *
+*     Input - @FINDQCB                                            *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FINDQCB  PROC  @FINDQCB,SCOPE=LOCAL
+*
+*  Address the QCT and get the QCT lock
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         IF    (QCT,NE,=CL4'QCT'),'ABORT QCT'
+         LKOB  QCTLOCK
+*
+*  Search the Queue chain
+*
+         LA    RX,QCTQCBS              QCB chain
+         SH    RX,=Y(QCBNEXT-QCB)      Offset
+         WITH  (QCB,RX)
+         LOOP  BEGIN
+         L     RX,QCBNEXT              Next in chain
+*
+*  Create a new QCB if necessary
+*
+         IF    (RX,Z),BEGIN
+         VMGET L'QCB,LOC=GLOBHI
+         IF    ('LTR  RX,RVR',Z),'ABORT QCB'   No memory
+         LA    R1,L'QCB
+         CLEAR R15
+         MVCL  R0,R14
+         MVC   QCB(4),=CL4'QCB'
+         MVC   QCBNAME,@ENQCQNM        Queue name
+         PSET  @LOCKCRE
+         MVC   @LOCKNAM(L'QCBNAME),QCBNAME
+         VCALL LKCRE
+         IF    (RVR,Z),'ABORT QCBLOCK'
+         ST    RVR,QCBLOCK             SET LOCK
+*
+*  SET CHAIN HEAD AND TAIL POINTERS
+*
+         LA    RVR,QCBNQRB             NUMBER OF QRB CHAINS
+         LA    RS,QCBQRBS              FIRST QRB POINTER SET
+         WHILE (RVR,P),BEGIN
+         LA    R15,@RS                 CHAIN HEAD
+         ST    R15,@RS                 SET FORWARD POINTER
+         ST    R15,@RS+4                AND BACK POINTER
+         LA    RS,@RS+8                NEXT CHAIN
+         DECR  RVR
+         END   ,
+*
+*  Add QCB to the chain
+*
+         MVC   QCBNEXT,QCTQCBS         Previous QCB
+         ST    RX,QCTQCBS              Add this one to the chain
+         END   ,
+*
+*  EXIT IF QCB FOUND
+*
+         IF    (QCBNAME,EQ,@ENQCQNM),EXIT     Found Queue element
+         END   ,
+*
+*  QCB in hand, release QCT lock, get QCB lock
+*
+         LKREL QCTLOCK
+         LR    RVR,RX                  RETURN QCB POINTER
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   GETQRB  - Obtain a Queue Resource Block                       *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - QRB Pointer in RVR                                  *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+GETQRB   PROC  ,SCOPE=LOCAL
+*
+*  Address the QCT
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         IF    (QCT,NE,=CL4'QCT'),'ABORT QCT'
+*
+* Try to get a QRB off the free queue
+*
+         LM    RA,RB,QCTQRBS           Get free queue info
+         WITH  (QRB,RA)
+         LOOP  BEGIN
+         IF    (RA,Z),EXIT             No free ones left
+         L     R14,QRBFP               Get pointer to the next one
+         LA    R15,@RB+1               Set the control word
+         CDS   RA,R14,QCTQRBS          Remove it from the queue
+         UNTIL Z,END                   Keep on trying
+*
+* None available, create a new one
+*
+         IF    (RA,Z),BEGIN
+         VMGET L'QRB,LOC=GLOBHI,SP=02
+         IF    ('LTR  RA,RVR',Z),'ABORT QRBMEM'   No memory
+         END   ,
+*
+*  Initialize the QRB
+*
+         CLEAR QRB
+         MVC   QRBID,=CL4'QRB'         Set ID
+         LA    RS,QRBWFP               QRB wait pointers
+         ST    RS,QRBWFP               Set forward
+         ST    RS,QRBWBP                and back pointers
+         LR    RVR,RA                  Return the QRB address
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   FREEQRB - Return a QRB to the available pool                  *
+*                                                                 *
+*     Input - @FREEQRB                                            *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FREEQRB  PROC  @FREEQRB,SCOPE=LOCAL
+*
+*  Address the QCT
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         IF    (QCT,NE,=CL4'QCT'),'ABORT QCT'
+*
+*  Add the QRB to the free chain
+*
+         L     RA,@FRQRBP              Address of QRB to free
+         WITH  (QRB,RA)
+         MVC   QRBID,=CL4'qrb'         Set ID
+         LM    R14,R15,QCTQRBS         Get current top, control
+         LOOP  BEGIN
+         ST    R14,QRBFP               Make ours point at theirs
+         LA    RB,@R15+1               Copy and update the control
+         CDS   R14,RA,QCTQRBS          Update the values
+         UNTIL Z,END
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   GETQOE  - Obtain a Queue Ownership Element                    *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - QOE Pointer in RVR                                  *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+GETQOE   PROC  ,SCOPE=LOCAL
+*
+*  Address the QCT
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         IF    (QCT,NE,=CL4'QCT'),'ABORT QCT'
+*
+* Try to get a QOE off the free queue
+*
+         LM    RA,RB,QCTQOES           Get free queue info
+         WITH  (QOE,RA)
+         LOOP  BEGIN
+         IF    (RA,Z),EXIT             No free ones left
+         L     R14,QOEFP               Get pointer to the next one
+         LA    R15,@RB+1               Set the control word
+         CDS   RA,R14,QCTQOES          Remove it from the queue
+         UNTIL Z,END                   Keep on trying
+*
+* None available, create a new one
+*
+         IF    (RA,Z),BEGIN
+         VMGET L'QOE,LOC=GLOBHI,SP=02
+         IF    ('LTR  RA,RVR',Z),'ABORT QOEMEM'   No memory
+         END   ,
+*
+*  Initialize the QOE
+*
+         CLEAR QOE
+         MVC   QOEID,=CL4'QOE'         Set ID
+         MVC   QOEPID,PZCURPID         PROCESS ID
+         LR    RVR,RA                  Return the QOE address
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   FREEQOE - Return a QOE to the available pool                  *
+*                                                                 *
+*     Input - @FREEQOE                                            *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FREEQOE  PROC  @FREEQOE,SCOPE=LOCAL
+*
+*  Address the QCT
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         IF    (QCT,NE,=CL4'QCT'),'ABORT QCT'
+*
+*  Add the QOE to the free chain
+*
+         L     RA,@FRQOEP              Address of QOE to free
+         WITH  (QOE,RA)
+         MVC   QOEID,=CL4'qoe'         Set ID
+         LM    R14,R15,QCTQOES         Get current top, control
+         LOOP  BEGIN
+         ST    R14,QOEFP               Make ours point at theirs
+         LA    RB,@R15+1               Copy and update the control
+         CDS   R14,RA,QCTQOES          Update the values
+         UNTIL Z,END
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   GETQAO  - Obtain a Queue Address space Ownership element      *
+*                                                                 *
+*     Input - None                                                *
+*                                                                 *
+*    Output - QAO Pointer in RVR                                  *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+GETQAO   PROC  ,SCOPE=LOCAL
+*
+*  Address the QAS
+*
+         L     RX,PZCURASB             ASB POINTER
+         WITH  (ASB,RX),'L  RX,ASBENQ'   Address space Enqueue table
+         WITH  (QAS,RX)
+         IF    (QAS,NE,=CL4'QAS'),'ABORT QAS'
+*
+* Try to get a QAO off the free queue
+*
+         LM    RA,RB,QASFQAO           Get free queue info
+         WITH  (QAO,RA)
+         LOOP  BEGIN
+         IF    (RA,Z),EXIT             No free ones left
+         L     R14,QAOCHN              Get pointer to the next one
+         LA    R15,@RB+1               Set the control word
+         CDS   RA,R14,QASFQAO          Remove it from the queue
+         UNTIL Z,END                   Keep on trying
+*
+* None available, create a new one
+*
+         IF    (RA,Z),BEGIN
+         VMGET L'QAO,LOC=LOCSYS
+         IF    ('LTR  RA,RVR',Z),'ABORT QAOMEM'   No memory
+         END   ,
+*
+*  Initialize the QAO
+*
+         CLEAR QAO
+         MVC   QAOID,=CL4'QAO'         Set ID
+         LR    RVR,RA                  Return the QAO address
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   FREEQAO - Return a QAO to the available pool                  *
+*                                                                 *
+*     Input - @FREEQAO                                            *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+FREEQAO  PROC  @FREEQAO,SCOPE=LOCAL
+*
+*  Address the QAS
+*
+         L     RX,PZCURASB             ASB POINTER
+         WITH  (ASB,RX),'L  RX,ASBENQ'   Address space Enqueue table
+         WITH  (QAS,RX)
+         IF    (QAS,NE,=CL4'QAS'),'ABORT QAS'
+*
+*  Add the QAO to the free chain
+*
+         L     RA,@FRQAOP              Address of QAO to free
+         WITH  (QAO,RA)
+         MVC   QAOID,=CL4'qao'         Set ID
+         LM    R14,R15,QASFQAO         Get current top, control
+         LOOP  BEGIN
+         ST    R14,QAOCHN              Make ours point at theirs
+         LA    RB,@R15+1               Copy and update the control
+         CDS   R14,RA,QASFQAO          Update the values
+         UNTIL Z,END
+         PEND
+         EJECT
+         LTORG
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQDUMP  - Enqueue Services Global Dump Processing            *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQDUMP  PROC  ,ENQDWORK,SCOPE=GLOBAL
+*
+*  Address the QCT
+*
+         L     RY,PZMATP               MAT POINTER
+         WITH  (MAT,RY),'L  RY,MATQCT'  Get pointer
+         WITH  (QCT,RY)
+         SEGEOR '*** ENQUEUE Service ***',,EQDUMPCB
+         SEGEOR ,
+         IF    (RY,Z),BEGIN
+         SEGEOR '  *** Not initialized ***'
+         EXIT  ENQDUMP
+         END   ,
+*
+*  QCB CHAIN
+*
+         L     RX,QCTQCBS
+         WITH  (QCB,RX)
+         WHILE (RX,NZ),BEGIN
+*
+*  QRB CHAINS
+*
+         LA    RB,QCBNQRB              NUMBER OF CHAINS
+         LA    RA,QCBQRBS              FIRST CHAIN
+         WHILE (RS,P),BEGIN
+         L     RK,@RA
+         WHILE (RK,NE,RA),BEGIN
+         WITH  (QRB,RK)
+*
+*  PRINT RESOURCE INFO
+*
+         SEGB  QCBNAME                 QUEUE NAME
+         SEGEOR QRBNAME                RESOURCE NAME
+         SEGCOL 5
+         L     RJ,QRBOWNF              OWNERSHIP ELEMENT
+         WITH  (QOE,RJ)
+         IF    QOESHR,BEGIN
+         SEG   'SHARING PIDS: '          SHARED
+         LA    RS,QRBOWNF
+         WHILE (RJ,NE,RS),BEGIN
+         SEGCOL 19
+         SEGHEX QOEPID,4
+         SEG   ' '
+         SEGHEX QOEPID+4,4
+         SEGEOR
+         L     RJ,QOEFP                NEXT IN THE LIST
+         END   ,
+         END   ,
+         ELSE  BEGIN
+         SEG   'OWNER PID: '
+         SEGHEX QOEPID,4
+         SEG   ' '
+         SEGHEX QOEPID+4,4
+         SEGEOR
+         END   ,
+         L     RJ,QRBWFP               WAITING
+         LA    RS,QRBWFP
+         SEGCOL 6
+         SEG   'WAITING PIDS: '
+         IF    (RJ,EQ,RS),BEGIN
+         SEGEOR 'None'
+         END   ,
+         ELSE  BEGIN
+         WHILE (RJ,NE,RS),BEGIN
+         SEGCOL 20
+         SEGHEX QOEPID,4
+         SEG   ' '
+         SEGHEX QOEPID+4,4
+         IF    QOESHR,'SEG  "SHR "'    SHARED
+         ELSE  'SEG  "EXC "'            OR EXCLUSIVE
+         L     RJ,QOEFP                NEXT ELEMENT ON THE CHAIN
+         END   ,
+         END   ,
+         END   ,
+         LA    RA,@RA+8                TO NEXT CHAIN
+         DECR  RB
+         END   ,
+         L     RX,QCBNEXT              NEXT QCB ON THE CHAIN
+         END   ,
+         SEGEOR
+         PEND
+         EJECT
+*******************************************************************
+*                                                                 *
+*   ENQASDMP - Enqueue Services Address Space Dump Processing     *
+*                                                                 *
+*     Input -                                                     *
+*                                                                 *
+*    Output - None                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+ENQASDMP PROC  ,ENQDWORK,SCOPE=GLOBAL
+*
+*  Set address space table
+*
+         L     RA,PZCURASB             CURRENT ASB
+         WITH  (ASB,RA),'L  RA,ASBENQ'   LOCAL ENQUEUE CONTROL
+         WITH  (QAS,RA)
+         IF    (RA,NZ),BEGIN
+         IF    (QASID,NE,=CL4'QAS'),EXIT
+         SEGEOR 'Enqueue Table',,EQDUMPCB
+         IF    ('LT  RB,QASCHN',Z),BEGIN
+         SEGEOR '  *** Not initialized ***'
+         EXIT  ENQASDMP
+         END   ,
+*
+*  LOOP THROUGH RESOURCE LIST
+*
+         WHILE (RB,NZ),BEGIN
+         WITH  (QAO,RB)
+         L     RJ,QAOQOE               OWNERSHIP ELEMENT
+         WITH  (QOE,RJ)
+         IF    QOEWAIT,'SEG  "  WAIT "'
+         ELSE  'SEG  "       "'
+         IF    QAOSHR,'SEG  "SHR "'    SHARED
+         ELSE  'SEG  "EXC "'            OR EXCLUSIVE
+         SEGB  QAOQNAME                QUEUE NAME
+         SEGEOR QAORNAME                RESOURCE NAME
+         L     RB,QAOCHN               NEXT ENTRY
+         END   ,
+         END   ,
+         PEND
+         TITLE 'ORVYL''S Resource Management Services'
+         LTORG
+         END   .

@@ -1,0 +1,101 @@
+//&$KBLD JOB ,'KWR-BUILD',TIME=5
+/*JOBPARM NOTIFY=YES,HOLD=OUTPUT
+//* This job creates a new keyword file (using PL/I)
+//* and then copies each non-dummy record from the
+//* existing keyword file (GO.INFILE) to the newly
+//* created one (GO.KWRFILE). To run this job, you
+//* might need to change the BLKSIZE and LRECL values
+//* throughout and you should make sure the space
+//* allocations match what the current keyword file
+//* uses.
+//*
+//* Also, this job uses a modified version of the WYLBUR
+//* keyword file module (KWWR). To make this modified
+//* version, all you have to do is use the KWWR file
+//* and delete the stuff at the end involving resource
+//* group access (the routines starting with KWIO).
+//* Then reassemble this module but stick the object into
+//* a PDS and change the LKED.WYLBUR DD statement below
+//* to point to that PDS.
+//*
+//*   01/28/2000 M. Durket (modified from old JDN code)
+//*
+// EXEC PL1XCG
+//PLI.SYSIN DD *
+ /*  KWRFMT -- ROUTINE TO FORMAT KEYWORD FILE  */
+
+ KWRFMT: PROC OPTIONS (MAIN);
+
+   DCL  (KWRFILE DIRECT OUTPUT) FILE KEYED
+        ENVIRONMENT (REGIONAL(2) F);
+
+   OPEN FILE (KWRFILE) TITLE ('KWRFILE');  /* PL/I WILL FORMAT */
+   CLOSE FILE (KWRFILE);
+
+ END KWRFMT;
+//GO.KWRFILE DD DSN=SYS2.TEST.KWRFILE,VOL=SER=SYSB02,
+// UNIT=DISK,SPACE=(CYL,(58),,CONTIG),DISP=(,KEEP),
+// DCB=(DSORG=DA,RECFM=F,BLKSIZE=495,LRECL=495,KEYLEN=5)
+//*
+// EXEC HIBALCLG,TIME.GO=4
+KWRBUILD TITLE 'PROGRAM TO RE-BUILD (COPY) THE KEYWORD FILE'
+         HIBAL
+*         COPY  UTYPDEFN
+*
+KWRBUILD CSECT
+*
+         DATA  BEGIN
+INFILE   DCB   DSORG=PS,MACRF=R,DDNAME=INFILE,KEYLEN=5,RECFM=F,        *
+               EODAD=EOF
+*
+KWLIST   DC    0A(0),AL1(KWRCWR),AL3(KWR)
+KWR      KWR
+         END
+*
+         BASE  R7
+         LA    R13,STACK
+         LR    R8,R13
+*
+         OPEN  (INFILE,(INPUT))
+RDLOOP   READ  RDECB,SF,INFILE,KWR
+         CHECK RDECB
+         IF    (KWRUSER,EQ,X'FF'),RDLOOP  EMPTY RECORD
+         XC    KWRUSER(5),=C'TTMCC'    Unscramble key
+         XC    KWRPASS,=C'EATATCIT'     and
+         XC    KWRPASS+4(4),KWRPASS       password field
+*
+         CLEAR KWRWRCT             SET REWR COUNT TO ZERO FOR ADD
+*
+         LA    R6,3
+RETRY    LA    R1,KWLIST
+         CLEAR R0                  (NO TTR)
+         L     R15,=V(KWEXCP)
+         BALR  R14,R15
+WAIT     L     R1,=V(KWECB)
+         WAIT  ECB=(1)
+         L     R15,=V(KWWAIT)
+         BALR  R14,R15
+         B     WAIT                +0: RETURN FOR WAIT
+         IF    KWRHFL.KWRHFUOK,RDLOOP  IT WORKED
+         QSNAP 'RE-WRITE FAILED FOR'
+         QSNAP KWRUSER,5
+         BCT   R6,RETRY
+         ABEND 1,DUMP              SHUCKS
+*
+EOF      ABEND 0                   ALL DONE
+*
+U        DS    X
+*
+BLANKS   DC    CL80' '
+STACK    DS    512F
+         END   .
+//LKED.WYLBUR  DD DSN=WYL.GG.MPD.OBJECT,DISP=SHR
+//LKED.SYSIN   DD *
+ INCLUDE WYLBUR(WYLKWWR)
+ ENTRY KWRBUILD
+//*
+//GO.SYSUDUMP DD SYSOUT=$
+//GO.INFILE DD DSN=SYS2.TEST.COBOL.V2R3,DISP=SHR,
+// UNIT=DISK,VOL=SER=SYSB01
+//GO.KWRFILE DD DSN=SYS2.TEST.KWRFILE,DISP=SHR,
+//  UNIT=DISK,VOL=SER=SYSB02

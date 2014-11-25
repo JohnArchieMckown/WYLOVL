@@ -1,0 +1,823 @@
+HELP     TITLE 'WYLBUR''s External Data Set Facilities'                         
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+WYLHELP  CSECT                                                                  
+HELP     IDENT 2010                10:26:03 01/10/02  (SLP)                     
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+         SYSDEFN ,                 Define installation params                   
+         SPACE 2                                                                
+         PUSH  DSECTS                                                           
+*                                                                               
+         COPY  CONTROL                                                          
+*                                                                               
+         COPY  SYSDSNS                                                          
+*                                                                               
+         COPY  UTYPDEFN                                                         
+*                                                                               
+         COPY  RTNCODES                                                         
+         TITLE 'DSECTS'                                                         
+         EJECT                                                                  
+KWR      RECORD 'KWR'                                                           
+         EJECT                                                                  
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+         POP   DSECTS                                                           
+         TITLE 'SET WHELP Command'                                              
+HDIR     RECORD BEGIN                                                           
+HDIRLINK DS    F                   Next HDIR ptr (or zero)                      
+HDIRWCNT DS    X                   No. of words in this entry                   
+*                                  eg, CARRIAGE CONTROL CHARACTERS              
+*                                  looks for three words                        
+*                                                                               
+HDIRMAXW EQU   6                   Maximum no. of words any entry               
+HDIRWORD DS    (HDIRMAXW)CL(1+8)   Flag+word                                    
+HDIRQUOT EQU   X'01'               Quoted - don't abbreviate                    
+*                                                                               
+HDIRFLAG FLAG                                                                   
+         FLAG  HDIRPRIV            Privileged entry follows                     
+*                                                                               
+HDIRDSN  DS    CL54                Dsname (including member, etc.)              
+         END                                                                    
+         SPACE 2                                                                
+SHLPWA   RECORD BEGIN                                                           
+SHLPFPTR DS    A                   First HDIR ptr                               
+SHLPLPTR DS    A                   Last HDIR ptr                                
+*                                                                               
+SHLPHDIR DS    XL(L'HDIR)          Working HDIR entry                           
+         END                                                                    
+         EJECT ,                                                                
+         COPY  FFINFO                                                           
+         EJECT ,                                                                
+*box                                                                            
+*                                                                               
+*  SETWHELP -- SET WHELP Command.  (Priv'd.)                                    
+*                                                                               
+*    Note:  This routine is also called after a successful save of              
+*           HELP PUBLIC.                                                        
+*                                                                               
+SETWHELP GENTER                                                                 
+         IF    (CPCMNM,NE,'W'),BEGIN  Entered after SAVE...                     
+         TCCR                                                                   
+         TSEG  'Type SET WHELP to reset help tables.'                           
+         B     CVNEXT                                                           
+         END                                                                    
+         ELSE  BEGIN               Command entry...                             
+*  De-privileged on 9/12/88 by Niz (what harm can it do if someone              
+*    tries this).                                                               
+****     IF    ^CPSFSPR,CVNVALID                                                
+         END                                                                    
+*                                                                               
+         CLEAR CPLFLG1.CPFDSN1                                                  
+         LA    R0,SDSNHDIR         Want HELP dir. dsn                           
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         SCINIT (R1),(R0)                                                       
+         VCALL DOFNAME             Scan HELP dir file name                      
+         VCALL FNAMOPTS            Scan for file name options                   
+         VCALL FNAMEFIN            Determine file type from name                
+*                                                                               
+         SET   CPLFLG1.CPFALL                                                   
+         SET   CPFRDEXT                                                         
+         VCALL NDETRNG                                                          
+*                                                                               
+         XPUSH ,,L'SHLPWA,PTR=WAR                                               
+         USING SHLPWA,WAR                                                       
+         CLEAR SHLPWA                                                           
+         ST    WAR,CPCWA                                                        
+*                                                                               
+         VCALL EXTOPEN                                                          
+         IF    (R15,NZ),CVNEXT                                                  
+*-                                                                              
+*-       Go process HELP directory lines to make table.                         
+*-                                                                              
+         RDRNG SHLPRTN,(DESRTRN+LXCATRTN+UNPRST)                                
+*                                                                               
+         VCALL EXTCLOSE                                                         
+*-                                                                              
+*-       Now make the new HELP directory the default and free the               
+*-         old one.                                                             
+*-                                                                              
+         LT    R15,SHLPFPTR                                                     
+         IF    Z,BEGIN             Nothing in new dir...                        
+         SETMSG 'No help directory entries.'                                    
+         B     CVABTMSG                                                         
+         END                                                                    
+*                                                                               
+         L     R5,CVHLPPTR         Old dir ptr                                  
+         ST    R15,CVHLPPTR        New dir ptr                                  
+*                                                                               
+         WHILE (R5,NZ),BEGIN       Free old dir...                              
+         WITH  (HDIR,R5)                                                        
+         L     R3,HDIRLINK         Next entry ptr                               
+         MVC   HDIRLINK,=F'-1'     (Safety)                                     
+         FREEMAIN R,A=(R5),LV=L'HDIR                                            
+*                                                                               
+         LR    R5,R3                                                            
+         END                                                                    
+*                                                                               
+         B     CVNEXT                                                           
+*                                                                               
+         DROP  BR,SHLPWA                                                        
+*                                                                               
+         DS    0F                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHLPRTN -- Routine to process help directory lines.                          
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*                                                                               
+SHLPRTN  XENTER R2,R8,*,LOCAL                                                   
+         L     R6,CPCWA            SHLPWA ptr                                   
+         USING SHLPWA,R6                                                        
+         LA    R5,SHLPHDIR                                                      
+         USING HDIR,R5                                                          
+         CLEAR HDIR                                                             
+*                                                                               
+         SCINIT (R1),(R0)                                                       
+         SCAN  SHLPPRT             DONT check for errors                        
+         XEXIT                                                                  
+         DROP  BR                                                               
+*                                                                               
+SHLPPRT  SCKW  :,SHLPDSN                                                        
+         SCKW  +,SHLPDSN           PRIV TEXT FOLLOWS THIS PUB TEXT              
+         SCKW  ,SHLPWORD                                                        
+*                                                                               
+SHLPDSN  PROC  ,                                                                
+         IF    (@R1,EQ,'+'),BEGIN                                               
+         SET   HDIRPRIV                                                         
+         END   ,                                                                
+         SCINFO                                                                 
+         VCALL LRTRIM                                                           
+         IF    (R0,NP),SHLDEXIT                                                 
+         CEIL  R0,L'HDIRDSN                                                     
+         MVC   HDIRDSN,CVBLANKS                                                 
+         LR    R15,R0                                                           
+         MOVE  R15,HDIRDSN,@R1                                                  
+*-                                                                              
+*-       Add HDIR entry to the queue.                                           
+*-                                                                              
+         GETMAIN R,LV=L'HDIR                                                    
+         MVC   @R1(L'HDIR),HDIR    Use working HDIR entry                       
+         LR    R5,R1                                                            
+*                                                                               
+         IF    (SHLPFPTR,Z),BEGIN  First entry...                               
+         ST    R5,SHLPFPTR         First entry ptr                              
+         ST    R5,SHLPLPTR         Last entry ptr                               
+         END                                                                    
+         ELSE  BEGIN               Link up entry...                             
+         L     R15,SHLPLPTR        Last entry                                   
+         WITH  (HDIR,R15),'ST R5,HDIRLINK'  link to new entry                   
+         ST    R5,SHLPLPTR         New last entry                               
+         END                                                                    
+SHLDEXIT LABEL ,                                                                
+         LA    R15,4               Terminate scan                               
+         PEND  ,                                                                
+*                                                                               
+SHLPWORD PROC                                                                   
+         LC    R3,HDIRWCNT                                                      
+         IF    (R3,GE,HDIRMAXW),BEGIN                                           
+         LA    R15,4                                                            
+         B     SHLWEXIT                                                         
+         END                                                                    
+         LR    R2,R3                                                            
+         MH    R2,=AL2(L'HDIRWORD)                                              
+         LA    R2,HDIRWORD(R2)                                                  
+         MVI   @R2,0               Flag: abbreviatable                          
+         MVC   @R2+1(L'HDIRWORD-1),CVBLANKS                                     
+         VCALL DEQUOTE                                                          
+         IF    ^NEG,'OI @R2,HDIRQUOT' quoted means non-abbreviatable            
+         LR    R15,R0                                                           
+         CEIL  R15,L'HDIRWORD-1                                                 
+         MOVE  R15,@R2+1,@R1                                                    
+         LA    R3,@R3+1                                                         
+         STC   R3,HDIRWCNT                                                      
+         CLEAR R15                                                              
+SHLWEXIT LABEL ,                                                                
+         PEND  ,                                                                
+*                                                                               
+         DROP  HDIR,SHLPWA                                                      
+*                                                                               
+         QLTORG                                                                 
+*box                                                                            
+*                                                                               
+*  GETHDIR -- Local routine to match the command text with an HDIR              
+*    entry.                                                                     
+*                                                                               
+*    On entry:                                                                  
+*      scanner points to start of text                                          
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - no match                                                             
+*      nz- matched; R15 contains HDIR ptr                                       
+*                                                                               
+GHWA     RECORD BEGIN                                                           
+GHWORDS  DS    XL(L'NSCNCB)                                                     
+         END                                                                    
+*                                                                               
+*                                                                               
+GETHDIR  PROC  GHWA                                                             
+         SCSAVE AREA=GHWORDS                                                    
+*                                                                               
+         LA    R5,CVHLPPTR-(HDIRLINK-HDIR)                                      
+GETHLP   LOOP  BEGIN               go through HDIR's...                         
+         WITH  (HDIR,R5)                                                        
+         WHILE ('LT R5,HDIRLINK',NZ)                                            
+         CLEAR R2                                                               
+         LC    R3,HDIRWCNT         Word count                                   
+         SCRSTR AREA=GHWORDS                                                    
+*-                                                                              
+*-       Match HELP with no options.                                            
+*-                                                                              
+         IF    (R3,Z),BEGIN        No words...                                  
+         SCAN                                                                   
+         SCANCHK                                                                
+         IF    (R0,NZ),GETHLP                                                   
+         END                                                                    
+*-                                                                              
+*-       Match the words in the directory with the user's input.                
+*-                                                                              
+         ELSE  BEGIN               Match words...                               
+         LA    R4,HDIRWORD                                                      
+*                                                                               
+         WHILE (R2,LT,R3),BEGIN  go through words...                            
+         SCAN                                                                   
+         SCANCHK                                                                
+         SCUPTOK (R15)                                                          
+         LR    R1,R0                                                            
+         FLOOR R1,3                At least 3 chars                             
+         CEIL  R1,8                                                             
+         CMPR  R1,@R15,@R4+1       Does what the user typed match?              
+         BNE   GETHLP              Not even close                               
+         IF    (@R4,EQ,HDIRQUOT),BEGIN  Must be an exact match...               
+         IF    ('CLC @R15(8),@R4+1',NE),GETHLP  go try next entry               
+         END                                                                    
+         LA    R4,@R4+L'HDIRWORD                                                
+         LA    R2,@R2+1                                                         
+         END                                                                    
+         END                                                                    
+         EXIT                                                                   
+         END                                                                    
+*                                                                               
+         LTR   R15,R5                                                           
+         PEND                                                                   
+         QLTORG                                                                 
+         EJECT                                                                  
+         TITLE 'HELP Command'                                                   
+HELPWA   RECORD BEGIN                                                           
+HELPFLAG FLAG                                                                   
+         FLAG  HELFQ               - ? command                                  
+         FLAG  HELFPUB             - Allow this help before logon               
+         FLAG  HELFSOME            - Have 1st help page                         
+         FLAG  HELFMAT             - Current section is matched                 
+         FLAG  HELFSKIP            - Skip text lines                            
+         FLAG  HELFALL             - Display everything                         
+         FLAG  HELFFND             - At least one option was found              
+*                                                                               
+HELPBLNK DS    C                   Blank char                                   
+*                                                                               
+HELPDSN  DS    CL(L'HDIRDSN)       Dsname for help                              
+*                                                                               
+HELPTNO  DS    H                   Number of tokens in table                    
+HELPMAX# EQU   16                  Max no. of tokens                            
+HELPTOK  DS    (HELPMAX#)CL(1+8)   Token table                                  
+*                                                                               
+HELPBCNT DS    H                   Working blank line count                     
+HELPFNO  DS    H                   Working field number                         
+HELPPTRS DS    2F                  Working scan ptrs                            
+HELPDIR  DS    F                   Addr of matching HELPDIR entry               
+HELPCMD  DS    XL(L'NSCNCB)        Help command text                            
+HELPOPTS DS    XL(L'NSCNCB)        Help command options                         
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  HELP -- HELP/? Commands.                                                     
+*                                                                               
+HELP     GENTER L'HELPWA                                                        
+         LR    R6,WAR                                                           
+         ST    R6,CPCWA                                                         
+         USING HELPWA,R6                                                        
+         CLEAR HELPWA                                                           
+         MVI   HELPBLNK,X'E0'      Default blank char is backslash              
+*                                                                               
+         IF    (CPCMNM,EQ,'DES'),BEGIN  Describe...                             
+         TSEG  'Please use the HELP command instead of the '                    
+         ERROR 'DESCRIBE command.'                                              
+         END                                                                    
+*                                                                               
+         IF    (@R1,EQ,'?'),'SET HELFQ'  ? command                              
+*                                                                               
+         VCALL PAGERES             *** Reset Page mode always ***               
+*                                                                               
+         MVC   CPCMNM,=C'HEL'                                                   
+         SET   HELFMAT             Start off matched                            
+         MVC   HELPDSN,CVBLANKS                                                 
+*-                                                                              
+*-       Set up for the ? command.                                              
+*-                                                                              
+         IF    HELFQ,BEGIN         ? command...                                 
+         IF    (CPOERRID,Z),BEGIN                                               
+         TSEG  'No help available.  '                                           
+         ABORT 'Type HELP for general information.'                             
+         END                                                                    
+         LA    R0,SDSNERR          Want the ERRORS dsn                          
+         VCALL EXIT0               LOCAL exit - format system dsname            
+         LR    R2,R0               Copy dsname length                           
+         TDEX  R2,'MVC HELPDSN(0),@R1' Copy dsname                              
+         LA    R2,HELPDSN          Point to start of dsname                     
+         AR    R2,R0               Point to end+1                               
+         MVI   @R2,C'#'            Add member                                   
+         MVC   @R2+1(8),CPOERRID                                                
+         END                                                                    
+*-                                                                              
+*-       Otherwise, initialize for the HELP command.                            
+*-                                                                              
+         ELSE  BEGIN               Help...                                      
+         SCSAVE AREA=HELPCMD                                                    
+         SCAN                                                                   
+         SCANCHK                                                                
+         IF    (R0,Z),BEGIN        No options...                                
+*******  IF    CPVFPAGE,'SCINIT "PAGE INTRO"'  Page mode default                
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               We have options...                           
+         VCALL DEQUOTE             Dequote if quoted                            
+         IF    NEG,BEGIN           Not quoted                                   
+         SCRSTR AREA=HELPCMD                                                    
+         END                                                                    
+         ELSE  BEGIN               Quoted...                                    
+         SCSAVE AREA=HELPOPTS                                                   
+         SCINIT (R1),(R0)                                                       
+         END                                                                    
+         END                                                                    
+*                                                                               
+         ACALL GETHDIR             Match text                                   
+         IF    Z,BEGIN                                                          
+         TSEG  'No help available for '                                         
+         SCRSTR AREA=HELPCMD                                                    
+         SCINFO                                                                 
+         VCALL LRTRIM                                                           
+         TSEG  (R1),(R0),CR                                                     
+         ERROR 'Type HELP for general information.'                             
+         END                                                                    
+*                                                                               
+         ST    R15,HELPDIR         Save addr of matching entry                  
+         WITH  (HDIR,R15),'MVC HELPDSN,HDIRDSN'                                 
+*-                                                                              
+*-       Save the remaining words in the token table.                           
+*-                                                                              
+         CLEAR R2                                                               
+         LA    R3,HELPTOK          Start of table                               
+*                                                                               
+HELPSTAB LOOP  BEGIN                                                            
+         SCAN                                                                   
+         SCANCHK                                                                
+         IF    (R0,Z),EXIT         All done, scram                              
+         SCUPTOK (R1)                                                           
+         LR    R15,R1                                                           
+         IF    (@R15,EQ,'ALL '),'SET HELFALL; EXIT HELPSTAB'                    
+         CEIL  R0,8                                                             
+         STC   R0,@R3              Save length                                  
+         MVC   @R3+1(8),@R15       Save token                                   
+*                                                                               
+         LA    R3,@R3+L'HELPTOK                                                 
+         LA    R2,@R2+1                                                         
+         IF    (R2,GE,HELPMAX#),EXIT  all done, scram                           
+         END                                                                    
+*                                                                               
+         STH   R2,HELPTNO          Save no. of tokens                           
+*                                                                               
+         SCRSTR AREA=HELPOPTS                                                   
+         END                                                                    
+*-                                                                              
+*-       Scan for HELP command options.                                         
+*-                                                                              
+         SCAN  HELPPRT                                                          
+         SCANCHK                                                                
+*-                                                                              
+*-       Now initialize and process the text from the help file.                
+*-                                                                              
+         SCINIT HELPDSN                                                         
+         VCALL DOFNAME             Scan dsname and place in FFINFO              
+         VCALL FNAMOPTS            Look for options with dsn                    
+         VCALL FNAMEFIN            Find file type for dsn                       
+         SET   CPLFLG1.CPFALL      Read the entire range                        
+         SET   CPFRDEXT            From an external file                        
+         VCALL NDETRNG                                                          
+*                                                                               
+         VCALL EXTOPENE            Open file                                    
+         IF    (R15,NZ),BEGIN                                                   
+         IF    (CPERRID,EQ,'NOACCESS'),BEGIN                                    
+         QSNAP CPCMD,32                                                         
+         TCLEAR                                                                 
+         TSEG  'No help available.  '                                           
+         ABORT 'Type HELP for general information.'                             
+         END                                                                    
+         B     CVNEXT                                                           
+         END                                                                    
+*-                                                                              
+*-       RDRNG will call a routine in ACT to read through the                   
+*-       external file, calling HELPRTN as a co-routine for                     
+*-       each line it finds in the external file.  (Just in case                
+*-       you, too, were banging your head against the monitor                   
+*-       trying to find where the next line gets read!)                         
+*-                                                                              
+*-       [For those who worked on WYLBUR in the 1970s, this                     
+*-       replaces the old DESPOT interface.  That's really asking               
+*-       a lot of old gray cells...]                                            
+*-                                                                              
+         RDRNG HELPRTN,(DESRTRN+LXCATRTN+UNPRST+DESABORT)                       
+         IF    NZ,'TCLEAR; B CVABORT'                                           
+         VCALL EXTCLOSE            Close current HELP so we can                 
+*                                   open next if necessary                      
+*-                                                                              
+*-       If command has privileged parts, consider displaying                   
+*-       them now.                                                              
+*-                                                                              
+         L     R15,HELPDIR         Get back HELPDIR entry                       
+         USING HDIR,R15                                                         
+         IF    HDIRPRIV,BEGIN                                                   
+         IF    (CPSFSPR,OR,CPSFOPR),BEGIN   Show only to priv users             
+         L     R15,HDIRLINK        Point at privileged entry                    
+*                                  no checking for valid HELPDIR...             
+         MVC   HELPDSN,HDIRDSN     Set next HELP to display                     
+         DROP  R15                                                              
+*-                                                                              
+*-       Now initialize and process the text from the privileged                
+*-       help file.                                                             
+*-                                                                              
+         SCINIT HELPDSN                                                         
+         VCALL DOFNAME             Scan dsname and place in FFINFO              
+         L     R15,CPFINFOP                                                     
+         USING FFINFO,R15                                                       
+         XC    FFOPTSL,FFOPTSL     Clear options from previous                  
+         XC    FFOPTS,FFOPTS        file name                                   
+         DROP  R15                                                              
+         VCALL FNAMOPTS            Look for options with dsn                    
+         VCALL FNAMEFIN            Find file type for dsn                       
+         SET   CPLFLG1.CPFALL      Read the entire range                        
+         SET   CPFRDEXT            From an external file                        
+         VCALL NDETRNG                                                          
+*                                                                               
+         VCALL EXTOPENE            Open file                                    
+         IF    (R15,Z),BEGIN        and if okay, do coroutine                   
+         IF    HELFFND,BEGIN       If some HELP already given,                  
+         TCR   ,                    inSert blank line                           
+         TCR   ,                                                                
+         END   ,                                                                
+         RDRNG HELPRTN,(DESRTRN+LXCATRTN+UNPRST+DESABORT)                       
+         IF    NZ,'TCLEAR; B CVABORT'                                           
+         END   ,                                                                
+         ELSEIF (CPERRID,EQ,'NOACCESS'),BEGIN                                   
+         QSNAP CPCMD,32                                                         
+         END   ,                                                                
+         END   ,                                                                
+         END   ,                                                                
+*-                                                                              
+*-       If none of the options were found mention it now.                      
+*-                                                                              
+         IF    ^HELFFND,BEGIN      Nothing...                                   
+         IF    (HELPTNO,Z),EXIT                                                 
+         TCR                                                                    
+         TSEG  'There is no information available for: '                        
+*                                                                               
+         LH    R2,HELPTNO                                                       
+         LA    R3,HELPTOK                                                       
+*                                                                               
+         LOOP  BEGIN                                                            
+         TSEG  @R3+1,LC:@R3,B                                                   
+         LA    R3,@R3+L'HELPTOK                                                 
+         DECR  R2                                                               
+         UNTIL (R2,NP)                                                          
+         END                                                                    
+         END                                                                    
+         B     CVNEXT                                                           
+*                                                                               
+*                                                                               
+HELPPRT  SCKW  ,V(COLLPSH),PUSH                                                 
+         SCKW  ,V(INVALID)                                                      
+*                                                                               
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HELPRTN -- Routine to process lines from the help data set.                  
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*                                                                               
+HELPRTN  XENTER R2,R8,,LOCAL                                                    
+         L     R6,CPCWA                                                         
+         USING HELPWA,R6                                                        
+*                                                                               
+         STM   R0,R1,HELPPTRS                                                   
+*-                                                                              
+*-       Check for internal .* lines.                                           
+*-                                                                              
+         IF    ((R0,GE,2),AND,(@R1,EQ,'.*')),BEGIN                              
+         SH    R0,=H'2'                                                         
+         SCINIT @R1+2,(R0)                                                      
+         SCAN  HOPPRT              Look for control card words                  
+         B     HOPEXIT             DONT check for errors                        
+         END                                                                    
+*-                                                                              
+*- Check for conditional sections.  Special conditional sections are:           
+*-         .cs 1     - never display this text.                                 
+*-         .cs 7     - only display this text if privileged account.            
+*-         .cs 8     - only display this text if in line mode.                  
+*-         .cs 9     - only display this text if in page mode.                  
+*-         .cs 10-19 - never display this text.                                 
+*-                                                                              
+         MVC   CPDOUB,@R1          Retrieve the control token                   
+         OC    CPDOUB,CVBLANKS     and uppercase it                             
+         IF    ((R0,GE,3),AND,(CPDOUB,EQ,'.CS')),BEGIN                          
+         SH    R0,=H'3'            If we have a .cs card                        
+         SCINIT @R1+3,(R0)         look for the .cs number                      
+         SCAN                                                                   
+         IF    ((R15,NZ),OR,(R0,Z)),HOPEXIT                                     
+         DTB   (R1),(R0)           Convert .cs number to binary                 
+         BNZ   HOPEXIT                                                          
+         LR    R2,R15              Save .cs number for later                    
+*                                                                               
+         SCAN                                                                   
+         IF    ((R15,NZ),OR,(R0,Z)),HOPEXIT                                     
+         SCUPTOK (R1)                                                           
+*                                                                               
+*                                  If .cs 1 or 10-19,                           
+         IF    ((R2,EQ,1),OR,((R2,GE,10),AND,(R2,LE,19))),BEGIN                 
+         CLEAR HELFSKIP                                                         
+         IF    (@R1,EQ,'ON'),'SET HELFSKIP'  skip this section                  
+         END                                                                    
+*                                                                               
+*                                  If .cs 7, allow                              
+         IF    (R2,EQ,7),BEGIN      privileged accounts only...                 
+         CLEAR HELFSKIP                                                         
+         IF    (@R1,EQ,'ON'),BEGIN                                              
+         IF    (^CPSFSPR,AND,^CPSFOPR),'SET HELFSKIP'  skip it                  
+         END                                                                    
+         END                                                                    
+*                                                                               
+         IF    (R2,EQ,8),BEGIN     Line mode only...                            
+         CLEAR HELFSKIP                                                         
+         IF    (@R1,EQ,'ON'),BEGIN                                              
+         IF    CPVFPAGE,'SET HELFSKIP'  skip if in page mode                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         IF    (R2,EQ,9),BEGIN     Page mode only...                            
+         CLEAR HELFSKIP                                                         
+         IF    (@R1,EQ,'ON'),BEGIN                                              
+         IF    ^CPVFPAGE,'SET HELFSKIP'  skip if in line mode                   
+         END                                                                    
+         END                                                                    
+         B     HOPEXIT                                                          
+         END                                                                    
+*-                                                                              
+*-       Skip text which is not to be displayed.                                
+*-                                                                              
+         IF    (R0,POS),BEGIN                                                   
+         IF    (@R1,EQ,'.'),HOPEXIT                                             
+         IF    (@R1,EQ,','),HOPEXIT                                             
+         IF    (@R1,EQ,':'),HOPEXIT                                             
+         END                                                                    
+*-                                                                              
+*-       Don't display non-public help if not logged on.                        
+*-                                                                              
+         IF    (CPSACCT,Z),BEGIN   Not logged on...                             
+         IF    HELFPUB,EXIT        It's ok to display public help               
+         ABORT 'Please logon first.'                                            
+         END                                                                    
+*-                                                                              
+*-       Now write the line, if it is from the appropriate section.             
+*-                                                                              
+         IF    (HELFMAT,AND,^HELFSKIP),BEGIN  Matched...                        
+         LCALL HTXTFMT             Do any re-formatting                         
+*                                                                               
+         LCALL HTXTLINE            Write line out in line mode                  
+*                                                                               
+         CLEAR HELPFNO             Reset working field number                   
+         END                                                                    
+*                                                                               
+HOPEXIT  LABEL ,                                                                
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+**                                                                              
+**  .* Control Lines                                                            
+**                                                                              
+         SPACE 2                                                                
+HOPPRT   SCKW  PUBLIC,HOPPUB,A                                                  
+         SCKW  DESCRIPTION,HOPDESC,A                                            
+         SCKW  FUNCTION,HOPDESC,A  (compatability)                              
+         SCKW  OPTION,HOPOPTN,A                                                 
+         SCKW  BLANK,HOPBLANK,(A,P)                                             
+         SCKW  NOBLANK,HOPNBLNK,A                                               
+         SCKW  PROMPT,HOPPRMPT,(A,P)                                            
+         SCKW  SELECT,HOPSEL,(A,P)                                              
+         SCKW  ,HOPDONE                                                         
+         EJECT                                                                  
+**                                                                              
+**                                                                              
+**                                                                              
+HOPDONE  PROC ,                                                                 
+         LA    R15,4                                                            
+         PEND                                                                   
+**                                                                              
+**  .* PUBLIC control line.                                                     
+**                                                                              
+HOPPUB   PROC  ,                                                                
+         SET   HELFPUB             Allow this help before logon                 
+         LA    R15,4                                                            
+         PEND                                                                   
+         SPACE 2                                                                
+**                                                                              
+**  .* DESCRIPTION control line.                                                
+**                                                                              
+HOPDESC  PROC  ,                                                                
+         CLEAR HELFMAT                                                          
+         IF    (HELPTNO,Z),'SET HELFMAT'                                        
+         LA    R15,4                                                            
+         PEND                                                                   
+         SPACE 2                                                                
+**                                                                              
+**  .* OPTION control line.                                                     
+**                                                                              
+HOPOPTN  PROC  ,                                                                
+         CLEAR HELFMAT             Assume no match                              
+         IF    HELFALL,'SET HELFMAT+HELFFND; B HOPOEXIT'  Everything            
+*                                                                               
+         SCAN  ,                                                                
+         WHILE ((R15,Z),AND,(R0,POS)),BEGIN  Try to match an option..           
+         LA    R4,3                                                             
+         VCALL DEQUOTE             De-quote, if needed                          
+         IF    ^NEG,'LA R4,8'      Quoted means asis                            
+         ELSE  'SCUPTOK (R1)'      Not quoted use upper case                    
+         MVC   CPDOUB,CVBLANKS                                                  
+         LR    R15,R0                                                           
+         CEIL  R15,8                                                            
+         MOVE  R15,CPDOUB,@R1                                                   
+*                                                                               
+         CLEAR R2                                                               
+         LA    R3,HELPTOK                                                       
+         WHILE (R2,LT,HELPTNO),BEGIN  Go through tokens...                      
+         LC    R15,@R3             Saved token length                           
+         FLOOR R15,R4              Allow abbreviations                          
+         CMPR  R15,CPDOUB,@R3+1                                                 
+         IF    EQ,'SET HELFMAT+HELFFND; B HOPOEXIT'  Matched, scram             
+*                                                                               
+         LA    R3,@R3+L'HELPTOK                                                 
+         LA    R2,@R2+1                                                         
+         END                                                                    
+         SCAN  ,                                                                
+         END                                                                    
+*                                                                               
+HOPOEXIT LA    R15,4                                                            
+         PEND  ,                                                                
+         EJECT                                                                  
+**                                                                              
+**  .BLANK/.NOBLANK control lines.                                              
+**                                                                              
+HOPBLANK PROC  ,                                                                
+         VCALL DEQUOTE             De-quote, if quoted                          
+         BZ    HOPNBLNK                                                         
+         MVC   HELPBLNK,@R1        New blank char                               
+         LA    R15,4                                                            
+         PEND                                                                   
+*                                                                               
+HOPNBLNK PROC  ,                                                                
+         CLEAR HELPBLNK            No blank char                                
+         LA    R15,4                                                            
+         PEND                                                                   
+         EJECT                                                                  
+**                                                                              
+**  .* PROMPT control line.                                                     
+**                                                                              
+HOPPRMPT PROC  ,                                                                
+         IF    (HELFMAT,AND,^HELFSKIP),BEGIN  Matched...                        
+         IF    CPFDUMP,EXIT        Skip if collecting text                      
+*                                                                               
+         VCALL DEQUOTE             De-quote, if quoted                          
+         VCALL YESRTN              Get a yes/no                                 
+         BM    CVABORT             Attn, scram                                  
+         IF    POS,'CLEAR HELFMAT'  Skip the rest of the section                
+         END                                                                    
+         LA    R15,4                                                            
+         PEND  ,                                                                
+         EJECT                                                                  
+**                                                                              
+**  .* SELECT control line.                                                     
+**                                                                              
+HOPSEL   PROC  ,                                                                
+         IF    (HELFMAT,AND,^HELFSKIP),BEGIN                                    
+         IF    CPFDUMP,EXIT        Skip if collecting text                      
+         IF    CPVFPAGE,EXIT       Skip if in page mode                         
+         IF    (HELPTNO,NZ),EXIT   Skip if there are some words                 
+         IF    HELFALL,EXIT        Show everything                              
+*                                                                               
+         IF    CPFDUMP,'SET HELFALL; B HOPSEXIT'                                
+*                                                                               
+         XPUSH R0,R1                                                            
+         CLEAR HELPBCNT            Zot any pending CRs                          
+         TCR                                                                    
+         TSEG  'Type any options you would like to get information'             
+         TSEG  ' about.',,CR                                                    
+*                                                                               
+         XPOP  R0,R1                                                            
+         VCALL DEQUOTE             De-quote, if quoted                          
+         TSEG  (R1),(R0)                                                        
+         TREAD ' (<RETURN>=everything)? '                                       
+         BNZ   CVNEXT                                                           
+*-                                                                              
+*-       Save the words in the token table.                                     
+*-                                                                              
+         SCINIT (R1),(R0)                                                       
+*                                                                               
+         CLEAR R2                                                               
+         LA    R3,HELPTOK          Start of table                               
+*                                                                               
+         LOOP  BEGIN                                                            
+         SCAN                                                                   
+         SCANCHK                                                                
+         SCUPTOK (R15)                                                          
+         IF    (R0,Z),EXIT              All done, scram                         
+         CEIL  R0,8                                                             
+         STC   R0,@R3              Save length                                  
+         MVC   @R3+1(8),@R15       Save token                                   
+*                                                                               
+         LA    R3,@R3+L'HELPTOK                                                 
+         LA    R2,@R2+1                                                         
+         IF    (R2,GE,HELPMAX#),EXIT  all done, scram                           
+         END                                                                    
+*                                                                               
+         STH   R2,HELPTNO          Save no. of tokens                           
+         IF    (R2,Z),'SET HELFALL'  Display everything                         
+         END                                                                    
+*                                                                               
+HOPSEXIT LABEL ,                                                                
+         LA    R15,4                                                            
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HTXTFMT -- Local routine to do any re-formatting of a line of                
+*    help text.                                                                 
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*                                                                               
+HTXTFMT  XENTER R2,R8,,LOCAL                                                    
+         IF    (HELPBLNK,NZ),BEGIN  Blank char...                               
+         LR    R3,R1                                                            
+         LR    R2,R0                                                            
+*                                                                               
+         WHILE (R2,POS),BEGIN                                                   
+         IF    (@R3,EQ,HELPBLNK),'MVI @R3,C" "'  blank out                      
+         LA    R3,@R3+1                                                         
+         DECR  R2                                                               
+         END                                                                    
+         END                                                                    
+         XEXIT                                                                  
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HTXTLINE -- Local routine to display a line of help text in line             
+*    mode.                                                                      
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*                                                                               
+HTXTLINE XENTER R2,R8,,LOCAL                                                    
+         IF    (R0,Z),'INCR R15,HELPBCNT'  blank line count                     
+*                                                                               
+         ELSE  BEGIN                                                            
+         LR    R5,R1                                                            
+         LR    R4,R0                                                            
+*                                                                               
+         LH    R2,HELPBCNT                                                      
+         WHILE (R2,POS),'TCR; DECR R2'                                          
+         CLEAR HELPBCNT                                                         
+*                                                                               
+         TSEG  (R5),(R4),CR        Write out the line                           
+         BNZ   CVABORT                                                          
+         END                                                                    
+*                                                                               
+         XEXIT                                                                  
+         DROP  BR                                                               
+*                                                                               
+         DROP  HELPWA                                                           
+*                                                                               
+         QLTORG                                                                 
+         VLTORG                                                                 
+         END   .                                                                

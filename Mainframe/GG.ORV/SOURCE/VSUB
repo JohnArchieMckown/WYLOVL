@@ -1,0 +1,2687 @@
+VSUB     TITLE 'ORVYL''S COMMAND PROCESSOR FILE SUBROUTINES'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 2
+         HIBAL
+         SPACE 2
+* MODIFICATIONS
+*
+         EJECT ,
+VSUB     CSECT ,
+         IDENT 00                      MODULE ID
+         SPACE 2
+         GBLC  &SYSGRP,&SYSUSER
+         COPY  ORVDEFN
+         SPACE ,
+&MODULE  SETC  'VSUB'
+         SPACE 3
+         REGS  ,,SR,TR,QR,(RR,FSUBR),BRR,BR,WAR,RAR,CLWR,,GPWR
+*
+         MACRO
+&L       BTD   &LOC,&LEN,&WORD,&SW,&COMMAS=NO
+         LCLC  &CM
+         AIF   ('&COMMAS' NE 'YES').NOCM
+&CM      SETC  'C'
+.NOCM    ANOP
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN,TYPE=&SW
+         SYSLR 1,&LOC
+         XCALL BTD&CM
+         MEND
+*
+         MACRO
+&L       BTX   &LOC,&LEN,&WORD
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN
+         SYSLR 1,&LOC
+         XCALL BTX
+         MEND
+*
+         MACRO
+&L       CNTRLCOD &CODE
+&L       BAL   R1,DOCONTRL
+         DC    AL2(&CODE)
+         MEND
+*GEN
+         EJECT ,
+         COPY  SCP
+         EJECT ,
+         COPY  CLW
+         EJECT ,
+         COPY  WYLMDWD
+         EJECT ,
+         COPY  GPW                     COPY GET/PUT WORK AREA
+*NOGEN
+         EJECT ,
+         COPY  PRGCAT                  COPY PROGRAM CATALOG FMT
+         SPACE 2
+         COPY  DENTRY                  COPY DIRECTORY ENTRY FMT
+         SPACE 2
+         COPY  DIRB                    COPY DIRECTORY BLOCK FMT
+         EJECT ,
+VSUB     CSECT ,                       RESUME CONTROL SECTION
+         SPACE ,
+         USING CLW,CLWR                ##
+         USING GPW,GPWR                ##
+         USING FSUB#COM,BRR            ## ADDR FOR COMMON ROUTINES
+*GEN
+         FSCALL FSUB#1                 GENERATE SEGMENT 1
+*NOGEN
+         EJECT ,
+FILSETUP LABEL ,
+         L     GPWR,CLWGPWP            ADDRESS OF GET/PUT WRK PGE
+         IF    CLWFGPW,BEGIN           PAGE ALREADY ALLOCATED
+         LT    R15,GPWDIRAL            ANY DIRECTORY SPACE ?
+         IF    NZ,BEGIN                FREE EXISTING DIR CORE
+         L     R1,GPWDIRAP             POINT TO DIRECTORY CORE
+         FREECLW (1),(15)              FREE DIRECTORY CORE
+         END   ,
+         END   ELSE,BEGIN
+         L     R1,=A(L'GPW)            GPW LENGTH
+         GETCLW (1),(1)                GET GPW CORE
+         IF    NZ,FSNOCORE             NOT ENOUGH, GIVE UP
+         LR    GPWR,R1                 SET BASE FOR GPW
+         ST    R1,CLWGPWP              SET GP WORK ADDRESS
+         SET   CLWFGPW                 GP WORK AREA OBTAINED
+         END   ,
+         SPACE ,
+         LR    R0,GPWR                 CLEAR GPW TO ZEROS
+         LA    R1,L'GPWWRK             LENGTH TO CLEAR
+         CLEAR TR                      ZERO FROM LENGTH
+         MVCL  R0,SR                   ZERO PAD WORK AREA
+         SPACE ,
+         SET   GPWFFREE                FREE CORE AT EXIT
+         MVC   GPWSUSER,CLWUSER        DFLT SIGNED-ON USER
+         MVC   GPWSGRP,CLWGROUP        DFLT SIGNED-ON GROUP
+         L     R1,=A(GPWBUF-GPWSTART)  GENERAL BUFFER OFFSET
+         ALR   R1,GPWR                 ADDRESS OF GENERAL BUFFER
+         ST    R1,GPWBUFA              SET BUFFER ADDRESS IN GPW
+         SPACE ,
+* FALL INTO FNINIT CODE
+*
+         SPACE ,
+FNINIT   LABEL ,
+         CLEAR GPWBN                   CLEAR NEXT BLOCK NUMBER
+         CLEAR (GPWPFFL,3)             CLEAR FLAGS IN GP FCB
+         MVC   GPWFFN(L'PFX+1),=C'ORV.  .   . '
+         MVC   GPWFN+1(L'GPWFN),GPWFN  BLANK FILL
+         B     FSUB0                   EXIT, RC=0
+         EJECT ,
+*
+*  ATTACH ROUTINES
+*
+*  THERE  ARE ATTACH ROUTINES FOR BOTH ORVYL AND OS/FILES.
+*  ORVYL FIRST.
+*
+*
+ATTNEW   LABEL ,                       ATTACH NEW
+         IF    GPWFVOSF,NOVOSF         NO OS NEW ATTACH, SEE ATTOUTOS
+         ATTACH 2,GPWFILN,IC:GPWFNL
+         B     ATTCOM
+*
+ATTOLDX  LABEL ,                       MARK SHARED ATTACH
+         IF    GPWFVOSF,OSATTSHR       O.S FILE ATTACH ->
+         SET   GPWFSHR
+         CLEAR R14
+         BCTR  R14,0                   DON'T UPDATE ACCESS DATE
+         ATTACH 2,GPWFILN,IC:GPWFNL,(R14),MODE=(OLD,SHARE)
+         B     ATTCOM
+*
+ATTOLD   LABEL ,                       MARK SHARED ATTACH
+         IF    GPWFVOSF,OSATTSHR       O.S FILE ATTACH ->
+         SET   GPWFSHR
+         ATTACH 2,GPWFILN,IC:GPWFNL,MODE=(OLD,SHARE)
+         B     ATTCOM
+*
+ATTOLDE  LABEL ,                       MARK EXCLUSIVE ATTACH
+         IF    GPWFVOSF,OSATOLDE       OS/FILE ATTACH ->
+         CLEAR GPWFSHR
+         ATTACH 2,GPWFILN,IC:GPWFNL,MODE=(OLD)
+*
+ATTCOM   B     *+16(15)
+         B     NOFILSYS                -12 FILE SYSTEM NOT AVAILABLE
+         B     ILLNAME                 -8 ILLEGAL DEVICE (NAME?)
+         B     TOOMANY                 -4 TOO MANY DEVICES ALREADY
+         B     ATTWAIT                  0 ATTACH STARTED
+         B     ISATT                    4 RECURSIVE ATTACH
+         B     ISATT                    8 ALREADY ATTACHED
+         B     ISATT                   12 ALREADY ATTACHED
+ATTWAIT  WAIT  (0)
+         B     *+8(15)
+         B     ATTEXCLU                -4 FILE UNAVAILABLE
+         B     ATTCOMP                  0 ATTACH COMPLETE
+         B     NOACCESS                 4 ACCESS NOT PERMITTED
+         B     NOUSPACE                 8 USER SPACE EXHAUSTED
+         B     NODSPACE                12 FILE DIRECTORY FULL
+         B     TRYNEW                  16 FILE NOT THERE
+         B     EXISTS                  20 FILE ALREADY THERE
+         B     OFLOW                   24 SYSTEM TABLES OVERFLOWED
+         B     NODSPACE                28 NO MORE DISK SPACE
+         B     SHRONLY                 32 FILE ATTACHABLE ONLY SHARE
+*
+ATTCOMP  SET   GPWFATT                 MARK FILE ATTACHED
+         STC   R0,GPWFID                 SAVE ID
+         FSCALL SENBLKSZ               Get Blocksize
+         STH   R1,GPWBLKSZ              Save it
+         CLEAR GPWFNIXR,GPWFHYBR       ASSUME NORMAL MODE
+         FSCALL SENMODE                WHICH IS IT?
+         IF    NZ,BEGIN
+         SET   GPWFNIXR                NON-IXR'ED
+         IF    (R15,EQ,28),BEGIN       HYBRID
+         SET   GPWFHYBR                HYBRID FILE TYPE
+         FSCALL SENNRECH               GET NUMBER OF IXRs
+         ST    R14,GPWHCNT             SAVE IXR COUNT
+         END   ,
+         END   ,
+         SET   GPWFFMT                 ASSUME FORMAT
+         IF    ^GPWFNSF,'FSCALL SENUINFO'    GET FORMAT IF NECC
+         IF    NZ,BEGIN               IS A FORMAT
+         CLEAR GPWFFMT                 CAN'T WIN THEM ALL
+         CLEAR R1
+         END   ,
+         ST    R1,GPWUINFO             SET FORMAT INFO
+         IF    GPWFSHR,FSUB0           SCKIP CHECK IF SHARE
+         FSCALL DOSENCLP               SENSE CLP ACCESS
+         BNZ   NOCLPACC                SORRY...
+         B     FSUB0                   RETURN TO CALLER
+*
+TRYNEW   LABEL ,                       OLD FILE NOT THERE
+         IF    GPWFNOE,FSUBX           FORGIVE AND FORGET?(CALL)
+         IF    ^GPWFANW,NOTHERE        TRY NEW? (PUT AND LOADFILE)
+         SET   GPWFNEW                 SET NEW FILE
+         B     ATTNEW                  ONCE MORE, ONCE
+         EJECT ,
+*
+* ATTACH OS/FILES
+*  FIRST WE DO EXISTING, INPUT FILES.  IE ATTACH OLD
+*  THEN WE DO OUTPUT FILE ATTACHES.  ROUTINES FOLLOW
+*
+*
+*  ATTACH FOR INPUT
+*
+*
+OSATTSHR LABEL ,                       OS/FILE ATTACH
+         SET   GPWFSHR
+         SET   OSFSHR
+         B     ATTACHOS
+         SPACE ,
+OSATOLDE LABEL ,                       EXCLUSIVE OS FILE ATTACH
+         CLEAR GPWFSHR
+         SET   OSFOLD
+         SET   OSFIN
+*        B     ATTACHOS                PISTACHIOS
+         SPACE ,
+ATTACHOS ATTACH 3,OSFPB,L'OSFPB,MODE=(RETURN,FULLDSN) ATTACH OS
+         BNZ   HOTERROS
+         WAIT  (0)
+         BNZ   ERROS                   ATTACH ERROR
+         SET   GPWFATT                 MARK ATTACHED, SAVE ID
+         STC   R0,GPWFID
+         LH    SR,OSFBLKSZ
+         IF    (('CH SR,OSFLRECL',E),AND,OSFRCFMU),'SET GPWOSFED'
+         SET   GPWFFMT                 SET FILE FORMAT
+         FSCALL SENUINFO
+         ST    R1,GPWUINFO
+         B     FSUB0                   DONE
+         EJECT ,
+*
+*  CHECK OUT OS FILE
+*
+*  MINUS RETURN IF FILE DOES NOT EXIST.   IF FILE EXISTS,
+*  WE FILL THE OSFPB AND SET THE FILE INFO WORD.   WE NOTE,
+*  THIS MUST BE CALLED BEFORE THE ATTACH, BUMMER CITY.
+*
+CHECKOS  LABEL ,
+         B     NOOSFIL2
+         SERVICE 1,OSFPB,L'OSFPB,MODE=FULLDSN
+         BNZ   HOTERROS
+         WAIT  (0)
+         IF    (R15,EQ,8),BEGIN        FILE DOES NOT EXIST
+         LA    R15,4
+         LCR   R15,R15
+         B     FSUBX
+         END   ,
+         LTR   R15,R15
+         BNZ   ERROS
+         LH    SR,OSFBLKSZ
+         IF    (('CH SR,OSFLRECL',E),AND,OSFRCFMU),'SET GPWOSFED'
+         SET   GPWFFMT                 SET FILE FORMAT
+         FSCALL SENUINFO
+         ST    R1,GPWUINFO
+         B     FSUB0                   DONE
+         EJECT ,
+*
+*  ATTACH OS/FILE FOR OUTPUT
+*
+*  NOTE UNLESS SET EXTERNALLY THE DISP= FIELD WILL DEFAULT TO NEW.
+*  OTHER OSFPB OPTIONS ARE SET THE BEST THEY CAN.
+*
+*
+ATTOUTOS LABEL ,                       ATTACH FOR OUTPUT
+         SET   OSFOUT                  OUTPUT
+         VCALL SETFMT                  GET FILE INFO
+         CLI   OSFDSORG,X'00'          IF DSORG NOT SET, SET IT
+         IF    E,BEGIN
+         IF    GPWUILIB,' SET OSFPO '            PDS
+         ELSE  'SET OSFPS'             SEQUENTIAL
+         END   ,
+         MVC   OSFLRECL(2),GPWUILRC
+         IF    GPWUIFLR,'SET OSFRCFMF'
+         IF    GPWUILDF,'SET OSFRCFMU'
+*$ NOTE: WE ONLY EXPECT FIXED AND EDIT, OTHERS ARE IN TROUBLE.
+         ATTACH 3,OSFPB,L'OSFPB,MODE=(RETURN,FULLDSN) ATTACH OS
+         BNZ   HOTERROS
+         WAIT  (0)
+         BNZ   ERROS                   ATTACH ERROR
+         SET   GPWFATT                 MARK ATTACHED, SAVE ID
+         STC   R0,GPWFID
+         LH    SR,OSFBLKSZ
+         IF    (('CH SR,OSFLRECL',E),AND,OSFRCFMU),'SET GPWOSFED'
+         SET   GPWFFMT                 SET FILE FORMAT
+         FSCALL SENUINFO
+         ST    R1,GPWUINFO
+         B     FSUB0                   DONE
+         EJECT ,
+*  DETACH ROUTINE
+*
+DETACH   LABEL ,
+         DETACH IC:GPWFID
+         WAIT  (0)
+         CLEAR GPWFATT                 CLEAR ATTACHED
+         B     FSUB0                   RETURN TO CALLER
+         SPACE 5
+         LTORG ,
+         EJECT ,
+*GEN
+         FSCALL FSUB#2                 GENERATE SEGMENT 2
+*NOGEN
+         EJECT ,
+*  GET FILE NAME
+*
+GETNAME  LABEL ,
+         SCAN  ,CLWKWCB
+GOTNAME  LTR   SR,R0                   KEYWORD ROUTINE ENTRY
+         BNP   FSSCNRTN                NO
+         IF    (@R1,EQ,'$'),BEGIN      OS/FILE SPECIFIED
+         SET   GPWFVOSF+GPWFFFN        OS/FILE AND FULL FORMAT
+         IF    (R0,GT,45),FSUNREC      LENGTH TESTS
+         IF    (R0,LE,1),FSUNREC      STANDALONE '$' ILLEGAL
+         INCR  R1                      ADJUST STARTING ADDRESS
+         DECR  SR                      ADJUST LENGTH
+         LR    R0,SR                   RESET R0 TO ADJUSTED LENGTH
+         END   ELSE,BEGIN              PROCESS UNQUALIFIED NAME
+         IF    (R0,GT,44),FSUNREC      LENGTH TEST
+         END   ,
+         SPACE ,
+         STC   SR,GPWFNL               SET LENGTH IN GPW
+         DEX   SR,'OC  GPWFN(0),@R1'   MOVE NAME INTO GPW SPACE
+         LR    SR,R0                   RESET CORRECT LENGTH
+         SPACE ,
+         IF    ((GPWFN+10,EQ,'.'),AND,       FULLY QUALIFIED NAME      *
+               (GPWFN+6,EQ,'.'),AND,         TEST FOR PROPER           *
+               (GPWFN+3,EQ,'.')),BEGIN            FORMAT
+         IF    (=C'WYL',EQ,GPWFN),'SET GPWFVOSF+GPWFFFN'
+         IF    (=C'ORV',EQ,GPWFN),'SET GPWFFFN'
+         IF    (GPWFFFN,AND,(SR,LT,L'PFX+1)),FSHRTORV
+         END   ,
+         EJECT ,
+         IF    GPWFFFN,BEGIN                 QUALIFIED NAME
+         MVC   GPWFFN(44),GPWFN              SHIFT FILENAME
+         B     FSUB0
+         END   ,
+         LA    SR,@SR+L'PFX
+         LOOP  BEGIN
+         IF    (GPWFN,EQ,'@'),BEGIN          GROUP SPECIFIED
+         IF    (GPWGRP,NE,' '),FSDBLGRP      GROUP ALREADY SPEC
+         IF    (GPWFN+1,EQ,'.'),BEGIN        JUST @.
+         MVC   GPWGRP,CLWGROUP               SIGNED ON GROUP
+         MVC   GPWFN(L'GPWFN-2),GPWFN+2      SKIP @.
+         SH    SR,=Y(2)                      DECREMENT LENGTH
+         END   ELSE,BEGIN
+         CLI   GPWFN+L'GPWGRP+1,C'.'         DOT?
+         BNE   ILLFN
+         MVC   GPWGRP,GPWFN+1
+         MVC   GPWFN(L'GPWFN-L'GPWGRP-2),GPWFN+2+L'GPWGRP
+         SH    SR,=Y(2+L'GPWGRP)             DECREMENT LENGTH
+         END   ,
+         END   ,
+         ELSEIF (GPWFN,EQ,'&&'),BEGIN
+         IF    (GPWUSER,NE,' '),FSDBLUSR
+         IF    (GPWFN+1,EQ,'.'),BEGIN  JUST &.
+         MVC   GPWUSER,CLWUSER               USE SIGNED ON USER
+         MVC   GPWFN(L'GPWFN-2),GPWFN+2      REMOVE &.
+         SH    SR,=Y(2)                      DECREMENT LENGTH
+         END   ELSE,BEGIN
+         IF    (GPWFN+L'GPWUSER+1,NE,'.'),ILLFN
+         MVC   GPWUSER,GPWFN+1
+         MVC   GPWFN(L'GPWFN-L'GPWUSER-2),GPWFN+2+L'GPWUSER
+         SH    SR,=Y(2+L'GPWUSER)            DECREMENT LENGTH
+         END   ,
+         END   ELSE,BEGIN
+         STC   SR,GPWFNL               RESET UPDATED LENGTH
+         B     FSUB0                   RETURN
+         END   ,
+         END   ,
+         SPACE ,
+ILLFN    SEG   GPWFN,1(SR)
+         B     FSILNAM1
+         EJECT ,
+*  ROUTINE TO SCAN FOR A FILENAME#MEMBER OR FILENAME(MEMBER)
+*  RETURNS ZERO COND CODE IF MEMBER IS FOUND
+GETMEMBR LABEL ,
+         SCTELL CLWKWCB                SAVE SCAN
+         VPUSH ,,CLWKWCBL,PTR=QR
+         SCINIT (1),(0),(QR)           START NEW SCAN
+         SCAN  0,(QR)                  FILE OR MEMBER NAME
+         BNP   NOMEMBR                 NOTHING THERE...
+         CLI   @R1,C'('                MEMBER ALREADY?
+         BE    FSNDFLIB                NOT SUPPORTED (YET?)
+         CLI   @R1,C'#'                MEMBER ALREADY?
+         BE    FSNDFLIB                NOT SUPPORTED (YET?)
+         LR    TR,R1                   SAVE
+         LR    SR,0                     FILENAME
+SRCH#MEM CLI   @TR,C'#'                START OF MEMBER NAME?
+         BE    FOUND#                  YES
+         LA    TR,@TR+1                BUMP POINTER
+         BCT   SR,SRCH#MEM              AND LOOP
+         VPUSH R0,R1,*                 PUSH FILENAME ONTO STACK
+         LR    SR,0                    COMPUTE ADDRESS OF
+         AR    SR,R1                    OF END OF FILENAME
+         SCAN  0,(QR)                  LOOK FOR '(MEMBER)'
+         BNP   NOMEMBR                 IF NOTHING THERE, NOT MEMB
+         CLR   R1,SR                   IS IT RIGHT AFTER FILENAME
+         BNE   NOMEMBR                 NO, FORGET IT
+         CLI   @R1,C'('                START WITH '('
+         BNE   NOMEMBR                 NO, FORGET IT
+         DECR  R0                      DECREMENT LENGTH
+         FSCALL SCNMLIST               POSSIBLE MEMBER LIST
+         B     MEMCOM                  GO TO COMMON PART
+*
+FOUND#   LABEL ,
+         CLEAR GPWLLIST                CLEAR MULTI LIST FLAG
+         SR    R0,SR                    FILE NAME LENGTH
+         VPUSH R0,R1,*                 SAVE FILE NAME
+         LR    R0,SR                    MEMBER NAME LENGTH
+         LR    R1,TR                   MEMBER NAME STARTING POINT
+         LA    R1,@R1+1                SKIP # OR (
+         DECR  R0                      DECREMENT LENGTH
+MEMCOM   LTR   R0,0                     ANYTHING LEFT?
+         BNP   FSINVMEM                NO, FORGET IT
+         CH    R0,=Y(8)                 TOO LONG?
+         BH    FSINVMEM                YES
+         STC   R0,GPWLMNL               SAVE MEMBER NAME LENGTH
+         LR    SR,0                    PUT LENGTH WHERE USEABLE
+         MVC   GPWLMN,=CL8' '          BLANK IT OUT
+         DEX   SR,'OC  GPWLMN(0),@R1'  MOVE IT IN
+         VPOP  R0,R1,*                 GET FILENAME
+         LR    SR,R1                   FOR CALLING SEQUENCE
+         FSCALL GOTNAME
+         SCTELL (QR)
+         SCINIT (1),(0),CLWKWCB        UPDATE SCAN
+         VPOP  ,,PTR=QR                FIX UP STACK
+         B     FSUB0                   RETURN, CC=0
+*
+NOMEMBR  VPOP  ,,PTR=QR                RESTORE STACK
+         CLEAR GPWLLIST                CLEAR MULTI LIST FLAG
+         LA    R15,4
+         B     FSUBX                   RECURN, CC=4
+         EJECT ,
+*
+* SCAN MEMBER LIST FOR NEXT NAME
+*  INPUT - R0 = LENGTH OF LIST (INCLUDING ',' OR '('
+*          R1 = ADDRESS OF LIST
+* OUTPUT - R0 = LENGTH OF MEMBER, R1 = LOCATION
+*        - GPWLMFBN(0/8) = LENGTH/ADDRESS OF REST OF LIST
+*
+SCNMLIST LABEL ,
+         LA    R1,@R1+1                SKIP IST CHARACTER
+         DECR  R0
+         VPUSH R0,R1,*                 SAVE REST
+SCNMCMA  CLI   @R1,C','                CHECK FOR COMMA
+         BE    SCANMCOM
+         CLI   @R1,C' '                BLANK?
+         BE    FSINVMEM
+         LA    R1,@R1+1                BUMP POINTER
+         BCT   R0,SCNMCMA              LOOP
+         VPOP  R0,R1,*                 RESTORE
+         CLEAR GPWLLIST                CLEAR MULTI LIST FLAG
+         B     SCNMEND
+SCANMCOM LABEL ,                       COMMA FOUND
+         IF    ^GPWLLIST,FSINVMEM
+         STM   R0,R1,GPWLMFBN          SAVE FOR NEXT TIME
+         VPOP  SR,TR,*                 GET ORIGIONAL POSITION
+         SR    SR,R0
+         LR    R0,SR                   MEMBER NAME LENGTH
+         LR    R1,TR                   ADDRESS
+SCNMEND  B     FSUB0
+         EJECT ,
+*  FORMAT MEMBER NAME OR FILE NAME
+*
+SEGMEMB  LABEL ,
+         IF    GPWUILIB,BEGIN
+         LC    R0,GPWLMNL
+         IF    (R0,POS),BEGIN
+         IF    ^GPWALIAS,'LA R1,GPWLMN'      MEMBER NAME
+         ELSE  'LA R1,GPWLMN2'         OR ALIAS NAME
+         LA    R2,8(R1)
+SEGMLEN  DECR  R2                      SEGMEMT LENGTH
+         CLI   0(R2),C' '
+         BE    SEGMLEN
+         SR    R2,R1
+         LA    R0,1(R2)
+         SEG   (R1),(R0),B             OUTPUT MEMBER
+         B     SEGNX
+         END   ,
+         END ,
+         SPACE ,
+*
+*  SEGMEMB FALLS THOUGH TO SEGNAME TO
+*  COMPLETE FILENAME FORMATTING
+*
+         EJECT ,
+*  FORMAT FILE NAME
+*
+SEGNAME  LABEL ,
+         LC    TR,GPWFNL               LENGTH OF FILENAME
+         LA    SR,GPWFILN              AND LOCATION
+         IF    GPWFALTF,BEGIN          PROCESSING ALTERNATE FILE?
+         LA    SR,GPWAFN               ALTERNATE FILE ANME
+         IC    TR,GPWAFNL
+         IF    GPWAFFL.GPWFFFN,SEGFULL FORMAT FULL FILENAME
+         END   ,
+         IF    GPWFFFN,SEGFULL         FULL DSN SPECIFIED
+         CLC   CLWGROUP,GPWGRP-GPWFFN(SR) SIGNED ON GROUP?
+         IF    NE,SEGFULL              FORMAT ALL IF NOT
+         CLC   CLWUSER,GPWUSER-GPWFFN(SR) SIGNED ON USER?
+         IF    NE,SEGFULL              FORMAT ALL IF NOT
+         LA    SR,@SR+(GPWFN-GPWFFN)   FILE NAME STEM ONLY
+         SH    TR,=Y(L'PFX)            REMOVE ORV.GG.UUU. LENGTH
+SEGFULL  SEG   (SR),(TR),B             SEG FILENAME
+*
+SEGNX    SEG   ' ',,B                  PLUS BLANK
+         B     FSUB0                   RETURN
+         EJECT ,
+         LTORG ,
+         EJECT ,
+*GEN
+         FSCALL FSUB#3                 GENERATE SEGMENT 3
+*NOGEN
+         EJECT ,
+*  RETURN TO CLP
+*
+*        RETURN CODES:  0 - PROCESS NEXT COMMAND
+*                       4 - SEND COMMAND TO WYL/MIL
+*
+MILWYL   LA    SR,4
+         B     FILX0
+*
+FILEXIT  CLEAR SR
+FILX0    IF    ^CLWFGPW,FSCLPRTN       GET/PUT PAGE ALLOCATED?
+         FSCALL RESETWMW               RESET WYLBUR MODE WORD
+         IF    GPWFATT,BEGIN           FILE ATTACHED
+         FSCALL DETACH                 DETACH
+         CLEAR GPWFATT
+         END   ,
+         IF    GPWAFFL.GPWFATT,BEGIN   ALTERNANTE FILE ATTACHED
+         MVC   GPWFID,GPWAFID
+         FSCALL DETACH
+         CLEAR GPWAFFL.GPWFATT
+         END   ,
+         IF    GPWFPCAT,BEGIN
+* ASSUMED ERROR IN PROGRAM CATALOG. RESET IT AND RELEASE IT.
+         L     QR,CLWSCP
+         WITH  (SCP,QR),'L  QR,SCPPCAT'     POINT TO CATALOG
+         CLPSERV PGPRTOFF,(QR),4095    UNPROTECT THE PAGE
+         USING PRGCAT,QR               ##
+         CLEAR PCATPTR                 ZERO PROG CAT POINTERS
+         CLEAR PCATEND
+         DROP  QR                      ##
+         FSCALL DEQ                    DEQ FROM CATALOG
+         CLEAR GPWFPCAT                DONE CATALOGING
+         END   ,
+         IF    ^GPWFFREE,FSCLPRTN      GO TO EXIT
+         LT    R15,GPWDIRAL            ANY DIRECTORY AREA?
+         IF    NZ,' FREECLW L:GPWDIRAP,(15)'   FREE DIRECTORY AREA
+         CLEAR CLWFGPW             Clear allocation
+         FREECLW (GPWR),L:=A(L'GPW)  Now free buffer
+         B     FSCLPRTN                GO TO EXIT
+         SPACE 2
+*  SET MESSAGE, CLEAN UP AND LEAVE
+*
+MSGEXIT  LABEL ,
+         SEG   (R1),(R0)
+WRITEXIT LABEL ,                       :::
+         VWRITE ,                      SEND MESSAGE
+         B     FILEXIT                 RETURN
+QIETEXIT LABEL ,                       :::
+         IF    ^GPWFQIET,WRITEXIT
+         CLEAR (CLWOBUF,4)             QUIET!!
+         B     FILEXIT
+         EJECT ,
+*  CREATE MEMBERS AND PRIVILEGES (STATUS 0)
+*
+MEMBER   LABEL ,
+         IF    GPWFPUB,PUBLIC          PUBLIC?
+         CLEAR R14                     ASSUME OWNER
+         LA    R15,GPWACCT             EXTENDEE
+         IF    ^GPWFAACC,DOMEM         ALTERNATE GROUP?
+         LA    R14,GPWAACCT            EXTENDER
+DOMEM    LABEL ,
+         STATUS 0,IC:GPWPERM,(15),(14)
+         B     *+16(15)
+         B     NOFILSYS                -12 FILE SYSTEM NOT AVAILABLE
+         B     ILLGRP                  -8 ILLEGAL GROUP NAME
+         B     TOOMANY                 -4 TOO MANY DEVICES ATTACHED
+         B     *+8                      0 OPERATION STARTED
+         B     NONOWN                   4 ATTEMPT TO ALTER OWNING GROUP
+         WAIT  (0)
+         B     *+4(15)
+         B     FSUB0                    0 GOOD COMPLETION
+         B     DONTHAVE                 4 DOESN'T HAVE PRIVILEGES
+         B     ILLGRP                   8 ILLEGAL GROUP
+         B     ILLGRP                  12 ILLEGAL GROUP
+         B     NODSPACE                16 FILE DIRECTORY FULL
+         EJECT ,
+*  ESTABLISH PRIVILEGES FOR PUBLIC (STATUS 1)
+*
+PUBLIC   LABEL ,
+         STATUS 1,IC:GPWPERM
+         B     STATCHK                 JOIN RETURN CHECK CODE
+         SPACE 3
+*  SENSE FILES (STATUS 2)
+*
+SENFILE  LABEL ,
+         STATUS 2,L:GPWBUFA,2048,GPWFGRP
+STATCHK  B     *+16(15)
+         B     NOFILSYS                -12 FILE SYSTEM NOT AVAILABLE
+         B     ILLNAME                 -8 ILLEGAL FILE NAME
+         B     TOOMANY                 -4 TOO MANY DEVICES ATTACHED
+         WAIT  (0)
+         B     *+4(15)
+         B     FSUB0                    0 GOOD COMPLETION
+         B     ILLGRP                   4 GROUP DOES NOT EXIST
+         B     FILEXIT                  8 NO FILES EXIST
+         B     NOSHACC                 12 ACCESS NOT PERMITTED
+         B     FILEXIT                 16 NO MORE FILES TO SENSE
+         EJECT ,
+*  SENSE GROUP MEMBERS (STATUS 3)
+*
+SENMEM   LABEL ,
+         CLEAR R14                     SET CALLER
+         IF    GPWFAACC,'LA R14,GPWAACCT'
+         LA    R15,2048                 BUFFER SIZE
+         L     R1,GPWBUFA              BUFFER
+         LA    R0,3
+STAT3OR4 STATUS (0),(1),(15),(14)
+         BNZ   STATCHK                 SAME STATUS ERRORS
+         WAIT  (0)
+         B     *+4(15)
+         B     FSUB0                    0 GOOD COMPLETION
+         B     ILLGRP                   4 GROUP DOES NOT EXIST
+         B     NOSHACC                  8 ACCESS NOT PERMITTED
+         SPACE 3
+*  SENSE SPACE (STATUS 4)
+*
+SENSP    LABEL ,
+         CLEAR R1                      ASSUME CALLER
+         IF    GPWFACC,'LA R1,GPWACCT' POIN TO GROUP
+         LA    R0,4
+         B     STAT3OR4                DO STATUS 4
+         EJECT ,
+*  MISCELLANEOUS TERMINAL CONTROLS
+*
+RESETWMW LABEL ,                       RESET WYLBUR MODE WORD
+         CLEAR R15
+         TM    CLWWLMOD+3,WSSBRK       NO CHANGES IN SESSION BREAK?
+         BZ    SETWMW                  DOESN'T CARE
+         LA    R15,WPRHBT+WNNUMB+WNALGN
+         B     SETWMW
+*
+SETPREST LABEL ,
+         LA    R15,WPREST              SET EDIT FORMAT
+         TM    CLWWLMOD+3,WSSBRK       CHANGES DURING SESSION BREAK?
+         BZ    SETWMW                  YES
+         LA    R15,@R15+WPRHBT+WNNUMB+WNALGN
+SETWMW   LABEL ,                       SET WYLBUR MODE WORD
+         LA    R1,12
+         B     TERMCON
+*
+SENWMW   LABEL ,                       SENSE WYLBUR MODE WORD
+         LA    R1,13
+         B     TERMCON
+*
+SENSWDS  LABEL ,                       SENSE SIZE OF WDS
+         LA    R1,14
+         B     TERMCON
+*
+SENFWDS  LABEL ,                       SENSE FIRST LINE OF WDS
+         LA    R1,15
+         B     TERMCON
+*
+SENLWDS  LABEL ,                       SENSE LAST LINE OF WDS
+         LA    R1,16
+         B     TERMCON
+*
+CLRWDS   LABEL ,                       CLEAR WDS (TEXT)
+         LA    R1,17
+         B     TERMCON
+*
+ABWYL    LABEL ,                       ABORT CURRENT WYLBUR COMMAND
+         LA    R1,18
+         B     TERMCON
+*
+GETDELTA LABEL ,
+         LA    R1,28                   GET WYLBUR LINE DELTA
+*
+TERMCON  LABEL ,
+         CONTROL LA:1,(1),(15)
+         BNZ   NOWYL                   -12 WYLBUR NOT AVAILABLE
+         WAIT  (0)
+         BZ    FSUB0                    0 GOOD COMPLETION
+         B     VOID                     4 VOID RANGE
+         EJECT ,
+*  DO MISCELLANEOUS CHORES (CONTROLS 0-7,10-19)
+*
+CREC     L     R15,GPWBN               BLOCK NUMBER
+         CNTRLCOD 0                    CREATE A BLOCK
+*
+DELREC   CNTRLCOD 1                    DELETE ONE BLOCK
+*
+DELLOTS  CNTRLCOD 2                    DELETE A SERIES OF BLOCKS
+*
+SENREC   CNTRLCOD 3                     SENSE EXISTENCE OF ONE BLOCK
+*
+SENFREC  CNTRLCOD 4                     SENSE NUMBER OF FIRST REC
+*
+SENLREC  CNTRLCOD 5                     SENSE NUMBER OF LAST BLOCK
+*
+SENNREC  CNTRLCOD 6                     SENSE NUMBER OF BLOCKS
+*
+FORCE    B     FSUBX                   FORCE IXR DELETED
+*
+DOPUBPER CNTRLCOD 10                    SET PUBLIC PRIVILEGES
+*
+SENUPRV  L     R15,GPWBUFA             SENSE ALL USER PRIVILEGES
+         LA    R14,2048
+         CNTRLCOD 11
+*
+SETSHR   CNTRLCOD 12                    SET ATTACHABILITY STATUS
+*
+SENSHR   CNTRLCOD 13                   SENSE ATTACHABILITY STATUS
+*
+SETUINFO LA    R1,14                   SET USER INFORMATION FIELD
+         IF    GPWFFMT,'LCR  R1,R1'    SET MODE=FORMAT
+         L     R15,GPWUINFO
+         B     CONTCOM
+         EJECT ,
+*
+SENUINFO LABEL ,                        SENSE USER INFORMATION FIELD
+         IF    GPWFVOSF,BEGIN
+         L     R0,GPWUINFO             FAKE FOR OS FILES
+         MVC   GPWUILRC(2),OSFLRECL                    LRECL
+         IF    OSFRCFMF,'SET GPWUIFLR'  FIXED
+         IF    GPWOSFED,'SET GPWUIFE'   EDIT
+         IF    OSFPO,'SET GPWUILIB'     PDS
+         IF    GPWLLDMD,BEGIN          LOAD FILE
+         CLEAR GPWLLDMD
+         SET   GPWUILDF
+         END
+         L     R1,GPWUINFO
+         ST    R0,GPWUINFO
+         B     FSUB0
+         END
+         SPACE ,
+         CNTRLCOD 15
+*
+DOSETCLP CNTRLCOD 16                    SET CLP STATUS
+*
+DOSENCLP CNTRLCOD 17                    SENSE CLP STATUS
+*
+SETLDF   CNTRLCOD 18                    SET LOADFILE(PROTECTED) STATUS
+*
+SENLDF   CNTRLCOD 19                    SENSE PROTECTED STATUS
+*
+SENMODE  CNTRLCOD 20                    SENSE IXR/NON-IXR MODE
+*
+DOSETSPI CNTRLCOD 21                   SET SPIRES STATUS
+*
+DOSENSPI CNTRLCOD 22                   SENSE SPIRES STATUS
+*
+SENBLKSZ CNTRLCOD 23                   Sense Blocksize
+*
+SENNRECH CNTRLCOD 24                   Sense max number data blocks
+         EJECT
+*
+DOCONTRL LABEL ,
+         LH    R1,0(,R1)
+*
+CONTCOM  LABEL ,                       COMMON CONTROL SVC
+         IF    GPWFVOSF,FSUB0          NO-OP CONTROLS FOR OS FILES
+*$       IS    THIS OK                 ,WE NOOP DELETE BLOCKS ETC, OK
+         LC    R0,GPWFID                NORMAL ID
+         IF    GPWFALTF,' IC R0,GPWAFID'
+         LCALL SAVRETRY                SET UP FOR RETRY
+         CONTROL (0),(1),(15),(14)
+         BM    NOFILSYS                -12 FILE SYSTEM NOT AVAIL.
+         BP    NONOWN                  4 CONTROLS 10 12 16
+CONTWAIT WAIT  (0)
+         B     *+16(15)
+         B     NOFILSYS               -12 FILE SYSTEM UNAVAILABLE
+         B     NOFILSYS                -8 FILE SYSTEM UNAVAILABLE
+         B     IOERR                   -4 PERMANENT I/O ERROR
+         B     FSUBX                    0 GOOD COMPLETION
+         B     UNAVAIL                  4 NOT IMMEDIATELY AVAIL
+         B     NOACCESS                 8 ACCESS NOT PERMITTED
+         B     FSUBX                   12 MEANINGFUL INFO
+         B     NOUSPACE                16 USER ALLOCATION EXHAUSTED
+         B     NODSPACE                20 DISK SPACE EXHAUSTED
+         B     ILLNAME                 24 INVALID FOR CONTIGUOUS FILES
+         B     FSUBX                   28 MEANINGFUL INFO
+         EJECT ,
+*  DO ERASE OR RENAME (CONTROL 8)
+*
+DOERASE  LABEL ,
+         IF    GPWFVOSF,ERASEOS
+         CLEAR R15                     NO FILE NAME
+         CLEAR R14
+         B     CONEIGHT
+DORENAME LABEL ,
+         IF    GPWFVOSF,RENAMEOS
+         LA    R15,GPWFILN            NW FILE NAME
+         LC    R14,GPWFNL                NEW FILE NAME LEN
+CONEIGHT LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' IC R0,GPWAFID'
+*
+         LCALL SAVRETRY                SET UP FOR RETRY
+         CONTROL (0),8,(15),(14)
+         B     *+16(15)
+         B     NOFILSYS                -12 FILE SYSTEM NOT AVAIL.
+         B     ILLNAME                 -8 ILLEGAL NAME
+         B     ATTEXCLU                -4 FILE ATTACHED MODE=SHR
+         B     CON8WAIT
+         B     ACCTCHNG
+         SPACE ,
+CON8WAIT WAIT  (0)
+         B     *+8(15)
+         B     IOERR                   -4 PERMANENT I/O ERROR
+         B     FSUBX                    0 GOOD RETURN
+         B     ISATT                    4 FILE ALREADY ATTACHED
+         B     NOACCESS                 8 ACCESS TO FILE ILLEGAL
+         B     EXISTS                  12 FILE NAME ALREADY EXISTS
+         B     NODSPACE                16 NO SPACE REMAINS IN DIRECTORY
+         EJECT ,
+*
+* OS/FILE ERASE AND RENAME
+*
+*$ NO ALTERNATE FILE ID PROCESSING
+*$ FILE MUST NOT BE ATTACHED; SKIP ATTACH IN VGP, ETC
+*
+ERASEOS  LABEL ,
+         B     NOOSFIL2
+         SERVICE 2,GPWFILN,IC:GPWFNL,OSFVOL,MODE=FULLDSN
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0
+         B     ERROS
+         SPACE 3
+RENAMEOS LABEL ,
+         B     NOOSFIL2
+         SERVICE 3,GPWAFN,GPWFILN,OSFVOL,MODE=(FULLDSN,FULLDSN2)
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0
+         B     ERROS
+*$ CHECK ERROR RETURNS
+         EJECT ,
+*  SET USER PRIVILEGES (CONTROL 9)
+*
+DOPERM   LABEL ,
+         LC    R15,GPWPERM
+         IF    GPWFPUB,DOPUBPER        PUBLIC?
+         CLEAR R14                     TRY IT
+         IF    GPWFACC,'LA R14,GPWACCT' POINT AT GROUP
+         CONTROL IC:GPWFID,9,(15),(14)
+         B     *+16(15)
+         B     NOFILSYS                -12 FILE SYSTEM NOT AVAIL.
+         B     ILLGRP                  -8 GROUP NAME ILLEGAL
+         B     ISATT                   -4 FILE ALREADY ATTACHED
+         B     *+8                      0 GOOD START
+         B     NONOWN                   4 NON OWNER TRYING TO CHANGE
+         WAIT  (0)
+         B     *+8(15)
+         B     IOERR                   -4 PERMANENT I/O ERROR
+         B     FSUB0                    0 GOOD COMPLETION
+         B     ISATT                    4 NOT IMMEDIATELY AVAILABLE
+         B     DONTHAVE                 8 CAN ONLY EXTEND PRIVS HE HAS
+         B     ILLGRP                  12 ILLEGAL GROUP
+         B     NODSPACE                16 FILE DIRECTORY FULL
+         EJECT ,
+         LTORG ,
+         EJECT ,
+*GEN
+         FSCALL FSUB#4                 GENERATE SEGMENT 4
+*NOGEN
+         EJECT ,
+*
+*  READ WYLBUR WORKING DATA SET
+*
+READWDS  LABEL ,
+         L     R1,CLWSCP
+         WITH  (SCP,R1),BEGIN
+         IF    SCBCFCLA,IDLEATTN       BR ON IDLE ATTN
+         END   ,
+         L     R1,GPWBUFA              ASSUME STANDARD READ
+         L     R15,GPWLREC
+         IF    GPWGPFHX,'LA 1,GPWHXBUF'      HEX
+         IF    GPWOSFED,BEGIN         IF OS EDIT, NEED HEADER ROOM
+         LA    R1,@R1+2
+         S     R15,=F'2'
+         END
+         ST    R1,GPWDATAD
+         READ  LA:1,(1),(15),GPWOPT,MODE=TEXT
+         BNZ   NOWYL               -12 WYLBUR NOT AVAILABLE
+         WAIT  (0)
+         B     FSUBX                 0 GOOD COMPLETION
+*                                    4 VOID OR END OF RANGE
+         EJECT ,
+*  WRITE WYLBUR WORKING DATA SET
+*
+WRITEWDS LABEL ,
+         WRITE LA:1,(1),L:GPWOPT,L:GPWLREC,MODE=TEXT
+         BNZ   NOWYL                   -12 WYLBUR NOT AVAILABLE
+         WAIT  (0)
+         B     *+4(15)
+         B     FSUB0                    0 COMPLETE
+         B     FSUB0                    4 COMPLETE, LINE > DELTA
+         B     WRWDSTRN                 8 COMPLETE, LINE TRUNCATED
+         B     WDSFULL                 12 WORKING DATA SET FULL
+         B     REQABORT                16 LINE NOT THERE
+         B     NOREP                   20 LINE ALREADY THERE
+         B     BADFORM                 24 INVALID DATA
+         B     BADFORM                 28 LINE NUMBER TOO LARGE
+*
+WRWDSTRN SET   GPWFTRN                 SET SOME LINE TRUNCATED
+         B     FSUBX
+*
+         EJECT ,
+*  READ FILE ROUTINE
+*
+READ     LABEL ,
+         L     R1,CLWSCP
+         WITH  (SCP,R1),BEGIN
+         IF    SCBCFCLA,IDLEATTN       BR ON IDLE ATTN
+         END   ,
+REDNOIDL LABEL ,                       BYPASS IDLE ATTN TEST
+         L     R1,GPWBUFA              STANDARD CLP BUFFER
+         LH    R15,GPWBLKSZ             ONE BLOCK IS DEFAULT
+         IF    GPWFVOSF,'LH  R15,OSFBLKSZ'
+READGO   ST    R1,GPWDATAD
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' LC  R0,GPWAFID'
+         IF    GPWFVOSF,OSREAD
+         IF    GPWFNSKP,READNSK
+         LCR   R15,R15                  SET SKIP MODE
+READNSK  LCALL SAVRETRY                SAVE INFO FOR RETRY
+         READ  (0),(1),(15),L:GPWBN
+         BNZ   NOFILSYS                -12 FILE SYSTEM NOT AVAIL.
+         WAIT  (0)
+         ST    R14,GPWBN               SAVE NEXT REC NUM
+         B     *+8(15)
+         B     IOERR                   -4 PERMANENT I/O ERROR
+         B     FSUBX                    0 GOOD COMPLETION
+         B     UNAVAIL                  4 NOT IMMEDIATELY AVAIL
+         B     NORACC                   8 READ ACCESS NOT PERMITTED
+         B     FSUBX                   12 BLOCK DOES NOT EXIST
+         B     FSUBX                   16 BLOCK DOES NOT EXIST
+         EJECT ,
+*
+*  READ OS/FILE
+*
+OSREAD   LABEL ,                       READ OS/FILE BLOCK
+         LCALL SAVRETRY
+         READ  (0),(1),(15)
+         BNZ   NOFILSYS
+         WAIT  (0)
+         IF    Z,BEGIN
+         IF    GPWOSFED,BEGIN          EDIT FILE, CHECK LEN HEADER
+         L     R2,GPWDATAD
+         LH    R3,0(R2)                DATA LENGTH
+         CR    R3,R1                   COMPARE LEN IN HEADR - LEN READ
+         BH    BADFORM
+         LR    R1,R3
+         LA    R3,2                    SKIP EDIT HEADER
+         SR    R1,R3                   DECR LENGTH, BUMP ADDR
+         AR    R2,R3
+         ST    R2,GPWDATAD
+         END   ,
+         B     FSUB0
+         END
+*$  WORRY ABOUT ZERO LENGTH BLOCK READS ????
+         CH    R15,=H'44'              EOF
+         IF    E,BEGIN
+         LA    R15,12
+         B     FSUBX
+         END
+         B     ERROS                   REST OF OS ERRORS
+         EJECT ,
+*  WRITE FILE ROUTINE
+*
+WRITE    LABEL ,
+         L     R1,GPWBUFA              STANDARD CLP BUFFER
+WRITEGO  LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,'LC R0,GPWAFID'
+         LCALL SAVRETRY                SET UP FOR RETRY
+         IF    GPWFVOSF,OSWRITE
+         WRITE (0),(1),(15),L:GPWBN
+         BNZ   NOFILSYS                -12 FILE SYSTEM NOT AVAIL.
+         WAIT  (0)
+         ST    R14,GPWBN               SAVE NEXT BLOCK NUM
+WRITERR  B     *+8(15)
+         B     IOERR                   -4 PERMANENT I/O ERROR
+         B     FSUBX                    0 GOOD COMPLETION
+         B     UNAVAIL                  4 NOT IMMEDIATELY AVAIL
+         B     NOAACC                   8 APPEND ACCESS NOT PERMITTED
+         B     NOWACC                  12 WRITE ACCESS NOT PERMITTED
+         B     NOUSPACE                16 USER ALLOCATION DEPLETED
+         B     NODSPACE                20 DISK SPACE DEPLETED
+         B     OUTRANGE                24 FILE FULL
+         SPACE 3
+*
+*  WRITE OS/FILE BLOCK
+*
+OSWRITE  LABEL ,
+         IF    GPWOSFED,BEGIN         OS EDIT FILE NEEDS HEADER
+         LA    R15,@R15+2              2 BYTES OF LENGTH
+         STH   R15,@R1
+*$ NOTE MAY BE CALCULATED IN ERROR, WELL SEE.
+         END
+         WRITE (0),(1),(15)
+         BNZ   NOFILSYS
+         WAIT  (0)
+         BZ    FSUB0
+         B     ERROS
+         EJECT ,
+*
+*  BACK SPACE
+*
+*  OS FILES: DO A BACKSPACE CONTROL
+*  ORVYL FILES: ALMOST A NO-OP, DECREMENT BLOCK COUNT
+*
+BSPACE   LABEL ,
+         IF    ^GPWFVOSF,BEGIN        ORVYL FILE, DECR BLOCK NUMBER
+         DECR  SR,GPWBN
+         B     FSUB0
+         END
+         ELSE  BEGIN                   OS FILE, DO BACKSPACE SVC
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,'LC R0,GPWAFID'
+         CONTROL (0),5
+         WAIT  (0)
+         BZ    FSUB0
+         B     ERROS
+         END
+         EJECT ,
+* ENQ ON SOMETHING
+*        ADDRESS IN R1, LENGTH IN R0
+*
+ENQ      LABEL ,
+         LR    R15,R0                  PUT LENGTH IN RIGHT REG
+         LCALL SAVRETRY                SET UP FOR RETRY IF NECESSARY
+         VSET  21,(R1),(R15),MODE=IMMED
+         BNZ   UNAVAIL                 DIDN'T GET IT
+         B     FSUBX                   GOT IT, GO RETURN
+         SPACE 5
+* DEQ ON SOMETHING
+*        NO ARGUMENTS NECESSARY
+*
+DEQ      LABEL ,
+         VSET  22                      DO DEQ
+         B     FSUBX
+         EJECT ,
+*
+** ENQ ON PROGRAM CATALOG. IF NECESSARY, READ IT INTO CLP PROGRAM CORE
+*
+GETCAT   LABEL ,
+         SETMSG 'PROGRAM CATALOG'      NAME TO ENQ ON
+         FSCALL ENQ                    ENQ ON IT
+         SET   GPWFPCAT                INDICATE ENQUEUED ON CAT
+         L     QR,CLWSCP
+         WITH  (SCP,QR),'L  QR,SCPPCAT'     POINT TO CATALOG
+         USING PRGCAT,QR               ##
+         LT    TR,PCATPTR              CATALOG LOADED?
+         IF    Z,BEGIN                 NO, LET'S DO IT NOW
+*  READ IN PROGRAM CATALOG
+         FSCALL FNINIT                 CLEAR FILE NAME
+         SETMSG '@GG.&&ORV.CATALOGUE'  NAME OF PROGRAM CATALOG FILE
+         FSCALL GOTNAME                SET NAME
+         FSCALL ASMBLNAM               PUT NAME TOGETHER
+         SET   GPWFNOE                 NO ERROR IF FILE NOT THERE
+         FSCALL ATTOLD                 GET FILE
+         LTR   R15,R15                 GOT IT?
+         BNZ   PCATERR                 NO, ERROR
+         CLEAR GPWBN                   START WITH BLOCK 0
+         LA    SR,PCATSTRT             START OF ENTRY AREA
+         ST    SR,PCATPTR              SET BEGINNING OF ENTRIES
+         LA    TR,4096-(PCATSTRT-PRGCAT)    LENGTH OF ENTRY AREA
+         WHILE (TR,P),BEGIN
+         FSCALL READ                   GET NEXT BLOCK
+         IF    NZ,EXIT                 THAT'S ALL
+         L     R14,GPWBUFA             GET LOCATION OF DATA
+         LR    R15,TR                   AND REMAINING AREA LENGTH
+         LR    R0,SR                   LOCATION IN AREA
+         MVCL  R0,R14                  MOVE THE CATALOG ENTRIES
+         LR    SR,R0                   CURRENT AREA POSITION
+         LR    TR,R15                   AND AREA LENGTH
+         END   ,                       READ ALL
+*
+         FSCALL DETACH                 DETACH FILE
+         ST    SR,PCATEND              SET END OF CATALOG ENTRIES
+         CLPSERV PGPRTON,(QR),4095     PROTECT THE PAGE
+         END   ,
+         LR    R1,QR                   SAVE BASE TO CATALOG
+         B     FSUB0
+         DROP  QR                      ##
+         SPACE 2
+PCATERR  SEG   'Program catalog error'
+         B     FSERRTN                 ERROR EXIT
+         SPACE 2
+*  RELEASE PROGRAM CATALOG
+RELCAT   LABEL ,
+         CLEAR GPWFPCAT                NO LONGER HAVE CATALOG
+         B     DEQ                     GO DEQ FROM CATALOG
+         EJECT ,
+         LTORG ,
+         EJECT ,
+         EJECT ,
+*GEN
+         FSCALL FSUB#5                 GENERATE SEGMENT 5
+*NOGEN
+         EJECT ,
+*  DIRECTORY MANIPULATING ROUTINES
+*
+GETDIR   LABEL ,                       BRING DIRECTORY INTO CORE
+         LT    R15,GPWDIRAL            ANY CORE ALREADY GOTTEN?
+         IF    NZ,BEGIN               YES
+         FREECLW L:GPWDIRAP,(15)       FREE PREVIOUS DIRECTORY
+         CLEAR R15                     ZERO LENGTH
+         ST    R15,GPWDIRAL            IN CASE OF ERROR
+         END   ,
+         IF    ^GPWUILIB,NOTLIB        SKIP IF NOT LIBRARY
+         GETCLW DIRBLEN,DIRBLEN        GET SOME ELBOW ROOM
+         BNZ   NODIRCOR                NOT ENOUGH
+         ST    R1,GPWDIRAP             SAVE BEGINNING
+         ST    R1,GPWDIRLS             INITIALIZE LAST ENTRY
+         ST    R0,GPWDIRAL               AND LENGTH
+         CLEAR GPWBN                   FIRST DIRECTORY BLOCK IS ZERO
+         LR    TR,R1                   SAVE START ADDRESS
+         LR    SR,0                    LENGTH
+         AR    SR,TR                   + START
+         SH    SR,=Y(DIRBLEN)           -1 BLOCK IS AS FAR AS WE CAN GO
+         USING DIRB,TR                ##
+DIRREADX LR    R1,TR                   WHERE TO READ IT
+         LA    R15,DIRBLEN             HOW MUCH TO READ
+         FSCALL READGO                 GO GET IT
+         BNZ   BADDIR                   NOT THERE
+         CH    R1,=Y(DIRBLEN)          RIGHT LENGTH?
+         BNE   BADDIR                   NO
+         CLI   0(TR),0                 FIRST BYTE 0
+         BNE   BADDIR
+         LT    R0,DIRBLINK              NEXT BLOCK POINTER
+         BZ    GOTDIRX                  THAT IS ALL
+         LA    TR,DIRBLEN(,TR)         POINT TO NEXT AREA
+         ST    R0,GPWBN                 SAVE BLOCK NUMBER
+         CR    TR,SR                   GONE TOO FAR?
+         BNL   NODIRCOR
+         B     DIRREADX                 GO GET NEXT BLOCK
+*
+GOTDIRX  LABEL ,
+         LR    R1,TR
+         LCALL FREUPDIR
+         B     FSUB0
+         DROP  TR                       ##
+         EJECT ,
+PUTDIR   LABEL ,                       REWRITE DIRECTORY
+         L     TR,GPWDIRAP             POINT TO FIRST BLOCK
+         USING DIRB,TR                ##
+PUTDIRLX MVC   GPWBN,DIRBBNUM          BLOCK TO WRITE
+         LA    R15,DIRBLEN             LENGTH TO WRITE
+         LR    R1,TR                   WHERE TO WRITE FROM
+         FSCALL WRITEGO                GO WRITE IT
+         FSCALL FORCE
+         LT    R1,DIRBLINK             LAST BLOCK?
+         LA    TR,DIRBLEN(,TR)         POINT TO NEXT DIRB
+         BNZ   PUTDIRLX                NOT LAST, WRITE ANOTHER
+         B     FSUB0                   ETURN
+         DROP TR                       ##
+         EJECT ,
+         USING DENTRY,14               ##
+*
+*  CHECK TO SEE IF MEMBER EXISTS
+*
+*  MINUS RETURN IF MEMBER DOES NOT EXIST.
+*
+CHECKMEM LABEL ,                       ORVYL PDS MEMBERS FIRST
+         IF    ^GPWFVOSF,BEGIN
+         LCALL GETDIRX
+         LCALL SRCHDIRX                SEARCH FOR MEMBER
+         BM    MINUSRET
+         B     FSUB0                   FOUND
+         END   ,
+         ELSE  BEGIN                   OS PDS CHECK
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' LC R0,GPWAFID'
+         MVC   CLWTEMP(4),=X'00010008'
+         MVC   CLWTEMP(8),GPWLMN       SET UP PDS SENSE AREA
+         CONTROL (0),4,CLWTEMP,MODE=NAME
+         BNZ   HOTERROS
+         WAIT (0)
+         BZ    FSUB0                   GOOD RETURN
+         CH    R15,=H'56'              MEMBER NOT FOUND
+         BE    MINUSRET
+         B     ERROS                   OS ERROR RETURNS
+         END   ,
+         EJECT ,
+*  INITIALIZE PDS MEMBER FOR INPUT
+*
+*  GET MEMBER: ORVYL FILES
+*
+GETMEM   LABEL ,                       INITIALIZE PDS INPUT
+         IF    ^GPWFVOSF,BEGIN        ORVYL PDS
+         IF    GPWLNXTM,BEGIN         GET NEXT MEMBER IN DIR
+         CLEAR GPWLGOTD
+         FSCALL NXTMEM
+         BM    MINUSRET                NO MORE
+         END   ,
+         ELSE  BEGIN                   OR GET MEMBER SPECIFIED
+         LCALL GETDIRX
+         LCALL SRCHDIRX
+         BM    MINUSRET                NOT FOUND
+         END
+*        IF    DFLG1.DFL1PRV,BEGIN
+*        SEG   'Cannot read private program'
+*        B     FSERRTN                 BR TO ERROR EXIT
+*        END   ,
+         L3    R1,DBCT                 RETURN DIRECTORY INFO
+         ST    R1,GPWLMBCT
+         L3    R2,DFBN
+         IF    (R1,Z),'DECR  R2'       MAKES NO BLOCKS CAUSE EOF
+         ST    R2,GPWLMFBN
+         ST    R2,GPWBN
+         SET   GPWFNSKP                NO MODE SKIP ON READ
+         DECR  R1
+         ALR   R1,R2
+         ST    R1,GPWLMLBN
+         MVC   GPWLMFLS,DFLGS
+         B     FSUB0                   RETURN
+         END   ,                       END INIT ORVYL FILE PDS READ
+         EJECT ,
+*
+*  GET MEMBER: OS/FILES
+*
+         ELSE  BEGIN
+         IF    GPWLNXTM,'FSCALL NXTMEM'  GET NEXT MEMBER
+         ELSE  'LA R14,GPWLMN'           OR GET MEMBER SPECIFIED
+         LR    R15,R14                   MEMBER ADDRESS, LENGTH
+         LA    R14,8
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,'LC R0,GPWAFID'
+         CONTROL (0),0,(15),(14)
+         BNZ   HOTERROS                PROCESS ERRORS
+         WAIT  (0)
+         BZ    FSUB0                   GOOD RETURN
+         CH    R15,=H'56'              MEMBER NOT FOUND
+         BE    MINUSRET
+         B     ERROS                   OS ERROR RETURNS
+         END   ,
+         EJECT ,
+*  INITIALIZE PDS FOR OUTPUT
+*
+*  PUT MEMBER: ORVYL FILES
+*
+*        WE SEARCH TO SEE IF MEMBER IS THERE, IF SO REPLACE ??
+*        GPWLREP FLAG SET IF REPLACE IS OK.
+*
+PUTMEM   LABEL ,
+         IF    ^GPWFVOSF,BEGIN        INITIALIZE PDS FOR OUTPUT
+         LCALL GETDIRX
+         IF    ^GPWLREP,BEGIN         IF NOT REPLACE AND MEMBER
+         LCALL SRCHDIRX                MINUS RETURN
+         BZ    MINUSRET
+         END   ,
+         FSCALL SENLREC                GET LAST BLOCK
+         LA    R1,@R1+2                NEXT+1 FOR MEMBER START
+         ST    R1,GPWBN
+         ST    R1,GPWLMFBN
+         CLEAR GPWLREP                 ZERO REPLACE OK FLAG
+         B     FSUB0                   OK
+         END   ,
+         EJECT ,
+*
+*  PUT MEMBER: OS/FILES
+*
+         ELSE  BEGIN
+         IF    ^GPWLREP,BEGIN         IF NOT REPLACE AND MEMBER
+         LC    R0,GPWFID               FILE ID
+         IF    NZ,'LC  R0,GPWAFID'
+         LA    R15,GPWLMN              MINUS RETURN
+         MVC   CLWTEMP(4),=X'00010008'
+         MVC   CLWTEMP(8),GPWLMN       SET UP PDS SENSE AREA
+         CONTROL (0),4,CLWTEMP,MODE=NAME
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    MINUSRET
+         CH    R15,=H'56'              MEMBER NOT FOUND
+         BE    FSUB0
+         B     ERROS
+         END   ,
+         CLEAR GPWLREP                 ZERO REPLACE OK FLAG
+         B     FSUB0                   END OF INIT OUTPUT PDS
+         END   ,
+         EJECT ,
+*$
+*$ WE NEED THE RIGHT CONTROL. GOT A NEW ONE FOR SINGLE MEMBER SENSE
+*$
+* PROCESS OUTPUT PDS; END OF FILE PROCESSING.
+*
+*  EOFMEM: ORVYL FILES
+*
+*  ASSUMES PUTMEM CALLED, REPLACE ALREADY CHECKED, ETC.
+*  ASSUMES DIRECTORY BLOCK(S) ARE IN MEMORY
+*
+EOFMEM   LABEL ,                       OUTPUT PDS EOF PROCESSING
+         CLEAR GPWLREP                 REPLACE FLAG CHECKED IN PUTMEM
+         IF    ^GPWFVOSF,BEGIN
+         LCALL SRCHDIRX                FIND PLACE IN DIR FOR ENTRY
+         BM    NEWENTRY
+         L     R1,GPWLMFBN             WE REPLACE ENTRY
+         L     2,GPWBN                 CALCULATE BLOCK COUNT
+         SR    R2,R1
+         ST    2,GPWLMBCT
+         L3    R5,DFBN                 GET AND REMEBER OLD MEMBER INFO
+         L3    R4,DBCT
+         AR    R4,R5                   FIRST,LAST BLOCKS OF OLD MEM
+         DECR  R4
+         MVC   DFLG1(2),GPWLMF1        REPLACE OLD W/NEW MEMBER INFO
+         MVC   DFBN(3),GPWLMFBN+1
+         MVC   DBCT(3),GPWLMBCT+1
+         LCALL PUTDIRX                 WRITE OUT DIRECTORY
+         LR    R15,R5                 NOW DELETE BLOCKS OF OLD MEM
+         LR    R14,R4                 FIRST, LAST BLOCKS TO DELETE
+         FSCALL DELLOTS
+         FSCALL FORCE
+         SET   GPWSFER
+         B     FSUB0
+NEWENTRY LABEL ,                       WE SET NEW ENTRY
+         LCALL FINDBLNK                GET BLANK ENTRY
+         BM    LIBFULL
+         L     R1,GPWLMFBN             CALCULATE BLOCK COUNT
+         L     2,GPWBN                  =FIRST-(LAST+1)
+         SR    R2,R1
+         ST    2,GPWLMBCT
+         MVC   DNAME,GPWLMN            SET MEMBER INFO IN DIRECTORY
+         MVC   DFLG1(2),GPWLMF1        FLAGS
+         MVC   DFBN(3),GPWLMFBN+1      FIRST BLOCK
+         MVC   DBCT(3),GPWLMBCT+1      AND NUMBER OF BLOCKS
+         LCALL PUTDIRX                 WRITE OUT DIRECTORY
+         B     FSUB0
+         END   ,
+         EJECT ,
+*
+*  EOFMEM: OS/FILES
+*
+*        WE ISSUE CONTROL MODE=REPLACE AND IGNORE IF NOT THERE
+* RETURN CODE.
+*
+         ELSE  BEGIN
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' LC  R0,GPWAFID'
+         CONTROL (0),1,GPWLMN,8,MODE=REPLACE
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0                   OK
+         B     ERROS                   NOT OK
+         END   ,
+         EJECT ,
+*
+*        RENAME MEMBER
+*
+RNAMEMEM LABEL ,                       ORVYL PDS RENAME
+         IF    ^GPWFVOSF,BEGIN
+         LCALL GETDIRX
+         MVC   CLWTEMP(16),GPWLMN      SAVE NAME1 AND NAME2
+         MVC   GPWLMN(8),GPWLMN2
+         LCALL FINDNTRY                SEE IF NAME2 ALREADY EXISTS
+         MVC   GPWLMN(8),CLWTEMP
+         BZ    PLUSRET
+         LCALL FINDNTRY                SEE IF NAME1 EXISTS
+         BM    MINUSRET
+         MVC   DNAME(8),GPWLMN2        RENAME NAME1 WITH NAME2
+         CLI   DALINAM,C' '
+         IF    H,RNAMDONE              IF ALIAS,  RENAME DONE
+         SET   GPWLGOTD                IF MEMBER
+         CLEAR GPWNXTAD                WE MUST UPDATE ALL ALIAS
+CHNGALAS LABEL ,                       POINTERS TO NEW MEM NAME
+         FSCALL NXTALIAS               LOOP THROUGH ALL ALIASES
+         BM    RNAMDONE
+         MVC   DALINAM(8),GPWLMN2
+         B     CHNGALAS
+RNAMDONE LABEL ,
+         LCALL PUTDIRX                 WRITE OUT DIRECTORY BLOCK
+         B     FSUB0
+         END   ,
+         SPACE 3
+         ELSE  BEGIN                   OS PDS MEMBER RENAME
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' LC  R0,GPWAFID'
+         CONTROL (0),3,GPWLMN,GPWLMN2
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0
+         CH    R15,=H'52'              MEMBER ALREADY EXISTS
+         BE    PLUSRET
+         CH    R15,=H'56'              MEMBER NOT FOUND
+         BE    MINUSRET
+         CH    R15,=H'60'              NO DIRECTORY SPACE
+         BE    LIBFULL
+         B     ERROS
+         END   ,
+         EJECT ,
+*
+*        ADDALIAS
+*
+ADDALIAS LABEL ,
+         IF    ^GPWFVOSF,BEGIN        ORVYL FILES
+         LCALL GETDIRX
+         MVC   CLWTEMP(16),GPWLMN      SAVE NAME AND ALIAS
+         MVC   GPWLMN(8),GPWLMN2       SEE IF ALIAS ALREADY EXISTS
+         LCALL FINDNTRY
+         IF    Z,BEGIN                ALIAS EXISTS
+         MVC   GPWLMN2(8),CLWTEMP
+         CLC   DENTRY(16),GPWLMN       ALIAS  FOR SPECIFIED NAME, OK
+         MVC   GPWLMN(16),CLWTEMP      ALIAS FOR ANOTHER MEMBER, ERROR
+         BE    FSUB0
+         B     PLUSRET
+         END
+         MVC   GPWLMN(8),CLWTEMP       NOW SEE IF MEMBER DOES NOT
+         LCALL SRCHDIRX                   EXIST
+         CLEAR GPWALIAS
+         LTR   R15,R15
+         BM    MINUSRET
+         LCALL FINDBLNK                GET BLANK ENTRY FOR ALIAS
+         BM    LIBFULL
+         MVC   DALINAM(8),GPWLMN       MOVE IN MEMBER NAME
+         MVC   GPWLMN(16),CLWTEMP      RESTORE NAME1 AND NAME2
+         MVC   DNAME(8),GPWLMN2        MOVE IN ALIAS
+         LCALL PUTDIRX                 WRITE DIRECTORY BLOCK
+         B     FSUB0
+         END   ,
+         SPACE 3
+         ELSE  BEGIN                   OS PDS ADD ALIAS
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,' LC  R0,GPWAFID'
+         CONTROL (0),3,GPWLMN,GPWLMN2,MODE=(ALIAS,REPLACE)
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0
+         CH    R15,=H'56'              MEMBER NOT FOUND
+         BE    MINUSRET
+         CH    R15,=H'60'              NO DIRECTORY SPACE
+         BE    LIBFULL
+         B     ERROS
+         END   ,
+         EJECT ,
+*
+*  DELETE MEMBER: ORVYL FILES
+*
+DELMEM   LABEL ,                       DELETE PDS MEMBER
+         IF    ^GPWFVOSF,BEGIN
+         LCALL GETDIRX
+         LCALL FINDNTRY                FIND ENTRY
+         BM    MINUSRET
+         CLI   DALINAM,C' '
+         IF    H,BEGIN                IF ALIAS, DELETE ONLY ALIAS
+         SET   GPWALIAS                SET ALIAS FLAG, ETC
+         MVC   GPWLMN(8),DALINAM
+         MVC   GPWLMN2(8),DNAME
+         MVC   DENTRY(16),BLANKS
+         LCALL PUTDIRX
+         B     FSUB0
+         END   ,
+         CLEAR GPWNXTAD                ELSE, DELETE ALL ALIAS'S
+         LOOP  BEGIN                   SEARCH FOR NEXT ALIAS
+         FSCALL NXTALIAS
+         IF    M,EXIT
+         MVC   DENTRY(16),BLANKS       DELETE ALIAS
+         END   ,
+         LCALL SRCHDIRX                DELETE ACTUAL MEMBER
+         L3    R5,DFBN                 GET REMEMBER MEMBER BLOCK INFO
+         L3    R4,DBCT
+         AR    R4,R5                   FIRST, LAST BLOCKS IN MEMBER
+         DECR  R4
+         MVC   DENTRY(16),BLANKS
+         LCALL PUTDIRX                 WRITE OUT DIRECTORY BLOCK
+         LR    R15,R5
+         LR    R14,R4
+         IF    (R14,GE,R15),BEGIN
+         FSCALL DELLOTS                NO BLOCKS, NO DELETE
+         FSCALL FORCE                  DELETE BLOCKS OF MEMBER
+         SET GPWSFER
+         END   ,
+         B     FSUB0                   DONE
+         END   ,
+         EJECT ,
+*
+* DELETE MEMBER: OS/FILES
+*
+         ELSE  BEGIN
+         LC    R0,GPWFID                FILE ID
+         IF    GPWFALTF,'LC  R0,GPWAFID'
+         CONTROL (0),2,GPWLMN,8             DELETE MEMBER
+         BNZ   HOTERROS
+         WAIT  (0)
+         BZ    FSUB0                   OK
+         BP    MINUSRET                MEMBER NOT FOUND
+         B     ERROS
+         END   ,
+         EJECT ,
+*
+*        NEXT PDS MEMBER, SKIPS BLANKS AND ALIAS'S
+*
+*  RETURNS ENTRY ADDRESS IN GPWNXTAD, IF GPWNXTAD=0 NEXT CALL STARTS
+*  AT BEGINING OF DIRECTORY.
+*  READS DIRECTORY BLOCK ONLY FOR FIRST TIME THRU!! BEWARE.
+*
+NXTMEM   LABEL ,                       RETURN NEXT MEMBER
+         IF    ^GPWFVOSF,BEGIN
+         LT    R14,GPWNXTAD            LAST MEMBER ENTRY ADDR
+         IF    Z,BEGIN
+         LCALL GETDIRX                 IF ZERO START AFRESH
+         L     R14,GPWDIRAP            R14 - ENTRY POINTER
+         END   ,
+         L     R1,GPWDIRAE             R1 - END OF BLOCK
+         LOOP  BEGIN                   GET NEXT MEMBER
+         LA    R14,DENTSIZ(R14)
+         IF    (R14,GE,R1),EXIT        DONE
+         CLI   DNAME,C' '              SKIP BLANK ENTRIES
+         IF    NH,NEXT
+         CLI   DALINAM,C' '            SKIP ALIASES
+         IF    H,NEXT
+         ST    R14,GPWNXTAD            GOT NEXT MEMBER
+         B     FSUB0                   RETURN
+         END   ,
+         CLEAR GPWLNXTM                NO NEXT MEMBER, BM ->
+         B     MINUSRET
+         END   ,
+         SPACE 3
+*
+*        OS PDS'S
+*
+         ELSE  BEGIN
+         LT    R14,GPWNXTAD            LAST MEMBER ENTRY ADDR
+         IF    Z,BEGIN
+         LCALL GETMEMS                 IF ZERO START AFRESH
+         L     R14,GPWDIRAP            R14 - ENTRY POINTER
+         S     R14,=F'8'
+         END   ,
+         L     R1,GPWDIRAE             R1 - END OF BLOCK
+         LOOP  BEGIN                   GET NEXT MEMBER
+         LA    R14,12(R14)
+         IF    (R14,GE,R1),MINUSRET    END OF DIRECTORY
+         TM    11(R14),X'80'           SKIP ALIAS'S
+         UNTIL Z,END
+*$ 11(14) TSK TSK BE SERIOUS !!!
+         ST    R14,GPWNXTAD            GOT NEXT MEMBER
+         B     FSUB0                   RETURN
+         END   ,
+         EJECT ,
+*
+*        NEXT PDS ENTRY, SKIPS ONLY BLANK ENTRY
+*
+*  RETURNS ENTRY ADDRESS IN GPWNXTAD, IF GPWNXTAD=0 NEXT CALL STARTS
+*  AT BEGINING OF DIRECTORY.
+*  READS DIRECTORY BLOCK ONLY FOR FIRST TIME THRU!! BEWARE.
+*
+NXTENTRY LABEL ,                       RETURN NEXT ENTRY
+         IF    ^GPWFVOSF,BEGIN
+         LT    R14,GPWNXTAD            LAST MEMBER ENTRY ADDR
+         IF    Z,BEGIN
+         LCALL GETDIRX                 IF ZERO START AFRESH
+         L     R14,GPWDIRAP            R14 - ENTRY POINTER
+         END   ,
+         L     R1,GPWDIRAE             R1 - END OF BLOCK
+         LOOP  BEGIN                   GET NEXT ENTRY
+         LA    R14,DENTSIZ(R14)
+         IF    (R14,GE,R1),MINUSRET    END OF DIRECTORY
+         CLI   DNAME,C' '              SKIP BLANK ENTRIES
+         UNTIL H,END
+         ST    R15,GPWNXTAD            GOT NEXT MEMBER
+         B     FSUB0                   RETURN
+         END   ,
+         SPACE 3
+*
+*        OS PDS'S
+*
+         ELSE  BEGIN
+         LT    R14,GPWNXTAD            LAST MEMBER ENTRY ADDR
+         IF    Z,BEGIN
+         LCALL GETMEMS                 IF ZERO START AFRESH
+         L     R14,GPWDIRAP            R14 - ENTRY POINTER
+         S     R14,=F'8'
+         END   ,
+         L     R1,GPWDIRAE             R1 - END OF BLOCK
+         LA    R14,12(R14)              GET NEXT MEMBER
+         IF    (R14,GE,R1),MINUSRET    END OF DIRECTORY
+         ST    R14,GPWNXTAD            GOT NEXT MEMBER
+         B     FSUB0                   RETURN
+         END   ,
+         EJECT ,
+*
+*        GET NEXT ALIAS FOR NAME1
+*
+*   RETURNS ALIAS OF GPWLMN ADDRESS IN GPWNXTAD, IF GPWNXTAD IS
+*   ZERO IT STARTS WITH FIRST ALIAS OF MEMBER. IF NO MEMBERS WE
+*   GIVE A MINUS RETURN. OS/FILES ARE NOP-ED (IE ALWAYS HAVE
+*   MINUS RETURN).
+*   THE DIRECTORY BLOCK IS ONLY READ FIRST TIME CALLED, NATCH.
+*   IF NAME FIRST CALLED WITH IS AN ALIAS IT WORKS ALL THE SAME.
+NXTALIAS LABEL ,
+         IF    GPWFVOSF,MINUSRET       OS GETS A MINUS RETURN ALWAYS
+         LT    R14,GPWNXTAD            IF ZERO START AFRESH
+         BNZ   RETALIAS
+         LCALL GETDIRX
+         L     R14,GPWDIRAP
+RETALIAS L     R1,GPWDIRAE             SET UP FOR BXLE
+         LA    R0,DENTSIZ
+         B     TRYNEXTA
+GTALOOP  LABEL ,                       LOOP SEARCHING FOR ALIAS
+         CLC   DALINAM(8),GPWLMN
+         BE    GTARET
+TRYNEXTA BXLE  R14,R0,GTALOOP          LOOP
+         B     MINUSRET                NOT FOUND
+GTARET   ST    R14,GPWNXTAD            FOUND
+         B     FSUB0
+         EJECT ,
+*
+*        GET DIRECTORY ENTRY FOR MEMBER IN GPWLMN
+*
+FINDNTRY LABEL ,
+         VPUSH R0,R9,*
+         CLEAR R15
+         L     R14,GPWDIRAP            START OF BLOCK
+         L     R1,GPWDIRAE             END OF BLOCK
+         LA    R0,DENTSIZ              LENGTH OF ENTRY
+GTELOOP  LABEL ,
+         CLC   DNAME(8),GPWLMN         IS IT REQUESTED ENTRY
+         BE    GTERET                  YES ->
+         BXLE  R14,R0,GTELOOP          NO LOOP
+         LA    R15,4                   NOT FOUND
+GTERET   VPOP  R0,R9,*                 FOUND
+         LCR   R15,R15
+         BR    RAR
+         SPACE 3
+*
+*        GET BLANK DIRECTORY ENTRY
+*
+FINDBLNK LABEL ,
+         VPUSH R0,R9,*
+         CLEAR R15
+         L     R14,GPWDIRAP            START OF BLOCK
+         L     R1,GPWDIRAE             END OF BLOCK
+         LA    R0,DENTSIZ              LENGTH OF ENTRY
+         B     NICETRY
+GTBLOOP  LABEL ,
+         CLI   DNAME,C' '              GET BLANK ENTRY
+         BH    NICETRY
+         CLC   DNAME(8),BLANKS         MAKE SURE ALL BLANK
+         BE    GTBRET
+         OC    DNAME(8),DNAME          OR ZEROS
+         BZ    GTBRET
+NICETRY  BXLE  R14,R0,GTBLOOP          ELSE LOOP
+         LA    R15,4                   NOT FOUND
+GTBRET   VPOP  R0,R9,*                 FOUND
+         LCR   R15,R15
+         BR    RAR
+         EJECT ,
+*
+*        SEARCH DIRETORY
+*
+*  FIND MEMBER FOR NAME IN GPWLMN, IF IT IS AN ALIAS MOVE NAME TO
+*  GPWLMN2, THEN INSERT ACTUAL MEMBER NAME IN GPWLN AND SET GPWALIAS
+*  FLAG.
+*
+SRCHDIRX LABEL ,
+         VPUSH R0,R9,*
+         CLEAR R15
+         CLEAR GPWALIAS
+SRCHIT   L     R14,GPWDIRAP
+         L     R1,GPWDIRAE
+         LA    R0,DENTSIZ
+SRCHLOOP LABEL ,
+         CLC   DNAME(8),GPWLMN
+         BE    SRCHECK
+         BXLE  R14,R0,SRCHLOOP
+         LA    R15,4
+         VPOP  R0,R9,*
+         LCR   R15,R15
+         BR    RAR
+SRCHECK  LABEL ,
+         CLI   DALINAM,C' '            IS IT AN ALIAS
+         BL    SRCHRET
+         IF    GPWALIAS,BEGIN         YES ALL ALIAS MUST POINT
+         CLC   DALINAM(8),GPWLMN       TO SAME MEMBER NAME
+         BNE   BADDIR
+         END   ,
+         ELSE  BEGIN                   FOR FIRST ALIAS FOUND
+         MVC   GPWLMN2(8),GPWLMN       WE MOVE ALIAS TO NAME2
+         MVC   GPWLMN(8),DALINAM        AND MEMBER NAME TO NAME1
+         SET   GPWALIAS                WE ALSO SET ALIAS FLAG
+         END   ,
+         B     SRCHIT                  IF ALIAS WE CONTINUE SEARCH
+SRCHRET  LABEL ,
+         VPOP  R0,R9,*                 FOUND ACTUAL MEMBER, POP
+         LTR   R15,R15
+         BR    RAR
+BADDIR   SEG   'Directory error in '
+         FSCALL SEGNAME
+         B     FSERRTN                 ERROR EXIT
+         EJECT ,
+*
+*        GET ORVYL PDS DIRECTORY
+*
+*  IF GPWLGOTD: GOT DIRECTORY BLOCK, SKIP DIRECTORY BLOCK READ
+*  IF GPWLNEWD: NEW DIRECTORY, CREATE FIRST DIRECTORY BLOCK
+*
+GETDIRX  LABEL ,
+         VPUSH R14,R9,*
+         IF    GPWLGOTD,BEGIN         IF WE HAVE DIRECTORY BLOCK
+         CLEAR GPWLGOTD
+         VPOP  R14,R9,*                RETURN
+         BR    RAR
+         END   ,
+*
+* CREATE NEW DIRECTORY
+*
+         IF    GPWLNEWD,BEGIN         IF NEW DIRECTORY, CREATE IT
+         CLEAR GPWLNEWD
+         LT    R15,GPWDIRAL            ANY CORE ALREADY GOTTEN?
+         IF    NZ,BEGIN
+         FREECLW L:GPWDIRAP,(15)       FREE PREVIOUS DIRECTORY
+         CLEAR R15             ZE      RO LENGTH
+         ST    R15,GPWDIRAL            IN CASE OF ERROR
+         END   ,                         MLP03
+         GETCLW DIRBLEN,DIRBLEN        GET SOME ELBOW ROOM
+         BNZ   NODIRCOR                NOT ENOUGH
+         ST    R1,GPWDIRAP              SAVE BEGINNING
+         ST    R0,GPWDIRAL               AND LENGTH
+         LR    R0,R1               DUMMY UP A DIRECTORY
+         LA    R1,DIRBLEN
+         CLEAR R2
+         L     R3,=X'40000000'
+         MVCL  R0,R2
+         L     R1,GPWDIRAP
+         CLEAR (@R1,DENTSIZ)
+         LCALL FREUPDIR
+         LA    R15,DIRBLEN
+         FSCALL WRITEGO
+         VPOP  R14,R9,*                CREATED NEW DIRECTORY
+         BR    RAR
+         END   ,
+*
+* READ EXISTING DIRECTORY
+*
+READDIR  LABEL ,
+         LT    R15,GPWDIRAL            ANY CORE ALREADY GOTTEN?
+         IF    NZ,BEGIN               YES
+         FREECLW L:GPWDIRAP,(15)       FREE PREVIOUS DIRECTORY
+         CLEAR R15                     ZERO LENGTH
+         ST    R15,GPWDIRAL            IN CASE OF ERROR
+         END   ,
+         IF    ^GPWUILIB,NOTLIB        SKIP IF NOT LIBRARY
+         GETCLW DIRBLEN,DIRBLEN        GET SOME ELBOW ROOM
+         BNZ   NODIRCOR                NOT ENOUGH
+         ST    R1,GPWDIRAP             SAVE BEGINNING
+         ST    R1,GPWDIRLS             INITIALIZE LAST ENTRY
+         ST    R0,GPWDIRAL               AND LENGTH
+         CLEAR GPWBN                   FIRST DIRECTORY BLOCK IS ZERO
+         LR    TR,R1                   SAVE START ADDRESS
+         LR    SR,0                    LENGTH
+         AR    SR,TR                   + START
+         SH    SR,=Y(DIRBLEN)           -1 BLOCK IS AS FAR AS WE CAN GO
+         USING DIRB,TR                ##
+DIRREAD  LR    R1,TR                   WHERE TO READ IT
+         LA    R15,DIRBLEN             HOW MUCH TO READ
+         FSCALL READGO                 GO GET IT
+         BNZ   BADDIR                  NOT THERE
+         CH    R1,=Y(DIRBLEN)          RIGHT LENGTH?
+         BNE   BADDIR                  NO
+         CLI   0(TR),0                 FIRST BYTE 0
+         BNE   BADDIR
+         LT    R0,DIRBLINK              NEXT BLOCK POINTER
+         BZ    GOTDIR                  THAT IS ALL
+         LA    TR,DIRBLEN(,TR)         POINT TO NEXT AREA
+         ST    R0,GPWBN                 SAVE BLOCK NUMBER
+         CR    TR,SR                   GONE TOO FAR?
+         BNL   NODIRCOR
+         B     DIRREAD                 GO GET NEXT BLOCK
+*
+GOTDIR   LABEL ,
+         LR    R1,TR
+         LCALL FREUPDIR
+         VPOP  R14,R9,*
+         BR    RAR
+         DROP  TR                       ##
+         EJECT ,
+*
+*  REWRITE DIRECTORY BLOCK
+*
+PUTDIRX  LABEL ,
+         VPUSH R14,R9,*
+         L     TR,GPWDIRAP             POINT TO FIRST BLOCK
+         USING DIRB,TR                ##
+PUTDIRLP MVC   GPWBN,DIRBBNUM          BLOCK TO WRITE
+         LA    R15,DIRBLEN             LENGTH TO WRITE
+         LR    R1,TR                   WHERE TO WRITE FROM
+         FSCALL WRITEGO                GO WRITE IT
+         FSCALL FORCE
+         LT    R1,DIRBLINK             LAST BLOCK?
+         LA    TR,DIRBLEN(,TR)         POINT TO NEXT DIRB
+         BNZ   PUTDIRLP                NOT LAST, WRITE ANOTHER
+         VPOP  R14,R9,*
+         BR    RAR
+         EJECT ,
+*
+*        FREE UP UNUSED DIRECTORY SPACE
+*        (????)
+*
+FREUPDIR LABEL ,
+         VPUSH R14,R9,*
+         LA    TR,DIRBLEN(,R1)         POINT TO END OF LAST BLOCK
+         LR    SR,TR                   SAVE LAST USED ADDRESS
+         DECR  SR                      MINUS 1
+         ST    SR,GPWDIRAE             END OF DIRECTORY
+*         LA    TR,DIRBLEN(,TR)         SKIP ONE EXTRA BLOCK
+*         LA    TR,X'FFF'(,TR)          ROUND UP
+*         N     TR,=X'00FFF000'          TO PAGE BOUNDARY
+*         L     R15,GPWDIRAP            START ADDRESS
+*         A     R15,GPWDIRAL            LAST ADDRESS GOTTEN MINUS
+*         SR    R15,TR                   LAST ADDR USED = LENGTH T
+*         L     SR,GPWDIRAL             ORIGINAL LENGTH
+*         SR    SR,R15                   - REMAINING LENGTH
+*         ST    SR,GPWDIRAL              = ALLOCATED LENGTH
+*         LR    R1,TR                   START OF AREA TO FREE
+*         FREECLW (1),(15)              FREE UNUSED SPACE
+         VPOP  R14,R9,*
+         BR    RAR
+         EJECT ,
+*
+*  READ IN ALL MEMBERS OF OS PDS
+*
+*  NOTE THE ENTRIES START AT GPDIRAP+4 AND ARE 12 BYTES LONG
+*  THERE ARE UP TO 8K OF THEM. (IE 682 ENTRIES).  YUM. EAT IT UP.
+*
+GETMEMS  LABEL ,
+         VPUSH R14,R9,*
+         LT    R15,GPWDIRAL            ANY CORE ALREADY GOTTEN?
+         IF    NZ,BEGIN                YES
+         FREECLW L:GPWDIRAP,(15)       FREE PREVIOUS DIRECTORY
+         CLEAR R15                     ZERO LENGTH
+         ST    R15,GPWDIRAL            IN CASE OF ERROR
+         END   ,
+         IF    ^GPWUILIB,NOTLIB        SKIP IF NOT LIBRARY
+         GETCLW L:OSDIRLEN,0           GET SOME ELBOW ROOM
+         BNZ   NODIRCOR                NOT ENOUGH
+         ST    R1,GPWDIRAP             SAVE BEGINNING
+         ST    R1,GPWDIRLS             INITIALIZE LAST ENTRY
+         ST    R0,GPWDIRAL             AND LENGTH
+         MVC   @R1(4),OSDRRQST         INFO REQUEST IN AREA HEADR
+         LR    R15,R1                  INFO AREA FOR CONTROL
+         LC    R0,GPWFID               FILE ID
+         IF    GPWFALTF,' LC  R0,GPWAFID'
+         L     R14,=A(8192-4)          LENGTH
+         CONTROL (0),4,(15),(14)       GET INFO
+         BNZ   HOTERROS
+         WAIT  (0)
+         BNZ   ERROS
+         L     R2,GPWDIRAP             START+LENGTH=END OF INFO AREA
+         AR    R2,R1
+         ST    R2,GPWDIRAE
+         ST    R2,GPWDIRLS             ??
+         L     R3,GPWDIRAP             END OF AREA - 12
+         S     R3,=F'12'
+         IF    (R1,GT,R3),NODIRCOR     MORE INFO THAN AREA ERR
+         VPOP  R14,R9,*
+         BR    RAR
+         DROP  R14                     ##
+         DS    0F
+OSDIRLEN DC    X'00002000'             8K
+OSDRRQST DC    X'02AA000C'             682 12 BYTE ENTRIES
+         EJECT ,
+*
+*  MISCELLANEOUS DIRECTORY RETURN ROUTINES, CONSTANTS, ETC.
+*
+MINUSRET LABEL ,                       RETURN R15 = -4
+         LA    R15,4
+         LCR   R15,R15
+         B     FSUBX
+         SPACE ,
+PLUSRET  LABEL ,                       RETURN R15 = 4
+         LA    R15,4
+         B     FSUBX
+         SPACE ,
+BLANKS   DC    16C' '                  CONSTANTS
+         LTORG
+         EJECT ,
+*GEN
+         FSCALL FSUB#6                 GENERATE SEGMENT 6
+*NOGEN
+         EJECT ,
+* TEST FOR GROUP LEVEL ACCOUNT PRIOR TO CONVERT
+*
+TSEGACC  LABEL ,
+         CLC   @R1+3(L'UUU),=C'PUB'
+         BNE   SEGACC1                 NOT GROUP LEVEL
+         MVC   GPWAFN(L'GG),@R1        GROUP CODE
+         SEG   'Group '
+         LA    R0,2                    NUMBER OF CHARS
+         B     SEGACC2
+* CONVERT GG.UUU TO UUU$GG AND PRINT   (MOVED FROM VGP)
+*
+SEGACCT  LABEL ,
+SEGACC1  MVC   GPWAFN(L'ACCT),@R1      USE ALT FILENAME FOR WORK
+         LA    R0,6
+SEGACC2  SEG   GPWAFN,(R0)
+         B     FSUB0
+         SPACE 2
+* PUT NAME TOGETHER
+*
+ASMBLNAM LABEL ,                       PUT TOGETHER FILE NAME
+         IF    (GPWFVOSF,AND,^GPWOSFOK),NOVOSF
+*        IF    (GPWFVOSF,AND,(GPWSGRP,NE,'G')),NOVOSF
+         CLI   GPWFNL,0                FILE NAME SPECIFIED?
+         BE    ASMNONAM                NO - ERROR
+         MVI   GPWFILN,C' '            BLANK FILE NAME
+         MVC   GPWFILN+1(L'GPWFILN-1),GPWFILN
+         IF    ^GPWFFFN,BEGIN          ONLY IF WHOLE NAME
+         CLI   GPWUSER,C' '            USER SPECIFIED?
+         IF    EQ,' MVC   GPWUSER,GPWSUSER'   USE 'SET' USER
+         CLI   GPWGRP,C' '             GROUP SPECIFIED?
+         IF    EQ,' MVC   GPWGRP,GPWSGRP'     USE 'SET' GROUP
+         END   ,
+         LC    SR,GPWFNL               GET FILENAME LENGTH
+         DEX   SR,'MVC  GPWFILN(0),GPWFFN'    MOVE FILENAME TO FCB
+*
+         B     FSUB0
+         EJECT ,
+*  ASK TO ERASE LIBRARY MEMBER
+*
+ASKMBERS LABEL ,
+         SEG   'Replace '
+         FSCALL SEGMEMB
+         SEG   'in '
+         B     ERAS1
+*
+*  REQUEST USER FOR ERASE OPTION
+*
+ASKERASE LABEL ,
+         SEG   'Replace '
+ERAS1    FSCALL SEGNAME
+*
+RDERASE  LABEL ,
+         VREAD
+         IF    NZ,'FSCALL FILEXIT'     QUIT IF ATTENTION
+         IF    (R0,Z),RDEXIT           NO RESPONSE
+         SCINIT (1),(0),CLWKWCB
+         SCAN  ERASETBL,CLWKWCB
+         B     RDEXIT                  IGNORE IF NOT IN TABLE
+*
+ERASETBL SCKW  YES,ERASEOK
+         SCKW  OK,ERASEOK
+         SCKW  APPEND,APPENOK,A
+         SCKW  MERGE,APPENOK,A
+         SCKW  Y,ERASEOK
+         SCKW  ,RDEXIT
+*
+ERASEOK  LABEL ,
+         SET   GPWFERS                 SET ERASE OK
+         B     RDEXIT
+*
+APPENOK  SET   GPWFAPP
+RDEXIT   LABEL ,
+         B     FSUB0                   RETURN TO CALLER
+         EJECT
+*
+*  CHECK FOR SPIRES ONLY ATTRIBUTE
+*
+CHKSPIRE LABEL ,
+         FSCALL  DOSENSPI              CHECK IT OUT
+         IF    Z,FSUB0                 NOT SPIRES ONLY
+         IF    (CLWACCT,EQ,GPWFGRP),FSUB0  OWNER CAN DO ANYTHING
+         SEG   'CLP cannot access Spires-only file'
+         B     FSERRTN
+         EJECT ,
+FORGROUP CH    R0,=Y(L'ACCT)            RIGHT LENGTH?
+         BNE   BADACCT                 NO - INVALID
+         LR    SR,R1                   SAVE ACCOUNT POINTER
+         CLI   L'UUU(SR),C'$'            SEPARATOR?
+         BNE   FORGP1                  IS MOT $
+         MVC   GPWACCT(L'GG),L'UUU+@R1+1  GROUP
+         MVC   GPWACCT+L'GG+1(L'UUU),@R1  USER
+         MVI   GPWACCT+L'GG,C'.'
+         MVI   L'UUU(SR),C'0'            TEMP FIX FOR TEST
+         B     GRPTST
+FORGP1   CLI   L'GG(SR),C'.'           TRY OTHER OPTION
+         BNE   BADACCT
+         MVC   GPWACCT(L'ACCT),@R1     MOVE ACCOUNT
+         MVI   L'GG(SR),C'0'           FOR TEST
+GRPTST   CLI   @SR,C'A'                CHECK VALIDITY OF ACCOUNT
+         BL    BADACCT
+         CLI   @SR,C'I'
+         BNH   CHKNXG
+         CLI   @SR,C'J'
+         BL    BADACCT
+         CLI   @SR,C'R'
+         BNH   CHKNXG
+         CLI   @SR,C'S'
+         BL    BADACCT
+         CLI   @SR,C'Z'
+         BNH   CHKNXG
+         CLI   @SR,C'0'
+         BL    BADACCT
+         CLI   @SR,C'9'
+         BH    BADACCT
+*
+CHKNXG   LA    SR,@SR+1
+         BCT   R0,GRPTST                DO ALL
+         CLI   GPWACCT,C'0'            FIRST MUST BE ALPHA
+         BNL   BADACCT
+         CLI   GPWACCT+L'GG+1,C'0'     ALSO THIS ONE
+         BNL   BADACCT
+         SET   GPWFACC                 INDICATE GROUP SET
+         B     FSUB0
+         EJECT ,
+*
+* OS ERROR MESSAGES
+*
+OSERROR  LABEL ,                 WE DO  EM ALL
+         VPUSH R15,,*
+         SEG   'Request aborted, '     TELL REQUEST ABORTED
+         VPOP  R15,,*
+         LA    R15,12(R15)
+         B     OSERRS(R15)
+OSERRS   B     OSERRM12                -12 UNUSUAL OS ERROR
+         B     OSERRM8                 -8
+         B     OSERRM4                 -4
+         B     FSUB0                    0  IS OK
+         B     OSERR4                   4  ERROR
+         B     OSERR8                   8   ERRORS
+         B     OSERR12                 12       AND MORE ERRORS
+         B     OSERR16                 16
+         B     OSERR20                 20
+         B     OSERR24                 24
+         B     OSERR28                 28
+         B     OSERR32                 32
+         B     OSERR36                 36
+         B     OSERR40                 40
+         B     OSERR44                 44
+         B     OSERR48                 48
+         B     OSERR52                 52
+         B     OSERR56                 56
+         B     OSERR60                 60
+         DC    F'0'                    64   BOMB
+         SPACE 5
+OSERRM12 LABEL ,                       UNUSUAL OS ERROR
+         SEG   'Unusual OS file error - R14: '
+         SEGHX 8,(R14)                PRINT HEX CONTENTS OF R14
+         B     FSERRTN
+         SPACE 2
+OSERRM8  LABEL ,                       INVALID OPERATION
+         SEG   'Invalid operation'     ??
+         B     FSERRTN
+         SPACE 2
+OSERRM4  LABEL ,                       I/O ERROR
+         SEG   'I/O error'
+         B     FSERRTN
+         SPACE 2
+OSERR4   LABEL ,                       INVALID FILE,VOLUME,ETC NAME
+         SEG   'Illegal file, volume, or member name'
+         B     FSERRTN
+         SPACE 2
+OSERR8   LABEL ,                       DATA SET NOT ON VOL
+         SEG   'Data set not found on volume'
+         B     FSERRTN
+         SPACE 2
+OSERR12  LABEL ,                       DATA SET NOT ON CATALOUGE
+         SEG   'Data set not found on catalog'
+         B     FSERRTN
+         SPACE 2
+OSERR16  LABEL ,                       ACCESS NOT PERMITTED
+         SEG   'Access not permitted'
+         B     FSERRTN
+         SPACE 2
+OSERR20  LABEL ,                       DATA SET IN USE
+         SEG   'Data set in use'
+         B     FSERRTN
+         SPACE 2
+OSERR24  LABEL ,                       DATA SET ALREADY ON VOLUME
+         SEG   'Data set already on volume'
+         B     FSERRTN
+         SPACE 2
+OSERR28  LABEL ,                       VOLUME FULL
+         SEG   'Volume specified is full'
+         B     FSERRTN
+         SPACE 2
+OSERR32  LABEL ,                       VOLUME VTOC FULL
+         SEG   'Volume VTOC is full'
+         B     FSERRTN
+         SPACE 2
+OSERR36  LABEL ,                       SYSTEM TABLES FULL
+         SEG   'System tables full'
+         B     FSERRTN
+         SPACE 2
+OSERR40  LABEL ,                       FILE TABLES FULL
+         SEG   'File tables full'
+         B     FSERRTN
+         SPACE 2
+OSERR44  LABEL ,                       END OF FILE
+         SEG   'End of file'           NEVER CALLED (?)
+         B     FSERRTN
+         SPACE 2
+OSERR48  LABEL ,                       FILE FULL (END OF EXTENT)
+         FSCALL SEGNAME
+         SEG   ' full (End of extent)'
+         B     FSERRTN
+         SPACE 2
+OSERR52  LABEL ,                       MEMBER EXISTS
+         SEG   'Member already exists' NEVER CALLED (?)
+         B     FSERRTN
+         SPACE 2
+OSERR56  LABEL ,                       MEMBER NOF FOUND
+         SEG   'Member not found'      NEVER CALLED (?)
+         B     FSERRTN
+         SPACE 2
+OSERR60  LABEL ,                       NO SPACE IN DIRECTORY
+         SEG   'No space in file directory'
+         B     FSERRTN
+         SPACE 2
+         EJECT ,
+         LTORG ,
+         EJECT ,
+*
+*  GLOBAL KEYWORD SCAN TABLES
+*         KEYWORD EXIT ROUTINES
+*
+         SPACE ,
+         ENTRY GOTNKWR                 GOTNAME EXIT ROUTINE
+         ENTRY KWFNOPT                 USER/GROUP OPTIONS
+         ENTRY QUIET                   QUIET SCAN EXIT
+         ENTRY FORACT
+         ENTRY FORPUB
+         ENTRY SETPUB
+         ENTRY GROUP
+         ENTRY USER
+         ENTRY USR$GRP
+         ENTRY OSOPTS                  OS/FILE OPTIONS
+         ENTRY OSCREATE                OS/FILE CREATE OPTIONS
+         SPACE ,
+KWFNOPT  SCKW  USER,USER,(A,P)
+         SCKW  GROUP,GROUP,(A,P)
+         SCKW  ACCOUNT,USR$GRP,(A,P)
+         SCKW  PUBLIC,SETPUB,A
+         SCKW  GRP,GROUP,P
+         SCKW  USR,USER,P
+         SCKW  ACCT,USR$GRP,P
+         SCKW  ,,POP
+         SPACE ,
+OSOPTS   SCKW  ON,VOLUME,P
+         SCKW  OSFILE,OSFILE,A
+         SCKW  LOADFILE,LOADFILE
+         SCKW  OSOK,OSOK               *TESTOS
+         SCKW  ,,POP
+         SPACE ,
+OSCREATE SCKW  SPACE,SPACE,(P,PI,A),1200
+         SCKW  DSPACE,DSPACE,(P,PI),1200
+         SCKW  DSPA,DSPACE,(P,PI),1200
+         SCKW  ,,POP
+         EJECT ,
+*  SET QUIET OPTION FOR VAROUS COMMANDS
+*
+QUIET    SET   GPWFQIET                SET QUIET FLAG
+         SCRTN (15)                    RETURN TO SCANNER
+         SPACE ,
+GOTNKWR  LABEL ,
+         VPUSH BRR,R15,*               GET ADDRESSABILITY
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ADDRESABILITY
+         FSCALL GOTNAME                ENTER FILE SUBROUTINE
+         VPOP  BRR,R15,*               RESET SCANNER RETURN
+         SCRTN (15)                    RETURN TO SCANNER
+         EJECT ,
+* THE ROUTINES TO PROCESS 'FOR' CLAUSES IN SET AND SHO
+* PERMITS, FILES, ETC. COMMANDS HAVE BEEN MOVED TO VFSB
+*
+* PROCESS UUU$GG FORM OF ACCOUNT
+FORACT   LABEL ,
+         VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         CH    R0,=Y(L'ACCT)
+         BNE   FSUNREC
+         CLI   @R1+L'UUU,C'$'          CHECK DELIMITER TYPE
+         BNE   FORAC1
+         LA    R2,@R1+L'UUU+1
+         B     FORAC2
+FORAC1   CLI   @R1+L'GG,C'.'
+         BNE   FSUNREC
+         LR    R2,R1
+         LA    R1,L'GG+1(R1)
+FORAC2   CLI   GPWGRP,C' '             GROUP ALREADY?
+         BNE   FSDBLGRP
+         CLI   GPWUSER,C' '
+         BNE   FSDBLUSR
+         MVC   GPWUSER,@R1
+         MVC   GPWGRP,@R2
+         VPOP  BRR,BR,*                RESTORE REGISTERS
+         SCRTN (R15)                   RETURN
+*
+* PROCESS PUBLIC
+FORPUB   VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         SET   GPWFPUB
+         CLI   GPWGRP,C' '             GROUP ALREADY?
+         BNE   FSUNREC                 YES
+         CLI   GPWUSER,C' '            HOW ABOUT USER?
+         BNE   FSUNREC
+         MVI   GPWGRP,C'0'             IN CASE OF
+         MVI   GPWUSER,C'0'              DUPLICATE
+         VPOP  BRR,BR,*                RESTORE REGISTERS
+         SCRTN (R15)                   RETURN
+         EJECT ,
+* GROUP AND USER KEYWORD ROUTINES
+*
+*
+SETPUB   LABEL ,
+         VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         VPUSH R14,,*                  QUICK RETURN SAVE
+         SETMSG '&SYSUSER'
+         LTR   R0,R0                   MAKE POS CC
+         BAL   R14,USER                FAKE KEYWORD ROUTINE ENTRY
+         SETMSG '&SYSGRP'
+         BAL   R14,GROUP               FAKE KEYWORD ENTRY
+         VPOP  R14,,*                  RESTORE SCAN RETURN
+         VPOP  BRR,BR,*
+         SCRTN (15)
+         EJECT ,
+GROUP    VPUSH BRR,WAR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    FSMISSNG
+         CLI   GPWGRP,C' '             ALREADY A GROUP?
+         BNE   FSDBLGRP                YES - ILLEGAL
+         CLI   0(1),C'@'               RIGHT CHARACTER?
+         BNE   GROUP2                  NO
+         LA    R1,@R1+1                SKIP @
+         BCT   R0,GROUP2                GO GET REST OF GROUP
+         MVC   GPWGRP,CLWGROUP         SIGNED ON GROUP
+         VPOP  BRR,WAR,*
+         SCRTN (15)                    RETURN TO SCANNER
+GROUP2   CH    R0,=Y(L'GG)
+         BNE   BADGRP
+         OC    GPWGRP,@R1
+         VPOP  BRR,WAR,*
+         SCRTN (15)                    RETURN TO SCANNER
+*
+USER     VPUSH BRR,WAR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    FSMISSNG
+         CLI   GPWUSER,C' '            ALREADY A USER?
+         BNE   FSDBLUSR                YES - ILLEGAL
+         CLI   @R1,C'&&'               RIGHT CHARACTER?
+         BNE   USER3                   NO
+         LA    R1,@R1+1                SKIP &
+         BCT   R0,USER3                 GO GET REST OF USER
+         MVC   GPWUSER,CLWUSER         USE SIGNED ON USER
+         VPOP  BRR,WAR,*
+         SCRTN (15)                    RETURN TO SCANNER
+USER3    CH    R0,=Y(L'UUU)            RIGHT LENGTH?
+         BNE   BADUSR                  NO - ILLEGAL
+         OC    GPWUSER,@R1
+         VPOP  BRR,WAR,*
+         SCRTN (15)                    RETURN TO SCANNER
+         EJECT ,
+USR$GRP  VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    FSMISSNG
+         CH    R0,=Y(L'ACCT)
+         BNE   BADACCT
+         CLI   GPWGRP,C' '             GROUP ALREADY?
+         BNE   FSDBLGRP
+         CLI   GPWUSER,C' '
+         BNE   FSDBLUSR
+         CLI   @R1+L'UUU,C'$'          CHECK DELIMITER TYPE
+         BNE   GRP$USR
+         OC    GPWGRP,@R1+L'UUU+1
+         OC    GPWUSER,@R1
+         B     USR$RET
+GRP$USR  CLI   @R1+L'GG,C'.'           OTHER OPTION
+         BNE   BADACCT
+         OC    GPWGRP,@R1
+         OC    GPWUSER,@R1+L'GG+1
+USR$RET  VPOP  BRR,BR,*
+         SCRTN (15)                    RETURN TO SCANNER
+         EJECT ,
+*
+*  OS/FILE PARAMETER SCANING,  'ON VOLUME'  ETC.
+*
+LOADFILE SET   GPWLLDMD                LOADFILE
+         SCRTN (15)
+         SPACE 2
+OSOK     DS   0H
+         VPUSH BRR,BR,*,PTR=SR
+         VPUSH WAR,R5,*,PTR=TR
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)
+         SET   GPWOSFOK               *TESTOS OS FILES OK
+         VCALL PRIVTNOM                OKDOKIE?
+         VPOP  WAR,R5,PTR=TR           RESTORE
+         BNZ   FSUNREC                 NOPE
+         VPOP  BRR,BR,PTR=SR
+         SCRTN (15)                    RETURN TO SCANNER
+         SPACE 3
+OSFILE   LABEL ,                       OS FILES
+         VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         IF    ^GPWFFFN,BEGIN
+         MVC   GPWFFN(4),=C'WYL.'       SET WYLBUR FILE PREFIX
+         END   ,
+         SET   GPWFVOSF                 SET OS FILE FLAG
+         VPOP  BRR,BR,*
+         SCRTN (15)
+         SPACE 3
+VOLUME   LABEL ,                       SCAN FOR OS VOLUME
+         VPUSH BRR,BR,*
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    ILLVOL                  VOLUME NAME WAY TOO SHORT
+         CH    R0,=H'6'                VOLUME NAME TOO LONG
+         BH    ILLVOL
+         MVC   OSFVOL(6),=C'      '    BLANK VOLUME NAME
+         CLC   0(3,R1),=C'CATLG'       CATOLOGUE  ??
+         IF    (E,AND,(R0,EQ,3)),VOLCAT
+         CLC   0(5,R1),=C'CATLG'
+         IF    (E,AND,(R0,EQ,5)),VOLCAT
+         LR    SR,R0
+         DEX   SR,'MVC  OSFVOL(0),@R1'
+VOLCAT   LABEL ,                        BLANK NAME DEFAULTS TO CAT
+         IF    ^GPWFFFN,BEGIN
+         MVC   GPWFFN(4),=C'WYL.'       SET WYLBUR FILE PREFIX
+         END   ,
+         SET   GPWFVOSF                 SET OS FILE FLAG
+         VPOP  BRR,BR,*
+         SCRTN (15)
+*$  WHAT DO WE DO WITH ORV.GG.UUU.TEMP ON SCR002  ????
+         EJECT ,
+*
+*  PROCESS SPACE PARMETERS
+*
+*
+SPACE    LABEL ,
+         VPUSH BRR,BR,*                SCAN FOR OS SPACE
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    ILLSPACE                NO PRIMARY SPACE PARM
+         MVC   OSFSPQTY(4),@R15        PRIMARY SPACE PARM, SAVE IT
+         SET   OSFSPTRK                ALL ALLOCATIONS IN TRACKS
+         VPOP  BRR,BR,*
+         SCRTN (15)
+         SPACE 5
+DSPACE   LABEL ,
+         VPUSH BRR,BR,*                SCAN FOR OS SPACE
+         BALR  BR,0
+         USING *,BR                    ##
+         L     BRR,=A(FSUB#COM)        COMMON ROUTINES
+         BZ    ILLSPACE                NO DIRECTORY SPACE PARM
+         SET   OSFSPTRK
+         MVC   OSFSDBLK(2),2(R15)      DIRECTORY SPACE PARM, SAVE IT
+         VPOP  BRR,BR,*
+         SCRTN (15)
+         EJECT ,
+         LTORG ,
+         EJECT ,
+*
+*  START OF COMMON ADDRESSABILITY ROUTINES
+*
+         SPACE ,
+*GEN
+         FSCALL FSUB#COM               MUST BE FIRST IN SECTION
+         SPACE 3
+         FSCALL GOSUB
+*NOGEN
+         EJECT ,
+SEG      DS   0H
+         VPUSH RAR,,*
+         VSEG  (R1),(R0)
+         VPOP  RAR,,*
+         BR    RAR
+         SPACE ,
+FSERRTN  LABEL ,
+         LM    BRR,WAR,CLWQRET         BACK TO ORIGINAL CALLER
+*         B     4(,BR)                  RETURN TO CLP
+         LA    R15,4(,BR)
+         BSM   0,R15                   RETURN TO CLP IN 24 BIT MODE
+         SPACE ,
+FSCLPRTN LABEL ,
+         LM    BRR,WAR,CLWQRET         BACK TO ORIGINAL CALLER
+*         BR    BR                      RETURN TO CLP
+         BSM   0,BR                    RETURN TO CLP IN 24 BIT MODE
+         SPACE ,
+FSUB0    LABEL ,                       GENERAL RETURN FROM VSUB
+         CLEAR R15                     CLEAR RETURN CODE
+         SPACE ,
+FSUBX    LABEL ,                       GENERAL RETURN WITH R15 SET
+         VREST SR,RAR
+         LTR   R15,R15                 SET CONDITION CODE
+         B     2(,RAR)                 AND RETURN
+         EJECT ,
+*
+* THE FOLLOWING ROUTINES ARE USED BY FILE READ, WRITE AND CONTROLS
+*  (INCLUDING ERASE AND RENAME) TO SET UP FOR, AND RETRY,
+*  OPERATIONS WHICH WERE BLOCKED BECAUSE OF FILE UNAVAILABILITY
+         SPACE 2
+SAVRETRY LABEL ,                       SAVE REGS FOR RETRY
+         CLEAR CLWFQMSG                Note message not yet sent
+         VPUSH R14,R1,*
+         BR    RAR                      AND RETURN
+         SPACE 2
+UNAVAIL  LABEL ,                       FILE UNAVAILABLE
+         IF    ^CLWFQMSG,BEGIN
+         VPUSH RAR,,*                  SAVE RETRY ADDRESS
+         VWRITE 'Orvyl Queued'         INDICATE A WAIT
+         BNZ   REQABORT                IMPATIENT USERS!
+         SET   CLWFQMSG                Message sent
+         VPOP  RAR,,*                  RESTORE RETRY ADDRESS
+         END
+         CLPSERV QTIMER                Wait a second
+         L     R1,CLWSCP
+         WITH  (SCP,R1),BEGIN
+         IF    SCBCFCLA,IDLEATTN       BR ON IDLE ATTN
+         END   ,
+         VPOP  R14,R1,*                RESTORE REGS FOR RETRY
+         VPUSH ,,16                    LEAVE R14,R1 THERE
+         BR    RAR                     AND TRY AGAIN
+         EJECT ,
+*
+* GLOBAL ERROR MESSAGE ROUTINES
+*
+FSNOCORE LABEL ,
+         SEG   'Insufficient user memory to process command'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSSCNRTN LABEL ,                       ERROR EXIT FROM SCANNER
+         LPR   R0,R0                   ANYONE HOME (??)
+         IF    Z,FSMISSNG              SOMEBODY'S MISSING
+         SPACE ,
+FSILLSTR LABEL ,
+         SEG   (R1),(R0)               REPORT ILLAGAL STRING
+         SEG   ': Invalid string'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSMISSNG LABEL ,
+         SEG   'Operand missing'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+ILLSPACE LABEL ,
+         SEG   'Invalid space parameter'
+         B     FSERRTN
+         SPACE ,
+ILLVOL   LABEL ,
+         SEG   'Invalid volume name'
+         B     FSERRTN
+ILLNAME  LABEL ,
+         FSCALL SEGNAME
+FSILNAM1 LABEL ,
+         SEG   'Invalid file name'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSUNREC  LABEL ,
+         SEG   (R1),(R0)
+         SEG   ': Invalid'
+         B     FSERRTN                 BR TO ERROR RETURN
+         EJECT ,
+FSHRTORV LABEL ,
+         SEG   'Name starting with '
+         IF    GPWFVOSF,BEGIN
+         SEG   '"WYL."'
+         END   ELSE,BEGIN
+         SEG   '"ORV."'
+         END   ,
+         SEG   ' must be fully qualified.'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSDBLGRP LABEL ,
+         SEG   'Group'
+         B     FSDBLDEF
+         SPACE ,
+FSDBLUSR LABEL ,
+         SEG   'User'
+         SPACE ,
+FSDBLDEF LABEL ,
+         SEG   ' Defined twice'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSNDFLIB LABEL ,
+         SEG   'Default library name not implemented'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+FSINVMEM LABEL ,
+         SEG   'Invalid member name specified'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NOFILSYS LABEL ,
+         IF    ((R15,EQ,-12),AND,(R1,EQ,4)),BEGIN
+         SEG   'File system maintenance in progress'
+         END   ELSE,BEGIN
+         SEG   'Orvyl File System not available'
+         END   ,
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+TOOMANY  LABEL ,
+         SEG   'Too many devices already attached'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NONOWN   LABEL ,
+         SEG   'Non-owner may not change privileges'
+         B     FSERRTN                 BR TO ERROR RETURN
+SHRONLY  LABEL ,
+         SEG   'Attachable share only'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NOTHERE  LABEL ,
+         FSCALL SEGNAME
+         SEG   'not found'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+OFLOW    LABEL ,
+         SEG   'System table overflow'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+ATTEXCLU LABEL ,
+         FSCALL SEGNAME                WRITE NAME
+         SEG   'Attached exclusively by other user'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+EXISTS   LABEL ,
+         FSCALL SEGNAME
+         SEG   'already there'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+OUTRANGE LABEL ,
+         SEG   'File overflow, block out of range'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NODSPACE LABEL ,
+         SEG   'File system full'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NOUSPACE LABEL ,
+         SEG   'User allocation depleted'
+         B     FSERRTN                 BR TO ERROR RETURN
+         SPACE ,
+NOCLPACC LABEL ,
+         FSCALL SEGNAME
+         SEG   'may not be changed by CLP'
+         B     FSERRTN                 BR TO ERROR RETURN
+         EJECT ,
+*
+*  PROCESS OS ERRORS HERE
+*
+*  (MOSTLY LINKAGES)
+*  (LINKAGE SAUSAGE)
+*
+ERROS    LABEL ,                       SWEET AND SIMPLE
+         FSCALL OSERROR                HANDLE ALL WAIT ERR RETURNS
+         SPACE 2
+NOVOSF   LABEL ,                       OS FILES INVALID FOR COMMAND
+         SEG   'OS File invalid for this command'
+         B     FSERRTN
+         SPACE 2
+HOTERROS LABEL ,                       OS ERRS BEFORE WAIT
+         LA    R15,12(R15)
+         B     HMERROS(R15)
+HMERROS  B     NOOSFILS                -12 OS FILES NOT AVAILABLE
+         B     BADIDS                  -8  INVALID NAME
+         B     TOOMANY                 -4  TOO MANY DEVICES ATTACHED
+         SPACE 1
+NOOSFILS LABEL ,
+         SEG   'OS File system not available'
+         B     FSERRTN
+NOOSFIL2 LABEL ,
+         SEG   'OS File system not currently supported by Orvyl'
+         B     FSERRTN
+BADIDS   LABEL ,
+         SEG   'Invalid file, volume, or member name'
+         B     FSERRTN
+         EJECT ,
+ISATT    LABEL ,
+         FSCALL SEGNAME
+         SEG   'already attached'
+         B     FSERRTN
+         SPACE ,
+IOERR    LABEL ,
+         SEG   'Permanent I/O error'
+         B     FSERRTN
+         SPACE ,
+NODIRCOR SEG   'Directory too large in '
+         FSCALL SEGNAME
+         B     FSERRTN
+*
+NOTLIB   FSCALL SEGNAME
+         SEG   'is not a library'
+         B     FSERRTN
+         SPACE ,
+ACCTCHNG LABEL ,
+         SEG   'Rename does not change account'
+         B     FSERRTN
+         SPACE ,
+DONTHAVE LABEL ,
+         SEG   'Attempt to give privileges you don''t have'
+         B     FSERRTN
+         SPACE ,
+ILLGRP   LABEL ,
+         IF    GPWFACC,BEGIN           GROUP SPECIFIED?
+         LA    R1,GPWACCT              POINT TO ACCOUNT
+         FSCALL SEGACCT                WRITE USER'S ACCOUNT
+         SEG   ' - '
+         END   ,
+         SEG   'No file space allocated'
+         B     FSERRTN
+         EJECT ,
+* GROUP/USER ERRORS
+*
+BADACCT  SYSQS R15,14,'ACCOUNT'
+         B     BADGU
+*
+BADGRP   SYSQS R15,14,'GROUP'
+         B     BADGU
+*
+BADUSR   SYSQS R15,14,'USER'
+BADGU    SEG   (R1),(R0)               ILLEGAL TOKEN
+         SEG   ': Invalid '
+         SEG   (15),(14)
+         B     FSERRTN
+         SPACE ,
+VOID     LABEL ,
+         SEG   'Void range'
+         B     FSERRTN
+         SPACE ,
+NOWYL    LABEL ,
+         SEG   'Wylbur not available'
+         B     FSERRTN
+         SPACE ,
+*
+NOSHACC  SEG   'Show '
+         B     NOACCESS
+*
+NOAACC   SEG   'Append '
+         B     NOACCESS
+*
+NOWACC   SEG   'Write '
+         B     NOACCESS
+*
+NORACC   SEG   'Read '
+*
+NOACCESS SEG   'Access not permitted'
+         B     FSERRTN
+         SPACE ,
+ASMNONAM LABEL ,
+         SEG   'Missing file name'
+         B     FSERRTN
+         SPACE ,
+IDLEATTN LABEL ,
+         L     R1,CLWSCP
+         WITH  (SCP,R1),'CLEAR SCBCFCLA'        IDLE ATTN
+REQABORT SEG   'Request aborted'
+         B     FSERRTN                 TAKE ERROR EXIT
+         SPACE ,
+WDSFULL  SEG   'Active file full'
+         B     FSERRTN                 TAKE ERROR EXIT
+         SPACE ,
+BADFORM  SEG   'File not '
+         IF    ^GPWGPFV,BADEDIT        FILE VARIABLE FORMAT?
+         SEG   'variable'
+         B     BADFCOM
+BADEDIT  SEG   'edit'
+         IF    ^GPWGPFLR,BADFCOM       EDIT OR CARD?
+         SEG   ' or card'
+BADFCOM  LABEL ,
+         SEG   ' format'
+         B     FSERRTN                 TAKE ERROR EXIT
+         SPACE ,
+NOREP    SEG   'Command does not replace (try renumber option)'
+         B     FSERRTN
+         SPACE ,
+LIBFULL  LABEL ,
+         SEG   'No more directory space in library'
+         B     FSERRTN
+         SPACE ,
+         EJECT ,
+         GENMSGS ,                     GENERATE MESSAGE POOL
+         END   .

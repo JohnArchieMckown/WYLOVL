@@ -1,0 +1,339 @@
+XPROC () BEGIN
+; Upload a TIFF graphic file from a micro, and store it in an image
+; library.
+;
+; Mark C. Lawrence (GA.MCL) 03/21/88
+
+; last revision
+DECLARE STR REVDATE
+REVDATE='07/26/90'
+
+; Revision log---
+;
+;  07/26/90  Recover from imagelib allocate failure
+;            Allow imagelib with format not set
+;            Allow input of converted TIFF file
+;
+;  07/05/90  Delete old "put a disk in the A drive" prompt stuff
+;            used by MacSamson 1
+
+;  file formats-----------------
+;  All TRANSPARENT uploaded files have 66 byte records, with the
+;  first and last being guard characters.  In some cases the data
+;  will have been translated from ASCII to EBCDIC and must be
+;  "untranslated".  Remaining options are:
+;  (1) Original (release 1) MacSamson--
+;        Each line is tagged (col. 2) with a character to identify
+;        what part of the file it came from (I=Info; R=resource)
+;        Therefore, just 63 data bytes per line.
+;  (2) IBM PC Samson--
+;        64 data bytes in each line.
+;  (3) New (release 2) MacSamson
+;        Like IBM, but file includes 128-byte header.
+
+DECLARE STRING INDSN OUTDSN TEMPDSN ZERO ZEROS G1 G2 S0 HELPDS
+DECLARE NUM    OLDACT BLOCKS XL LCOL
+DECLARE BOOLEAN TRANSL OLDMAC NEWMAC SAVETIFF SETFMT
+DECLARE STRING DSORG RECFM DSNSTRING OMEM OTIT BLEEP MACHDR TIFFDSN
+DECLARE STRING XVOLS TVOL
+DECLARE NUM LRECL BLKSIZE
+ZERO = S'00'
+HELPDS = 'WYL.GA.PUB.LIBDATA#GRAFHELP'
+ZEROS = COPIES(ZERO,64)
+BLEEP = S'2F'
+SET ESC &
+SHO WVOL COLLECT
+REA STR XVOLS USI LAST DELETE   ; Possible new volumes for allocate
+OLDACT=ACTNO
+IF (LINES EQ 0) OLDACT=0
+TEMPDSN=SUBSTR(DATE,1,2)||SUBSTR(DATE,4,2)||SUBSTR(DATE,7,2)
+TEMPDSN='TEXTMP.D'||SUB(DATE,20,2)||SUB(DATE,23,3)||'.T'||TEMPDSN
+TEMPDSN=DSNFORMAT(TEMPDSN) ; NAME FOR TEMP FILE
+IF (PARM_STRING NE '') BEGIN
+   INDSN=PARM_STRING
+   GOTO GOT_DSN
+   END
+
+WRI 'GRAFLOAD version of &(REVDATE):  Upload a graphic file.'
+WRI 'For help, reply ? to any prompt.'
+WRI ' '
+S0 = YESNO('Do you want instructions?','YES,NO,NULL,ATTN')
+IF (S0 EQ 'YES') LIS 1001/1099 UNN FRO &(HELPDS) ATTN=GET_DSN
+   ELSEIF (S0 EQ 'ATTN') GOTO QUIT
+
+GET_DSN:
+TRY READ STRING INDSN UPP PRO 'Name of file to be uploaded: '
+IF (TRYATTN) GOTO QUIT
+INDSN=UPPER(STRIP(INDSN))
+IF (INDSN EQ '') GOTO NULLNAME
+IF (INDSN EQ '*') GOTO GOT_DATA
+IF (INDSN EQ '?') BEGIN ; help
+   LIS 1101/1199 UNN FRO &(HELPDS) ATTN=GET_DSN
+   GOTO GET_DSN
+   END
+
+GOT_DSN:
+INDSN=UPPER(STRIP(INDSN))
+IF (INDSN EQ '') GOTO NULLNAME
+IF (SUBSTR(INDSN,2,1) EQ ':') BEGIN ;  Use A:filename etc.
+   TRY USE &(INDSN) TRANSPARENT KEEP
+   IF (TRYERR) GOTO GET_DSN
+   IF (TRYATTN) GOTO QUIT
+   WRI BLEEP
+   WRI BLEEP
+   GOTO GOT_DATA
+   END
+
+GOTO GET_DATA
+
+NULLNAME:
+IF (TTYPE NE 'MACSAM') GOTO GET_DSN
+USE C:  TRANSPARENT KEEP
+IF (TRYERR) GOTO GET_DSN
+IF (TRYATTN) GOTO QUIT
+WRI BLEEP
+WRI BLEEP
+GOTO GOT_DATA
+
+GET_DATA:
+TRY USE &(INDSN) KEEP
+IF (TRYERR) GOTO GET_DSN
+IF (TRYATTN) GOTO QUIT
+
+GOT_DATA:
+; The uploaded file will have LRECL=66 with a "@" or '-' at the
+; beginning and end of each record.  If input is already-converted
+; TIFF file, LRECL=128.
+LCOL=SIZE(LINE(FIRST))
+FLAGC=SUB(LINE(FIRST),1,2)  ; TIFF flag characters
+IF (LCOL GE 127 AND FLAGC EQ S'4D4D') BEGIN ; TIFF file
+   DSNSTRING=DSNINFO(INDSN)
+   DSORG=STRIP(SUBSTR(DSNSTRING,69,3))
+   RECFM=STRIP(SUBSTR(DSNSTRING,72,5))
+   LRECL=SUBSTR(DSNSTRING,79,5)
+   GOTTIFF=TRUE
+   IF (RECFM EQ 'FB' AND LRECL EQ 128) BEGIN ; format OK, don't resave
+      TIFFDSN=DSNFORMAT(INDSN)
+      GOTO GET_ODSN
+      END
+   TIFFDSN=TEMPDSN
+   GOTO TSAVE
+   END
+G1=SUB(LINE(FIRST),1,1) ;  left guard character
+G2=SUB(LINE(FIRST),LCOL,1)  ; right guard character
+IF (G1 NE G2) GOTO BADFILE  ; don't match...
+IF (G1 EQ '@') BEGIN ; untranslated file
+   TRANSL=FALSE
+   GOTO OK
+   END
+IF (G1 EQ '|' OR G1 EQ '-') BEGIN ; Been translated to EBCDIC
+   TRANSL=TRUE
+   GOTO OK
+   END
+
+; invalid file
+BADFILE:
+LIST FIRST MIXED
+WRI 'Not a valid uploaded file.'
+GOTO GET_DSN
+
+OK:
+OLDMAC=FALSE
+NEWMAC=FALSE
+NUM BY 1 STA 1 QUI
+
+;  Convert the file
+IF (SUB(LINE(1),2,1) EQ 'I') BEGIN ; Macintosh file with INFO
+   OLDMAC=TRUE
+   POI 'D' 2 (1) NOLIST ; Find "data" line
+   XL=*-.001 ; Last non-data line
+   DEL 0/&(XL) NOLIST ; remove info/header
+   END
+
+; Translate
+
+IF (TRANSL) EVAL ALL EXPR(LINE_PUT(EVAL_LNO, ASCII(LINE(EVAL_LNO))))
+
+CH 66/66 TO '' IN 1/L-1 NOLIST ; strip trailing guard from all
+                               ; but last line
+CH 1/1 TO '' NOLIST            ; strip leading guard char.
+LCOL=SIZE(LINE(LAST))          ; strip trailing guard from
+S0=SUB(LINE(LAST),1,LCOL-1)    ; last line (which might be short)
+S0=LEFT(S0,64,ZERO) ; pad to LRECL
+PUTLINE LAST &(S0)
+
+; reblock
+
+IF (OLDMAC) BEGIN;
+; Mac, the 64 bytes includes D for "data" in col. 2
+; so only 63 real data bytes
+   CH 1/1 TO '' NOLIST ; Get rid of the "D"
+   SAVE &(TEMPDSN) LRECL=63(128) TEMP QUI
+   USE &(TEMPDSN) LRECL=128 CLR
+   S0=LINE(LAST)   ; repad last line in case the 63/128 stuff was odd
+   S0=LEFT(S0,128,ZERO) ; pad to LRECL
+   PUTLINE LAST &(S0)
+   SCR &(TEMPDSN) QUI
+   END;
+
+ELSE BEGIN;  For all except old Mac fmt
+   SAV &(TEMPDSN) LRECL=64(128) TEMP QUI
+   USE &(TEMPDSN) LRECL=128 CLR
+   S0=LINE(LAST)   ; repad last line in case the 64/128 stuff was odd
+   S0=LEFT(S0,128,ZERO) ; pad to LRECL
+   PUTLINE LAST &(S0)
+   SCR &(TEMPDSN) QUI
+   END;
+
+; Here, we have the file as 128-byte records in the active file.
+
+GET_TDSN:
+IF (SUB(LINE(FIRST),1,1) EQ S'00' AND SUB(LINE(FIRST),75,1) EQ S'00') BEGIN;
+;  Found MACBINARY header record
+   NEWMAC=TRUE
+   REA STR MACHDR USI FIRST DELETE ; strip and save header
+   END
+
+REA STR TIFFDSN UPP PRO 'Enter dsname to save TIFF file (RETURN=do not save): '
+TIFFDSN=STRIP(TIFFDSN)
+IF (TIFFDSN EQ '?') BEGIN ; Help TIFFDSN
+   LIS 1701/1799 UNN FRO &(HELPDS) ATTN=GET_TDSN
+   GOTO GET_TDSN
+   END
+ELSEIF (TIFFDSN EQ '') BEGIN ; default
+   TIFFDSN=TEMPDSN
+   SAVETIFF=FALSE
+   END
+ELSE BEGIN                   ; got name
+   SAVETIFF=TRUE
+   TIFFDSN=DSNFORMAT(TIFFDSN)
+   END
+
+TSAVE:
+IF (SAVETIFF) TRY SAVE &(TIFFDSN) LRECL=128
+ELSE TRY SAVE &(TIFFDSN) LRECL=128 TEMP QUIET
+IF (TRYERR) GOTO GET_TDSN
+
+; now run the GRAFCON job
+
+GET_ODSN:
+REA STR OUTDSN UPP PRO 'Name of your image library: '
+OUTDSN=STRIP(OUTDSN)
+IF (OUTDSN EQ '?') BEGIN ; help imagelib
+   LIS 1201/1299 UNN FRO &(HELPDS) ATTN=GET_ODSN
+   GOTO GET_ODSN
+   END
+
+TRY OUTDSN=DSNFORMAT(OUTDSN)
+IF (TRYERR) GOTO GET_ODSN
+S1=DSNVER(OUTDSN)
+MAKE_IMG:
+IF (S1 EQ 'NOT THERE') BEGIN
+   WRI OUTDSN||' does not exist.  '
+   REA STR S0 UPP PRO 'Do you want to create it? ' ATTN=GET_ODSN
+   S0 = STRIP(S0)
+   IF (S0 EQ 'Y' OR S0 EQ 'OK' OR S0 EQ 'YES' OR S0 EQ '') BEGIN
+   RETRY_2:
+      TRY ALLOC &(OUTDSN) TRA 10 BLO 10 LRECL=128 &(TVOL)
+      IF (TRYERR) BEGIN
+         ;  Allocate failed
+         RETRY_1:
+         REA STR S0 UPP PRO'Allocation failed.  Do you want to try another volume?' ATTN=GET_ODSN
+         S0=STRIP(S0)
+         IF (S0 EQ '?') BEGIN ; Help retry
+            LIS 1801/1899 UNN FRO &(HELPDS) ATTN=GET_ODSN
+            GOTO RETRY_1
+            END   ; help
+         IF (S0 EQ 'Y' OR S0 EQ 'OK' OR S0 EQ 'YES' OR S0 EQ '') BEGIN
+            TRYVOL=SCAN_TOKEN(XVOLS) ; Next from WVOL list
+            XVOLS=STRIP(SCAN_SKIP(XVOLS))  ; don't use that one again...
+            TVOL='ON '||TRYVOL
+            GOTO RETRY_2
+            END  ; retry request, nonospecific vol
+         IF (S0 EQ 'N' OR S0 EQ 'NO') GOTO GET_DSN
+         IF (SIZE(S0) EQ 6) BEGIN ; might be a volser
+            ; validate volume ****
+            ; if invalid reissue prompt
+            TVOL='ON '||S0
+            GOTO RETRY_2
+            END  ; volume specified
+   ;  Here if invalid response
+         WRI S0||':  Invalid.  Reply YES, NO, or with a volume name.  Reply ? for help.'
+         GOTO RETRY_1
+      END
+   GOTO GOT_ODSN
+   END
+
+   ELSEIF (S0 EQ '?') BEGIN ; help create imagelib
+      LIS 1301/1399 UNN FRO &(HELPDS) ATTN=MAKE_IMG
+      GOTO MAKE_IMG
+      END
+   ELSEIF (S0 EQ 'N' OR S0 EQ 'NO') GOTO GET_ODSN
+   ELSE BEGIN ; invalid response
+      WRI S0||': invalid.  Please respond YES, NO, or ? for help.'
+      GOTO MAKE_IMG
+      END
+   END
+
+GOT_ODSN:
+
+DSNSTRING=DSNINFO(OUTDSN)
+DSORG=STRIP(SUBSTR(DSNSTRING,69,3))
+RECFM=STRIP(SUBSTR(DSNSTRING,72,5))
+LRECL=SUBSTR(DSNSTRING,79,5)
+BLKSIZE=SUBSTR(DSNSTRING,85,5)
+
+IF (DSORG EQ 'PO' AND RECFM EQ 'FB' AND LRECL EQ 128) GOTO IMGLIB_OK
+IF (DSORG EQ 'PO' AND (RECFM EQ 'FB' OR RECFM EQ '*') AND (LRECL EQ 128 OR LRECL EQ 0)) BEGIN
+;  Not FB and 128, but RECFM either FB or not set, LRECL 128 or not set
+   SETFMT=TRUE
+   GOTO IMGLIB_OK
+   END
+
+WRI 'ERROR:  Invalid DSORG ('||DSORG||') or RECFM ('||RECFM||') or LRECL ('||FORMAT(LRECL,-1,-1)||')'
+LIS 1401/1499 UNN FRO &(HELPDS) ATTN=GET_ODSN
+GOTO GET_ODSN
+
+IMGLIB_OK:
+
+GET_MEM:
+REA STR OMEM UPP PRO 'Member name for this graphic in image library: ' ATTN=GET_ODSN
+OMEM=STRIP(OMEM)
+IF (OMEM EQ '?') BEGIN ; help member
+   LIS 1501/1599 UNN FRO &(HELPDS) ATTN=GET_MEM
+   GOTO GET_MEM
+   END
+IF (SIZE(OMEM) GT 8) BEGIN; Illegal name
+   WRI OMEM||':  Invalid; must be 1-8 characters.'
+   LIS 1501/1599 UNN FRO &(HELPDS) ATTN=GET_MEM
+   END
+IF (OMEM EQ '') GOTO GET_MEM
+
+GET_TIT:
+WRI 'Enter a title (40 chars. max.) for this graphic in image library: '
+REA STR OTIT PRO 'Title = ' ATTN=GET_MEM
+IF (STRIP(OTIT) EQ '?') BEGIN ; help title
+   LIS 1601/1699 UNN FRO &(HELPDS) ATTN=GET_TIT
+   GOTO GET_TIT
+   END
+
+MAKE_JCL:
+CLR ACT
+PUTEND // JOB
+PUTEND /*JOBPARM FORMS=BOND
+PUTEND //TIFF EXEC TIFFCON,
+PUTEND //  INPUT='&(TIFFDSN)'
+PUTEND //LOAD EXEC GRAFCON,COND=(5,LT),
+PUTEND //  IMGLIB='&(OUTDSN)'
+IF (SETFMT) PUTEND //IMAGELIB DD DCB=(RECFM=FB,LRECL=128,BLKSIZE=6272)
+OMEM=SUBSTR(OMEM||'       ',1,8)
+PUTEND &(OMEM) &(OTIT)
+
+RUN NOTIFY
+
+QUIT:
+WRI ' '
+WRI 'UPLOAD done.'
+IF (INDSN NE '*' AND ACTNO NE OLDACT) CLOSE
+IF (OLDACT NE 0) PIC &(OLDACT)
+END

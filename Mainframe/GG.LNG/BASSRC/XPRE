@@ -1,0 +1,177 @@
+VPRE     TITLE   'VPRESS ROUTINE'
+VPRESS   CSECT
+***********************************************************************
+*                                                                     *
+*                 WYLBUR/BASIC VPRESS PROGRAM                         *
+*                       BATCH VERSION                                 *
+*                                                                     *
+***********************************************************************
+*
+*REGISTER USAGE
+*
+R0       EQU   0                  PARAMETER REGISTER FOR RETURN
+R1       EQU   1                  ADDR OF ARGUMENT LIST ON ENTRY
+R2       EQU   2
+R3       EQU   3
+R4       EQU   4
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9
+R10      EQU   10
+R11      EQU   11
+R12      EQU   12                 BASE FOR VPRESS
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14
+R15      EQU   15
+*
+BASER    EQU   12                 BASE FOR VPRESS
+*
+*OS ENTRY LINKAGE (USING WYLBUR/BASIC CONVENTIONS)
+*
+         XAVE  VPRESS
+*                                                                     *
+*  CALL    R1 ADDRESS OF 3 WORK ARGUMENT LIST                         *
+*                                                                     *
+*             WORD 1 = LENGTH OF AREA TO BE PRESSED                   *
+*                  2 = ADDR OF SOURCE STRING TO BE PRESSED            *
+*                  3 = ADDR OF OUTPUT STRING FROM THIS ROUTINE        *
+*                                                                     *
+*  RETURN  R0 LENGTH OF PRESSED OUTPUT STRING (IF POSITIVE)           *
+*             (-1 IF BAD CHARACTER STRING WAS FOUND)                  *
+*                                                                     *
+***********************************************************************
+*
+************************SET UP ENTRY ARGUMENTS*************************
+*
+         L     R4,0(R0,R1)        LENGTH OF INPUT WITH PRESSED SOURCE
+         L     R5,8(R0,R1)        ADDR OF OUTPUT
+         L     R1,4(R0,R1)        ADDR OF INPUT
+         SR    R0,R0              INITIALIZE FOR OUTPUT LENGTH RETURN
+         SR    R2,R2              INITIALIZE INDEX REGISTER
+*
+         LA    R4,0(R4,R1)     R4 <= A(FIRST BYTE AFTER INPUT BUFF)
+         IC    R9,0(,R4)       R9 <=   FIRST BYTE AFTER INPUT BUFFER
+         MVI   0(R4),0            INSERT EOB SENTINEL BEHIND INPUT BUF
+*
+         TRT   0(256,R1),TRTNB    SEARCH FOR FIRST NON-BLANK
+*
+         CLI   0(R1),0                                         10/13/71
+         BNE   CLCREM             BRANCH IF NOT ALL-BLANK LINE 10/13/71
+*                                                              10/13/71
+         MVI   0(R5),C' '         MOVE IN A BLANK              10/13/71
+         LA    R0,1               CHARACTER COUNT              10/13/71
+         B     RETURN                                          10/13/71
+ SPACE
+CLCREM   CLC   0(3,R1),=C'REM'
+         BNE   SFNB+6(R2)         BRANCH IF NOT A REMARKS STATEMENT
+*
+         MVC   0(3,R5),0(R1)      MOVE IN THE 'REM'
+         LA    R0,3               CHARACTER COUNT
+         B     RETURN             IGNORE REST OF LINE
+ SPACE
+*DO THE SCAN
+*
+SFNB     TRT   0(256,R1),TRTNB    SEARCH FOR NON-BLANK
+         B     *(R2)              BRANCH ON FUNCTION
+*
+         B     RETURN             END-OF-BUFFER  OR  CENT-MARK
+*
+         B     BEGQ               QUOTE
+*
+         LR    R6,R1           R6 <= A(NON-BLANK)
+         TRT   0(256,R1),TRTB     SEARCH FOR END OF NON-BLANK BYTES
+         B     *(R2)              BRANCH ON FUNCTION
+*
+         B     MVCNR              END-OF-BUFFER  OR  CENT-MARK
+*
+         NOP   0                  QUOTE
+*
+*        ***                      BLANK
+*
+MVSTRNG  LR    R7,R1           R7 <= A(BYTE FOLLOWING STRING TO MOVE)
+         SR    R7,R6              <= NUMBER OF BYTES TO BE MOVED
+         EX    R7,MVC             MOVE SOURCE FIELD TO TARGET AREA
+         AR    R0,R7           R0 <= TOTAL NUMBER OF BYTES MOVED
+         AR    R5,R7           R5 <= A(NEXT UNUSED FIELD IN TARGET)
+         MVI   0(R5),C' '         CLEAN UP THE EXTRA BYTE MOVED IN
+*
+         B     *(R2)              BRANCH ON TYPE OF STRING JUST MOVED
+         B     SFNB               QUOTE STRING WAS MOVED
+         B     BEGQ               STRING PRECEDING QUOTE WAS MOVED
+         B     SFNB               STRING PRECEDING BLANK WAS MOVED
+         B     RETURN             LAST STRING WAS MOVED
+ SPACE
+BEGQ     LR    R6,R1           R6 <= A(QUOTE)
+BUMPR1   LA    R1,1(,R1)       R1 <= A(NEXT BYTE IN CHAR. STRING)
+         TRT   0(256,R1),TRTB     SEARCH FOR MATCHING QUOTE
+         B     *(R2)              BRANCH ON FUNCTION
+*
+         B     Q4                 END-OF-BUFFER  OR  CENT-MARK
+*
+         B     Q8                 QUOTE
+*
+         B     BUMPR1             BLANK
+*
+Q8       CLC   0(1,R6),0(R1)
+         BNE   BUMPR1             BRANCH IF DIFFERENT TYPE OF QUOTE
+*
+         LA    R1,1(,R1)       R1 <= A(QUOTE) + 1
+         CLC   0(,R6),0(R1)       CHECK FOR TWO IN A ROW
+         BE    BUMPR1             IGNORE PAIRED QUOTES
+*
+         LA    R2,4               RETURN TO SFNB AFTER STRING IS MOVED
+         B     MVSTRNG
+ SPACE
+Q4       CLI   0(R1),0
+         BNE   BUMPR1             BRANCH IF NOT END-OF-BUFFER
+*
+         STC   R9,1(,R4)          REPLACE THE SAVED BYTE BEHIND INPUT
+         SR    R0,R0
+         BCT   R0,RETURN          RETURN WITH ERROR CODE IN R0
+ SPACE
+MVCNR    LA    R2,16              RETURN TO RETURN AFTER LAST MOVE
+         B     MVSTRNG
+ SPACE
+*
+*RETURN TO CALLER
+*
+RETURN   STC   R9,0(,R4)          REPLACE THE SAVED BYTE BEHIND INPUT
+         L     13,4(0,13)         PUT ADDR OF CALLERS SAVE AREA BACK
+         LM    14,15,12(13)       RESTORE CALLERS REGISTERS
+         LM    1,12,24(13)         EXECPT REGISTER 0
+         BCR   15,14              RETURN TO CALLER
+ SPACE 2
+MVC      MVC   0(,R5),0(R6)
+ SPACE
+         DS   0D
+TRTNB    DC    AL1(4),255AL1(12)
+ SPACE
+TRTB     DC    AL1(4),255AL1(0)
+ SPACE
+         ORG   TRTNB+C''''
+         DC    AL1(8)
+         ORG   TRTNB+C'"'
+         DC    AL1(8)
+         ORG   TRTNB+C' '
+         DC    AL1(0)
+         ORG   TRTNB+C'^'
+         DC    AL1(4)             A '^' CHARACTER ACTS AS THE END-OF-
+*                                 BUFFER WHEN NOT IN A CHARACTER STRING
+ SPACE
+         ORG   TRTB+C''''
+         DC    AL1(8)
+         ORG   TRTB+C'"'
+         DC    AL1(8)
+         ORG   TRTB+C' '
+         DC    AL1(12)
+         ORG   TRTB+C'^'
+         DC    AL1(4)             A '^' CHARACTER ACTS AS THE END-OF-
+*                                 BUFFER WHEN NOT IN A CHARACTER STRING
+*                                 AND AS JUST ANOTHER CHARACTER WHEN
+*                                 PART OF A CHARACTER STRING.
+         ORG   TRTB+256
+         LTORG
+         END
+/*

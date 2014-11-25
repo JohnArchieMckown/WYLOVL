@@ -1,0 +1,1038 @@
+TEXTCONV TITLE 'ORVYL''s Text and Conversion Routines'
+         COPY  HEADER
+TEXTCONV MODULE
+         EJECT ,
+         MACRO ,
+&L       SEGADDR &ADDR
+&L       PSET  @SAD
+         MOVPARM @SADADDR,&ADDR
+         MOVPARM @SADLOC,LA:#SC
+         MOVPARM @SADPARM,LA:@SEGCORE
+         LCALL SEGADDR
+         MEND  ,
+         SPACE ,
+         MACRO ,
+&L       SEGWORD &LOC,&LEN,&CB
+&L       PSET  @SEGWORD
+         MOVSTR @SRLOC,@SRLEN,&LOC,&LEN
+         SEGLD &CB,PARM=@SRCB
+         LCALL SEGWORD
+         MEND  ,
+         SPACE ,
+         MACRO ,                       REGCH
+.********************************************************************
+.*   Check symbolic registers for equalness.
+.* The parameter string is a list of register pairs ie, (R2,SR)
+.* which are meant to match.  This will check on assumptions which
+.* could be changed by an unknowing change to a REGS statement.
+.********************************************************************
+         REGCH
+&N       SETA  1
+.REGNEX  AIF   (L'&SYSLIST(&N,1) NE &SYSLIST(&N,2)).REGER
+.INCR    AIF   (&N GE N'&SYSLIST).REGX
+&N       SETA  &N+1
+         AGO   .REGNEX
+.REGER   ANOP
+ MNOTE  8,'&SYSLIST(&N,1) is not register &SYSLIST(&N,2)'
+         AGO   .INCR
+.REGX    MEND
+         EJECT ,
+         COPY  SEGCBD
+         EJECT ,
+         COPY  SEGPARM
+         EJECT ,
+         COPY  CONVPARM
+         EJECT ,
+         COPY  HASHPARM
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*   SEGINIT -- Initialize a seg control block.                    *
+*                                                                 *
+*     Input - @SEGINIT                                            *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+SEGINIT  PROC  @SEGINIT,SCOPE=GLOBAL
+         L     RY,@SEGICB              Get address of the SEGCB
+         WITH  (SEGCBD,RY),BEGIN       Addr to control block
+         CLEAR SEGCBD                  Clear the whole thing
+         MOVPARM SEGADD,@SEGILOC       Save the buffer location
+         MOVPARM SEGBLEN,@SEGILEN      | and the buffer length
+         L     EPAR,@SEGIRTN           | processing rtn addr
+         IF    (EPAR,ZERO),'L EPAR,=A(SEGDUMMY)'
+         MOVPARM SEGWRT,(EPAR)
+         SET     SEGFINIT              | set exit routine code
+         PSET    @SEGRTN               Set up processing rtn call
+         MOVPARM @SEGRCB,(RY)          | to point to control block
+         BASR  RAR,EPAR                Call the exit routine
+         END   ,                       OF Addr to control block
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*  SEGDUMMY - Default processing routine - do nothing.            *
+*                                                                 *
+*     Input - @SEGRTN                                             *
+*              appropriate minimal action taken                   *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE ,
+SEGDUMMY PROC  @SEGRTN,SCOPE=LOCAL
+         L     RY,@SEGRCB
+         WITH  (SEGCBD,RY)
+*
+*  Kill last character in overflow case
+*
+         IF    SEGFOVER,BEGIN          kill last character
+         DECR  RS,SEGCNT
+         END   ,
+*
+*  On end-of-buffer call erase the buffer
+*
+         ELSEIF SEGFEOB,BEGIN
+         CLEAR SEGCNT
+         END   ,
+         PEND  ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*       SEG - Add a text segment to a buffer.                     *
+*                                                                 *
+*     Input - @SEG                                                *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE ,
+#SEG     RECORD BEGIN
+#SEGF    FLAG  ,
+         FLAG  #SEGMORE                More to seg on
+         END   ,
+         SPACE ,
+SEG      PROC  @SEG,#SEG,SCOPE=GLOBAL
+         SET   #SEGMORE                More to seg on
+         L     RY,@SEGCB               Get the control block addr
+         WITH  (SEGCBD,RY),BEGIN       Addr to control block
+         L     RA,@SEGLOC              Get the location of the data
+         LT    RB,@SEGLEN              And the length of the data
+         IF    POS,BEGIN               Start segment
+*
+* Take care of any trimming that needs to be done
+*
+         IF    @SEGT,BEGIN             Trim blanks off segment
+         LA    RS,@RB(RA)              Point 1 past end of string
+         DECR  RS                      Point at end of string
+         WHILE ((RS,GE,RA),AND,(@RS,EQ,' ')),'DECR RS'
+         SR    RS,RA                   Get the new length-1
+         LA    RB,@RS+1                Get the new length
+         CLEAR @SEGT
+         END   ,                       OF Trim blanks off segment
+         END   ,                       OF Start segment
+*
+* Now move the text into the buffer
+*
+         IF    (RB,^POS),BEGIN         No text lines
+         IF    @SEGB,BEGIN             At least add a blank
+         LA    RA,=C' '                Address of a blank
+         LA    RB,1                    Length of the blank
+         CLEAR @SEGB                   Turn off the flag
+         END   ,                       OF At least add a blank
+         ELSE  'CLEAR #SEGMORE'        Nothing to seg
+         END   ,                       OF No text lines
+         WHILE #SEGMORE,BEGIN          More of segment to add
+         L     RJ,SEGADD               Get address of the buffer
+         AH    RJ,SEGCNT               And get first free loc in buf
+         LH    RK,SEGBLEN              Get max length
+         SH    RK,SEGCNT               And then length left
+         CEIL  RK,RB                   Dont move more than we have
+         LH    RS,SEGCNT               Get the current count
+         AR    RS,RK                   Add in the amount we're moving
+         STH   RS,SEGCNT               Update the count
+         MVCL  RJ,RA                   Move all we can
+*
+* We have moved all we can.  If it was not all that has been
+* requested, we must call the processing routine to clear some of
+* the data out of the buffer.  This will loop if the processing
+* routine does not remove at least one byte.
+*
+         IF    LT,BEGIN                More to move but no room
+         SET   SEGFOVER                Set overflow state
+         PSET  @SEGRTN                 Set up to call routine
+         ST    RY,@SEGRCB              Tell him which SEGCB
+         L     EPAR,SEGWRT             Processing routine address
+         BASR  RAR,EPAR                Go to it
+         END   ,
+*
+* Put in trailing blank, if requested.
+*
+         ELSEIF @SEGB,BEGIN            Want the blank
+         LA    RA,=C' '                Address of a blank
+         LA    RB,1                    Length of the blank
+         CLEAR @SEGB                   Turn off the flag
+         END   ,
+         ELSE  'CLEAR #SEGMORE'        No more to seg
+         END   ,                       OF More of segment to add
+*
+* Mark the buffer
+*
+         IF    @SEGMK,BEGIN
+         MVC   SEGMCNT,SEGCNT          Save the count
+         END   ,
+*
+* End of a logical record (end of line)
+*
+         IF    @SEGEOR,BEGIN
+         SET   SEGFEOR                 Notify the write routine
+         PSET  @SEGRTN                 Set up to call routine
+         ST    RY,@SEGRCB              Tell him which SEGCB
+         L     EPAR,SEGWRT             Processing routine address
+         BASR  RAR,EPAR                Go to it
+         MVC   SEGRCNT,SEGCNT          Save the record start position
+         END   ,
+*
+* End of buffer.  Write the buffer out.
+*
+         IF    @SEGEOB,BEGIN
+         SET   SEGFEOB                 Notify the write routine
+         PSET  @SEGRTN                 Set up to call routine
+         ST    RY,@SEGRCB              Tell him which SEGCB
+         L     EPAR,SEGWRT             Processing routine address
+         BASR  RAR,EPAR                Go to it
+         MVC   SEGRCNT,SEGCNT          Save the record start position
+         END   ,
+         END   ,                       OF Addr to control block
+         PEND
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    SEGCOL - Pad a buffer out to a particular column.            *
+*                                                                 *
+*     Input - @SEGCOL                                             *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+SEGCOL   PROC  @SEGCOL,SCOPE=GLOBAL
+         L     RY,@SEGCCB              Get the seg control block
+         WITH  (SEGCBD,RY),BEGIN       Addr to control block
+         L     RS,@SEGCNUM             Desired column number
+         DECR  RS                      Col 1 is position 0
+         AH    RS,SEGRCNT              Relative to beginning of rec
+         SH    RS,SEGCNT               Number of blanks to add
+         FLOOR RS,1                    At least one blank
+         CEIL  RS,L'BLANKS             Max blanks available
+         SEG   L:=A(BLANKS),(RS),.(RY)       Put blanks in buffer
+         END   ,                       OF Addr to control block
+         PEND  ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    SEGCLR - Re-initialize a seg control block.                  *
+*                                                                 *
+*     Input - @SEGINIT                                            *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+SEGCLR   PROC  @SEGINIT,SCOPE=GLOBAL
+         L     RY,@SEGICB              Get control block address
+         WITH  (SEGCBD,RY),BEGIN       Addr to control block
+         CLEAR SEGCNT,SEGMCNT,SEGRCNT  Clear the counts
+         SET   SEGFINIT                Set function code for routine
+         PSET  @SEGRTN                 Set up to call routine
+         ST    RY,@SEGRCB              Tell him which SEGCB
+         L     EPAR,SEGWRT             Processing routine address
+         BASR  RAR,EPAR                Go to it
+         END   ,                       OF Addr to control block
+         PEND  ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*    SEGHEX - Add the data to the buffer after converting it to   *
+*             Hex.                                                *
+*                                                                 *
+*     Input - @SEG                                                *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+#SX      RECORD BEGIN                  Seg hex work area
+#SXBUF   DS    XL8
+         END   ,
+         SPACE 2
+SEGHEX   PROC  @SEG,#SX,SCOPE=GLOBAL
+         L     RY,@SEGCB               Get the SEGCB address
+         WITH  (SEGCBD,RY),BEGIN       Addr to control block
+         L     RJ,@SEGLOC              Get the location of the data
+         L     RK,@SEGLEN              And its length
+*
+* Loop, moving in 4 bytes of source at a pop
+*
+         WHILE (RK,POS),BEGIN
+         LA    RA,4                    Max to process at a time
+         CEIL  RA,RK                   But not bigger than length
+         LR    RB,RA                   Multiply length by 2
+         SLL   RB,1                    |
+         BTX   @RJ,#SXBUF,8            Convert it
+         AR    RJ,RA                   Update the pointer
+         SR    RK,RA                   And the length
+*
+* We have the data converted to hex.  Now put it into the buffer
+*
+         PUSH  USING
+         SEG   #SXBUF,(RB),.(RY)       Seg the data in
+         POP   USING                   Restore the usings
+         END   ,                       Continue until no more to do
+         END   ,                       OF Addr to control block
+         PEND  ,
+         EJECT
+*******************************************************************
+*                                                                 *
+*   SEGCORE - Dump core in a user specified format.               *
+*                                                                 *
+*     Input - @SEGCORE                                            *
+*                                                                 *
+*    Output - none                                                *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+*
+* Data used during the output
+*
+#SC      RECORD BEGIN                  Seg core work area
+#SCBUF   DS    XL32                    Buffer for translation
+#SCPBUF  DS    XL32                    Prev buf contents (untrans)
+#SCADDR  DS    A                       Address of data left to move
+#SCLEN   DS    A                       Length of data left to move
+#SCOFF   DS    A                       Address of offset
+#SCANUM  DS    A                       Number of alignment bytes
+#SCANUME DS    A                       Ending alignment bytes
+#SCRBEG  DS    A                       Beginning repeat addr
+#SCREND  DS    A                       Ending repeat addr
+#SCBUFL  DS    A                       Bytes/line
+#SCCURL  DS    A                       This line's length
+#SCPREL  DS    A                       Previous line's length
+#SCFLAGS FLAG  ,
+         FLAG  #SCFREP                 There is a repeat line
+         END   ,
+         SPACE 2
+SEGCORE  PROC   @SEGCORE,#SC,SCOPE=GLOBAL
+         SEGDEF @SEGXCB                Define control block's addr
+*
+* First, get us the data needed from the parms
+*
+         MVC   #SCLEN,@SEGXLEN         Save the length
+         MVC   #SCADDR,@SEGXLOC        And the data location
+*
+* Get the alignment info
+*
+         CLEAR #SCFREP                 No repeats to start
+         CLEAR #SCPREL                 | and no initial length
+         IF    @SEGXFOF,BEGIN          Print offsets
+         CLEAR (RA)                    | aligned
+         MVC   #SCOFF,@SEGXOFF         | address to offset from
+         END   ,                       OF Print offsets
+         ELSE  BEGIN                   Otherwise align on boundry
+         L     RA,#SCADDR              | for boundry offset
+         CLEAR #SCOFF                  | no offset
+         END   ,                       OF align on boundry
+         IF    @SEGXF16,BEGIN          16 Bytes/line
+         L     RB,=A(X'0000000F')      Alignment value
+         MVC   #SCBUFL,=A(16)          | Buffer length
+         END   ELSE,BEGIN
+         L     RB,=A(X'0000001F')      32 Byte alignment value
+         MVC   #SCBUFL,=A(32)          | Buffer length
+         END   ,
+*
+         NR    RA,RB                   Starting print line
+         ST    RA,#SCANUM              Alignment number for 1st line
+*
+* Loop, printing each line.
+*
+         L     RA,#SCADDR              Get the location
+SCLOOP   WHILE ('LT RB,#SCLEN',POS),BEGIN       Still more to dump
+*
+* Check to see if this line is a repeat line
+*
+SCREPCHK IF    (^@SEGXFRL),BEGIN       Check for repeats
+         CEIL  RB,#SCBUFL              Max size for the compare
+         IF    ((RB,EQ,#SCBUFL),AND,(RB,EQ,#SCPREL),AND,               *
+               ('DEX RB,"CLC @RA(0),#SCPBUF"',EQ)),BEGIN
+*
+* Line is a repeat, notify
+*
+         IF    ^#SCFREP,BEGIN          First line of repeat
+         ST    RA,#SCRBEG              Beginning addr of match
+         SET   #SCFREP                 Show at least 1 repeat exists
+         END   ,                       OF First line of repeat
+         ALR   RA,RB                   Ending addr of match
+         ST    RA,#SCREND              | RB is decremented len
+         INCR  RA                      Remaining loc/len
+         ST    RA,#SCADDR              |
+         INCR  RB                      | length
+         LCR   RB,RB                   |
+         AL    RB,#SCLEN               |
+         ST    RB,#SCLEN               |
+         NEXT  SCLOOP
+         END   ,                       OF Line is the same
+         BEGIN ,                       Not the same
+         IF    #SCFREP,BEGIN           Repeat lines need msg first
+         SEGCOL  12
+         SEGADDR #SCRBEG
+         SEG     '/'
+         SEGADDR #SCREND
+         SEGEOR  ' same as above.'
+         CLEAR   #SCFREP
+         END   ,                       OF Repeat lines need msg first
+         END   ,                       OF Not the same
+         END   ,                       OF Check for repeats
+*
+* Put in the address or the offset
+*
+         SEGADDR #SCADDR
+         SEG   BLANKS,2
+*
+         L     RB,#SCLEN               This Line length
+         L     RY,#SCBUFL              | buffer length
+         CEIL  RB,RY                   |
+         L     RX,#SCANUM              Maximum # chars this line
+         SLR   RY,RX                   | buffer - alignment
+         CEIL  RB,RY                   |
+         ST    RB,#SCCURL              | Current length
+         SLR   RY,RB                   End alignment chars
+         ST    RY,#SCANUME             |
+         IF    (RX,NZ),BEGIN           Starting alignment
+*
+* If there is alignment to be done, do it.
+*
+         LR    RK,RX                   2 chars/byte + 1 space/fwd
+         CLEAR (RJ)                    | |
+         D     RJ,=A(4)                | | RK = # fullwords
+         LR    RY,RX                   | save byte count
+         SLL   RY,1                    | 2 chars/byte
+         ALR   RY,RK                   | + fullword spaces
+         SEG   BLANKS,(RY)             |
+*
+         LCR   RY,RJ                   Num bytes to next fullword
+         AL    RY,=A(4)                | 4-number of odd bytes
+         IF    (RY,NZ),BEGIN           Format odd bytes
+         SEGHEX L:#SCADDR,(RY)         | format them
+         SEG   BLANKS,1
+         ALR   RA,RY                   Remaining location
+         SLR   RB,RY                   | remaining length
+         END   ,                       OF Format odd bytes
+         END   ,                       OF Starting alignment
+*
+* Put out hex characters
+*
+         LA    RX,4                    Fullword at a time
+         WHILE (RB,POS),BEGIN          Still more in this line
+         LR    RY,RB                   Maximum length
+         CEIL  RY,RX                   |
+         SEGHEX (RA),(RY)
+         SEG   BLANKS,1
+         LA    RA,@RA(RX)              Next loc
+         SLR   RB,RX                   | remaining len
+         END   ,                       OF Still more in this line
+*
+         IF    ('LT RX,#SCANUME',POS),BEGIN     Ending alignment
+         LR    RK,RX                   2 chars/byte + 1 space/fwd
+         CLEAR (RJ)                    | |
+         D     RJ,=A(4)                | | RK = # fullwords
+         SLL   RX,1                    | 2 chars/byte
+         ALR   RX,RK                   | + fullword spaces
+         SEG   BLANKS,(RX)             |
+         END   ,                       OF Ending alignment
+*
+         L     RA,#SCADDR              This line's loc/len
+         L     RB,#SCCURL              | and length of this line
+         ST    RB,#SCPREL              | set as previous len
+         DEX   RB,'MVC #SCPBUF(0),@RA' |  and data
+*
+         IF    @SEGXFAL,BEGIN          Put out alpha chars
+         LA    RX,2                    Space for breathing
+         AL    RX,#SCANUM              | + any alignment
+         SEG   BLANKS,(RX)             |
+         SEG   '|'
+*
+* Put out alpha characters
+*
+         EX    RB,'MVC #SCBUF(0),@RA'
+         EX    RB,'TR #SCBUF(0),BCDTBL'
+         SEG   #SCBUF,L:#SCCURL
+         SEG   '|'
+         END   ,                       OF Put out alpha chars
+         SEGEOR ,
+         CLEAR #SCANUM                 Starting alignment done
+         L     RB,#SCCURL              New loc/len
+         ALR   RA,RB                   | new loc
+         ST    RA,#SCADDR              |
+         LCR   RB,RB                   |
+         AL    RB,#SCLEN               | new len
+         ST    RB,#SCLEN               |
+         END   ,                       OF Still have more to dump
+         IF      #SCFREP,BEGIN         Repeat lines need msg
+         SEGCOL  10
+         SEGADDR #SCRBEG
+         SEG     '/'
+         SEGADDR #SCREND
+         SEGEOR  ' same as above.'
+         CLEAR   #SCFREP
+         END   ,                       OF Repeat lines need msg
+         PEND  ,
+         EJECT
+*
+*  EBCDIC CONVERSION TABLE
+*
+         DATA  BEGIN
+BCDTBL   DC    256C'.'
+         ORG   BCDTBL+C'A'
+         DC    C'ABCDEFGHI'
+         ORG   BCDTBL+C'J'
+         DC    C'JKLMNOPQR'
+         ORG   BCDTBL+C'S'
+         DC    C'STUVWXYZ'
+         ORG   BCDTBL+C'a'
+         DC    C'abcdefghi'
+         ORG   BCDTBL+C'j'
+         DC    C'jklmnopqr'
+         ORG   BCDTBL+C's'
+         DC    C'stuvwxyz'
+         ORG   BCDTBL+C'0'
+         DC    C'0123456789'
+         ORG   BCDTBL+C' '
+         DC    C' '
+         ORG   BCDTBL+C'<'
+         DC    C'<(+|&&'
+         ORG   BCDTBL+C'!'
+         DC    C'!$*);^-/'
+         ORG   BCDTBL+C','
+         DC    C',%_>?'
+         ORG   BCDTBL+C':'
+         DC    C':#@''="'
+         ORG   ,
+         END   ,
+         LTORG
+         EJECT ,
+*********************************************************************
+*  Format an address given the specified flags of the SEGCORE work  *
+*   area                                                            *
+*  Input:  @SEGADD                                                  *
+*  Output: none                                                     *
+*********************************************************************
+         SPACE ,
+#SAD     RECORD BEGIN
+#SADWORK DS    CL8
+#SADOFF  EQU   #SADWORK+5,3
+         END   ,
+         SPACE ,
+@SAD     RECORD BEGIN
+@SADLOC  DS    A                       Address of parent's local area
+@SADPARM DS    A                       Address of parent's parm area
+@SADADDR DS    A                       Actual address to print
+         END   ,
+         SPACE ,
+SEGADDR  PROC  @SAD,#SAD
+         L     RX,@SADLOC              Address of parent local area
+         WITH  (#SC,RX),BEGIN          |
+         L     RY,@SADPARM             Address of parent parm area
+         WITH  (@SEGCORE,RY),BEGIN     |
+         SEGDEF @SEGXCB                Define control block's addr
+*
+         L     RA,@SADADDR             Address to print
+         SL    RA,#SCOFF               |
+         BTX   (RA),#SADWORK,LA:L'#SADWORK
+         IF    @SEGXFID,BEGIN          Print the ID
+         SEG   @SEGXID,4
+         SEG   '+'
+         SEG   #SADOFF                 Just put in the offset
+         END   ELSE,BEGIN
+         SEG   #SADWORK                Move the whole address over
+         END   ,
+         END   ,                       OF Address of parent parm area
+         END   ,                       OF Address of parent local area
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*                                                                   *
+*   Dump task stack                                                 *
+*                                                                   *
+*     Input - @SEGSTK                                               *
+*                                                                   *
+*     Output - none                                                 *
+*                                                                   *
+*********************************************************************
+#SEGSTK  RECORD BEGIN
+#SEGSENT DS    CL12                    Entry information
+#SEGSNAM EQU   #SEGSENT,8,C'X'         | name of routine
+#SEGSPAR EQU   #SEGSENT+8,2,C'X'       | length of parameter area
+#SEGSWOR EQU   #SEGSENT+10,2,C'X'      | length of local work area
+         END   ,
+         SPACE ,
+FRAME    RECORD BEGIN                  Stack frame
+FRANEXT  DS    A                       Forward frame link
+FRAREGS  DS    16A                     Registers on entry
+         DS    A                       - Unused -
+FRAPARM  DS    0A                      Start of parameters
+         END   ,
+         SPACE ,
+SEGSTK   PROC  @SEGSTK,#SEGSTK,SCOPE=GLOBAL
+         L     RX,@SEGSST              First frame in task is a dummy
+         WITH  (FRAME,RX)
+         LOOP  BEGIN
+*
+*  Address of routine name and lengths of parm areas
+*
+         L     RA,FRAREGS+(EPAR*4)     12 bytes before entry point
+         SH    RA,=Y(L'#SEGSENT)       |
+         MVC   #SEGSENT,@RA            |
+*
+         SEG   'On entry to routine ',,@SEGSCB
+         SEGEOR #SEGSNAM
+         SEG   'Return address = '
+         SEGHEX FRAREGS+(RAR*4),4
+         SEGEOR ,
+*
+*  Format registers
+*
+         SEG   'R0 -R3  '
+         SEGWORD FRAREGS+(R0*4),4*4
+         SEGEOR ,
+         SEG   'R4 -R7  '
+         SEGWORD FRAREGS+(R4*4),4*4
+         SEGEOR ,
+         SEG   'R8 -R11 '
+         SEGWORD FRAREGS+(R8*4),4*4
+         SEGEOR ,
+         SEG   'R12-R15 '
+         SEGWORD FRAREGS+(R12*4),4*4
+         SEGEOR ,
+*
+*  Format parameter area
+*
+         LA    RA,FRAPARM
+         LF    RB,#SEGSPAR
+         IF    (RB,NZ),BEGIN
+         SEGEOR ,
+         SEGCORE (RA),(RB),ID=Parm
+         END   ,
+*
+*  Format local work area
+*
+         LA    RA,@RA(RB)
+         LF    RB,#SEGSWOR
+         IF    (RB,NZ),BEGIN
+         SEGEOR ,
+         SEGCORE (RA),(RB),ID=Work
+         END   ,
+         SEGEOR ,
+         L     RX,FRANEXT              Forward frame link
+         UNTIL (RX,NP),END
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*                                                                   *
+*  Add words to seg buffer, separated by blanks                     *
+*                                                                   *
+*    Input - @SEGWORD                                               *
+*                                                                   *
+*    Output - nothing                                               *
+*                                                                   *
+*********************************************************************
+@SEGWORD RECORD BEGIN
+@SRCB    DS    A                       Seg control Block
+@SRLOC   DS    A                       Location
+@SRLEN   DS    A                       Length
+         END   ,
+         SPACE ,
+SEGWORD  PROC  @SEGWORD
+         L     RA,@SRLOC
+         L     RB,@SRLEN               Number of fullwords
+         LA    RB,@RB+3                |
+         SRL   RB,2                    |
+SRLOOP   SEGHEX (RA),4,@SRCB
+         SEG   ' '
+         LA    RA,@RA+4
+         BCT   RB,SRLOOP
+         PEND  ,
+         DATA  BEGIN
+*
+* CONSTANTS
+*
+HEXTBL   DC    C'0123456789ABCDEF'
+*
+EDMASK   DS    0CL15                   STANDARD EDIT MASK
+         DC    4C' ',9X'20',X'2120'
+*
+EDMASKC  DS    0CL15                   EDIT MASK WITH COMMAS
+         DC    X'402020',C',',3X'20',C',',3X'20',C',',X'202120'
+*
+LENCHECK DC    0S(L'EDMASK-L'EDMASKC,L'EDMASKC-L'EDMASK)
+*
+BLANKS   DC    CL256' '
+*
+BTSEDMSK DS    0CL24                   EDIT MASK FOR SCALED INTEGERS
+         DC    14X'20',X'2120',C'.',7X'20'
+*
+MAXDEC   DC    PL8'2147483647'
+MINDEC   DC    PL8'-2147483648'
+DECNEG   EQU   X'DF'                   Mask 1 zone bit, low byte neg
+*
+*  Digit test table
+DIGITTR  DC    256X'04'                Invalid characters
+         ORG   DIGITTR+C'0'
+         DC    10X'00'                 Valid digits
+         ORG   DIGITTR+C'.'
+         DC    X'08'                   Decimal point
+         ORG   ,
+*
+         END   ,
+         EJECT ,
+*******************************************************************
+*                                                                 *
+*    DTB -- Convert decimal string to an integer value            *
+*                                                                 *
+*                                                                 *
+*     Input - @DTB                                                *
+*                                                                 *
+*    Output - RVR contains value                                  *
+*                                                                 *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+#DTB     RECORD BEGIN
+#DTBDEC  DS    D                       Double word conversion area
+#DTBSTR  DS    CL(L'@DTBMXLN)          String conversion area
+#DTBFLG  FLAG  ,
+         FLAG  #DTBNEG                 Negative value
+         END   ,
+         SPACE ,
+DTBDTB   PROC  @DTB,#DTB,SCOPE=GLOBAL
+         CLEAR #DTB
+         CLEAR @DTBVALID               Assume it will be invalid
+         LM    RX,RY,@DTBLOC           String location/length
+         IF    ('CLI @RX,C"-"',EQ),BEGIN
+         SET   #DTBNEG                 NOTE NEGATIVE
+         INCR  RX
+         DECR  RY
+         END   ,
+         IF    (RY,P),BEGIN            Start conversion
+         IF    (RY,GT,@DTBMXLN),EXIT   Overflow
+         DEX   RY,'MVC #DTBSTR(0),@RX' Copy string to test/change
+         REGCH (RA,2),(RS,1)
+         EX    RY,'TRT #DTBSTR(0),DIGITTR'      Test digits
+         IF    NZ,EXIT                 Error, don't set valid flag
+         IF    #DTBNEG,BEGIN           Make it negative
+         LA    RS,#DTBSTR(RY)          | last digit addr
+         NI    @RS,DECNEG              |
+         END   ,                       OF Make it negative
+         EX    RY,'PACK #DTBDEC,#DTBSTR(0)'
+         IF    (('CP #DTBDEC,MINDEC',LT),OR,                           *
+               ('CP #DTBDEC,MAXDEC',GT)),EXIT           Overflow
+         CVB   RVR,#DTBDEC
+         SET   @DTBVALID               No conversion error/overflow
+         END   ,                       OF Start conversion
+         PEND  ,
+         EJECT ,
+*
+**  XTB -- Routine to convert hexadecimal strings.
+**
+**    Input:
+**      @XTB
+**
+**    Output:
+**      IF @XTBVALID  - RVR = 32 Bit binary value
+**
+**      IF ^@XTBVALID - Invalid hexadecimal string
+*
+         SPACE ,
+XTBXTB   PROC  @XTB,SCOPE=GLOBAL
+         CLEAR @XTBVALID               Assume invalid
+         CLEAR RVR                     Init return value
+         LM    RX,RY,@XTBLOC           Location/length of string
+XTBVALID IF    ((RY,LE,@XTBLOC),AND,(RY,POS)),BEGIN     Check length
+XTBL     LABEL ,
+         LC    RS,@RX                  PICK UP DIGIT
+         IF    (('CLI @RX,C"A"',GE),AND,('CLI @RX,C"F"',LE)),BEGIN
+         SL    RS,=A(C'A'-10)          In range 10..15
+         END   ,
+         ELSEIF (('CLI @RX,C"0"',GE),AND,('CLI @RX,C"9"',LE)),BEGIN
+         SL    RS,=A(C'0')             In range 0..9
+         END   ELSE,EXIT               Invalid digit
+         SLL   RVR,4                   ADD NEW DIGIT IN
+         OR    RVR,RS                  |
+         LA    RX,@RX+1                NEXT DIGIT
+         BCT   RY,XTBL                 |
+         SET   @XTBVALID               Valid digit found
+         END   ,                       OF Check length range
+         PEND  ,
+         EJECT ,
+*
+**  STB -- Routine to convert scaled decimal strings.
+**
+**    Input:
+**      @STB
+**
+**    Output:
+**      IF @STBVALID  - RVR = binary scaled value
+**
+**      IF ^@STBVALID - Invalid decimal string
+*
+         SPACE ,
+#STB     RECORD BEGIN                  STB LOCAL WORK AREA
+#STBDEC  DS    D                       Decimal conversion area
+#STBSTR  DS    CL(L'@STBMXLN)          String conversion area
+#STBFLG  FLAG  ,
+         FLAG  #STBNEG                 Is a negative number
+#STBSCAL DS    A                       Number of fractional digits
+         END   ,                       OF STB LOCAL WORK AREA
+         SPACE ,
+STBSTB   PROC  @STB,#STB,SCOPE=GLOBAL  Scaled decimal conversion
+         CLEAR #STB
+         CLEAR @STBVALID               Assume it will be invalid
+         LM    RX,RY,@STBLOC           String location/length
+         IF    ('CLI  @RX,C"-"',EQ),BEGIN
+         SET   #STBNEG                 NOTE NEGATIVE
+         INCR  RX
+         DECR  RY
+         END   ,
+         STM   RX,RY,@STBLOC           |
+STBCONV  IF    (RY,P),BEGIN            Start conversion
+         IF    (RY,GT,@STBMXLN),EXIT   Overflow of maximum length
+         DEX   RY,'MVC #STBSTR(0),@RX'
+         REGCH (RA,2),(RS,1)           Hardware sez... must match
+         CLEAR R2                      Function code will be ins here
+         EX    RY,'TRT #STBSTR(0),DIGITTR'
+         IF    NZ,BEGIN                Not all digits
+*  TRT code is index for branch table
+STBCHK   B     STBCHK(R2)
+         EXIT  STBCONV                 Not valid (not decimal point)
+* Come here for decimal point (RY is decremented total length)
+* R1 is hardware set to the address of the '.'
+* RK is used as the remaining string length
+         ST    RY,@STBLEN              Total length is one less
+         IF    LOW,BEGIN               More digits
+         LA    RK,#STBSTR              Find digits so far
+         SR    RK,R1                   | (-)Digits so far
+         ALR   RK,RY                   | RK = remaining len
+         DEX   RK,'MVC @R1(0),@R1+1'   Shift out decimal point
+*  Check bounds for scaled decimal (can't be more that 10 digits
+*    plus decimal point)
+         LCR   RJ,RK                   (-)fractional digits
+         DECR  RJ                      |
+         AL    RJ,@STBSCAL             | specified scale number
+         ST    RJ,#STBSCAL             | number to really shift
+         ALR   RJ,RY                   | number of resulting digits
+         IF    (RJ,GT,@STBMXLN-1),EXIT,STBCONV
+         EX    RK,'TRT @R1(0),DIGITTR' Test for validity
+         IF    NZ,EXIT,STBCONV         Invalid digit or 2nd '.'
+         END   ,                       OF More digits
+         END   ,                       OF not all digits
+         L     RY,@STBLEN              Length
+         DECR  RY                      | length - 1
+         IF    #STBNEG,BEGIN           Make it negative
+         LA    RS,#STBSTR(RY)          | last digit addr
+         NI    @RS,DECNEG              |
+         END   ,                       OF Make it negative
+         EX    RY,'PACK #STBDEC,#STBSTR(0)'
+         L     RS,#STBSCAL             Scale: power of 10 required
+         SRP   #STBDEC,@RS,5           | scale it
+         IF    (('CP #STBDEC,MINDEC',LT),OR,                           *
+               ('CP #STBDEC,MAXDEC',GT)),EXIT           Overflow
+         CVB   RVR,#STBDEC             Convert it
+         SET   @STBVALID               No conversion error/overflow
+         END   ,                       OF Start conversion
+         PEND  ,
+         EJECT ,
+*
+**  BTD  -- Routine to format integer strings.
+**  BTDC -- Routine to format integer strings with commas.
+**
+**    Input:
+**      @BTD
+**
+**    Output:
+**      If  @BTDVALID  - String is in specified output location
+**
+**      If ^@BTDVALID  - An invalid string was passed
+*
+#BTD     RECORD BEGIN                  BTD LOCAL WORK AREA
+#BTDDEC  DS    D                       DECIMAL DOUBLE WORD
+#BTDEDIT DS    CL(L'EDMASK)
+         END   ,                       OF BTD LOCAL WORK AREA
+         SPACE ,
+BTDBTD   PROC  @BTD,#BTD,SCOPE=GLOBAL
+         IF    @BTDCOMM,BEGIN
+         MVC   #BTDEDIT,EDMASKC        EDIT MASK WITH COMMAS
+         END   ELSE,BEGIN
+         MVC   #BTDEDIT,EDMASK         USE STANDARD MASK
+         END   ,
+         L     RX,@BTDVAL              Put parm in register
+         IF    (@BTDUNSI,AND,(RX,NEG)),BEGIN  Unsigned
+         N     RX,=X'7FFFFFFF'         Remove sign
+         CVD   RX,#BTDDEC              Convert to packed
+         AP    #BTDDEC,=P'2147483648'  Add back unsign
+         END   ,
+         ELSE  BEGIN
+         CVD   RX,#BTDDEC
+         END   ,
+         REGCH (RS,1),(R1,1)           Should match!
+         LA    R1,#BTDEDIT+L'#BTDEDIT-1  DEFAULT SIGNIFIGANCE
+         EDMK  #BTDEDIT,#BTDDEC+2      CAN BE AT MOST 10 DIGITS
+         IF    (RX,NEG),BEGIN          INSERT MINUS SIGN IF NEG.
+         DECR  R1                      BACK UP ONE
+         MVI   @R1,C'-'                SHOVE IT IN
+         END   ,
+         LA    RB,#BTDEDIT+L'#BTDEDIT  CALCULATE LENGTH OF RESULT
+         SLR   RB,R1                   | IN RB
+         IF    ('LT RVR,@BTDLEN',NP),BEGIN      NOT FIXED FIELD...
+         LCR   RVR,RVR                 | DESIRED NUMBER OF LEADING
+         AR    RVR,RB                  | BLANKS
+         END    ,
+         CEIL  RVR,L'#BTDEDIT          Limit length
+         LA    RA,#BTDEDIT+L'#BTDEDIT  Get source address
+         SR    RA,RVR                  |
+         LR    RB,RVR                  Length for execute
+         L     RS,@BTDLOC
+         DEX   RB,'MVC  @RS(0),@RA'    MOVE RESULT TO USER AREA
+         PEND  ,
+         EJECT ,
+*
+**  BTX -- Routine to format hexadecimal strings.
+**
+**    Input: @BTX
+**
+**    Output: RVR = text length
+*
+#BTX     RECORD BEGIN                  BTX LOCAL WORK AREA
+         DS    H                       (pad)
+#BTXHEXS DS    CL8                     Hex conversion area
+         DS    H                       (pad)
+         END   ,                       OF BTX LOCAL WORK AREA
+         SPACE ,
+BTXBTX   PROC  @BTX,#BTX,SCOPE=GLOBAL
+         UNPK  #BTXHEXS(9),@BTXVAL(5)  TO ZONED FORMAT (SKIP SIGN)
+         TR    #BTXHEXS,HEXTBL-C'0'    TO HEX FORMAT
+         L     RB,@BTXLEN              LENGTH
+         IF    (RB,Z),BEGIN            NOT GIVEN CALCULATE IT
+         LA    RA,#BTXHEXS-1
+         LA    RB,7
+BTXCHK0  LA    RA,@RA+1
+         CLI   @RA,C'0'                START OF NON-ZERO STUFF?
+         BNE   BTXX                    YES, DONE
+         BCT   RB,BTXCHK0              KEEP LOOKING
+         LA    RA,@RA+1                POINT TO LAST DIGIT
+BTXX     LA    RVR,@RB+1               GET REAL LENGTH IN RVR
+         END   ELSE,BEGIN
+         LPR   RB,RB                   Negatives not allowed
+         CEIL  RB,L'#BTXHEXS           | or greater than this
+         LR    RVR,RB                  Return specified length
+         LA    RA,#BTXHEXS+L'#BTXHEXS  COMPUTE ADDR TO MOVE FROM
+         SR    RA,RB                   |
+         DECR  RB
+         END   ,
+         L     RS,@BTXLOC              MOVE TO USERS AREA
+         EX    RB,'MVC @RS(0),@RA'
+         PEND  ,
+         EJECT ,
+*
+**  BTS -- Routine to format scaled decimal strings.
+**
+**    Input
+**      @BTS
+**
+**    On exit:
+**      R1,R0 - text loc, len
+*
+#BTS     RECORD BEGIN                  BTS LOCAL WORK AREA
+#BTSDEC  DS    D                       DOUBLE WORD
+#BTSEDIT DS    CL17
+         END   ,                       OF BTS LOCAL WORK AREA
+         SPACE ,
+BTSBTS   PROC  @BTS,#BTS,SCOPE=GLOBAL  Scaled decimal strings
+         L     RX,@BTSVAL              Binary value
+         CVD   RX,#BTSDEC
+         LA    RA,X'07'                GET NUMBER
+         N     RA,@BTSSCAL             | OF DIGITS
+         LA    RB,BTSEDMSK(RA)         GET START OF MASK TO USE
+         REGCH (RS,1)
+         LA    R1,#BTSEDIT+15          DEFAULT STARTING POINT
+         SR    R1,RA                   MINUS OFFSET
+         MVC   #BTSEDIT,@RB            GET MASK
+         MVI   #BTSEDIT,C' '           FIRST BYTE IS PAD CHAR
+         EDMK  #BTSEDIT,#BTSDEC        EDIT NUMBER
+         IF    (RX,NEG),'DECR R1; MVI @R1,C"-"'
+         IF    ('LT RVR,@BTSLEN',ZERO),BEGIN    USE AS NECESSARY
+         LA    RVR,#BTSEDIT+L'#BTSEDIT R1 POINTS TO START,
+         SR    RVR,R1                  GET LENGTH IN RVR
+         END
+         ELSE  BEGIN
+         LPR   RVR,RVR                 No negatives
+         CEIL  RVR,L'#BTSEDIT          | or ones too long
+         LA    R1,#BTSEDIT+L'#BTSEDIT  RVR HAS LENGTH,
+         SR    R1,RVR                  GET START IN R1
+         END   ,
+         LR    RB,RVR                  MOVE TO OUTPUT - LENGTH
+         L     RA,@BTSLOC              |
+         DEX   RB,'MVC @RA(0),@R1'    |
+         PEND  ,
+         EJECT
+         TITLE 'Hash Routine'
+*******************************************************************
+*                                                                 *
+*   HASHIT  - Hash a string to a numeric value                    *
+*                                                                 *
+*     Input - @HASH                                               *
+*                                                                 *
+*    Output - RVR contains hash value                             *
+*                                                                 *
+*******************************************************************
+         SPACE 3
+HASHIT   PROC  @HASH,SCOPE=GLOBAL
+         L     RA,@HSHSTR              STRING POINTER
+         L     RB,@HSHLEN              LENGTH
+         DECR  RB                      LAST CHARACTER
+*
+*  STRIP TRAILING BLANKS
+*
+         IF    @HSHBLNK,BEGIN          STRIP TRAILINB BLANKS
+         UNTIL (@RA,NE,C' '),'DECR  RB'
+         END   ,
+         CLEAR RVR
+         CLEAR RS
+         AR    RB,RA                   END OF STRING + 1
+         EJECT
+*
+*  HASH STRING CHARACTER BY CHARACTER
+*
+         WHILE (RA,LT,RB),BEGIN
+         SLL   RS,4
+         IC    RVR,@RA                 GET NEXT CHARACTER
+         ALR   RS,RVR                  ADD TO HASH VALUE
+*
+*  CAP VALUE AT 2**28
+*
+         L     R15,=X'F0000000'
+         IF    ('NR  R15,RS',NZ),BEGIN   SHIFTED INTO HIGH NIBBLE
+         LR    R14,R15
+         SRL   R14,24                  SHIFT HIGH BYTE TO LOW BYTE
+         XR    RS,R14
+         XR    RS,R15
+         END   ,
+         INCR  RA                      TO NEXT BYTE
+         END   ,
+*
+*  CREATE HASH INDEX VALUE
+*
+         CLEAR RVR
+         D     RVR,@HSHVAL             HASH INDEX VALUE IS IN RVR
+         PEND
+         END   .

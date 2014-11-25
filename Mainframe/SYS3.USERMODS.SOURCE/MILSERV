@@ -1,0 +1,126 @@
+//&$MSVC JOB ,'MILSERV SVC'
+// EXEC PURGEOLD
+// EXEC HIBALCL
+//ASM.SYSLIB DD DSN=SYS3.IS.MACLIB,DISP=SHR
+IGC0024B TITLE 'MILSERV SVC'
+*******************************************************************
+*                                                                 *
+*     MILTEN/370 - Release IV - Class I - Stanford Proprietary    *
+*                                                                 *
+*******************************************************************
+         HIBAL
+*
+         SYSDEFN
+         GBLA  &SVCMIL             Milserv svc no.
+         SPACE 2
+**
+**  milserv svc --
+**
+**    This is the [MVS] MILSERV SVC, it is a Type-4 SVC.  It is
+**    entered to queue requests for MILTEN (to perform various
+**    interactive system functions).  This SVC just takes a pre-
+**    allocated entry linked off of the user cvt and adds the request
+**    to the MILTEN's "active" queue.  The actual processing of the
+**    request is done in the MILTEN SERV module.
+**
+**    The calling sequence is:
+**                 MILSERV  location,length,option
+**                          (r1)     (r0)   (r15)
+**
+**                 generates:
+**                          LA    R1,location
+**                          LA    R0,length
+**                          LA    R15,option
+**                          svc   &svcmil
+**                          ltr   r15,r15
+**
+**    A detailed mapping of the parameter list can be obtained by:
+**
+**                 copy     milservd
+**
+**    Return code (in register R15):
+**     -12 - can't queue request, internal logic/control block error
+**      -8 - can't queue request, control blocks not set up
+**      -4 - can't queue request, busy (all queue entries used)
+**       0 - request queued
+**       4 - illegal request format
+**
+**    For old-world compatability...   If R0 is X'AABBCCDD' or
+**    X'CBAABCDD' then a return code of -1 will always be given.
+**
+**
+**    Written on 5/80, by Jim Nisbet
+**
+**    Modifications:
+**       8/81 jdn  - Changes for MVS.  The SVC now just queues the
+**                   request for MILTEN.  (Previously, the SVC
+**                   branch entered MILTEN.)
+**
+*
+         PUSH  DSECTS
+CVT      DSECT
+         CVT   SYS=VMS
+*
+         POP   DSECTS
+         EJECT
+USERCVT  RECORD 'USERCVT'
+         EJECT
+         MILQ
+         EJECT
+BR       REG   R8                  Base register
+         SPACE 2
+IGC0024B CSECT
+         USING CVT,R3              ##  (entry assumption)
+*
+         BASE
+SVCBASE  IF    ((R0,EQ,X'AABBCCDD'),OR,(R0,EQ,X'CBAABCDD')),BEGIN
+         LH    R5,=H'-1'           Sorry joe (h.b.--1946)
+         B     RETURN
+         END
+*
+         LH    R5,=H'-8'           Assume the worst
+         LT    R4,CVTUSER          User cvt ptr
+         BZ    RETURN              None, scram
+         USING USERCVT,R4          ##
+         IF    (USERCVT,NE,'SCIP'),RETURN  not correct, scram
+         IF    ((R0,NEG),OR,(R0,GT,L'MILQTEXT)),'LA R5,4; B RETURN'
+         LTR   R2,R0
+         IF    POS,BEGIN
+         DEX   R2,'CLC @R1,@R1'   get any program check now
+         END
+*
+*  queue request...
+FREEQ    LT    R7,USEMFREQ         Free queue head
+         IF    Z,'LH R5,=H"-4"; B RETURN'  no more entries
+         WITH  (MILQ,R7),BEGIN
+         L     R6,MILQLINK         Next ptr
+         CS    R7,R6,USEMFREQ      Update free queue
+         BNZ   FREEQ               Try again
+         IF    ((MILQ,NE,'FREQ'),OR,(MILQEND,NE,'QEND')),BEGIN
+         LH    R5,=H'-12'          Crummy queue entry
+         B     RETURN              Scram
+         END
+         MVC   MILQ(4),=CL4'MILQ'  Flag as active
+         STH   R15,MILQOPT         Save option code
+         STH   R0,MILQLEN          Save length
+         LR    R2,R0
+         MOVE  R2,MILQTEXT,@R1     ... and text
+ACTQ     L     R6,USEMACTQ         Active queue head
+         ST    R6,MILQLINK
+         CS    R6,R7,USEMACTQ      Update active queue
+         BNZ   ACTQ                Try again
+         END
+         CLEAR R5                 we did it
+*
+RETURN   LTR   R15,R5              Set rc
+         BR    R14
+         B     RETURN
+*
+         DROP  BR,CVT
+*
+         LTORG
+         EJECT
+         END   .
+//LKED.SYSLMOD DD DSN=SYS1.LPALIB(IGC0024B),
+//      VOL=SER=IPORES,UNIT=SYSALLDA,DISP=SHR,SPACE=
+//*TEST*LKED.SYSLMOD DD DSN=WYL.GG.JDN.LINKLIB(SMIL),DISP=SHR,SPACE=

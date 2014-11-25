@@ -1,0 +1,2519 @@
+UTILS    TITLE 'Wings Utility Routines'
+********************************************************************
+*** %%Module: wings asm utils;                                     *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- FILE SERVER UTILITY ROUTINES.                        *
+***                                                                *
+***    This module is a collection of miscellaneous utility        *
+***    routines.                                                   *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***  2002/06/06  mcl  MSG->SETMSG                                  *
+***  1996/10/10  mcl  more TZ adjustments                          *
+***  1996/09/23  mcl  BDATE routine; corrections to TZ offset      *
+***  1995/01/09  mcl  more NDATE cleanup                           *
+***  1994/07/11  mcl  NDATE cleanup, fix some 24-bit dependencies  *
+***  1994/07/07  mcl  add "new date" proc FMTNDATE for yyyy/mm/dd  *
+***  1990/12/15  Niz  Cleanup.                                     *
+***  1990/11/24  Niz  Initial version.                             *
+***                                                                *
+***                                                                *
+********************************************************************
+UTILS    HIBAL ASSOC=YES
+         REGS  FSR,,,,,,,BR,WAR,,,TVTR,(GVTR,LSR),SPR,RAR
+*
+         GBLC  &ZONE,&ALTZONE
+         SYSDEFN
+*
+SEGCB    RECORD 'SEGCB'
+*
+         PUSH  DSECTS              Common DSECTS
+         CVT   DSECT=YES
+TIOTDSCT DSECT ,
+         IEFTIOT1 ,
+         IKJTCB DSECT=YES
+*
+         DCBD  DEVD=DA,DSORG=PS
+DCB      EQU   IHADCB,,C'X'
+*
+DVTAREA  RECORD 'DVTAREA'
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+*
+         COPY  TRCENTRY            Trace entry format
+*
+         COPY  WTOCB               WTO information block
+         POP   DSECTS
+*
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+         TITLE 'Procedure Tracing Routine'
+*box
+*
+*  PTRACE -- Entered every time a procedure is entered to make
+*    a trace table entry.  Efficiency is important here.
+*
+         ENTRY PTRACE
+PTRACE   DS    0H
+         WITH  (PTRACE,R15),BEGIN
+         IF    TVTFTRC,BEGIN       If tracing active...
+         L     R13,TVTTRCUR        Get current entry address
+         LA    R13,L'TRCENTRY(R13) Step to next entry
+         IF    (R13,GE,TVTTREND),'L R13,TVTTRBEG'  Check for wrap
+         ST    R13,TVTTRCUR        Save current entry pointer
+         WITH  (TRCENTRY,R13)
+         STCK  TRCCLOCK            Time stamp
+         MVC   TRCNAME,@R14        Move in id
+         STM   R0,R12,TRCREGS      Save R0-R12
+         MVC   TRCREGS+13*4(12),TVTTRSAV  Move in R13-R15
+         END
+         B     8(R14)              Return to caller (step over id)
+         END
+         TITLE 'PRTINIT -- Initialize output file'
+*box
+*
+*   PRTINIT -- Routine to initialize an output SEGCB.
+*
+*     On entry:
+*       R1  - 8 character DDNAME
+*       R15 - SEGCB ptr
+*
+*     On exit, R15 (and cc):
+*       0 - opened ok
+*       nz- error of some sort
+*
+         SPACE ,
+PRTIWRK  RECORD BEGIN
+OPNLIST  OPEN  (*-*,(OUTPUT)),MF=L
+         END   ,
+         SPACE ,
+PRTINIT  XPROC PRTIWRK
+         LR    R6,R15              Save SEGCB ptr
+         WITH  (SEGCB,R6)
+*-
+*-       Allocate DCB and output buffer.
+*-
+         LR    R2,R1               Save DDNAME ptr
+*
+         LA    R0,L'PRTIDCB+PRTLEN#  Model DCB
+         VCALL GETLOW              Get DCB and output buffer
+         LA    R4,@R1+L'PRTIDCB    Start of output buffer
+         LR    R5,R1               DCB ptr
+         WITH  (DCB,R5)
+         MVC   DCB(L'PRTIDCB),PRTIDCB  Initialize model DCB
+         MVC   DCBDDNAM,@R2        Initialize DDNAME
+*
+         SEGINIT (R4),PRTLEN#,SEGCB,RTN=PRTSEG  Initialize SEGCB
+         ST    R5,SEGCBUSR         Save DCB ptr in user field
+*-
+*-       Open output file.
+*-
+         XPUSH ,,L'DVTAREA,PTR=R4
+         WITH  (DVTAREA,R4)
+         VCALL AMODE24             ********
+         DEVTYPE DCBDDNAM,DVTAREA  Is DDNAME defined?
+         VCALL AMODE31             ********
+         IF    (R15,NZ),'LA R15,8; EXIT PRTINIT'  No, scram
+*
+         LA    R2,DCB
+         VCALL AMODE24             ********
+         CLEAR OPNLIST             CLEAR OPEN PARAMETER LIST
+         OI    OPNLIST,X'80'       MARK ONLY ONE FILE
+         OPEN  ((2),(OUTPUT)),MF=(E,OPNLIST)
+         VCALL AMODE31             ********
+         IF    ~DCBOFLGS.DCBOFOPN,'LA R15,20; EXIT PRTINIT'
+*
+         CLEAR R15                 Set good return code
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+*-
+*-       Model DCB.
+*-
+PRTLEN#  EQU   200,,C'N'           Maximum length print line
+PRTIDCBX DCB   DDNAME=SYSPRINT,DSORG=PS,MACRF=PL,                      *
+               RECFM=VBA,LRECL=PRTLEN#,BLKSIZE=6233,EXLST=PRTIEXL
+PRTIDCB  EQU   PRTIDCBX,*-PRTIDCBX,C'X'
+*
+PRTIEXL  DC    0A(0),X'91',AL3(PRTIAEX)   DCB abend exit
+*
+PRTIAEX  WITH  (*,R15),BEGIN
+         MVI   @R1+3,4             Tell OS to ignore the abend
+         BR    R14                 Return
+         END
+         TITLE 'PRTCLOSE -- Close output file'
+*box
+*
+*  PRTCLOSE -- Routine to close the output file specified.
+*
+*    On entry:
+*      R15 - SEGCB ptr
+*
+         SPACE ,
+PRTCWRK  RECORD BEGIN
+CLSLST   CLOSE (*-*),MF=L
+         END   ,
+         SPACE ,
+PRTCLOSE XPROC PRTCWRK
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+*
+         L     R5,SEGCBUSR         User field points to DCB
+         IF    (R5,NZ),BEGIN       We have a DCB...
+         WITH  (DCB,R5)
+*-
+*-       Only close if DCB is currently open.
+*-
+         IF    DCBOFLGS.DCBOFOPN,BEGIN  DCB is open...
+         VCALL AMODE24             ********
+         CLEAR CLSLST              CLEAR CLOSE PARAMETER LIST
+         OI    CLSLST,X'80'        MARK ONLY ONE DCB
+         CLOSE ((R5)),MF=(E,CLSLST)
+         VCALL AMODE31             ********
+         END
+*-
+*-       Now free the memory for the DCB and output buffer.
+*-
+         CLEAR SEGCBLOC,SEGCBLENF,SEGCBMAXF  Reset
+*
+         L     R1,SEGCBUSR         DCB/buffer storage
+         CLEAR SEGCBUSR            Reset buffer ptr
+         VCALL FREECORE            Free them both
+         END
+*
+         PEND
+         TITLE 'PRTSEG -- Output seg processing routine'
+*box
+*
+*   PRTSEG -- Seg routine to write line to an output file.
+*
+*     On entry:
+*
+*       R15 - SEGCB ptr
+*
+PRTWA    RECORD BEGIN
+PRTSTAMP DS    CL12                Timestamp ("hh:mm:ss.hh ")
+         END
+*-
+PRTSEG   XPROC (R2,LSR),PRTWA,TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+*
+         IF    (SEGCBCR,OR,SEGCBWR,OR,SEGCBOVF),BEGIN  Segwr...
+         CEIL  R0,PRTLEN#          Not too long
+         LR    R5,R1
+         LR    R4,R0
+*
+         CLEAR R0,R1
+         LA    R15,PRTSTAMP
+         VCALL FMTTIME             Get current time
+         MVI   PRTSTAMP+11,C' '
+*-
+*-       Copy print line to in-core log buffer.
+*-
+         LT    R14,TVTLGCUR        Get log buffer pointer
+         IF    NZ,BEGIN            We have a in core log...
+         LA    R14,LOGLEN(R14)     Step to next slot
+         IF    (R14,GE,TVTLGEND),'L R14,TVTLGBEG'  Check for wrap
+         ST    R14,TVTLGCUR        Save new pointer
+         MVC   @R14(L'PRTSTAMP),PRTSTAMP   Move in time stamp
+         LA    R14,L'PRTSTAMP(R14) Target area address
+         LA    R15,LOGLEN-L'PRTSTAMP  Target area length
+         LR    R0,R5               Message start
+         LR    R1,R4               Message length
+         ICM   R1,8,GVTBLANK       Blank fill
+         MVCL  R14,R0              Move text to log buffer
+         L     R15,TVTLGCUR        Get pointer again
+         L     R14,=A(SEGTRTBL)
+         TR    @R15(LOGLEN),@R14   Translate unprintable chars
+         END
+*
+         L     R3,SEGCBUSR         SYSPRINT DCB
+         IF    @R3+(DCBOFLGS-DCB).DCBOFOPN,BEGIN  It's open...
+         LR    R2,R4
+         LA    R2,4+1+@R2          l'rdw + cc char + text
+****!!!  IF    ~GVTFPNTS,'LA R2,L"PRTSTAMP(R2)'
+         STH   R2,@R3+(DCBLRECL-DCB)
+         VCALL AMODE24             ********
+         PUT   (R3)                Get buffer space
+         VCALL AMODE31             ********
+         IF    ~@R3+(DCBOFLGS-DCB).DCBOFOPN,EXIT  DCB abend, scram
+         STH   R2,@R1              Rdw len
+         CLEAR (@R1+2,2)           Rdw flags
+         MVI   @R1+4,C' '          Cc char
+         IF    (GVTPRCC,NZ),'MVC @R1+4,GVTPRCC'
+         LA    R2,4+1+@R1
+***!!!   IF    ~GVTFPNTS,BEGIN
+***!!!   MVC   @R2(L'PRTSTAMP),PRTSTAMP  Timestamp
+***!!!   LA    R2,L'PRTSTAMP(R2)
+***!!!   END
+         IF    (R4,POS),BEGIN
+         LR    R15,R4
+         MOVE  R15,@R2,@R5
+         L     R14,=A(SEGTRTBL)
+         EX    R15,'TR @R2,@R14'
+         END
+         END
+*
+*!!!!    CLEAR GVTPRCC             Reset
+         LCR   R0,R4               Amnt we reduced bfr--for segcbovf
+         IF    SEGCBCR,'CLEAR R0,SEGCBMRKF,SEGCBLENF'  no cr char
+         END
+*
+         IF    SEGCBSPP,'CLEAR R0'  always set good return code
+         PEND
+*
+GVTPRCC  DC    C' '                Next CC char to use !!!!!!!!
+         TITLE 'WTOINIT -- Initialize WTO SEGCB'
+*box
+*
+*   WTOINIT -- Routine to initialize an WTO SEGCB.
+*
+*     On entry:
+*       R15 - SEGCB ptr
+*
+*     On exit, R15 (and cc):
+*       0 - ok
+*       nz- error of some sort
+*
+WTOINIT  XPROC
+         LR    R6,R15              Save SEGCB ptr
+         WITH  (SEGCB,R6)
+*-
+*-       Allocate WTOCB and output buffer.
+*-
+         LA    R0,L'WTOCB+WTOMAXL#  WTOCB and buffer
+         VCALL GETCORE             Get WTOCB and output buffer
+         LA    R4,@R1+L'WTOCB      Start of output buffer
+         LR    R5,R1               WTOCB ptr
+         WITH  (WTOCB,R5)
+         CLEAR WTOCB               Initialize
+         MVC   WTOID,=CL4'WTO'     Self identification
+*
+         SEGINIT (R4),WTOMAXL#,SEGCB,RTN=WTOSEG  Initialize SEGCB
+         ST    R5,SEGCBUSR         Save WTOCB ptr in user field
+*
+         CLEAR R15                 Set good return code
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+         EJECT
+*box
+*
+*  SETCONID - Set console id to be used on WTO.
+*     Set console ID to zero to use routcode=2.
+*
+*  On entry:
+*     R0 - console ID
+*     R15 - segcb pointer
+*
+*  NOTE:
+*  For now we use 1 byte CIBCONID in CIB field.
+*  (see qedit macro.)  This must be upgraded to CIBXCNID
+*  or CIBCART in future versions of MVS.
+*
+*  NOTE:
+*  Once set this all WTO segs will go to this console
+*  until cleared.  YEOW !
+*
+*  NOTE:
+*  Caller is responsible to make sure a SEGWR forces out
+*  the SEG buffer before changing console ID's.  Otherwise
+*  buffered output may be directed to the wrong console.
+*
+*
+SETCONID XPROC ,
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         L     R5,SEGCBUSR
+         WITH  (WTOCB,R5)
+         IF    (R5,NZ),BEGIN
+         STC   R0,WTOCONID
+         END
+         PEND
+         EJECT
+*box
+*
+*  SETAUXID - Set auxiliary place to SEG WTO output.
+*     Often used to additionally seg WTO output to a log.
+*
+*  On entry:
+*     R0 - auxiliary segcb pointer (zero means none)
+*     R15 - WTO segcb pointer
+*
+*
+*
+SETAUXSG XPROC ,
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         L     R5,SEGCBUSR
+         WITH  (WTOCB,R5)
+         IF    (R5,NZ),BEGIN
+         ST    R0,WTOAUXSG
+         END
+         PEND
+         TITLE 'WTOSEG -- WTO seg processing routine'
+*box
+*
+*  WTOSEG -- Routine to send a write to operator (WTO) message.
+*    This routine is entered as a SEG exit routine, with the
+*    SEGCB containing a pointed to the "WTOCB" with speical
+*    options.
+*
+*    On entry:
+*      R15 - SEGCB ptr
+*
+WTOWA    RECORD BEGIN
+WTOXCB   DS    CL(L'WTOCB)         Default WTOCB area
+*
+WTOS     SEGCB
+*
+WTOWORK  DS    F                   Working fullword
+*
+         DS    0F
+WTOPAD   DS    F                   Padder
+WTOHDR   DS    H                   MCS header (length)
+WTOMCS   DS    H                   MCS flags
+         ORG   WTOPAD
+         DS    H                   Padder
+WTOPARM  DS    X                   MILSERV: Must be zero
+WTOACCT  DS    CL5                 MILSERV: Account (uuugg)
+WTOPFX   EQU   WTOPARM,*-WTOPARM,C'X'
+         ORG
+WTOSBUF  DS    CL120               Work buffer
+         END
+*-
+WTOSEG   XPROC WTOWA,TRACE=NO
+*
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+*-
+*-       SEGCR/SEGWR.
+*-
+         IF    (SEGCBCR,OR,SEGCBWR),BEGIN  Write...
+         LT    R5,SEGCBUSR         User info ptr
+         IF    Z,BEGIN             No WTOCB ptr...
+         LA    R5,WTOXCB           Make a dummy WTOCB
+         WITH  (WTOCB,R5),'CLEAR WTOCB; MVC WTOID,=C"WTO "'
+         END
+*
+         WITH  (WTOCB,R5)
+         FAIL  (WTOCB,NE,'WTO'),'Bad WTOCB ptr.'
+*-
+*-       Do WTO.
+*-
+         CLEAR WTOLID              Reset WTO id
+*
+         SEGINIT WTOSBUF,,WTOS
+         IF    ~WTOFNOPFX,BEGIN    Prefix is OK...
+         SEG   '*** '
+         SEGTB GVTJOBNM
+         SEG   '*** '
+         END
+*
+         SEGT  L:SEGCBLOC,L:SEGCBLENF  Message text
+*
+*                                  Set routcd=nn and Desc=nnn
+         MVC   WTOWORK,=X'00004000' Default is Routcde=2
+         IF    GVTFTEST,BEGIN      If test wings, Rout=11
+         MVC   WTOWORK,=X'00000020'
+         END
+         IF    WTOFWTL,BEGIN       If WTL, Rout=11
+         MVC   WTOWORK,=X'00000020'
+         END
+         IF    WTOFACTION,BEGIN    If action req, Desc=1 Rout=2
+         MVC   WTOWORK,=X'80004000'
+         END
+         IF    (WTOCONID,NZ),BEGIN If console id, rout=0
+         MVC   WTOWORK+2(2),=X'0000'
+         END
+         SEG   WTOWORK             Add MCS suffix
+*
+         L     R15,WTOSLENF        Total text length
+         STH   R15,WTOHDR          Save length in MCS header
+         MVC   WTOMCS,=X'8000'     MCS flags (rout suffix present)
+         OC    WTOMCS,=X'4000'     MCS flags (REG0 R0 is console id)
+*
+         LC    R0,WTOCONID
+         LA    R1,WTOHDR
+         WTO   MF=(E,(1))          Do WTO
+         ST    R1,WTOLID           Save WTO id
+*-
+*-       Do AUXILIARY seg if requested.
+*-
+         IF    (WTOAUXSG,NZ),BEGIN
+         SETMSG L:SEGCBLOC,L:SEGCBLENF
+         L     R15,WTOAUXSG
+         SEGWR (R1),(R0),.(R15)
+         END
+*-
+*-       Do MILSERV NOTIFY (for test systems).
+*-
+         IF    (GVTNOTFY,NZ),BEGIN  We have an account to notify...
+         IF    WTOFWTL,EXIT        Just a WTL, forget it
+*
+         SEGCLR
+         SEG   'From '
+         SEGT  GVTJOBNM            Jobname
+         SEG   ': '
+         SEGT  L:SEGCBLOC,L:SEGCBLENF  Message text
+*
+         CLEAR WTOPARM             Clear MILSERV parm
+         MVC   WTOACCT,GVTNOTFY    Set notification account
+         LA    R0,L'WTOPFX         MILSERV prefix
+         A     R0,WTOSLENF         Total MILSERV parm length
+*
+         MILSERV WTOPARM,(R0),LA:2  Send message to the owner
+         END
+         END
+*
+         PEND
+*
+         QLTORG
+         TITLE 'MONITOR CMD seg stuff'
+*
+*  MCMDINIT - init monitor command
+*
+*  ON ENTRY:
+*    R0,R1 - seg buffer loc, length
+*    R2 - TVT
+*    R15 - SEGCB
+*
+*  NOTE:
+*  SEGCBUSR IS TVT ADDRESS
+*
+*
+MCMDINIT XPROC ,
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         LR    TVTR,R2
+         WITH  TVT
+*
+*                                  INIT SEGCB
+         SEGINIT (R1),(R0),(R15),RTN=MCMDSEG
+         LA    R1,TVT
+         ST    R1,SEGCBUSR
+*
+*                                  CLEAR RESPONSE BUFFER LEN
+         L     R1,TVTRSPBF
+         LA    R0,4
+         ST    R0,@R1
+         PEND
+         EJECT
+*
+*  MCMDSEG - monitor command seg processing routine
+*
+*  We put each line into TVTRSPBF (response buffer)
+*  Response buffer is 4 bytes total length (including
+*  self). followed by lines of text. each line of text
+*  is 1 byte length followed by length bytes of text.
+*  (1 byte length is length of text does not include
+*  lenfth byte)
+*
+*  NOTE:
+*  SEGCBUSR IS TVT ADDRESS
+*
+*
+MCMDSEG  PROC
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         L     TVTR,SEGCBUSR
+         WITH  TVT
+*
+*                                  WRITE
+         IF    (SEGCBWR,OR,SEGCBOVF),BEGIN
+*                                  CHECK IF ROOM IN RESPONSE BUF
+         L     R1,TVTRSPBF
+         L     R0,@R1
+         A     R0,=A(256)
+         IF    (R0,LT,TVTRSPLN),BEGIN  IF ROOM
+*                                  MOVE TEXT INTO RESPONSE BUFFER
+         L     R1,TVTRSPBF         R1 - RESPONSE BUFFER
+         LR    R2,R1               R2,R3 DEST LOC, LEN
+         A     R2,@R1              R4,R5 SOURCE LOC, LEN
+         L     R3,SEGCBLENF
+         CEIL  R3,255
+         L     R4,SEGCBLOC
+         LR    R5,R3
+         STC   R3,@R2
+         INCR  R2
+         MVCL  R2,R4
+*                                  UPDATE TOTAL LENGTH
+         L     R2,@R1
+         L     R3,SEGCBLENF
+         CEIL  R3,255
+         INCR  R3
+         AR    R2,R3
+         ST    R2,@R1
+         END
+*                                  SET RETURNS
+         L     R0,SEGCBLENF
+         LCR   R0,R0               RETURN FOR SEGCBOVF
+         CLEAR R15
+         END
+*
+*                                  SEGCR, TREAT AS SEGWR
+*                                  THIS CODE NEVER EXECUTED I HOPE
+         IF    SEGCBCR,BEGIN
+         SEGWR ,,.SEGCB
+         END
+*
+*                                  POST PROCESSING
+         IF    SEGCBSPP,BEGIN
+         CLEAR R0                  ASSUME ALL OK
+         END
+*
+         PEND
+*
+         QLTORG
+         TITLE 'AMODE switching routines'
+*box
+*
+*  AMODE31 -- Routine to switch to 31-bit addressing mode if
+*    we are running MVS/XA.
+*
+*    (If you are not running MVS/XA then this routine can be
+*    commented out.)
+*
+AMODE31  XPROC
+         LA    R2,A31GO
+         O     R2,=A(X'80000000')  31 bit mode wanted
+         BSM   0,R2
+*
+A31GO    LABEL
+*
+         PEND
+         SPACE 2
+*box
+*
+*  AMODE24 -- Routine to switch back to 24-bit addressing mode.
+*
+AMODE24  XPROC
+         LA    R2,A24GO
+         BSM   0,R2                24 bit mode wanted
+*
+A24GO    LABEL
+*
+         PEND
+         TITLE 'Memory Management Routines'
+*box
+*
+*   GETCORE -- Routine to get memory.
+*
+*     On entry:
+*       R0 - no. of bytes needed
+*
+*     On exit:
+*       R1 - addr of memory
+*       R0 - no. of bytes obtained (ge needed)
+*
+GETCORE  XPROC
+         LR    R6,RAR              Save callers addr
+*
+         FAIL  (R0,NP),'Bad GETCORE length parm'
+         AH    R0,=H'7'
+         N     R0,=F'-8'           Doubleword
+         AH    R0,=H'16'           Overhead
+         LR    R4,R0               Save length for later
+*
+         GETMAIN RU,LV=(0),LOC=ANY  Get memory (above 16M is OK)
+         MVC   @R1(4),=C'MEM '     Identifier
+*
+         ST    R4,@R1+4            Len
+         ST    R6,@R1+8            Caller's addr (for debugging)
+         LA    R15,@R1(R4)
+         SH    R15,=H'4'
+         MVC   @R15(4),=C'MEND'    Ending identifier
+*
+*DONT    L     R2,NITMEMT          Keep count of bytes...
+*DONT    AR    R2,R4               ...allocated
+*DONT    ST    R2,NITMEMT          ...by GETCORE
+*
+         LA    R1,@R1+12           Skip past overhead prefix
+         LR    R0,R4
+         SH    R0,=H'16'           Deduct overhead
+         PRETURN (R0,R1)           Return len, loc
+*
+         CLEAR R15                 Always good rc
+         PEND
+         EJECT
+*box
+*
+*   GETLOW -- Routine to get memory below the 16M line.
+*
+*     On entry:
+*       R0 - no. of bytes needed
+*
+*     On exit:
+*       R1 - addr of memory
+*       R0 - no. of bytes obtained (ge needed)
+*
+GETLOW   XPROC
+         LR    R6,RAR              Save callers addr
+*
+         FAIL  (R0,NP),'Bad GETLOW length parm'
+         AH    R0,=H'7'
+         N     R0,=F'-8'           Doubleword
+         AH    R0,=H'16'           Overhead
+         LR    R4,R0               Save length for later
+*
+         GETMAIN RU,LV=(0),LOC=(BELOW,ANY)  Get mem below 16M line
+         MVC   @R1(4),=C'MEM '     Identifier
+*
+         ST    R4,@R1+4            Len
+         ST    R6,@R1+8            Caller's addr (for debugging)
+         LA    R15,@R1(R4)
+         SH    R15,=H'4'
+         MVC   @R15(4),=C'MEND'    Ending identifier
+*
+*DONT    L     R2,NITMEMT          Keep count of bytes...
+*DONT    AR    R2,R4               ...allocated
+*DONT    ST    R2,NITMEMT          ...by GETLOW
+*
+         LA    R1,@R1+12           Skip past overhead prefix
+         LR    R0,R4
+         SH    R0,=H'16'           Deduct overhead
+         PRETURN (R0,R1)           Return len, loc
+*
+         CLEAR R15                 Always good rc
+         PEND
+         EJECT
+*box
+*
+*   GETSHARE - Routine to get memory shared with mother subtask.
+*
+*   IE. this routine obtains memory that will not automatically
+*   be cleaned up when this task exits.  it will be cleaned up
+*   when mother task exits by MVS or can explicitly be freed by
+*   FREECORE routine.
+*
+*     On entry:
+*       R0 - no. of bytes needed
+*
+*     On exit:
+*       R1 - addr of memory
+*       R0 - no. of bytes obtained (ge needed)
+*
+GETSHARE XPROC
+         LR    R6,RAR              Save callers addr
+*
+         FAIL  (R0,NP),'Bad GETSHARE length parm'
+         AH    R0,=H'7'
+         N     R0,=F'-8'           Doubleword
+         AH    R0,=H'16'           Overhead
+         LR    R4,R0               Save length for later
+*
+         GETMAIN RU,LV=(0),LOC=ANY,SP=2
+         MVC   @R1(4),=C'MEMS'     Identifier
+*
+         ST    R4,@R1+4            Len
+         ST    R6,@R1+8            Caller's addr (for debugging)
+         LA    R15,@R1(R4)
+         SH    R15,=H'4'
+         MVC   @R15(4),=C'MEND'    Ending identifier
+*
+*DONT    L     R2,NITMEMT          Keep count of bytes...
+*DONT    AR    R2,R4               ...allocated
+*DONT    ST    R2,NITMEMT          ...by GETLOW
+*
+         LA    R1,@R1+12           Skip past overhead prefix
+         LR    R0,R4
+         SH    R0,=H'16'           Deduct overhead
+         PRETURN (R0,R1)           Return len, loc
+*
+         CLEAR R15                 Always good rc
+         PEND
+         EJECT
+*box
+*
+*   FREECORE -- Routine to release memory.
+*
+*     On entry:
+*       R1 - address of memory being released
+*
+FREECORE XPROC
+         LR    R6,RAR              Save caller's addr
+*
+         LR    R5,R1
+*
+*                                  Memory free
+         SH    R5,=H'12'           Backup for prefix
+         IF    (@R5,EQ,'MEM '),BEGIN
+         L     R4,@R5+4            Len
+         LA    R15,@R5(R4)
+         SH    R15,=H'4'
+         FAIL  (@R15,NE,'MEND'),'FREECORE buffer clobbered'
+         MVC   @R5(4),=C'FRMX'     Tag as free
+         ST    R6,@R5+8
+         MVC   @R15(4),=C'FEND'    Ending tag
+         LR    R0,R4
+         FREEMAIN RU,A=(R5),LV=(R0)  Release memory
+         END
+*
+*                                  Shared Memory free
+         ELSEIF    (@R5,EQ,'MEMS'),BEGIN
+         L     R4,@R5+4            Len
+         LA    R15,@R5(R4)
+         SH    R15,=H'4'
+         FAIL  (@R15,NE,'MEND'),'FREECORE buffer clobbered'
+         MVC   @R5(4),=C'FRMX'     Tag as free
+         ST    R6,@R5+8
+         MVC   @R15(4),=C'FEND'    Ending tag
+         LR    R0,R4
+         FREEMAIN RU,A=(R5),LV=(R0),SP=2
+         END
+*
+         ELSE  BEGIN
+         FAIL  (R0,NE,R0),'Bad FREECORE address.'
+         END
+*
+*DONT    L     R2,NITMEMT          Keep count of bytes...
+*DONT    SR    R2,R4               ...allocated
+*DONT    ST    R2,NITMEMT          ...by GETCORE
+*
+         CLEAR R1
+         PRETURN (R1)              Return loc of zero (tidy)
+*
+         CLEAR R15                 Always good rc
+         PEND
+         TITLE 'Utility Routines'
+*-
+*-       work area
+*-
+WA       RECORD BEGIN
+         DS    F                   Double word insurance
+DW       DS    2F                  Double word
+HEXW     DS    F
+HEXS     DS    CL16
+*
+         ORG   HEXW                Work area for FMTXDATE
+SAVEDAY  DS    F                   Save area for day-of-week
+SAVEDATE DS    F                   Save area for day-of-month
+         ORG   ,
+*
+REDITWA  DS    CL17
+         END
+         SPACE 2
+DEC      RECORD 'DS 2D'
+         EJECT
+*box
+*
+*  RTRIM -- Trim right-side (trailing) blanks.
+*
+*    On entry:
+*      R1,R0 - string loc, len
+*
+RTRIM    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R1
+         AR    R6,R0
+         DECR  R6
+         WHILE ((R0,POS),AND,(@R6,EQ,' ')),'DECR R6; DECR R0'
+         PEND
+         SPACE 2
+*box
+*
+*  LRTRIM -- Trim left and right-side (leading/trailing) blanks.
+*
+*    On entry:
+*      R1,R0 - string loc, len
+*
+LRTRIM   XPROC (R2,LSR),TRACE=NO
+         WHILE ((R0,POS),AND,(@R1,EQ,' ')),'LA R1,@R1+1; DECR R0'
+*
+         LR    R6,R1
+         AR    R6,R0
+         DECR  R6
+         WHILE ((R0,POS),AND,(@R6,EQ,' ')),'DECR R6; DECR R0'
+         PEND
+         TITLE 'Wings: DINTPACK - Convert double-word integer'
+*box
+*
+*  DINTPACK - Convert double-word integer to packed decimal
+*
+*  On entry:   (R0,R1) Contains the double-word quantity
+*              R15     Contains address of an aligned double-word
+*                      work area.
+*
+*  On exit:    R15=0   The work area contains the packed decimal
+*                      value.
+*              R15=4   The converted value would have exceeded 15
+*                      decimal digits.
+*
+         SPACE ,
+DINTPWRK RECORD BEGIN              Number conversion work area
+         DC    5A(0)               Conversion double words
+         END   ,
+         SPACE ,
+DINTPACK XPROC DINTPWRK            Enter and obtain work area
+*-
+*-       Insure the stack word area is double-word aligned
+*-
+         LR    R4,R15              Save address of return area
+         LA    R15,4               Preset error return code
+         IF    (R0,LE,1000),BEGIN  Validity check input value
+         LA    R3,DINTPWRK         Start of work area
+         LA    R3,@R3+7              Round up to double word
+         N     R3,=A(X'FFFFFFFC')      Guarantee double word bndry
+*-
+*-       Convert high order portion of result
+*-
+         CVD   R0,@R3              Convert to decimal
+         MP    @R3(8),NUMCONV1       shift over by 2^32
+*-
+*-       Convert low order portion of result, check for negative
+*-       result and adjust the conversion if necessary
+*-
+         CVD   R1,@R3+8            Convert low order portion
+         CP    @R3+8(8),=PL1'0'     Is the result negative?
+         IF    M,BEGIN              Yes, adjust result
+         AP    @R3+8(8),NUMCONV1    Wrap around sign
+         END   ,
+         AP    @R3(8),@R3+8(8)     Add to high order portion
+         MVC   @R4(8),@R3          Pass back packed decimal field
+         CLEAR R15                 Zero return code
+         END   ,
+         PEND  ,
+         TITLE 'Wings: DINTCONV - Convert double-word integer'
+*box
+*
+*  DINTCONV - Convert double-word integer to EBCDIC character string
+*
+*  On entry:   (R0,R1) Contains the double-word quantity
+*              R15     Contains address of a 20-byte work area
+*
+*  On exit:    R0  Contains the length of the coverted number
+*              R1  Contains the address of the start
+*
+         SPACE ,
+NUMCONVW RECORD BEGIN              Number conversion work area
+         DC    3A(0)               Conversion double words
+NUMCED   DC    XL20'402020204B2020204B2020204B2020204B202120'
+         END   ,
+         SPACE ,
+DINTCONV XPROC NUMCONVW            Enter and obtain work area
+         LR    R4,R15              SAVE ADDRESS OF PASSED WORK AREA
+         LA    R3,NUMCONVW         Start of work area
+         LA    R3,@R3+7              Round up to double word
+         N     R3,=A(X'FFFFFFFC')      Guarantee double word bndry
+         LR    R15,R3              Set address of double word
+         ACALL DINTPACK            Convert to packed decimal
+         MVC   @R4(20),NUMCONV2    Move in edit mask
+         LA    R1,@R4+19           ->lo digit in case 0    ML940215
+         EDMK  @R4(20),@R3         Edit value
+         SLR   R1,R4               Compute length of zero digits
+         LA    R4,@R4(R1)          Point to first non-zero digit
+         LA    R0,20               Set maximum length
+         SLR   R0,R1               Compute converted string length
+         LR    R1,R4               Move in address to return
+         PRETURN (R0,R1)           Return location and length
+         PEND  ,
+NUMCONV1 DC    PL6'4294967296'
+NUMCONV2 DC    XL20'402020206B2020206B2020206B2020206B202120'
+         EJECT
+*box
+*
+*  TOUPPER -- Routine to convert text to all upper case.
+*
+*    On entry:
+*      R1,R0 - text loc, len
+*
+*    On exit:
+*      R1,R0 - translated text loc, len
+*              (the text is translated in place)
+*
+TOUPPER  XPROC
+         LA    R2,UPPTBL           Upper case only xl table
+*
+         WHILE (R0,POS),BEGIN      Translate text...
+         LR    R15,R0
+         CEIL  R15,256
+         DEX   R15,'TR @R1,@R2'    To upper case only
+*
+         LA    R1,@R1+256
+         SH    R0,=H'256'
+         END
+         PEND
+*-
+UPPTBL   DC    256AL1(*-UPPTBL)
+         ORG   UPPTBL+C'a'         Lowercase
+         DC    C'ABCDEFGHI'
+         ORG   UPPTBL+C'j'         Lowercase
+         DC    C'JKLMNOPQR'
+         ORG   UPPTBL+C's'         Lowercase
+         DC    C'STUVWXYZ'
+         ORG
+         EJECT
+*box
+*
+*  decimal to binary conversion
+*
+DTB      XPROC (R2,LSR),TRACE=NO
+         CLEAR R15                 Clear result
+DTBL     LTR   R0,R0               Done?
+         BNP   DTBX
+         CLI   @R1,C'0'            Digit?
+         BL    DTBX                Br if too low
+         CLI   @R1,C'9'
+         BH    DTBX                Br if too high
+         LC    R2,@R1
+         SL    R2,=A(C'0')
+         MH    R15,=H'10'          Build result
+         ALR   R15,R2
+         LA    R1,@R1+1
+         DECR  R0
+         B     DTBL
+DTBX     PEND  *
+         EJECT
+*box
+*
+*  hexadecimal to binary conversion
+*
+*  On entry:   R0  Contains the length of the hex string
+*              R1  Contains the address of the hex string
+*
+*  On exit:    R15 Contains the converted hex value
+*
+XTB      XPROC (R2,LSR),TRACE=NO
+         CLEAR R15
+XTBL     LTR   R0,R0               Done?
+         BNP   XTBX                Br if so
+         LC    R2,@R1              Pick up digit
+         CLI   @R1,C'A'
+         BL    XTBN
+         CLI   @R1,C'F'
+         BH    XTBN
+         SL    R2,=A(C'A'-10)
+         B     XTBB
+*
+XTBN     CLI   @R1,C'0'
+         BL    XTBX
+         CLI   @R1,C'9'
+         BH    XTBX
+         SL    R2,=A(C'0')
+XTBB     SLL   R15,4               Add new digit in
+         OR    R15,R2
+         LA    R1,@R1+1            Next digit
+         DECR  R0
+         B     XTBL
+*
+XTBX     PEND  *
+         EJECT
+*box
+*
+*  binary to decimal conversion
+*
+BTD      XPROC (R2,LSR),WA,TRACE=NO
+         LA    R6,DW               Get a double word
+         N     R6,=X'FFFFFFF8'     down to doubleword bdy.
+         WITH  (DEC,R6)
+         CVD   R15,DEC             Convert number to packed
+         MVC   HEXS(16),ED15       Edit mask
+         LR    R4,1                Save result loc.
+         LA    R1,HEXS+15
+         EDMK  HEXS(16),DEC
+         LTR   R15,R15             Negative?
+         BNM   *+10                Br if not
+         DECR  R1                  Put in a sign
+         MVI   @R1,C'-'
+         LA    R3,HEXS+16          Compute actual length
+         SR    R3,R1
+         LR    R1,R4               Restore result pointer
+         LTR   R0,R0               Field size given?
+         BP    *+8                 Br if so
+         LCR   R0,R0
+         AR    R0,R3               Compute field size
+         LR    R3,R0               Field length
+         LA    R2,HEXS+16          Compute starting addr
+         SR    R2,R3
+         DEX   R3,BTDMV            Move to result loc.
+         PEND  *
+*
+BTDMV    MVC   @R1,@R2
+*
+ED15     DC    C' ',13X'20',X'2120'
+         EJECT
+*box
+*
+*  binary to hexadecimal conversion
+*
+BTX      XPROC (R2,LSR),WA,TRACE=NO
+         ST    R15,HEXW            Word to be converted
+         UNPK  HEXS(9),HEXW(5)     To zoned format
+         TR    HEXS(8),HEXTBL-C'0' To hex format
+         LTR   R3,R0               Length
+         BZ    BTX0                Zero means calculate it
+         LA    R2,HEXS+8           Compute addr to move from
+         SR    R2,R3
+         DECR  R3
+BTXC     EX    R3,HEXMV            Move to users area
+         EXIT
+*
+BTX0     LA    R2,HEXS-1
+         LA    R3,7
+BTXCHK0  LA    R2,@R2+1            Bump
+         CLI   @R2,C'0'            Start of non-zero stuff?
+         BNE   BTXX                No, branch
+         BCT   R3,BTXCHK0          Loop if not last dig
+         LA    R2,@R2+1            Point to last digit
+BTXX     LA    R0,@R3+1            Get real length in r0
+*              now return with r3 having the length in ex form
+         B     BTXC
+*
+         PEND  *
+*
+HEXMV    MVC   @R1,@R2
+         EJECT
+*box
+*
+*  binary to real conversion
+*
+BTR      XPROC (R2,LSR),WA,TRACE=NO
+*** r15 has value, r1 has output addr, r0 = length*256+no of digits
+         LA    R6,DW               Set up
+         N     R6,=F'-8'           Double word
+         WITH  (DEC,R6)
+         LR    R5,R1               Save output pointer
+         CVD   R15,DEC
+         LA    R2,X'07'            Get number
+         NR    R2,R0               ...of digits
+         LA    R3,BTREDMSK(R2)     Get start of mask to use
+         LA    R1,REDITWA+15       Default starting point
+         SR    R1,R2               Minus offset
+         MVC   REDITWA,@R3         Get mask
+         MVI   REDITWA,C' '        First byte is pad char
+         EDMK  REDITWA,DEC         Edit number
+         IF    (R15,NEG),'DECR R1; MVI @R1,C"-"'
+         SRA   R0,8                Get number of digits to produce
+         IF    Z,BEGIN             If 0, use as much as necessary
+         LA    R0,REDITWA+L'REDITWA  r1 points to start,
+         SR    R0,R1               Get length in r0
+         END
+         ELSE  BEGIN
+         LA    R1,REDITWA+L'REDITWA  r0 has length,
+         SR    R1,R0               Get start in r1
+         END
+         LR    R2,R0               Length in r2 for execute
+         DEX   R2,'MVC @R5,@R1'    Move to output area
+         LR    R1,R5               Set r1 to point to output
+         PEND
+         EJECT
+*box
+*
+*  HEXCONV/HEXSTR -- Routine to convert hex digits to binary.
+*
+*    On entry:
+*      R1,R0 - string loc,len
+*      R15   - output string loc (only for "HEXSTR" entry)
+*
+*    On exit, CC:
+*      neg   - bad hex string (R1,R0 - as on entry)
+*      z,pos - hex string converted. CC set by string len.
+*                (R1,R0 - string loc, len)
+*
+HXWA     RECORD BEGIN
+HXDOUB   DS    D                   Working double word
+         END
+*-
+HEXCONV  LR    R15,R1              Convert to hex in place
+*
+HEXSTR   XPROC (R2,LSR),HXWA
+         IF    ((@R1,EQ,''''),OR,(@R1,EQ,'"')),BEGIN  string quotes...
+         LA    R1,@R1+1
+         SH    R0,=H'2'
+         END
+*
+         XPUSH R0,R1               Ptrs restored if bad hex
+*
+         LR    R6,R15              Output string ptr
+         CLEAR R5                  Output string len
+         CLEAR R4,R3               Ic regs
+*
+         WHILE (R0,POS),BEGIN
+         ST    R0,HXDOUB
+         IF    HXDOUB+3.1,BEGIN    Odd no. of digits...
+         MVI   HXDOUB,C'0'
+         MVC   HXDOUB+1(1),@R1
+         LA    R1,@R1+1
+         DECR  R0
+         END
+         ELSE  BEGIN               Even no. of digits...
+         MVC   HXDOUB(2),@R1
+         LA    R1,@R1+2            Kick ptr
+         SH    R0,=Y(2)            & remaining len
+         END
+         OC    HXDOUB(2),GVTBLANK  Upper case
+*  first digit...
+         IF    (HXDOUB,LT,'A'),HEXBAD
+         IC    R3,HXDOUB           Get char
+         LA    R2,C'A'-10          Assume alpha adjustment
+         IF    (HXDOUB,GT,'F'),BEGIN
+         IF    ((HXDOUB,LT,'0'),OR,(HXDOUB,GT,'9')),HEXBAD
+         LA    R2,C'0'             Numeric adjustment
+         END
+         SR    R3,R2               Binary
+*  second digit...
+         IF    (HXDOUB+1,LT,'A'),HEXBAD
+         IC    R4,HXDOUB+1         Get char
+         LA    R2,C'A'-10          Assume alpha adjustment
+         IF    (HXDOUB+1,GT,'F'),BEGIN
+         IF    ((HXDOUB+1,LT,'0'),OR,(HXDOUB+1,GT,'9')),HEXBAD
+         LA    R2,C'0'             Numeric adjustment
+         END
+         SR    R4,R2               Binary
+*
+         SLL   R3,4                Move high byte over
+         AR    R3,R4               Form byte
+         STC   R3,@R6(R5)
+         LA    R5,@R5+1
+         END
+         LR    R1,R6               Loc
+         LTR   R0,R5               Len
+         B     HEXEXIT
+*
+HEXBAD   XPOP  R0,R1               Restore orig ptrs
+         LNR   R15,BR              Set cc=neg
+HEXEXIT  PEND
+         EJECT
+*box
+*
+*   FMTXDATE -- Routine to format Arpa-style time/date from TOD
+*     clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current time/date)
+*       R15   - return area (32 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc, len
+*               returns: DAY, dd MON yy hh:mm:ss ZON
+*
+FMTXDATE XPROC (R2,LSR),WA,TRACE=NO
+         LR    R6,R15
+         MVC   @R6(32),GVTBLANK
+*
+         IF    ((R0,Z),AND,(R1,Z)),BEGIN   get time
+         STCK  DW                  system clock
+         LM    R0,R1,DW
+         L     R2,CVTPTR
+         WITH  (CVT,R2),'AL R0,CVTTZ'  Time zone adjustment
+         ST    R0,DW               save adjusted time
+         END   ,                      (get time)
+         LR    R4,R0
+         LR    R5,R1
+*-
+*-       Format day of the week.
+*-
+         LCALL FMTDAY              Get day of the week
+         ST    R15,SAVEDAY         Save day number
+         MVC   @R6(3),@R1          Move in first three chars
+         NI    @R6+1,255-C' '      (Lower case)
+         NI    @R6+2,255-C' '      (Lower case)
+*
+         MVI   @R6+3,C','
+*-
+*-       Format date.
+*-
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,DW              Point to 8 byte area
+         LCALL FMTDATE             mm/dd/yy
+         MVC   @R6+5(2),@R1+3      "dd"
+         IF    (@R6+5,EQ,'0'),'MVI @R6+5,C" "'  Blank leading zero
+*
+         MVC   @R6+12(2),@R1+6     "yy"
+*
+         LR    R2,R1
+         DTB   @R2+3,2             Day-of-month
+         ST    R15,SAVEDATE
+         DTB   @R2,2               Month
+         IF    ((R15,LT,0),OR,(R15,GT,12)),'CLEAR R15'  Bad month
+         LR    R3,R15              Save for later
+         MH    R15,=H'3'
+         LA    R1,FMTXMON(R15)     Month string
+         MVC   @R6+8(3),@R1
+*-
+*-       Format time of day.
+*-
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,@R6+15
+         LCALL FMTTIME             hh:mm:ss
+*-
+*-       Format time zone.
+*-
+         MVC   @R6+23(4),=C' &ZONE'  Set time zone, assume std
+         IF    ((R3,GE,4),AND,(R3,LE,10)),BEGIN
+         MVC   @R6+23(4),=C' &ALTZONE'  Assume daylight time
+*-
+*-       Now handle special cases for April and October.
+*-
+         IF    ((R3,EQ,4),OR,(R3,EQ,10)),BEGIN
+         L     R1,SAVEDATE         Get binary day-of-month
+         L     R2,SAVEDAY          Get binary day-of-week
+         LA    R0,30               Assume April
+         IF    (R3,EQ,10),'LA R0,31'
+         SR    R0,R1               Days in month - day of month
+         AR    R0,R2               ... + day of week
+         IF    (((R0,GT,7),AND,(R3,EQ,4)),OR,                          C
+               ((R0,LE,7),AND,(R3,EQ,10))),BEGIN
+         MVC   @R6+23(4),=C' &ZONE'  Re-do assumption
+         END
+         END
+         END
+*
+         SETMSG @R6,27             Formatted date
+         PEND
+*
+FMTXMON  DC    C'???JanFebMarAprMayJunJulAugSepOctNovDec'
+         LTORG ,
+         EJECT ,
+*box
+*
+*  FMTIDLE -- Routine to format elapsed time based on two TOD
+*             clock values
+*
+*  On entry:   R1  Contains the address of two double-words:
+*                  +0  STCK value indicating the end time
+*                  +8  STCK value indicating the start time
+*              R15 Return area (13 bytes)
+*
+*  On exit:
+*
+*
+FMTIDLEW RECORD BEGIN
+         DC    5A(0)               Conversion work area
+         END   ,
+FMTIDLE  XPROC FMTIDLEW,TRACE=NO
+         LA    R4,FMTIDLEW         Address of work area
+         AL    R4,=A(7)              insure double word boundary
+         N     R4,=X'FFFFFFF8'       for conversion routine
+         SPACE ,
+         LM    R2,R3,@R1           Load ending time
+         SDL   R2,@R1+8              subtract double logical
+         SRDL  R2,12                   convert to micro-seconds
+         D     R2,=A(10000)              convert to .01 second units
+         CLEAR R2
+         SPACE ,
+         D     R2,=A(60*60*100)    Determine number of hours
+         CVD   R3,@R4              Convert hours to packed decimal
+         SRDL  R2,32               Prepare for next divide
+         D     R2,=A(60*100)       Determine number of minutes
+         CVD   R3,@R4+8            Convert minutes to packed decimal
+         MP    @R4(8),=P'100'      Move over hours
+         AP    @R4(8),@R4+8(8)     Add in minutes
+         SRDL  R2,32               Prepare for next divide
+         D     R2,=A(100)          Compute number of seconds
+         CVD   R3,@R4+8            Convert seconds to packed decimal
+         MP    @R4(8),=P'100'      Move orver hh:mm
+         AP    @R4(8),@R4+8(8)     Add in seconds
+         CVD   R2,@R4+8            Convert .tt's to packed decimal
+         MP    @R4(8),=P'100'      Move orver hh:mm:ss
+         AP    @R4(8),@R4+8(8)     Add in .tt's
+         MVC   @R15(13),FMTIDLEM   Set edit mask
+         ED    @R15(13),@R4+3      Edit result
+         LR    R1,R15              Set return address
+         LA    R0,13               And length of return
+         PRETURN (R0,R1)           Return text loc and length
+         PEND  ,
+FMTIDLEM DC    XL13'402020207A20207A20214B2020'
+         EJECT
+*box
+*
+*   FMTCLCK -- Routine to format time/date from TOD clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current time/date)
+*       R15   - return area (26 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc, len  returns: hh:mm:ss mm/dd/yy (yy.ddd)
+*
+FMTCLCK  XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         MVC   @R6(26),GVTBLANK
+*
+         LR    R4,R0
+         LR    R5,R1
+         LCALL FMTTIME             Hh:mm:ss
+         MVI   @R6+8,C' '
+*
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,@R6+9
+         LCALL FMTDATE             Mm/dd/yy
+*
+         MVI   @R6+18,C'('
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,@R6+19
+         LCALL FMTJUL              Yy.ddd
+         MVI   @R6+25,C')'
+*
+         SETMSG @R6,26
+         PEND
+         EJECT
+*box
+*
+*   FMTRCLCK -- Routine to format time/conditional-date from TOD
+*     clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock
+*       R2-R3 - 64 bit comparison clock (zero = current)
+*       R15   - return area (17 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc,len    hh:mm:ss -or- hh:mm:ss mm/dd/yy
+*
+FMTRCLCK XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         MVC   @R6(17),GVTBLANK
+*
+         LR    R4,R0
+         LR    R5,R1
+         PUSH  11,PTR=R15
+         LCALL FMTTIME
+         MVC   @R6(8),@R1          "hh:mm"
+*
+         LR    R15,R1
+         LR    R0,R4
+         LR    R1,R5
+         LCALL FMTDATE
+         MVC   @R6+9(8),@R1        "mm/dd/yy"
+         POP   11
+*
+         LR    R0,R4
+         LA    R1,R5
+         LCALL TIMEDATE            Get date in R1
+         LR    R5,R1
+*
+         LR    R0,R2
+         LR    R1,R3
+         LCALL TIMEDATE            Get "comparison" date in R1
+*
+         IF    (R1,EQ,R5),'SETMSG @R6,8'  same day
+         ELSE  'SETMSG @R6,17'
+         PEND
+         EJECT
+*box
+*
+*   FMTTIME -- Routine to format time from TOD clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current time)
+*       R15   - return area (11 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc, len    returns: hh:mm:ss.hh
+*
+FMTTIME  XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         MVC   @R6(11),=C'??:??:??.??'
+*
+         LCALL TIMEDATE            Get time in r0
+         LR    R5,R0
+         CLEAR R4
+         D     R4,=A(60*100)
+         BTR   @R6+6,(5,2),(R4)    Sec.hsec
+         CLEAR R4
+         D     R4,=A(60)           R4=min, r5=hours
+         BTD   @R6+3,2,(R4)        Min
+         BTD   @R6,2,(R5)          Hours
+         OC    @R6(11),=C'00 00 00 00'  leading zeros
+*
+         SETMSG @R6,11
+         PEND
+         EJECT
+*box
+*
+*   FMTDATE -- Routine to format date from TOD clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current date)
+*       R15   - return area (8 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc,len    returns: mm/dd/yy
+*
+FMTDATE  XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         MVC   @R6(8),=C'??/??/??'
+*
+         LCALL TIMEDATE            Get julian date in r1
+         CLEAR (@R13,4)
+         ST    R1,@R13+4
+         CVB   R5,@R13             Get "yyddd" in binary
+         CLEAR R4
+         D     R4,=A(1000)         R4=days, r5=year
+         BTD   @R6+6,2,(R5)
+         IF    ('N R5,=F"3"',NZ),BEGIN  non-leap year...
+         IF    (R4,GE,31+29),'LA R4,@R4+1'  skip feb29th
+         END
+*
+         LA    R5,1                Month
+         LA    R3,MTBL
+         WHILE ('CH R4,@R3',GT),BEGIN  not this month...
+         LA    R5,@R5+1
+         SH    R4,@R3
+         LA    R3,@R3+2
+         END
+         BTD   @R6,2,(R5)          Month
+         BTD   @R6+3,2,(R4)        Day
+         OC    @R6(8),=C'00 00 00'
+*
+         SETMSG @R6,8
+         PEND
+*
+*box
+*
+*   FMTNDATE -- Routine to format "NEW" date from TOD clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current date)
+*       R15   - return area (10 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc,len    returns: yyyy/mm/dd
+*
+FMTNDATE XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         MVC   @R6(10),=C'????/??/??'
+*
+         LCALL TIMEDATE            Get julian date in r1
+*  Note:  Format is packed decimal, as 0cyyddds, where "c" is
+*  0 for dates in 1900s, 1 for dates in 2000s.
+         CLEAR (@R13,4)
+         ST    R1,@R13+4
+         CVB   R5,@R13             Get "cyyddd" in binary
+         CLEAR R4
+         D     R4,=A(1000)         R4=days, r5=year, cyy
+         LA    R5,@R5+1900         Get yyyy
+         BTD   @R6,4,(R5)
+         IF    ('N R5,=F"3"',NZ),BEGIN  non-leap year...
+         IF    (R4,GE,31+29),'LA R4,@R4+1'  skip feb29th
+         END
+*
+         LA    R5,1                Month
+         LA    R3,MTBL
+         WHILE ('CH R4,@R3',GT),BEGIN  not this month...
+         LA    R5,@R5+1
+         SH    R4,@R3
+         LA    R3,@R3+2
+         END
+         BTD   @R6+5,2,(R5)          Month
+         BTD   @R6+8,2,(R4)        Day
+         OC    @R6(10),=C'0000 00 00'   ch signs to zones
+*
+         SETMSG @R6,10
+         PEND
+*
+MTBL     DC    H'31,29,31,30,31,30,31,31,30,31,30,31,999'
+         EJECT
+*box
+*
+*   FMTDAY -- Routine to format the day of the week from TOD clock
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero=current date)
+*
+*     On exit:
+*       R15 - day number (1=Sunday, 2=Monday, etc.)
+*       R1,R0 - day text loc, len ("SUNDAY", "MONDAY", etc.)
+*
+FMTDAY   XPROC (R2,LSR),TRACE=NO
+         IF    ((R0,Z),AND,(R1,Z)),BEGIN   get current
+         STCK @R13
+         LM R0,R1,@R13             system clock
+         L     R2,CVTPTR
+         WITH  (CVT,R2),'AL R0,CVTTZ'  Time zone adjustment
+         END   ,                          (get current)
+*
+         SRDL  R0,12+6             .000001*64 of a sec
+         D     R0,=A(1000000/64*60*60*24)  One day
+         LA    R3,@R1+1            No. of days since 1900
+*
+         CLEAR R2
+         D     R2,=F'7'            Get day of the week in R15
+*
+         LR    R1,R2               Day number 0 to 6
+         SLL   R1,2                Times four for word offset
+         L     R1,DAYTBL(R1)
+*
+         LC    R0,@R1              Get string length
+         LA    R1,@R1+1
+         LA    R15,@R2+1           Return day number (1..7)
+         PEND
+*
+DAYTBL   DC    A(DAYSUN,DAYMON,DAYTUE,DAYWED,DAYTHU,DAYFRI,DAYSAT)
+DAYSUN   DC    AL1(6),CL9'Sunday'
+DAYMON   DC    AL1(6),CL9'Monday'
+DAYTUE   DC    AL1(7),CL9'Tuesday'
+DAYWED   DC    AL1(9),CL9'Wednesday'
+DAYTHU   DC    AL1(8),CL9'Thursday'
+DAYFRI   DC    AL1(6),CL9'Friday'
+DAYSAT   DC    AL1(8),CL9'Saturday'
+         EJECT
+*box
+*
+*   FMTJUL -- routine to format julian date from TOD clock.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current date)
+*       R15   - return area (6 bytes)
+*
+*     On exit:
+*       R1,R0 - text loc,len    returns: yy.ddd
+*
+FMTJUL   XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+*
+         LCALL TIMEDATE            Get julian date in R1
+         CLEAR (@R13,4)
+         ST    R1,@R13+4
+         CVB   R15,@R13            Get "yyddd" in binary
+         BTR   @R6,(6,3),(R15)
+         OC    @R6(6),=C'00 000'
+*
+         SETMSG @R6,6
+         PEND
+         EJECT
+*box
+*
+*   TIMEDATE -- Routine to calculate time/date from TOD clock.
+*     (Note format returned is the same as the "TIME BIN" svc.)
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = current time/date)
+*
+*     On exit:
+*       R0 - time (in .01 sec's past midnight)
+*       R1 - date (in "yydddf" packed decimal format)
+*            For year>1999, will be 01yydddf
+*
+TIMEDATE XPROC (R2,LSR),TRACE=NO
+         IF    ((R0,Z),AND,(R1,Z)),BEGIN    get current time
+         STCK  @R13                clock
+         LM    R0,R1,@R13
+         L     R2,CVTPTR
+         WITH  (CVT,R2),'AL R0,CVTTZ'  Time zone adjustment
+         END   ,                      (get current time)
+
+         SRDL  R0,12+6             .000001*64 of a sec
+         D     R0,=A(1000000/64*60*60*24)  one day
+         LA    R3,@R1+1            No. of days since 1900
+         LR    R1,R0               .000001*64 sec since midnight
+         CLEAR R0
+         SLDL  R0,6                .000001 sec since midnight
+         D     R0,=A(10000)        .01 sec since midnight
+         LR    R0,R1
+*
+         CLEAR R2
+         M     R2,=A(100)
+         D     R2,=A(36525)        Days/365.25 = years
+         LR    R1,R3               Year
+         MH    R1,=H'1000'         Yy*1000
+         LR    R3,R2
+         CLEAR R2
+         D     R2,=A(100)          R3 = days in this year (rel zero)
+         LA    R1,@R3+1(R1)        Form "yyddd"
+         CVD   R1,@R13
+         OI    @R13+7,X'0F'        Make sign correct
+         L     R1,@R13+4           Date in packed decimal
+         PEND
+         EJECT
+*box
+*
+*     BDATE  -- Routine to calculate date from TOD clock.  Format
+*     returned is the same as used for CRDAT, EXPDT in a DSCB.
+*
+*     On entry:
+*       R0-R1 - 64 bit clock (zero = get current time/date)
+*
+*     On exit:
+*       R0 - date.
+*            byte 0 = 0
+*            byte 1 = year excess 1900, i.e. dec '96' is 1996,
+*                     X'FF' is 2155
+*            bytes 2-3 = day of the year (binary halfword)
+*
+*     This routine is a modification of TIMEDATE above.
+
+BDATE    XPROC (R2,LSR),TRACE=NO
+         IF    (R0,Z),'STCK @R13; LM R0,R1,@R13'
+*
+         L     R2,CVTPTR
+         WITH  (CVT,R2),'AL R0,CVTTZ'  Time zone adjustment
+*
+         SRDL  R0,12+6             .000001*64 of a sec
+         D     R0,=A(1000000/64*60*60*24)  one day
+         LA    R3,@R1+1            No. of days since 1900
+*
+         CLEAR R2                  for divide
+         M     R2,=A(100)
+         D     R2,=A(36525)        Days/365.25 = years
+* R2 remainder = day of year*100  R3 quotient = year
+         LR    R0,R3               Year
+         LR    R3,R2               day*100 (remainder above)
+         CLEAR R2                  for divide
+         D     R2,=A(100)          R3 = day of this year (rel zero)
+         LA    R1,@R3+1            day of this year (1-366)
+         SLL   R1,16               in left halfword
+         SLDL  R0,16               00yy dddd in R0 (binary byte,
+*                                  binary halfword)
+         PEND
+         EJECT
+*box
+*
+*   DATE -- Routine to convert packed decimal julian date (as
+*     returned by 'TIME BIN') to 'mm/dd/yy' format.
+*
+*       On entry:
+*         R0 - packed julian date (yydddf)
+*         R1 - 8 byte return area (for 'mm/dd/yy')
+*
+*       On exit:
+*         R1,R0 - return area loc,len
+*
+DATE     XPROC (R2,LSR),WA,TRACE=NO
+         LA    R6,DW
+         N     R6,=X'FFFFFFF8'     Doubleword
+         WITH  (DEC,R6)
+         ST    R0,DEC+4            Plant date
+         UNPK  @R1(5),DEC+5(3)     Convert year (and day to make dec)
+         OI    @R1,X'F0'           Ensure valid plus sign
+         MVZ   @R1+1(4),@R1        all have x'f0' zone
+         TRT   @R1(5),DATEVAL-C'0'
+         BNZ   DATERR
+         MVC   @R1+6(2),@R1        Put year into area
+         PACK  DEC(8),@R1+6(2)     Repack it
+         CVB   R3,DEC              Convert to binary
+         PACK  DEC(8),@R1+2(3)     Repack date (should be valid now)
+         CVB   R2,DEC              Day of year
+         IF    ('N R3,=F"3"',Z),BEGIN  leap year
+         IF    (R2,EQ,=A(31+29)),'LA R2,29; LA R4,20; B DATE1'
+         IF    GT,'DECR R2'
+         END
+         IF    (R2,GT,365),BEGIN
+DATERR   MVC   @R1(8),=C'??/??/??'
+         B     DATEX
+         END
+         LA    R4,10               Set month to jan
+         LA    R3,=H'31,28,31,30,31,30,31,31,30,31,30,31'
+         WHILE ('CH R2,@R3',GT),BEGIN
+         SH    R2,@R3              Try next month
+         LA    R4,@R4+10
+         LA    R3,@R3+2
+         END
+DATE1    CVD   R4,DEC              Convert month
+         UNPK  @R1(3),DEC+6(2)
+         MH    R2,=H'10'
+         CVD   R2,DEC              Convert day
+         UNPK  @R1+3(3),DEC+6(2)
+         MVI   @R1+2,C'/'
+         MVI   @R1+5,C'/'
+DATEX    LA    R0,8                Return length
+         PEND
+         EJECT
+*box
+*
+*   NDATE -- Routine to convert packed decimal julian date (as
+*     returned by 'TIME BIN') to 'yyyy/mm/dd' format.
+*
+*       On entry:
+*         R0 - packed julian date (0cyydddf)
+*         R1 - 10 byte return area (for 'yyyy/mm/dd')
+*
+*       On exit:
+*         R1,R0 - return area loc,len
+*
+*  revised 1995/01/09 MCL:  clean up last byte
+         SPACE
+NDATE    XPROC (R2,LSR),WA,TRACE=NO
+         LR    R5,R1               Save pointer
+         LA    R6,DW
+         N     R6,=X'FFFFFFF8'     Doubleword
+         WITH  (DEC,R6)
+         ST    R0,DEC+4            Plant date
+         UNPK  @R1(7),DEC+4(4)     Convert year (and day to make dec)
+         OI    @R1,X'F0'           Ensure valid plus sign
+         MVZ   @R1+1(7),@R1        all have x'f0' zone
+         TRT   @R1(7),DATEVAL-C'0' look for invalid digits
+         BNZ   NDATERR             if invalid
+**       MVC   @R1+6(2),@R1        Put year into area
+         PACK  DEC(8),@R1(4)       Repack it (still 0cyy fmt)
+         CVB   R3,DEC              cyy in binary
+         AP    DEC(8),=P'1900'     cyyddd->yyyyddd
+         UNPK  @R1(4),DEC(8)       back in result area
+         OI    @R1+3,C'0'          Fix sign/zone
+         PACK  DEC(8),@R1+4(3)     Repack day (should be valid now)
+         CVB   R2,DEC              Day of year
+         IF    ('N R3,=F"3"',Z),BEGIN  leap year
+         IF    (R2,EQ,=A(31+29)),'LA R2,29; LA R4,20; B NDAT1'
+         IF    GT,'DECR R2'
+         END
+         IF    (R2,GT,365),BEGIN
+NDATERR  MVC   @R5(10),=C'????/??/??'
+         B     NDATX
+         END
+         LA    R4,10               Set month to jan
+         LA    R3,=H'31,28,31,30,31,30,31,31,30,31,30,31'
+         WHILE ('CH R2,@R3',GT),BEGIN
+         SH    R2,@R3              Try next month
+         LA    R4,@R4+10
+         LA    R3,@R3+2
+         END
+NDAT1    CVD   R4,DEC              Convert month
+         UNPK  @R1+5(3),DEC+6(2)
+**-ML    MH    R2,=H'10'
+         CVD   R2,DEC              Convert day
+**=ml    UNPK  @R1+8(3),DEC+6(2)
+         UNPK  @R1+7(3),DEC+6(2)
+         OI    @R1+9,C'0'          fix zone      ml950109
+         MVI   @R1+4,C'/'
+         MVI   @R1+7,C'/'
+NDATX    LA    R0,10               Return length
+         PEND
+         EJECT
+*box
+*
+*  convert time to printable format
+*
+TIME     XPROC (R2,LSR),WA,TRACE=NO
+         LA    R6,DW               Find double word
+         N     R6,=XL4'FFFFF8'
+         WITH  (DEC,R6)
+         LR    R3,0
+         SR    R2,R2
+         D     R2,=F'100'          Dispose of 100ths
+         SR    R2,R2
+         D     R2,=F'60'           Get seconds
+         MH    R2,=H'10'
+         CVD   R2,DEC
+         UNPK  DEC(3),DEC+6(2)
+         MVC   6(2,1),DEC
+         SR    R2,R2
+         D     R2,=F'60'           Get minutes
+         MH    R2,=H'10'
+         CVD   R2,DEC
+         UNPK  3(3,1),DEC+6(2)
+         MH    R3,=H'10'
+         CVD   R3,DEC              Hours
+         UNPK  0(3,1),DEC+6(2)
+         MVI   2(1),C':'
+         MVI   5(1),C':'
+         LA    R0,8                Set len
+         PEND
+*
+BTREDMSK DC    0CL24' ',14X'20',X'2120',C'.',7X'20'
+HEXTBL   DC    C'0123456789ABCDEF'
+DATEVAL  DC    X'00000000000000000000010101010101'
+*
+         QLTORG
+         TITLE 'ADDSYM - ADD SYMBOL TO DYNAMIC SYMBOL TABLE'
+*box
+*
+*  ADDSYM -- Add symbol to dynamic symbol table
+*
+*
+         COPY  SYMTAB              INCLUDE SYMBOL TABLE FORMAT
+         SPACE ,
+ADDSYM   XPROC (R2,LSR),TRACE=NO
+         LR    R2,R1               Save address of table anchor
+         LR    R3,R15              Save address of new entry
+         GETMAIN RC,LV=L'SYMENTRY  Allocate memory for entry
+         IF    (R15,Z),BEGIN
+         WITH  (SYMENTRY,R1),BEGIN
+         MVC   SYMNAME(8+4+4),@R3  Initialize table entry
+         CLEAR SYMNEXT             Clear next symbol pointer
+         END   ,
+*-
+*-       CHAIN THRU EXISTING SYMBOL table adding new entry
+*-       IN STORAGE LOCATION ORDER
+*-
+         L     R4,@R2              Set address of first entry
+         WITH  (SYMENTRY,R4),BEGIN
+         WHILE (R4,NZ),BEGIN       Set anchor address of table
+         CLC   SYMLOC,SYMLOC-SYMENTRY(R1)
+         IF    GT,BEGIN            Found insert point
+         ST    R4,@R1              Insert symbol in proper location
+         CLEAR R4                  Terminate add
+         END   ELSE,BEGIN
+         LR    R2,R4               Save last entry address
+         L     R4,SYMNEXT          Point to next entry
+         END   ,
+         END   ,
+         ST    R1,@R2              Add this entry in
+         END   ,
+         END   ,
+         PEND
+         TITLE 'DELSYM - DELETE SYMBOL FROM SYMBOL TABLE'
+*BOX
+*
+*  DELSYM -- DELETE SYMBOL FROM SYMBOL TABLE
+*
+*      ON ENTRY:
+*        R15 - ADDRESS OF SYMBOL TABLE ANCHOR CELL
+*        R0  - ADDRESS OF SYMBOL LOCATION
+*        R1  - POINTER TO SYMBOL NAME
+*
+         SPACE 2
+DELSYM   XPROC (R2,LSR),TRACE=NO
+         WITH  (SYMENTRY,R2),BEGIN ADDRESSABILITY TO TABLE ENTRY
+         L     R2,@R15             ADDRESS OF FIRST SYMBOL
+         WHILE (R2,NZ),BEGIN       SCAN THROUGH TABLE FOR MATCH
+         IF    ((R0,EQ,SYMLOC),AND,(SYMNAME,EQ,@R1)),BEGIN
+         MVC   0(4,R15),SYMNEXT    DEQUEUE CURRENT ENTRY
+         FREEMAIN R,LV=L'SYMENTRY,A=(R2)     RELEASE ENTRY
+         CLEAR R2                  TERMINATE PROCESSING
+         END   ELSE,BEGIN
+         LR    R15,R2              SAVE PREVIOUS POINTER
+         L     R2,SYMNEXT          CHAIN TO NEXT SYMBOL ENTRY
+         END   ,
+         END   ,
+         END   ,
+         PEND  ,
+         EJECT ,
+*box
+*
+*   UNPRESS -- Unpresses a line in WYLBUR edit format.
+*
+*     On entry:
+*       R15- pressed line ptr (before lineno)
+*       R1 - unpress area (at least &LINESZ bytes)
+*
+*     On exit:
+*       R1,R0 - unpress loc, len
+*       R15   - WYLBUR line-number
+*
+UNPRWA   RECORD BEGIN
+UNPRLNO  DS    F                   Lineno
+         END
+*-
+UNPRESS  XPROC (R1,LSR),UNPRWA
+         MVC   UNPRLNO,@R15        Make aligned line-no available
+         MVI   @R1,C' '            Blank return area
+         MVC   @R1+1(235-1),@R1
+         LA    R1,@R1              Make sure 1st byte clear
+         LCR   R0,R1               Set r0 for length calc at end
+         LC    R5,@R15+4           Get total line length
+         LTR   R5,R5               Is it a null line
+         BZ    FINUNP              Br yes
+         LA    R6,X'0F'            Put mask in r2
+         LA    R2,1                Set r2 for bxle step
+         DECR  R5                  Set r5 so that end of line
+         LA    R3,@R15(R5)         Point r3 to end for bxle
+MORECH   IC    R5,@R15+5           Get blank-char control byte
+         LR    R4,R5               Put in r4 also
+         SRL   R5,4                Shift to get blank count
+         AR    R1,R5               Move output ptr over blanks
+         NR    R4,R6               Mask to get non-blank count
+         BZ    ALLBLS              No move if zero count
+         LR    R5,R4               Put count in r5
+         DEX   R5,'MVC @R1,@R15+6' Move text to output
+         AR    R15,R4              Bump input ptr past text
+         AR    R1,R4               Bump output ptr past text
+ALLBLS   BXLE  R15,R2,MORECH       Add 1 (in r2) to input ptr
+*                       (in r15) and branch if <= end (in r3)
+* note that this now falls through even for an invalid pressed
+*      line.  for a valid line (r3+1) must equal r15 but there
+*      is no reason to check because there is no good recovery
+*      if the line happens to be invalid.
+FINUNP   L     R15,UNPRLNO         Line-no to R15
+         AR    R0,R1               Calc total length of line
+         PEND
+         EJECT
+*box
+*
+*   DEQUOTE/DEQSTR -- Routine to dequote string.
+*
+*    On entry:
+*      R1,R0 - string loc,len
+*      R15   - output string loc (only for "DEQSTR" entry)
+*
+*    On exit, CC:
+*      NEG   - not a string (r1,r0 - same as on entry)
+*      Z,POS - string dequoted (r1,r0 -loc,len of dequoted string)
+*
+         ENTRY DEQUOTE
+DEQUOTE  LA    R15,@R1+1           De-quote string in place
+*
+DEQSTR   XPROC (R2,LSR),TRACE=NO
+         IF    (R0,LT,2),DQBAD     Bad string
+         IF    ((@R1,NE,''''),AND,(@R1,NE,'"')),DQBAD
+*
+         DECR  R0                  Strip off outer quotes
+         DECR  R0
+         LR    R4,R1               Remember kind of quote
+         LA    R6,@R1+1            Inp ptr
+         LR    R1,R15
+         LR    R5,R0
+         WHILE (R5,POS),BEGIN
+         MVC   @R15,@R6
+         IF    ('CLC @R15,@R4',EQ),'LA R6,@R6+1; DECR R5; DECR R0'
+         LA    R15,@R15+1
+         LA    R6,@R6+1
+         DECR  R5
+         END
+         LTR   R0,R0               Set cc
+         EXIT
+*
+DQBAD    LNR   R4,BR               Set cc=neg
+         PEND  *
+         TITLE 'HEXSEG - Seg data in hex format'
+*box
+*
+*  HEXSEG -- Routine to seg data in hex format.
+*
+*    On entry:
+*      R1,R0 - data loc, len
+*      R15 - SEGCB ptr
+*
+HXSWA    RECORD BEGIN
+HXSWORK  DS    D                   Work area
+         END
+         SPACE 2
+HEXSEG   XPROC HXSWA
+         LR    R3,R0
+         LR    R4,R1
+         LR    R5,R15              Save SEGCB ptr
+         SEGDEF (R5)
+*
+         WHILE (R3,POS),BEGIN      Keep stepping through the data...
+         BTX   HXSWORK,8,L:@R4     Convert a word to hex
+*
+         LR    R0,R3
+         CEIL  R0,4
+         AR    R0,R0               Get correct length for digits
+*
+         SEG   HXSWORK,(R0)        Seg what we have
+         LA    R4,@R4+4            Next word
+         SH    R3,=H'4'
+         END
+*
+HEXFEXIT PEND
+         TITLE 'HEXDUMP - Write formatted data display'
+*box
+*
+*   HEXDUMP -- Write formatted hex dump
+*
+*     On entry:
+*       R0  - length of area
+*       R1  - address of area
+*       R15 - SEGCB address
+*
+*       GVTHXDFL flags specify formatting options
+*
+HXDWA    RECORD BEGIN
+HXDSEGCB DS    A                   SEGCB address
+HXDTRT   DS    A                   Translate table address
+*
+HXDFLAGS DS    X                   Copy of GVTHXDFL
+*
+HXDUNPK  DS    XL2                 Working UNPK area
+*
+HXDADDR  DS    CL8                 Address
+         DS    CL2
+HXDHEXDM DS    0CL(8*4+3)          Hex bytes (EBCDIC dump format)
+HXDHEX   DS    CL(16*3+1)          Hex bytes (ASCII char  format)
+         DS    CL2
+         DS    C                   '|'
+         DS    CL16                Char display
+         DS    C                   '|'
+HXDLINE  EQU   HXDADDR,*-HXDADDR,C'C'
+         END
+*-
+HEXDUMP  XPROC HXDWA
+         LR    R5,R1               Save start address
+         LR    R6,R1               Init data pointer
+         LR    R7,R0               Init data counter
+         ST    R15,HXDSEGCB        Save SEGCB address
+         SEGDEF L:HXDSEGCB
+*
+         MVC   HXDFLAGS,GVTHXDFL   Save copy of flags
+         CLEAR GVTHXDFL            Reset flags
+*
+         MVC   HXDTRT,=A(ASCIIFMT)
+         IF    HXDFLAGS.HXDFLEBC,'MVC HXDTRT,=A(SEGTRTBL)'
+         WHILE (R7,P),BEGIN        Loop on data count
+         MVI   HXDLINE,C' '        Init print line buffer
+         MVC   HXDLINE+1(L'HXDLINE-1),HXDLINE
+         LR    R15,R6              Data address
+         IF    HXDFLAGS.HXDFLADD,BEGIN   If address format,
+         BTX   HXDADDR,8,(R15)     Format address
+         END
+         ELSE  BEGIN               Else display offset
+         SR    R15,R5              Get data offset
+         MVI   HXDADDR+3,C'+'      Offset form
+         BTX   HXDADDR+4,4,(R15)   Format offset
+         END
+         LA    R2,HXDHEX           Init hex display pointer
+         IF    HXDFLEBC,BEGIN      If EBCDIC dump format,
+         LA    R3,L'HXDHEXDM+2(R2)  Init char display pointer
+         END
+         ELSE  BEGIN               Else ASCII data format,
+         LA    R3,L'HXDHEX+2(R2)
+         END
+         MVI   @R3,C'|'
+         MVI   @R3+17,C'|'
+         INCR  R3
+         LA    R4,1                Loop counter for this line
+         WHILE ((R4,LE,16),AND,(R7,P)),BEGIN
+         LRA   R0,@R6              Check address
+         IF    (M,OR,O),BEGIN
+         SEGWR 'Invalid address'
+         EXIT  HEXDUMP
+         END
+         MVC   HXDUNPK(1),@R6      Copy data byte
+         UNPK  @R2(3),HXDUNPK(2)   Format data byte (and junk byte)
+         NC    @R2(2),=X'0F0F'
+         TR    @R2(2),=C'0123456789ABCDEF'
+         MVI   @R2+2,C' '
+         MVC   @R3,@R6             Move to char display
+         L     R15,HXDTRT          Translate table address
+         TR    @R3,@R15            Translate to text char
+         LA    R2,2(R2)            Incr hex pointer
+         IF    ~HXDFLAGS.HXDFLEBC,BEGIN  If ASCII format,
+         INCR  R2                  Extra space
+         IF    (R4,EQ,8),'INCR R2'  Extra space after 8th byte
+         END
+         ELSE  BEGIN
+         LR    R0,R4
+         N     R0,=A(3)
+         IF    Z,'INCR R2'         Space after every 4th byte
+         END
+         INCR  R3                  Incr char pointer
+         INCR  R6                  Incr data pointer
+         DECR  R7                  Decr data counter
+         INCR  R4                  Incr line loop counter
+         END
+         SEGWR HXDLINE             Write line
+         END
+         PEND
+*-
+*-       ASCII translate table.
+*-
+ASCIIFMT DC    32C'.'                 00-1F
+         DC    C' !"#$%&&''()*+,-./'  20-2F
+         DC    C'0123456789:;<=>?'    30-3F
+         DC    C'@ABCDEFGHIJKLMNO'    40-4F
+         DC    C'PQRSTUVWXYZ[\]^_'    50-5F
+         DC    C'.abcdefghijklmno'    60-6F
+         DC    C'pqrstuvwxyz{|}~.'    70-7F
+         DC    127C'.',C'#'           80-FF
+*-
+*-       Translate table to convert funny chars to dots.
+*-
+SEGTRTBL DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'404B4B4B4B4B4B4B4B4B4A4B4C4D4E4F'
+         DC    X'504B4B4B4B4B4B4B4B4B5A5B5C5D5E4B'
+         DC    X'60614B4B4B4B4B4B4B4B4B6B6C6D6E6F'
+         DC    X'4B4B4B4B4B4B4B4B4B4B7A7B7C7D7E7F'
+         DC    X'4B8182838485868788894B4B4B4B4B4B'
+         DC    X'4B9192939495969798994B4B4B4B4B4B'
+         DC    X'4B4BA2A3A4A5A6A7A8A94B4B4B4B4B4B'
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'
+         DC    X'4BC1C2C3C4C5C6C7C8C94B4B4B4B4B4B'
+         DC    X'4BD1D2D3D4D5D6D7D8D94B4B4B4B4B4B'
+         DC    X'4B4BE2E3E4E5E6E7E8E94B4B4B4B4B4B'
+         DC    X'F0F1F2F3F4F5F6F7F8F94B4B4B4B4B4B'
+         TITLE 'SEG Routines'
+*box
+*
+*  SEGINITR/SEGINITB --
+*    Routine to initialize the SEGCB control block.
+*
+*    On entry:
+*      R1,R0 - location & length of seg buffer
+*      R15   - SEGCB ptr
+*      @RAR  - adcon of processing routine
+*
+*  NOTE (01/23/91):
+*  SEGINIT ROUTINE CHANGED TO SEGINITR (INIT ROUTINE) AND
+*  SEGINITB (INIT BUFFER).  THIS WAS DONE TO ELIMINATE THE
+*  PASSING THE ROUTINE AS AN INLINE 'DC A(ROUTINE)'.
+*  SEGINITR SHOULD BE CALLED FIRST. IT CLEARS THE SEGCB.
+*
+*
+SEGINIT  XPROC TRACE=NO
+         WITH  (SEGCB,R15),BEGIN
+         CLEAR SEGCB               Init
+         ST    R0,SEGCBMAXF        Save max seg buffer length
+         ST    R1,SEGCBLOC         ... and location
+         END
+         PEND
+*-
+SEGINITR XPROC TRACE=NO
+         WITH  (SEGCB,R15),BEGIN
+         ST    R0,SEGCBRTN         Save processing routine addr
+         ST    R1,SEGCBERR         Save error recovery routine addr
+         END
+         PEND
+         EJECT
+*box
+*
+*   SEGB -- Routine to add segment to buffer followed by a blank.
+*     (Same entry conventions as "SEG" routine below.)
+*
+SEGB     XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         LCALL SEG
+         SEG   ' ',,(R6)
+         PEND
+         SPACE 2
+*box
+*
+*  SEGTB -- Routine to add "trimmed" segment to buffer followed by
+*    a blank.  (Same entry conventions as "SEG" routine below.)
+*
+SEGTB    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         LCALL SEGT
+         SEG   ' ',,(R6)
+         PEND
+         EJECT
+*box
+*
+*   SEGCR -- Add segment to buffer followed by a carriage
+*     return.  (Same entry conventions as "SEG" routine below.)
+*
+SEGCR    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         LCALL SEG
+         SEG   X'15',,(R6)         Followed by a cr
+         SEGMARK (R6)
+         PEND
+         EJECT
+*box
+*
+*   SEGWR -- Routine to add (final) segment to buffer and write
+*     contents.  (Same entry conventions as "SEG" routine below.)
+*
+SEGWR    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         LCALL SEG
+         WITH  (SEGCB,R6)
+         SET   SEGCBWR             Set function code for exit routine
+         L     R1,SEGCBLOC         Start of buffer
+         L     R0,SEGCBLENF        Length
+         LR    R15,R6              Segcb ptr
+         IF    ('LT RAR,SEGCBRTN',NZ),BEGIN
+         BALR  RAR,RAR             Go off to exit routine
+         MVC   SEGCBLENF,=F'0'     Reset buffer (don't change cc)
+         MVC   SEGCBMRKF,=F'0'     Reset mark too
+         END
+         ELSE  'CLEAR R15'         Set dummy rc
+         PEND
+         EJECT
+*box
+*
+*   SEG/SEGT -- Add segment to buffer.  "SEGT" entry will
+*     trim trailing blanks.
+*
+*      On entry:
+*        R1,R0 - location & length of segment
+*        R15 - SEGCB ptr
+*
+*      On exit, R15 (and CC):
+*         -4 - overflow occured
+*          0 - normal
+*
+SEGT     XPROC (R0,LSR),TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         IF    (R0,POS),BEGIN      Something to seg...
+         LA    R1,@R1              Clear high byte
+         LR    R2,R1
+         AR    R2,R0
+         DECR  R2                  Addr of last char
+         WHILE ((R2,GE,R1),AND,(@R2,EQ,' ')),'DECR R2'
+         SR    R2,R1
+         LA    R0,@R2+1            Trimmed string len
+         END
+         B     SEGCOM
+         PEND  ,                   (Dummy)
+         SPACE 2
+SEG      XPROC (R0,LSR),TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+*
+SEGCOM   BASE
+         SET   SEGCBSEG            Set function code for exit routine
+         IF    ('LT RAR,SEGCBRTN',NZ),'BALR RAR,RAR'
+*
+         CLEAR R5                  Set ok rc
+         IF    (R0,~POS),SEGEXIT   Skip if nothing to seg
+         CEIL  R0,SEGCBMAXF        Max allowed
+         LR    R2,R1
+         LR    R3,R0
+*
+SEGRETRY CLEAR R5                  Init return code
+         A     R0,SEGCBLENF        Calc new total length
+         IF    (R0,GT,SEGCBMAXF),BEGIN  Overflow...
+         SET   SEGCBOVF            Set function code for exit routine
+         L     R1,SEGCBLOC         Start of buffer
+         LT    R0,SEGCBMRKF        Last marked position
+         IF    NP,'L R0,SEGCBLENF'  Use cur len if no mark
+         LR    R15,R6              Segcb ptr
+         IF    ('LT RAR,SEGCBRTN',NZ),'BALR RAR,RAR'  user exit
+         IF    (R0,NEG),BEGIN      Exit processed something...
+         CLEAR SEGCBMRKF           Clear mark
+         LCR   R0,R0               Amount processed
+         L     R1,SEGCBLENF
+         L     R14,SEGCBLOC
+         IF    ('LT R15,SEGCBINDF',NZ),BEGIN  Indent...
+         IF    (R15,LGE,SEGCBMAXF),EXIT
+         L     R1,=A(X'40000000')
+         MVCL  R14,R0              Pad with blanks
+         L     R1,SEGCBLENF
+         L     R15,SEGCBINDF
+         END
+         SR    R1,R0               New buffer len
+         AR    R15,R1              Including indentation
+         ST    R15,SEGCBLENF
+         IF    (R1,~POS),'LA R0,@R3(R15); B SEGDO'  add new segment
+         LR    R15,R1
+         A     R0,SEGCBLOC
+         MVCL  R14,R0              Move remaining text over
+         LR    R0,R3               New segment len
+         B     SEGRETRY            Try again
+         END
+         LR    R0,R3
+         A     R0,SEGCBLENF        Re-calc total len
+         IF    ('S R0,SEGCBMAXF',NP),SEGDO  It's ok now
+         LH    R5,=H'-4'           Set return code
+         SR    R3,R0               Only seg as much as will fit
+         BNP   SEGEXIT             Nothing will fit
+         L     R0,SEGCBMAXF        New buffer len
+         END
+SEGDO    L     R15,SEGCBLENF
+         ST    R0,SEGCBLENF        Update length
+         L     R0,SEGCBLOC
+         AR    R0,R15              Insertion point
+         LR    R1,R3               Len
+         MVCL  R0,R2               Move in segment
+SEGEXIT  SET   SEGCBSPP            Set function code for exit routine
+         LR    R15,R6              Segcb ptr
+         LTR   R0,R5               Put rc in R0 for exit routine
+         IF    ('LT RAR,SEGCBRTN',NZ),'BALR RAR,RAR'  User exit
+         DROP  SEGCB
+         PEND  'LTR R15,R0'
+         EJECT
+*box
+*
+*   SEGCOL -- Routine to extend seg buffer to absolute column.
+*
+*     On entry:
+*       R0  - column number
+*       R15 - SEGCB ptr
+*
+SEGCOL   XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         DECR  R0                  Make rel to zero
+         IF    (R0,GT,SEGCBMAXF),'L R0,SEGCBMAXF'
+         S     R0,SEGCBLENF        No. of blanks
+         IF    ~POS,'LA R0,1'      At least one blank
+         SEGBLANK (R0)             Add the blanks
+         PEND
+         EJECT
+*box
+*
+*   SEGBLANK -- Routine to add blanks to the seg buffer.
+*
+*     On entry:
+*       R0  - no. of blanks to add
+*       R15 - SEGCB ptr
+*
+SEGBLANK XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         LR    R5,R0
+         WHILE (R5,GT,L'GVTBLANK),BEGIN
+         SEG   GVTBLANK,,(R6)
+         SH    R5,=AL2(L'GVTBLANK)
+         END
+         SEG   GVTBLANK,(R5),(R6)
+         PEND
+         EJECT
+*box
+*
+*  SEGDAY -- Routine to seg day, date and time.
+*
+*    On entry:
+*      R0,R1 - as returned from TIME BIN.
+*      R15   - SEGCB ptr
+*
+SEGDWA   RECORD BEGIN
+SEGDWORK DS    XL64                Work area
+         END
+*-
+SEGDAY   XPROC SEGDWA
+         LR    R5,R15
+         SEGDEF (R5)
+*
+         LR    R2,R0               Time
+         LR    R0,R1               Date
+*
+         LA    R1,SEGDWORK
+         ACALL FMTDAY              Format day
+         SEGT  (R1),(R0)
+         POP   ,,64
+*
+         SEG   ', at '
+         LR    R0,R2               Time
+         LA    R1,SEGDWORK
+         ACALL TIME                Hh:mm:ss
+         SEGB  (R1),8
+         PEND
+*
+         SEGDEF DUMMY              (Neatness)
+         EJECT
+*box
+*
+*   SEGCLR -- Routine to reset seg buffer.
+*
+*     On entry:
+*       R15 - SEGCB ptr
+*
+SEGCLR   XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15
+         WITH  (SEGCB,R6)
+         SET   SEGCBCLR            Set function code for exit routine
+         IF    ('LT RAR,SEGCBRTN',NZ),'BALR RAR,RAR'  user exit
+         CLEAR SEGCBLENF,SEGCBMRKF
+         PEND
+         SPACE 2
+*box
+*
+*  SEGMARK -- Routine to mark current location in seg buffer.
+*
+*    On entry:
+*      R15 - segcb ptr
+*
+         ENTRY SEGMARK
+SEGMARK  WITH  (SEGCB,R15),'MVC SEGCBMRKF,SEGCBLENF'
+         BR    RAR
+         EJECT
+*box
+*
+*   SEGDC -- Routine to add number in decimal to seg buffer.
+*
+*     On entry:
+*     R1 - number; R0 - length
+*     R15 - SEGCB ptr
+*
+SEGDC    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         PUSH  20,PTR=R2
+         LR    R15,R1
+         BTD   (R2),(R0),(R15)     Convert to printable format
+         SEG   (R1),(R0),(R6)
+         POP   20
+         PEND
+         EJECT
+*box
+*
+*   SEGHX -- Routine to add number in hex to seg buffer.
+*
+*     On entry:
+*     R1 - number; R0 - length
+*     R15 - SEGCB ptr
+*
+SEGHX    XPROC (R2,LSR),TRACE=NO
+         LR    R6,R15              Save segcb ptr
+         PUSH  20,PTR=R2
+         LR    R15,R1
+         BTX   (R2),(R0),(R15)     Convert to printable format
+         SEG   (R1),(R0),(R6)
+         POP   20
+         PEND
+         EJECT ,
+         QLTORG
+         TITLE 'Translate tables'
+*-
+*- Translate table for EBCDIC to ASCII conversion.
+*-
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+EBC2ASCI DC    X'000102032309237F2323230B0C0D0E0F'   0
+         DC    X'1011121323230823181923231C1D1E1F'   1
+         DC    X'23232323230A171B2323232323050607'   2
+         DC    X'2323162323232304232323231415231A'   3
+         DC    X'202323232323232323235E2E3C282B7C'   4
+         DC    X'2623232323232323232321242A293B7E'   5
+         DC    X'2D2F2323232323232323232C255F3E3F'   6
+         DC    X'232323232323232323603A2340273D22'   7
+         DC    X'23616263646566676869232323232323'   8
+         DC    X'236A6B6C6D6E6F707172232323232323'   9
+         DC    X'2323737475767778797A2323235B2323'   A
+         DC    X'232323232323232323232323235D2323'   B
+         DC    X'7B414243444546474849232323232323'   C
+         DC    X'7D4A4B4C4D4E4F505152232323232323'   D
+         DC    X'5C23535455565758595A232323232323'   E
+         DC    X'30313233343536373839232323232323'   F
+         SPACE 2
+*-
+*- Translate table for ASCII to EBCDIC conversion.
+*-
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F
+*
+ASCI2EBC DC    X'00010203372D2E2F1605250B0C0D0E0F'   0
+         DC    X'101112133C3D322618193F271C1D1E1F'   1
+         DC    X'405A7F7B5B6C507D4D5D5C4E6B604B61'   2
+         DC    X'F0F1F2F3F4F5F6F7F8F97A5E4C7E6E6F'   3
+         DC    X'7CC1C2C3C4C5C6C7C8C9D1D2D3D4D5D6'   4
+         DC    X'D7D8D9E2E3E4E5E6E7E8E9ADE0BD4A6D'   5
+         DC    X'79818283848586878889919293949596'   6
+         DC    X'979899A2A3A4A5A6A7A8A9C04FD05F07'   7
+         DC    X'00010203372D2E2F1605250B0C0D0E0F'   8
+         DC    X'101112133C3D322618193F271C1D1E1F'   9
+         DC    X'405A7F7B5B6C507D4D5D5C4E6B604B61'   A
+         DC    X'F0F1F2F3F4F5F6F7F8F97A5E4C7E6E6F'   B
+         DC    X'7CC1C2C3C4C5C6C7C8C9D1D2D3D4D5D6'   C
+         DC    X'D7D8D9E2E3E4E5E6E7E8E9ADE0BD4A6D'   D
+         DC    X'79818283848586878889919293949596'   E
+         DC    X'979899A2A3A4A5A6A7A8A9C04FD05F07'   F
+         SPACE 2
+*-
+*-  Lower case translate table
+*-
+LOWCASE  DC    256AL1(*-LOWCASE)
+         ORG   LOWCASE+C'A'
+         DC    C'abcdefghi'
+         ORG   LOWCASE+C'J'
+         DC    C'jklmnopqr'
+         ORG   LOWCASE+C'S'
+         DC    C'stuvwxyz'
+         ORG   LOWCASE+256
+*
+         QLTORG
+*
+UTILS@   EQU   *-UTILS,,C'N'       Module length
+*-
+*-       Our symbols.
+*-
+         ENTRY SYMUTILS            Utils' symbol table entries
+         DC    0D'0'               FORCE DOUBLED-WORD ALIGNMENT
+SYMUTILS DC    CL8'UTILS',A(UTILS,UTILS@)
+         DC    A(0)                End of table
+         END   .

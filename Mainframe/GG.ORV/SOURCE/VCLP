@@ -1,0 +1,1786 @@
+VCLP     TITLE 'ORVYL''S COMMAND LANGUAGE PROCESSOR'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 2
+         HIBAL ,
+         SPACE 2
+* MODIFICATIONS
+*
+         EJECT ,
+VCLP     CSECT
+         SPACE 2
+         COPY  ORVDEFN
+&MODULE  SETC  'VCLP'
+         SPACE 3
+         REGS  ,,SR,TR,QR,RR,PR,BR,WAR,RAR,CLWR,(LCBR,SCPR)
+         EJECT ,
+         MACRO
+&L       ERRMSG  &STR,&LEN
+&L       LS    TR,SR,&STR,&LEN
+         MEND
+*
+         MACRO
+         CODE  &MSG
+         GBLA  &CODES
+&CODES   SETA  &CODES+1
+         DC    AL1(L'CODE&CODES)
+CODE&CODES DC C&MSG
+         MEND
+*
+         MACRO
+         CODES
+         GBLA  &CODES
+         LCLA  &X
+CODETBL  DC    A(&CODES)
+.LOOP    ANOP
+&X       SETA  &X+1
+         DC    A(CODE&X-1)
+         AIF   (&X LT &CODES).LOOP
+         MEND
+*
+         MACRO
+&L       BTD   &LOC,&LEN,&WORD,&SW,&COMMAS=NO
+         LCLC  &CM
+         AIF   ('&COMMAS' NE 'YES').NOCM
+&CM      SETC  'C'
+.NOCM    ANOP
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN,TYPE=&SW
+         SYSLR 1,&LOC
+         XCALL BTD&CM
+         MEND
+*
+         MACRO
+&L       BTX   &LOC,&LEN,&WORD
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN
+         SYSLR 1,&LOC
+         XCALL BTX
+         MEND
+         EJECT ,
+*GEN
+         COPY  WYLMDWD
+         EJECT ,
+         COPY  PZERO
+         EJECT
+         COPY  SCP
+         EJECT ,
+         COPY  CLW
+         EJECT
+*         COPY  IDT                 (For TEST CLP initialization)
+         EJECT ,
+KWRD     DSECT
+         KWREC ,
+*
+KWR      EQU   KWRSTART,KWRVPGM+8-KWRSTART
+         EJECT ,
+*NOGEN
+VCLP     CSECT ,
+         USING SCP,SCPR                ##
+         USING CLW,CLWR
+*  ENTRY POINT
+*
+* CLP HAS TWO DISTINCT PARTS:
+*        1) THE SESSION BREAK ROUTINES WHICH ARE ENTERED FOR
+*            A) LOGON/LOGOFF PROCESSING
+*            B) ATTENTION, CLP TIMER AND PROGRAM INTERRUPTS
+*            C) PANIC,PAUSE,EXIT,AND COMMAND SVCS FROM THE USER PROGRAM
+*
+*        2) THE BASIC COMMAND LOOP WHICH ISSUES A READ MODE=EDIT, SCANS
+*           THE COMMAND AND RETURNS TO READ THE NEXT COMMAND.
+*
+*        NOTES ON ADDRESSABILITY: THE SESSION BREAK ROUTINES EITHER
+*              RETURN TO THE USER PROGRAM OR BRANCH TO THE COMMAND
+*              LOOP. WHEN THE COMMAND LOOP IS ENTERED IT SETS UP ITS
+*              OWN BASE REGISTER AND NEVER BRANCHES INTO THE
+*              SESSION BREAK ROUTINES.
+*
+         ENTRY STARTUP
+STARTUP  BASE  BR
+ENTBASE  EQU   *
+         B     STARTCLP
+         IDENT 00
+STARTCLP LR    SCPR,R14                GET THE SCP ADDRESS
+         L     CLWR,SCPCLW             GET ADDRESS OF THE CLW
+         LA    R13,CLWSVA              SAVE AREA
+         SPM   R13                     ZOT PROGRAM MASK
+         LTR   SR,R1                   SR - ENTRY CODE
+         IF    P,'LCALL INITCLP'       DO ENTRY INIT AS REQUIRED
+         ELSEIF (MINUS,AND,(CLWTIVAL,NE,0)),'LCALL INITCLP'
+         B     *+8(SR)                 BR ON ENTRY CODE
+         B     TIMER                   -4
+         B     LOGON                   0
+         B     LOGOFF                  4
+         B     PANIC                   8
+         B     PAUSEXIT                12
+         B     ATTEN                   16
+         B     EXITSVC                 20
+         B     COMMAND                 24
+         B     PAUSEXIT                28
+         B     QPAUSE                  32
+         EJECT ,
+*
+*  CLP ENTRY INITIALIZATION CODE,
+*           (DON'T DIDDLE SR (R2))
+INITCLP  LABEL ,                       SAVE VARIOUS USER INFO
+         STM   R15,0,CLWPER            SAVE PER,MON INFO
+         WAIT  LA:1                    WAIT FOR TERMINAL TO BE IDLE
+         IF    SCPFERR,BEGIN           IN CLP PREVIOUSLY
+         CONTROL LA:1,30,0             RESET MILTEN MODES
+         WAIT  (0)
+         END   ELSE,BEGIN
+         VSET  12,15                   SET PRIORITY
+         STC   R15,CLWDSP              SAVE PREVIOUS
+         CLPSERV TERMPUSH
+         CLEAR CLWFL
+*
+         CONTROL LA:1,31               SENSE MILTEN MODE
+         WAIT  (0)
+         ST    R1,CLWMLMOD             SAVE
+         IF    (R0,NZ),BEGIN
+         CONTROL LA:1,30,0             SET NEW MILTEN MODE WORD
+         WAIT  (0)
+         END
+*
+         CONTROL (0),13                SENSE MODE WORD
+         WAIT  (0)
+         ST    R1,CLWWLMOD             SAVED WYLBUR MODE WORD
+         END   ,
+         CLEAR R15
+         IF    (R15,NE,CLWWLMOD),BEGIN      ANY WYLBUR MODES SET
+         TM    CLWWLMOD+3,WSSBRK       ALLOW CHANGE DURING SB?
+         IF    ONE,'LA R15,WPRHBT+WNNUMB+WNALGN' BLOCK CHANGES
+         CONTROL (0),12,(15)           SET APPROPRIATE WYLBUR MODE
+         WAIT  (0)
+         END
+*
+* SAVE INFO FROM THE SCP
+*
+         MVC   CLWSBPSW(72),SCPSBPSW
+*
+         BR    RAR                DONE WITH CLP INIT
+         EJECT ,
+*
+*  PROCESS LOGON
+*
+LOGON    DS    0H
+         SET   SCPFERR                 SET CLPERR FLAG
+*
+*  Set up CLW
+*
+         ST    SCPR,CLWSCP             SCP POINTER
+         MVC   CLWSVAEN,=X'FEDCBA98'   SO WE'LL KNOW IF IT OVERFLOWS
+         MVI   CLWDSP,15               DISPATCHING PRIORITY
+         MVI   CLWWLMOD,C'-'           DEFAULT PROMPT FOR READ EDIT
+         MVC   CLWPSVC,=X'0AFF'        PAUSE SVC
+         MVC   CLWCSVC,=X'0AFE'        COMMAND SVC
+         MVC   CLWEXSVC,=X'0AFD'       EXIT SVC
+*
+*  SET THE CLP RESERVE/ALLOCATED CORE STATUS
+*
+         MVC   CLWUPST,SCPRRSEG        COPY ADDRESS SPACE START
+         LH    R1,SCPUNRSV             MAXIMUM NUMBER OF PAGES
+         ST    R1,CLWUPML              IS REGION MAXIMUM
+*
+*  GET US ALL LOGGED ON
+*
+         ATTACH 1,0                    ATTACH MASTER TERMINAL
+         WAIT  (0)
+         ACALL CKLOGON                 CHECK THE LOGON
+*
+* INITIALIZE THE REST OF THE CLW
+*
+         LS    R1,R15,'  CLP'          CLP'S NAME
+         VSET  24,(R1),(R15)           SET IT
+         MVC   CLWACCT,SCPACCT         SAVE OUR ACCT IN CLW
+         IF    ((CLWGROUP,EQ,'GG'),OR,(CLWGROUP,EQ,'GQ')),BEGIN
+         IF    (CLWUSER,EQ,'RAL'),'SET  CLWSSP'   Rich Levitt
+         IF    (CLWUSER,EQ,'MPD'),'SET  CLWSSP'   Mike Durket
+         IF    (CLWUSER,EQ,'AOS'),'SET  CLWSSP'   Sal Serafica
+         IF    (CLWUSER,EQ,'ORV'),'SET  CLWSSP'   Orvyl Maintenance
+         IF    (CLWUSER,EQ,'DFF'),'SET  CLWSSP'   Doug Fletcher
+         IF    (CLWUSER,EQ,'SRS'),'SET  CLWSSP'   Sal Serafica
+         IF    (CLWUSER,EQ,'JWS'),'SET  CLWSSP'   Jim Stosick
+         IF    (CLWUSER,EQ,'PJG'),'SET  CLWSSP'   Parker Gillespie
+         IF    (CLWUSER,EQ,'RLG'),'SET  CLWSSP'   Dick Guertin
+         IF    (CLWUSER,EQ,'SLP'),'SET  CLWSSP'   Susan Plass
+         IF    (CLWUSER,EQ,'WCK'),'SET  CLWSSP'   Bill Kiefer
+         IF    (CLWUSER,EQ,'XXX'),'SET  CLWSSP'   Dummy for patching
+         IF    (CLWUSER,EQ,'ZZZ'),'SET  CLWSSP'   Dummy for patching
+         END   ,
+*
+* READ THE KEYWORD FILE TO GET THE ORVYL AUTO CALL AND
+* MANDATORY CALL INFORMATION.
+*
+         B     LOGONEND                **** SKIP KEYWORD ACCESS ****
+         ATTACH 8                      ATTACH THE KEYWORD FILE
+         IF    NZ,LOGONEND             GIVE UP IF ERROR
+         WAIT  (0)                     WAIT
+         VPUSH ,,L'KWR,PTR=PR          GET A TEMPORARY AREA
+         WITH  (KWR,PR),BEGIN
+         READ  (0),KWR,L'KWR,CLWACCT,MODE=WAIT
+         IF    NZ,LOKEYEND             GIVE UP IF ERROR
+         WAIT  (0)
+         IF    NZ,LOKEYEND
+         MVC   CLWKFL(KWRVPGM+16-KWRTFL),KWRTFL   SET INFO
+         END   ,
+         VPOP  ,,L'KWR
+LOKEYEND DETACH (0)
+         WAIT (0)
+*
+*  THE LOGON PROCESS IS COMPLETE
+*
+LOGONEND CLEAR SCPFERR                 CLEAR CLPERR FLAG
+         B     READ                    HEAD OFF TO THE CMD LOOP
+         EJECT ,
+*  LOGOFF
+*
+LOGOFF   DS    0H
+         SET   SCPFERR                 SET CLPERROR DURING LOGOUT
+         CLPSERV PSEUDO,0              CLEAR PRIV BIT
+*
+* HALT ALL ACTIVE DEVICES
+*
+         LA    R1,4
+         VCALL CLRIDTS
+*
+* CLEAR PROGRAM CORE
+*
+         IF    CLWPFSUP,BEGIN
+         CLEAR R15                     CLEAR CORE (EXIT) CODE
+         VCALL PROGRAMS                CLEAR USER MEMORY
+         END
+*
+* HALT AND DETACH ALL ACTIVE DEVICES
+*
+         CLEAR R1                      Do all DEVICES
+         VCALL CLRIDTS
+*
+* RELEASE ANY ENQUEUED RESOURCES
+*
+         VCALL CLRENQS
+*
+* AND THEN EXIT
+*
+         XIT   ,                       EXIT FROM CLP IS LOGOFF
+         EJECT ,
+*
+*  PROCESS PANIC
+*
+PANIC    DS    0H
+         LA    SR,CLWSBPSW             USER ERROR PSW
+         IF    SCPFERR,BEGIN          CLP ERROR
+         CLEAR (CLWOBUF,4)             KILL ANY OUTPUT BEFORE ERROR
+         CLEAR CLWFTRAP+CLWFOSC
+         CLEAR CLWPFRUN
+         CLEAR CLWMDUMP+CLWMDSUP
+         VSEG  'CLP error, '
+         LA    SR,SCPCLPSW             CLP ERROR PSW
+         END
+         IF    CLWFTRAP,PAUSEXIT       PANIC ON TRAP
+         LM    R14,R15,@SR             ERROR PSW
+         SRL   R14,8+6-1
+         N     R14,=A(6)
+         SLR   R15,R14
+         LR    QR,R15                  SAVE ADDR
+         LH    TR,@SR                  PANIC CODE
+         LTR   TR,TR                   USER PANIC
+         BNP   PANREAL
+         TM    @SR+1,X'80'             PER EVENT
+         IF    ON,'L  QR,CLWPER'
+         TM    @SR+1,X'3F'             REAL PANIC?
+         BNZ   PANREAL                 YES
+         OC    CLWEVCNT,CLWEVCNT       ANY COUNT?
+         BZ    PANREAL
+         IF    CLWMNOL,READ            DON'T PRINT EVENT
+         VSEG  'Interrupt at '
+         B     PANREA2
+PANREAL  LCALL BREAK
+PANREA2  DS    0H
+*         VSEGLOC @QR
+         LR    R1,QR
+         N     R1,=X'0FFFFFFF'         TURN OFF ADDRESS MODE
+         VCALL VSEGLOC
+PANTRAP  DS    0H                      JOIN AFTER TRAP MESSAGE
+         IF    (TR,NPOS),PANUSER       USER PANIC
+         TM    @SR+1,X'3F'             PROGRAM CHECK?
+         BZ    PANPE                   NO: CHECK FOR PROGRAM EVENT
+         VSEG  ', System'
+         N     TR,=X'0000003F'         MASK OFF PER|MON
+         B     PAN3SEG
+PANUSER  VSEG  ', User'
+PAN3SEG  VSEG  ' panic code = '
+         LPR   R15,TR
+         SEGDC 0,(R15)                 CONVERT CODE
+         LTR   R14,TR                  SYSTEM CODE?
+         BNP   PANWR                   BR IF NOT
+         CL    R14,CODETBL             BE CAREFUL
+         BH    PANWR
+         SLL   R14,2
+         L     R14,CODETBL(14)         GET MESSAGE PTR
+         VSEG  ' ('
+         VSEG  @R14+1,IC:@R14
+         VSEG  ')'
+PANWR    DS    0H
+         SET   CLWFCERR                FORCE EXEC BREAK
+         VWRITE '.'                    GIVE PANIC MESSAGE
+         BNZ   PANATTN                 ATTN ON MSG
+         IF    (TR,NPOS),PANFIX        USER PANIC
+*
+PANPE    TM    @SR+1,X'80'             PROGRAM EVENT?
+         BZ    PANMON                  CHECK MONITOR EVENT
+         MVC   CLWEVENT,CLWPER         SAVE LAST EVENT
+         VSEG  ' Event ('
+         IF    PEFETCH,BEGIN
+         VSEG  'Fetch,'
+         END
+         IF    PESTORE,BEGIN
+         VSEG  'Store at '
+         L     R1,CLWPER               INSTRUCTION ADDRESS
+*         LA    R1,0(,R1)               ELIMINATE SIGN BIT
+         N     R1,=X'0FFFFFFF'         ELIMINATE SIGN BIT
+PEREX    LA    R0,CLWTEMP
+         LA    R15,4
+         VCALL READCORE
+         CLEAR R0                      COMPUTE EFFECTIVE STORE ADDRESS
+         TM    CLWTEMP,B'10000000'     RS,SI,SS TYPE INSTRUCTION?
+         BO    PERSS
+         TM    CLWTEMP,B'01000000'     RX TYPE?
+         BO    PERRX                   YES
+         VSEG  '??,'                   RR TYPE: SORRY, CHUMP
+         B     PANPE2
+*
+PERRX    IC    R1,CLWTEMP+1            INDEX
+         SLL   R1,2
+         N     R1,=BL4'111100'
+         IF    NZ,'AL R0,@SR+8(R1)'    ADD INDEX VALUE
+PERSS    LH    R1,CLWTEMP+2            DISPLACEMENT
+         N     R1,=XL4'FFF'
+         ALR   R0,R1
+         IC    R1,CLWTEMP+2            BASE
+         SRL   R1,2
+         N     R1,=BL4'111100'
+         IF    NZ,'AL R0,@SR+8(R1)'    ADD BASE VALUE
+         LR    R1,0
+*         LA    R1,0(,R1)               ELIMINATE SIGN BIT
+         N     R1,=X'0FFFFFFF'         ELIMINATE SIGN BIT
+         CLI   CLWTEMP,X'44'           EX?
+         BE    PEREX
+         ST    R1,CLWEVENT+4
+         VCALL VSEGLOC
+         VSEG  ','
+         END
+PANPE2   IF    PEBRANCH,BEGIN
+         VSEG  'Branch to '
+         L     R1,4(,SR)               NEW PSW ADDRESS
+         N     R1,=X'0FFFFFFF'
+         ST    R1,CLWEVENT+4
+         VCALL VSEGLOC
+         VSEG  ','
+         END
+         IF    PEREG,BEGIN
+         VSEG  'Register)'
+         END   ELSE,BEGIN
+         LH    R15,CLWOBUF             OUTPUT POINTER
+         LA    R15,CLWOBUF+3(15)
+         MVI   @R15,C')'
+         END
+         VWRITE '.'
+         BNZ   PANATTN                 ATTN ON MSG
+         SPACE
+PANMON   TM    @SR+1,X'40'             MONITOR INTERRUPTION?
+         BZ    PANFIX                  NO
+         VSEG  'Monitor class= '
+         SEGDC 0,IC:CLWMON
+         VSEG  ', Monitor code= '
+         L     R15,CLWMON
+         LA    R0,@R15                 CLEAN UP
+         SEGHX 6,(0)
+         VWRITE '.'
+         BZ    PANFIX                  NO ATTN ON MSG
+PANATTN  CLEAR CLWPFRUN                CLEAR CONTINUE
+         CLEAR CLWEVCNT                CLEAR COUNT
+PANFIX   CLEAR SCPFERR                 CANCEL ERROR CONDITION
+         B     READ                    STOP ON TRAP
+*
+         CODE  'Operation'
+         CODE  'Privileged Operation'
+         CODE  'Execute Exception'
+         CODE  'Protection'
+         CODE  'Addressing'
+         CODE  'Specification'
+         CODE  'Data'
+         CODE  'Fixed Overflow'
+         CODE  'Fixed Divide'
+         CODE  'Decimal Overflow'
+         CODE  'Decimal Divide'
+         CODE  'Exponent Overflow'
+         CODE  'Exponent Underflow'
+         CODE  'Significance'
+         CODE  'Floating Divide'
+         CODE  'Missing Wait'
+*
+         CODES
+PEFETCH  EQU   CLWPER,B'01000000',1
+PESTORE  EQU   CLWPER,B'00100000',1
+PEBRANCH EQU   CLWPER,B'10000000',1
+PEREG    EQU   CLWPER,B'00010000',1
+         EJECT ,
+*
+*  Process Quiet Pause.
+*
+QPAUSE   B     READ                Nothing to do
+         SPACE 2
+*  PROCESS PAUSE
+*
+PAUSEXIT DS    0H
+         IF    CLWFTRAP,TRAPDONE       PAUSE AFTER TRAP
+         LM    QR,RR,CLWSBPSW          COMPUTE INTR. ADDR.
+         N     RR,=X'0FFFFFFF'         CLEAR MODE BIT
+*
+         SRL   QR,8+6-1
+         N     QR,=A(6)
+         SLR   RR,QR
+         ST    RR,CLWTRAPA             LOOK UP IN TRAP TABLE
+         LA    SR,CLWTRAPS
+         LA    TR,CLWNTRAP+1
+TRYTRAP  CLC   CLWTRAPA+1(3),@SR       IN TABLE?
+         BE    TRAPDO                  BR IF SO
+         LA    SR,5(,SR)               TRY NEXT
+         BCT   TR,TRYTRAP
+         LCALL BREAK
+*         LA    R1,@RR
+         LR    R1,RR
+         N     R1,=X'0FFFFFFF'
+         VCALL VSEGLOC
+         VWRITE ', Pause'              GIVE PAUSE MSG
+         B     READ
+         EJECT ,
+*  EXECUTE THE TRAPPED INSTRUCTION
+*
+TRAPDO   DS    0H
+         CLEAR CLWMBSUC                ASSUME UNSUCCESSFUL BRANCH
+         MVC   CLWTRAPI(2),@SR+3       1ST HALFWORD OF THE INST.
+         LA    QR,@RR+2                MINIMUM INSTR. LEN.
+         TM    CLWTRAPI,X'C0'          COMPUT INSTR. LEN.
+         BZ    TRAP1HW                 ONE HALF WORD
+         BM    TRAP2HW                 TWO HALF WORDS
+         LA    QR,@QR+2                THREE HALF WORDS
+TRAP2HW  LA    QR,@QR+2
+TRAP1HW  ST    QR,CLWTRAPB
+         MVI   CLWTRAPJ+1,0            OR BYTE FROM EXECUTE
+TRAPDOX  LA    R1,BRTBL                TABLE OF BRANCH OPCODES
+TRAPSRCH CLC   CLWTRAPI(1),@R1         IS THIS IT?
+         BE    TRAPSIM                 BR IF SO
+         LA    R1,@R1+2                NEXT ENTRY
+         CLI   @R1,0                   DONE?
+         BNE   TRAPSRCH                BR IF NOT
+*
+*  EXECUTE THE TRAPPED INSTRUCTION IN PLACE
+*
+TRAPXIP  DS    0H
+         LA    R15,2
+         L     R1,CLWTRAPA
+         ST    R1,CLWSBPSW+4           RESET INSTRUCTION ADDR
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         LA    R0,@SR+3
+         VCALL RITECORE                RESTORE THE INSTRUCTION
+         L     R1,CLWTRAPB
+         LA    R0,CLWTRAPJ
+         LA    R15,2
+         VCALL READCORE                SAVE INST. AFTER
+         CL    R15,=F'4'
+         BH    TRAPNW                  BR IF NOTHING THERE
+         LA    R15,2
+         L     R1,CLWTRAPB
+         LA    R0,CLWPSVC
+         VCALL RITECORE                PUT A PAUSE THERE
+TRAPNW   MVC   CLWTRAPI+2(1),CLWSBPSW+3  SAVE MASK BYTE
+         MVI   CLWSBPSW+3,0            PROHIBIT EXITS
+         SET   CLWFTRAP                SET TRAP FLAG
+         SET   CLWPFRUN                CONTINUE EXECUTION
+         B     READ
+         EJECT ,
+*  SIMULATE A TRAPPED BRANCH
+*
+TRAPSIM  CLEAR TR
+         IC    TR,@R1+1                BRANCH CODE
+         TM    CLWTRAPI,X'C0'          HALFWORD INST?
+         BZ    TRAPHW                  BR IF SO
+         LA    R15,2
+         LA    R1,2(,RR)
+         LA    R0,CLWTRAPI+2
+         VCALL READCORE                READ 2ND HALF
+         CL    R15,=F'4'
+         BH    TRAPXIP                 BR IF NOTHING THERE
+         L     R1,CLWTRAPA             SET CORRECT ADDR IN PSW
+         LA    R1,4(,R1)
+         ST    R1,CLWSBPSW+4
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         NI    CLWSBPSW+2,X'3F'          ALSO SET ILC
+         OI    CLWSBPSW+2,X'80'          FOR A NICE TOUCH
+*
+TRAPHW   OC    CLWTRAPI+1(1),CLWTRAPJ+1  OR IN BYTE FROM EXECUTE
+         B     *+4(TR)                 BR TO SIMULATION ROUTINE
+         B     SIMBALR
+         B     SIMBCR
+         B     SIMBCTR
+         B     SIMEX
+         B     SIMBAL
+         B     SIMBC
+         B     SIMBCT
+         B     SIMBX                   BXH, BXLE
+         B     SIMBSM
+         SPACE 3
+*
+*  TABLE OF BRANCH INSTRUCTIONS
+*
+BRTBL    DC    X'0500'                 BALR
+         DC    X'0608'                 BCTR
+         DC    X'0704'                 BCR
+         DC    X'0B20'                 BSM
+         DC    X'0C00'                 BASSM
+         DC    X'0D00'                 BASR
+         DC    X'440C'                 EX
+         DC    X'4510'                 BAL
+         DC    X'4618'                 BCT
+         DC    X'4714'                 BC
+         DC    X'4D10'                 BAS
+         DC    X'861C'                 BXH
+         DC    X'871C'                 BXLE
+         DC    X'00'
+         EJECT
+*
+*  BALR, BASR, BASSM
+*
+SIMBALR  CLEAR R15
+         DECR  R15                     COMPUTE BRANCH ADDRESS
+         IC    R14,CLWTRAPI+1
+         SLL   R14,2
+         IF    ('N  R14,=BL4"111100"',NZ),BEGIN
+         L     R15,CLWSBGPR(14)
+         IF    (CLWTRAPI.X'0C',NE),'LA  R15,@R15'   BALR & BASR ONLY
+         END   ,
+SIMBALX  L     R0,CLWSBPSW+4           "LINK" ADDRESS
+         IF    ^CLWFM31,BEGIN          IF NOT IN 31 BIT MODE
+         IF    ^CLWTRAPI.X'08','ICM  R0,8,CLWSBPSW+2'   ADD ILC/CC
+         END   ,
+         ELSE  'O R0,=X"80000000"'     Set addressing mode
+         IC    R1,CLWTRAPI+1           FIND REGISTER TO STORE IN
+         SRL   R1,2
+         N     R1,=BL4'111100'
+         ST    R0,CLWSBGPR(R1)         STORE IT
+         IF    (R15,M),TRAPMSG         NO BRANCH
+         ST    R15,CLWSBPSW+4          STORE BRANCH ADDR
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         SET   CLWMBSUC                SUCCESSFUL BRANCH SIMULATED
+         B     TRAPMSG
+*
+*  BCR
+*
+SIMBCR   IC    R1,CLWTRAPI+1           COMPUTE BRANCH ADDR
+         SLL   R1,2
+         N     R1,=BL4'111100'
+         L     R15,CLWSBGPR(1)
+         LA    R15,@R15
+SIMBCX   IC    R1,CLWSBPSW+2           GET CONDITION CODE
+         SRL   R1,2
+         N     R1,=BL4'1100'
+         EX    R0,BCTMS(R1)            TEST MASK BIT
+         BZ    TRAPMSG                  BR IF NO BRANCH
+         ST    R15,CLWSBPSW+4          SET BRANCH ADDR
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         SET   CLWMBSUC                SUCCESSFUL BRANCH SIMULATED
+         B     TRAPMSG
+*
+BCTMS    TM    CLWTRAPI+1,X'80'
+         TM    CLWTRAPI+1,X'40'
+         TM    CLWTRAPI+1,X'20'
+         TM    CLWTRAPI+1,X'10'
+         EJECT
+*
+*  BCTR
+*
+SIMBCTR  CLEAR R15                     COMPUTE BRANCH ADDR
+         DECR  R15
+         IC    R1,CLWTRAPI+1
+         SLL   R1,2
+         N     R1,=BL4'111100'
+         BZ    SIMBCTX
+         L     R15,CLWSBGPR(1)
+         LA    R15,@R15
+SIMBCTX  IC    R1,CLWTRAPI+1           GET COUNT REGISTER
+         SRL   R1,2
+         N     R1,=BL4'111100'
+         L     R0,CLWSBGPR(R1)
+         DECR  R0
+         ST    R0,CLWSBGPR(R1)
+         IF    (R0,Z),TRAPMSG          COUNT WENT TO ZERO
+         IF    (R15,M),TRAPMSG         NO BRANCH WANTED
+         ST    R15,CLWSBPSW+4
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         SET   CLWMBSUC                SUCCESSFUL BRANCH SIMULATED
+         B     TRAPMSG
+*
+*  BXH, BXLE
+*
+SIMBX    MVC   CLWTEMP+2(2),CLWTRAPI+2
+         MVI   CLWTEMP+1,0
+         LCALL RXADDR                  COMPUTE BRANCH ADDR
+         IC    R1,CLWTRAPI+1           GET SUM REGISTER
+         SRL   R1,2
+         N     R1,=BL4'111100'
+         L     R0,CLWSBGPR(R1)           SUM VALUE
+         IC    R14,CLWTRAPI+1          GET INCREMENT REGISTER
+         SLL   R14,2
+         N     R14,=BL4'111100'
+         AL    R0,CLWSBGPR(R14)          COMPUTE NEW SUM
+         O     R14,=F'4'               GET COMPARAND REGISTER
+         L     R14,CLWSBGPR(14)
+         ST    R0,CLWSBGPR(R1)           STORE NEW SUM
+         TM    CLWTRAPI,1              BXLE?
+         BO    SIMBXLE                 BR IF SO
+         CR    R0,14                   BRANCH IF SUM HIGH
+         BNH   TRAPMSG
+SIMBXBRA ST    R15,CLWSBPSW+4            STORE BRANCH ADDR
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         SET   CLWMBSUC                SUCCESSFUL BRANCH SIMULATED
+         B     TRAPMSG
+*
+SIMBXLE  CR    R0,14                   BRANCH IF SUM LOW-EQUAL
+         BNH   SIMBXBRA
+         B     TRAPMSG
+         EJECT
+*
+*  BSM
+*
+SIMBSM   CLEAR R15
+         DECR  R15                     COMPUTE BRANCH ADDRESS
+         IC    R14,CLWTRAPI+1
+         SLL   R14,2
+         IF    ('N  R14,=BL4"111100"',NZ),'L  R15,CLWSBGPR(14)'
+         IC    R1,CLWTRAPI+1           FIND REGISTER TO STORE IN
+         SRL   R1,2
+         IF    ('N  R1,=BL4"111100"',NZ),BEGIN
+         LCM   R0,8,=X'80'             ISOLATE CURRENT MODE
+         N     R0,CLWSBPSW+4            FROM PSW
+         O     R0,CLWSBGPR(R1)         ADD TO REGISTER
+         ST    R0,CLWSBGPR(R1)         STORE IT
+         END   ,
+         IF    (R15,M),TRAPMSG         NO BRANCH
+         ST    R15,CLWSBPSW+4          STORE BRANCH ADDR
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         SET   CLWMBSUC                SUCCESSFUL BRANCH SIMULATED
+         B     TRAPMSG
+*
+*  EX
+*
+SIMEX    LCALL RXADDRM                 COMPUTE ADDR OF INSTRUCTION
+         IC    R1,CLWTRAPI+1           GET "OR" REGISTER
+         SRL   R1,2
+         IF    ('N  R1,=BL4"111100"',NZ),'IC  R1,CLWSBGPR+3(1)'
+         STC   R1,CLWTRAPJ+1           SAVE IT
+         LR    RR,R15
+         LR    R1,R15
+         LA    R0,CLWTRAPI             READ THE INSTRUCTION
+         LA    R15,2
+         VCALL READCORE
+         CL    R15,=F'4'
+         BH    TRAPXIP                 BR IF NOT THERE
+         CLI   CLWTRAPI,X'44'          EXECUTING AN EXECUTE?
+         BE    TRAPXIP                 BR IF SO
+         B     TRAPDOX                 GO EXECUTE IT
+         EJECT ,
+*
+*  BAL, BAS
+*
+SIMBAL   LCALL RXADDRM                 GET BRANCH ADDR
+         B     SIMBALX
+*
+*  BC
+*
+SIMBC    LCALL RXADDRM                 COMPUTE BRANCH ADDR
+         B     SIMBCX
+*
+*  BCT
+*
+SIMBCT   LCALL RXADDRM                 GET BRANCH ADDR
+         B     SIMBCTX
+*
+*  ROUTINE TO FORM EFFECTIVE ADDRESS
+*
+RXADDRM  L     R15,CLWTRAPI            MOVE INSTRUCTION TO WORK AREA
+         ST    R15,CLWTEMP
+RXADDR   LH    R15,CLWTEMP+2           GET DISPLACEMENT
+         N     R15,=XL4'FFF'
+         IC    R14,CLWTEMP+2           GET BASE
+         SRL   R14,2
+         IF    ('N  R14,=BL4"111100"',NZ),'AL  R15,CLWSBGPR(14)'
+         IC    R14,CLWTEMP+1           GET INDEX
+         SLL   R14,2
+         IF    ('N  R14,=BL4"111100"',NZ),'AL  R15,CLWSBGPR(14)'
+         LA    R15,@R15                BE NEAT
+         BR    RAR
+         EJECT ,
+* TRAPPED INSTRUCTION EXECUTED. RESET TRAP.
+*
+TRAPDONE CLEAR CLWFTRAP                CLEAR TRAP FLAG
+         MVC   CLWSBPSW+3(1),CLWTRAPI+2    RESTORE MASK BYTE
+         L     R1,CLWTRAPB             RESTORE INSTRUCTION AFTER
+         ST    R1,CLWSBPSW+4           RESET NEXT INSTRUCTION
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         LA    R0,CLWTRAPJ
+         LA    R15,2
+         VCALL RITECORE
+         L     R1,CLWTRAPA             PUT PAUSE BACK
+         LA    R0,CLWPSVC
+         LA    R15,2
+         VCALL RITECORE
+         SPACE 2
+* SET CORRECT ILC AND PRINT MESSAGE. CHECK FOR SIMULTANEOUS PANIC
+*
+TRAPMSG  L     R1,CLWTRAPB
+         S     R1,CLWTRAPA             INSTRUCTION LENGTH
+         NI    CLWSBPSW+2,255-X'C0'    CLEAR ILC
+         SLL   R1,5                    SHIFT TO ILC POSITION
+         EX    R1,'OI  CLWSBPSW+2,0'
+         IF    (CLWEVCNT,Z),'LCALL BREAK'
+         ELSE  BEGIN
+         IF    CLWMNOL,READ            DON'T PRINT EVENT
+         VSEG  'Interrupt at '
+         END   ,
+         L     R1,CLWTRAPA
+         N     R1,=X'0FFFFFFF'
+         VCALL VSEGLOC
+         VSEG  ', Trap sprung'
+         IF    CLWMBSUC,BEGIN          SUCCESSFUL BRANCH
+         VSEG  ', Branch to '
+         L     R1,CLWSBPSW+4           SEG BRANCH ADDRESS
+         N     R1,=X'0FFFFFFF'
+         VCALL VSEGLOC
+         END   ,
+         VWRITE '.'
+         BNZ   PANATTN                 ATTN ON MSG
+         LH    TR,CLWSBPSW             ANY PANIC?
+         IF    (TR,NZ),PANTRAP
+         B     READ
+*
+         EJECT ,
+*  PROCESS ATTN
+*
+ATTEN    LM    SR,TR,CLWSBPSW            COMPUTE INST. ADDR
+         SRL   SR,8+6-1
+         N     SR,=A(6)
+         SLR   TR,SR
+         IF    ^CLWFTRAP,ATTNBRK       NOT A TRAP
+         CL    TR,CLWTRAPA             EXECUTED THE TRAP YET?
+         BNE   TRAPDONE               BR IF SO
+         SET   CLWPFRUN                CONTINUE EXECUTION
+         B     READ
+*
+ATTNBRK  DS    0H
+         LCALL BREAK
+         LR    R1,TR
+         N     R1,=X'0FFFFFFF'
+         VCALL VSEGLOC
+         VSEG  ', Attention'
+         SENSE 12,1
+         BZ    ATTNWR
+         IF    ^CLWSBPSW+3.SCBXA,ATTNXDIS    EXIT IS DISABLED
+         VSEG  ' (Multiple attention)'
+         B     ATTNWR
+ATTNXDIS VSEG  ' (Exit disabled)'
+ATTNWR   VWRITE
+         B     READ
+*
+         EJECT ,
+*  PROCESS TIMER FIRE
+*
+TIMER    DS    0H
+         IF    CLWFPRGL,BEGIN
+         MVC   CLWSBPSW(72),SCPSBPSW
+         VCALL PROGMON                 IF PROGLOOK, MONITOR PROGRAM
+         VSET  10,CLWSBPSW                 AND RETURN TO USER PROGRAM
+         END
+         IF   (CLWTIVAL,NE,0),BEGIN
+         VCALL TIMEOUT                 IF TIMER EXPIRED, WARN USER
+         B     READ                         AND ASK TO CONTINUE
+         END
+* EXIT SVC
+*
+EXITSVC  DS    0H
+         L     BR,=A(NEXT)
+         B     EXIT-NEXT(,BR)
+         EJECT ,
+*  COMMAND
+*
+COMMAND  DS    0H
+         SET   CLWFCMD
+         LM    R0,R1,CLWSBGPR          TEST IF CMD WAS TYPED
+         IF    (R0,Z),'SET  CLWFTYPD'  COMMAND TYPED
+         IF    (R1,NM),'SET  CLWFWYL'  WYLBUR NOT WANTED
+         IF    CLWSSAM,'SET  CLWFWYL'  WYLBUR NOT WANTED
+         LPR   R1,R1                   COMMAND LOC
+         L     R0,CLWSBGPR+15*4        LENGTH
+         CLEAR R15                     SET RETURN CODE
+         ST    R15,CLWSBGPR+15*4
+         NI    CLWSBPSW+2,X'CF'        CLEAR CC
+         LPR   SR,R0
+         IF    Z,BEGIN
+         L     BR,=A(NEXT)
+         B     CMDRET-NEXT(,BR)        ALL DONE
+         END   ,
+         CEIL  SR,CLWIBUFL
+         STH   SR,CLWIBUFN             POS BUFF LENGTH
+         TM    CLWSBPSW+4,X'80'
+         IF    O,BEGIN                 IF USER IN 31 BIT MODE
+         LA    R15,COMMAN2
+         O     R15,=X'80000000'
+         BSM   0,R15
+COMMAN2  LABEL ,
+         DEX   SR,'MVC  CLWIBUF(0),@R1'
+         LA    R15,COMMAN3
+         BSM   0,R15
+COMMAN3  LABEL ,
+         END   ,
+         ELSE  BEGIN
+         DEX   SR,'MVC  CLWIBUF(0),@R1'
+         END   ,
+         L     BR,=A(NEXT)
+         LR    SR,R0
+         LPR   R0,R0
+         LTR   SR,SR                   POS LENGTH?
+         IF    NP,SENDWYL-NEXT(,BR)
+         B     VERBSCAN-NEXT(,BR)      JUMP INTO COMMAND LOOP
+         EJECT ,
+BREAK    VPUSH SR,RAR,*                SAVE RETURN
+         VSEG  'Session break at '
+         CLEAR CLWPFRUN                CANCEL CONTINUE
+         CLEAR CLWEVCNT
+         CLEAR CLWMNOL                 CLEAR NOLIST
+         VPOP  SR,RAR,*
+         BR    RAR
+         EJECT ,
+         LTORG
+         EJECT ,
+*  GET NEXT COMMAND
+*
+READ     BASE  BR                      SET UP BASE
+NEXT     DS    0H
+         LA    R13,CLWSVA              SAVE AREA
+         IF    CLWFCMD,CMDRET          COMMAND SVC
+         IF    CLWPFPAU,PAURET         PAUSE NOW
+         IF    CLWPFRUN,GORUN          RUN
+         IF    ('LT R1,CLWEVCNT',POS),BEGIN CHECK EVENT COUNTER
+         DECR  R1
+         ST    R1,CLWEVCNT
+GORUN    IF    ^SCBCFCLA,RUN           NO ATTENTION
+         SET   SCBCFAX                 SET ATTENTION INTERRUPT
+         B     RUN
+         END
+         OC    CLWTTRAP(3),CLWTTRAP    ANY TRAP THERE?
+         BZ    GORU1
+         MVC   CLWTEMP+1(3),CLWTTRAP   ALIGN
+         L     R1,CLWTEMP              ADDRESS TO REPAIR
+         LA    R1,@R1                  CLEAN IT UP
+         LA    R15,2                   LENGTH OF TEXT
+         LA    R0,CLWTTRAP+3           ADDRESS OF TEXT
+         VCALL RITECORE                RESTORE
+         CLEAR CLWTTRAP                CLEAR ENTRY
+GORU1    DS    0H
+         CLC   CLWSVAEN,=X'FEDCBA98'   STACK OVERFLOW?
+         IF    NE,BEGIN                YES
+*
+* STACK OVERFLOW...RESET THE INDICATOR
+*
+         MVC   CLWSVAEN,=X'FEDCBA98'   PUT IT BACK IN
+         END   ,
+         READ  LA:1,CLWIBUF,CLWIBUFL,MODE=EDIT
+         WAIT  (0)
+         SET   CLWFTYPD+CLWFWYL
+         IF    (R1,NP),BR              NULL LINE
+         STH   R1,CLWIBUFN             SAVE COUNT
+         IF    (R14,NZ),'CLEAR CLWFTYPD'  SET NOT TYPED
+         SPACE 2
+*
+*  SCAN FOR VERB
+*
+*
+VERBSCAN DS    0H
+         CLEAR SCBCFCLA                CLEAR ATTN FLAG
+*
+* MOVE 1ST N CHARACTERS INTO SCP FOR DEBUGGING
+*
+         LH    R1,CLWIBUFN             GET THE ACTUAL SIZE
+         CEIL  R1,L'SCPLCMD            MAX LENGTH TO MOVE
+         STH   R1,SCPLCMDL             SAVE THE LENGTH
+         DEX   R1,'MVC SCPLCMD(0),CLWIBUF'
+*
+         SCINIT CLWIBUF,LH:CLWIBUFN,CLWKWCB  SET FOR SCAN
+         SCAN  VERBTBL,CLWKWCB         SCAN FOR VERB
+*
+SCRET    DS    0H
+         LPR   R0,0                    SCAN OK?
+         BZR   BR                      BR IF SO
+         VSEG  (1),(0)
+         VSEG  ': Invalid string'
+*
+*  PROCESS ERROR
+*
+ERROR    VCALL TYPEIT                  GO TYPE COMMAND AND ERRMSG
+         BR    BR
+*  PROCESS UNIMPLEMENTED COMMAND
+*
+NOTYET   DS    0H
+         VSEG  (1),(0)
+         VSEG  ': Function not yet implemented'
+         B     ERROR
+         EJECT ,
+UNREC    DS    0H
+         VSEG  (1),(0)
+         VSEG  ': unrecognized '
+         IF    (SR,NZ),BEGIN
+         VSEG  (TR),(SR)
+         VSEG  ' option'
+         END   ELSE,BEGIN
+         VSEG  'command'
+         END   ,
+         B     ERROR
+*
+*  HERE FOR INVALID VALUE
+*
+ILLVAL   VSEG  'Invalid value'
+         B     ERROR
+*
+*  OPERAND MISSING
+*
+MISSING  VSEG  'Operand missing.'
+         B     ERROR
+         EJECT ,
+*
+*  RETURN FROM COMMAND SVC
+*
+CMDRET   L     R15,CLWSBGPR+15*4       RETURN CODE
+         LTR   R15,R15                 SET CONDITION CODE
+         BALR  R15,0
+         SRL   R15,16
+         N     R15,=XL4'00003000'
+         NI    CLWSBPSW+2,X'CF'
+         O     R15,CLWSBPSW
+         ST    R15,CLWSBPSW
+         CLEAR CLWFCMD
+         SET   CLWPFRUN
+         CLEAR SCBCFCLA                CLEAR ATTN FLAG
+         B     NEXT
+*
+* SIMULATE A PAUSE
+*
+PAURET   CLEAR CLWPFRUN+CLWPFPAU       CANCEL RUN REQUEST
+         IF    ^CLWPFPIC,'B  NEXT'     NO PROGRAM EXECUTING
+         L     BR,=A(ENTBASE)
+         B     (PAUSEXIT-ENTBASE)(,BR)
+         EJECT ,
+*  VERB TABLE
+*
+VERBTBL  DS    0X
+         SCKW  SET,SET
+         SCKW  SHOW,SHOW,A
+         SCKW  CLEAR,CLEAR,A
+         SCKW  CLR,CLEAR
+         SCKW  PATCH,PATCH,A
+         SCKW  DUMP,DUMP,A
+         SCKW  DUMPN,DUMPN
+         SCKW  LOGOFF,BYEBYE           PASS THE BUCK
+         SCKW  REL,INVALID             SEND IT TO WYLBUR
+*GEN
+         VPMTAB KWRT
+         SCKW  G,GO
+         SCKW  ATTEN,ATTN,A
+         VGPTAB KWRT
+         VFSHTAB KWRT
+         VPSTAB KWRT
+*NOGEN
+         SCKW  SP,SHABBR
+         SCKW  SG,SHABBR
+         SCKW  SET,SHABBR
+         SCKW  SC,SHABBR
+         SCKW  SOSC,SHABBR             SHO OS CORE
+         SCKW  SA,SHABBR               SHO ADDRESS
+         SCKW  SOSA,SHABBR             SHO OS ADDRESS
+         SCKW  SSG,SHABBR
+         SCKW  SSP,SHABBR
+         SCKW  SCG,SHABBR
+         SCKW  SCP,SHABBR
+         SCKW  PC,PATABBR
+         SCKW  POSC,PATABBR
+         SCKW  PG,PATABBR
+         SCKW  PF,PATABBR
+         SCKW  PIA,PATABBR
+         SCKW  PP,PATABBR
+         SCKW  PSG,PATABBR
+         SCKW  PSP,PATABBR
+         SCKW  PSIA,PATABBR
+         SCKW  ST,SETABBR
+         SCKW  CT,CLRABBR
+         SCKW  CTS,CLRABBR
+         SCKW  STS,SHABBR
+         SCKW  ABORT,GOABORT
+         SCKW  ,INVALID
+         EJECT ,
+*
+*  UNRECOGNIZED COMMAND
+*
+INVALID  LABEL ,
+         CLEAR SR
+*
+*  SEND UNRECOGNIZED COMMAND TO WYLBUR
+*
+SENDWYL  LABEL ,
+         IF    CLWFWYL,UNREC
+         LA    R1,CLWIBUF
+         LH    R15,CLWIBUFN
+         CLEAR R14                     ASSUME TYPED
+         IF    ^CLWFTYPD,'LA  R14,1'   SIGNAL NOT TYPED
+         WRITE LA:1,(1),(15),(14),MODE=EDIT
+         WAIT  (0)
+         BNMR  BR                      WYLBUR LIKED IT
+         SET   CLWFTYPD                ERROR MSG ALREADY WRITTEN
+         B     ERROR
+         EJECT ,
+*
+* PROGRAM PROCESSING
+*GEN
+         VPMTAB CLPTAB,15
+         VCALL PROGRAMS
+         BR    BR                      NEXT COMMAND
+         SPACE
+         EJECT ,
+*
+* FILE PROCESSING
+         SPACE
+         VGPTAB CLPTAB,15              LOAD 15 WITH VGP CODE
+*NOGEN
+         VCALL FILES                   0 HAS KEYWORD LENGTH
+         BR    BR
+         EJECT ,
+         VFSHTAB CLPTAB,15              LOAD 15 WITH VFSH CODE
+         VCALL FILESHOW                0 HAS KEYWORD LENGTH
+         BR    BR
+         SPACE 5
+*  PROGRAM SERVICES PROCESSING
+*
+*GEN
+         VPSTAB CLPTAB,15
+*NOGEN
+         VCALL PROGSERV
+         BR    BR
+         SPACE 3
+         EJECT ,
+*
+*  PROCESS THE LOGOFF COMMAND
+*
+BYEBYE   IF    ^CLWSSAM,INVALID             DON'T DO IT
+         WRITE LA:1,OFFMSG,L'OFFMSG
+         WAIT  (0)
+         L     BR,=A(ENTBASE)
+         B     (LOGOFF-ENTBASE)(,BR)         FAKE THE ENTRY
+OFMSTRT  DS    0C
+         DC    X'27ADF2D127AD86'
+         DC    X'151515'
+         DC    C'***** END OF ORVYL SESSION *****'
+OFFMSG   EQU   OFMSTRT,*-OFMSTRT,C'C'
+*
+*  PROCESS SET COMMAND ABBREVIATIONS
+*
+SETABBR  DS    0H
+         LR    SR,R1                   SAVE LOC OF TOKEN
+         SCTELL ,CLWKWCB               CURRENT POSITION
+         ALR   R0,R1
+         SLR   R0,SR
+         DECR  R0
+         SCINIT @SR+1,(0),CLWKWCB      SET NEW POSITION
+         SPACE 3
+*
+*  PROCESS SET COMMAND
+*
+SET      VCALL SET
+         BZR   BR                      COMMAND PROCESSED
+         ERRMSG 'SET'
+         B     SENDWYL                 MUST SEND TO WYLBUR
+*
+         EJECT
+*  PROCESS CLEAR COMMAND ABBREVIATIONS
+*
+CLRABBR  DS    0H
+         LR    SR,R1                   SAVE LOC OF TOKEN
+         SCTELL ,CLWKWCB               CURRENT POSITION
+         ALR   R0,R1
+         SLR   R0,SR
+         DECR  R0
+         SCINIT @SR+1,(0),CLWKWCB      SET NEW POSITION
+*
+*  PROCESS CLEAR COMMAND
+*
+CLEAR    VCALL CLEAR
+         BZR   BR                      WE LIKED IT
+         IF    ^CLWFWYL,SENDWYL        NOT BEEN TO WYLBUR YET
+         LOOP  BEGIN
+         SCAN  ,CLWKWCB
+         IF    Z,EXIT
+         CEIL  R0,16
+         VSEG  (R1),(R0)
+         VWRITE ': unrecognized CLEAR option'
+         BNZR  BR
+         END   ,
+         BR    BR
+         EJECT ,
+*  PROCESS SHOW COMMAND ABBREVIATIONS
+*
+SHABBR   DS    0H
+         LR    SR,R1                   SAVE LOC OF TOKEN
+         SCTELL ,CLWKWCB               CURRENT POSITION
+         ALR   R0,R1
+         SLR   R0,SR
+         DECR  R0
+         SCINIT @SR+1,(0),CLWKWCB      SET NEW POSITION
+         SPACE 3
+*
+*  PROCESS SHOW COMMAND
+*
+SHOW     VCALL SHOW
+         BZR   BR
+         ERRMSG 'SHOW'
+         B     SENDWYL                 BR IF MUST SEND TO MILTEN
+         SPACE 3
+*
+*  PROCESS DUMP COMMAND
+*
+DUMP     DS    0H
+DUMPN    SET   CLWMDUMP
+         VCALL SHOW
+         IF    NZ,BEGIN
+         ERRMSG 'DUMP'
+         B     SENDWYL                 BR IF MUST SEND TO WYLBUR
+         END   ,
+         IF    CLWMDUMP,BEGIN         IF DUMP NOT ABORTED
+         MVI   CLWOBUF+2,X'FF'         MARK BUFF CLEAR
+         VWRITE ,                      CLEAR DUMP BUFFER
+         IF    ^CLWFTYPD,BR            NO MESSAGE IF NOT TYPED
+         VCALL SHOWLAST                SEND LAST LINE MESSAGE
+         END   ,
+         BR    BR                      ALL DONE
+         EJECT ,
+* PROCESS PATCH COMMAND ABBREVIATIONS
+*
+PATABBR  DS    0H
+         LR    SR,R1
+         SCTELL ,CLWKWCB
+         ALR   R0,R1
+         SLR   R0,SR
+         DECR  R0
+         SCINIT @SR+1,(0),CLWKWCB
+*
+*  PROCESS PATCH COMMAND
+*
+PATCH    VCALL PATCH
+         BR    BR
+         SPACE 3
+*
+*  ABORT THE SYSTEM
+*
+         DC    C'Abort patch here ==>'
+GOABORT  LABEL ,
+         B     NOABORT                Patch if you really want to ...
+         IF    ^CLWSSP,NOABORT
+         ABORT CLP_ABORT_CMD
+NOABORT  VSEG  'Not authorized to issue abort command!'
+         B     ERROR
+         EJECT ,
+* RUN USER PROGRAM SET UP BY VPM
+*
+RUN      DS    0H
+         CLEAR CLWPFRUN
+         IF    ^CLWPFPIC,BEGIN         NO PROGRAM IN CORE
+         VSEG  'No program executing'
+         B     ERROR
+         END   ,
+         CONTROL LA:1,12,L:CLWWLMOD      RESTORE MODE WORD
+         WAIT  (0)
+         CONTROL (0),30,L:CLWMLMOD     SET MILTEN MODE WORD
+         WAIT  (0)
+         VSET  12,IC:CLWDSP            RESTORE PRIORITY
+         IF    CLWDOTIM,BEGIN         SHOULD TIMER BE SET?
+         CLEAR CLWDOTIM                NOT A SECOND TIME
+         LA    R0,152                  ASSUME REAL INTERVAL
+         IF    CLWCPTIM,'LA R0,153'    SET COMPUTE, IF SO
+         VSET  (0),L:CLWTIMER          SET CLP TIMER
+         END   ,
+         CLPSERV TERMPOP
+         IF    CLWFM31,'OI CLWSBPSW+4,X"80"' Set to 31 bit mode
+         VSET  10,CLWSBPSW             RESTORE FROM BREAK
+         SPACE 3
+         DROP  BR                      ##
+         EJECT ,
+*  CONSTANTS
+*
+         LTORG
+         EJECT ,
+*  CLEAN UP TRAPS
+*
+CLEANTRP VENTER SR,RAR,*
+         LA    SR,CLWTRAPS             RUN THRU TABLE
+         LA    TR,CLWNTRAP
+CLTSLOOP CLC   @SR(3),=X'000000'      EMPTY TRAP?
+         BE    CLTSNX                  BR IF SO
+         LA    R0,3(,SR)               RESTORE TRAP
+         MVC   CLWTEMP+1(3),@SR        ADDR
+         L     R1,CLWTEMP
+         LA    R1,@R1
+         LA    R15,2
+         VCALL RITECORE
+CLTSNX   LA    SR,5(,SR)
+         BCT   TR,CLTSLOOP
+         ST    TR,CLWTRAPA
+         CLEAR (CLWTRAPS,5*CLWNTRAP)   CLEAR TRAP TABLE
+         VEXIT SR,RAR
+         EJECT ,
+*  CLEAR ATTACHED DEVICES
+*
+CLRIDTS  VENTER SR,RAR,*
+*
+*  Delete possible terminal exits
+*
+         IF    ('LTR  TR,R1',NZ),BEGIN    Note scan level
+         VSET  8,0,1                   CLEAR ATTENTION EXIT
+         VSET  9,0,1                   CLEAR WAIT EXIT
+         END
+*
+*  Then halt any existing I/O
+*
+         CLEAR SR
+         LOOP  BEGIN
+         CLPSERV DEVSCAN,(SR),0
+         IF    NZ,EXIT
+         LR    SR,R1
+         VSET  8,0,(SR)                CLEAR ATTENTION EXIT
+         VSET  9,0,(SR)                CLEAR WAIT EXIT
+         HALT  (SR)                    CEASE ALL ACTIVITY ON DEVICE
+         WAIT  (0)                     WAIT FOR COMPLETION
+         END
+*
+*  Then detach all devices
+*
+         CLEAR SR
+         LOOP  BEGIN
+         CLPSERV DEVSCAN,(SR),(TR)
+         IF    NZ,EXIT
+         LR    SR,R1
+         DETACH (SR)                   DETACH DEVICE
+         WAIT  (0)                     WAIT FOR DETACH COMPLETION
+         END   ,
+         VEXIT SR,RAR
+         EJECT ,
+*  CLEAR ENQUEUE TABLE
+*
+CLRENQS  VENTER SR,RAR,*
+         L     TR,CLWSCP
+         WITH  (SCP,TR),BEGIN
+         CLEAR SR                      SLOT NUMBER
+         LH    QR,SCPNENQ              NUMBER OF ENQ ENTRIES
+         L     SR,SCPENQL              ENQ ID TABLE ADDRESS
+DEQUEUE  LT    R1,@SR                  GET ENQ ID
+         IF    NZ,BEGIN                SLOT IS VALID
+         DEQ   (R1),0                  DEQUEUE RESOURCE
+         WAIT  (0)                     WAIT FOR COMPLETION
+         END   ,
+         LA    SR,@SR+4                 NEXT SLOT
+         BCT   QR,DEQUEUE                UNTIL DONE
+         END
+         VEXIT SR,RAR
+         EJECT ,
+*  CHECK FOR IDLE ATTENTION
+*
+CHKATTN  VENTER SR,RAR,*
+         L     R1,CLWSCP
+         WITH  (SCP,R1),BEGIN
+         TM    SCBCFL,L'SCBCFCLA       TEST FOR IDLE ATTN
+         END   ,
+         VEXIT SR,RAR
+         EJECT ,
+*  TYPE COMMAND WHICH IS IN ERROR
+*
+TYPEIT   VENTER R0,R14,*
+         SET   CLWFCERR                INVALID COMMAND
+         IF    CLWFCMD,BEGIN          COMMAND SVC?
+         LA    R15,4                   SET ERROR CODE
+         ST    R15,CLWSBGPR+15*4
+         END   ELSE,BEGIN
+         CONTROL LA:1,32,0             SET MODE RETRY
+         WAIT  (0)
+         END   ,
+         IF    CLWMDUMP,BEGIN         DUMPING?
+           MVI CLWOBUF+2,X'FF'
+           VWRITE ,                      CLEAR UP BUFFER
+         END   ,
+         CLEAR R15
+         IF    ^CLWFTYPD,BEGIN         TYPE COMMAND IN ERROR
+         SET   CLWFTYPD
+         LH    R15,CLWIBUFN
+         LA    R15,@R15+3
+         LA    R1,CLWIBUF-3
+         MVC   CLWIBUF-3(3),=C'-> '
+         CLI   CLWIBUF,X'02'
+         IF    EQ,BEGIN                OBJECT CARD
+         MVC   CLWTEMP(3),=C'-> '
+         MVC   CLWTEMP+3(3),CLWIBUF+1    CARD TYPE
+         MVC   CLWTEMP+3+3(5),=C' ... '
+         MVC   CLWTEMP+3+3+5(8),CLWIBUF+72  SEQUENCE NUMBER
+         LA    R1,CLWTEMP
+         LA    R15,3+3+5+8
+         END   ,
+         WRITE LA:1,(1),(15)             TYPE THE COMMAND
+         WAIT  (0)
+         IF    NZ,BEGIN
+         CLEAR (CLWOBUF,4)
+         B     TYPEITX
+         END   ,
+         END   ,
+         LH    SR,CLWOBUF
+         IF    (SR,NZ),'VWRITE'
+TYPEITX  VEXIT R0,R14,LTR
+         EJECT ,
+* SPECIAL OUTPUT FORMATTING ROUTINES
+*
+*     OUTPUT TIME IN NNNNN.NNN FORMAT (R1 IS 26 MIC TUNITS)
+*
+SEGSECS  VENTER BR,RAR,*
+         M     R0,=A(10)               SO DIV RESULT IS MILLISECONDS
+         D     R0,=A(384)              THE MAGIC NUMBER
+         LR    R15,R1                  VALUE
+         LA    R1,CLWTEMP              TARGET
+         LA    R0,3                    FIELD DESCRIPTOR
+         XCALL BTR                     GO CONVERT
+         VSEG  (1),(0)
+         VEXIT BR,RAR
+         EJECT
+*
+* WRITE OUT LAST LINE MESSAGE
+*
+SHOWLAST VENTER SR,RAR,*
+         CONTROL LA:1,16               GET LAST LINE IN ACTIVE
+         WAIT  (0)
+         BNZ   SLEXIT                  QUIT IF VOID
+         LR    R15,R1                  SET
+         LA    R1,CLWTEMP               UP
+         LA    R0,3                      FOR
+         XCALL BTR                        CONVERSION
+         LR    SR,R0                   LENGTH
+         AR    SR,R1                   LAST POSITION + ONE
+SLALOOP  BCTR  SR,0                    LAST POSTION
+         CLI   0(SR),C'0'              ZERO?
+         BNE   SLSEG                   OK TO SEND IF NOT
+         BCTR  R0,0                    MINUS ONE
+         B     SLALOOP                 KEEP GOING
+SLSEG    VSEG  (1),(0)                 FORMAT
+         VWRITE ' - LAST LINE.'        MESSAGE
+SLEXIT   VEXIT SR,RAR
+         EJECT ,
+*  ADD SEGMENT TO OUTPUT BUFFER
+*
+VSEG     VENTER R0,RAR
+         LTR   TR,R0                   TEST LENGTH
+         IF    P,BEGIN
+         LA    SR,CLWOBUFL             COMPUTE REMAINING LENGTH
+         SH    SR,CLWOBUF
+         IF    NP,EXIT
+         SR    SR,TR
+         IF    M,BEGIN
+         AR    TR,SR
+         CLEAR SR
+         END   ,
+         LA    RR,CLWOBUF+4            COMPUT MOVE ADDR
+         AH    RR,CLWOBUF
+         DEX   TR,'MVC  @RR(*-*),@R1'  MOVE SEG TO BUFFER
+         LA    TR,CLWOBUFL             COMPUTE NEW LENGTH
+         SR    TR,SR
+         STH   TR,CLWOBUF
+         END   ,
+         VEXIT R0,RAR
+         EJECT ,
+*  SEG A RELATIVE ADDRESS (CSECT+OFFSET)
+*
+VSEGLOC  VENTER R0,R14,*
+         LR    TR,R1                   SAVE ENTRY ADDRESS
+         LPR   R1,R1                   MAKE POSITIVE
+*         LA    SR,@R1                  ADDRESS
+         LR    SR,R1                   ADDRESS
+         LR    QR,R1                   ADDRESS
+         IF    (CLWPFPL+CLWPFPIC,Z),NOSECT   LOADING OR EXECUTING?
+         L     LCBR,CLWLNKP
+         VCALL LDSECT                  FIND SECTION
+         BZ    NOSECT
+         SLR   SR,R1
+         LA    R0,8                    MAX LENGTH
+         LA    R1,7(,15)               NAME END POINTER
+CLRBLNK  CLI   @R1,C' '                TRAILING BLANK
+         BNE   ENDBLNK                 NO
+         DECR  R1
+         BCT   R0,CLRBLNK
+ENDBLNK  VSEG  (15),(0)
+         LTR   SR,SR                   ANY OFFSET?
+         BZ    VSGEX
+         VSEG  '+'
+OFFSET   BTX   CLWTEMP,7,(SR)
+         LA    R1,CLWTEMP
+         MVI   CLWTEMP+7,C'X'          BE SURE THE FOLLOWING STOPS
+CLRZERO  CLI   @R1+1,C'0'              TWO LEADING ZEROES?
+         BNE   VLSEG
+         LA    R1,@R1+1
+         BCT   R0,CLRZERO
+VLSEG    VSEG  (1),(0)
+         LTR   SR,QR                   FIND LOCAL SYMBOL?
+         BZ    VSGEX
+         LR    R1,QR                   LOCATION
+         VCALL LDENTRY                 FIND LOCAL SYMBOL
+         BZ    VSGEX
+         SLR   SR,R1
+         LA    R0,8                    MAX LENGTH
+         LA    R1,7(,15)               NAME END POINTER
+CLRBLNK2 CLI   @R1,C' '                TRAILING BLANK
+         BNE   ENDBLNK2                NO
+         DECR  R1
+         BCT   R0,CLRBLNK2
+ENDBLNK2 LR    QR,R0
+         VSEG  ' ('
+         VSEG  (15),(QR)
+         LTR   SR,SR                   ANY OFFSET?
+         BZ    VLSEG3
+         VSEG  '+'
+         BTX   CLWTEMP,7,(SR)
+         LA    R1,CLWTEMP
+         MVI   CLWTEMP+7,C'X'          BE SURE THE FOLLOWING STOPS
+CLRZERO2 CLI   @R1+1,C'0'              TWO LEADING ZEROES?
+         BNE   VLSEG2
+         LA    R1,@R1+1
+         BCT   R0,CLRZERO2
+VLSEG2   VSEG  (1),(0)
+VLSEG3   VSEG  ')'
+         CLEAR R15
+VSGEX    VEXIT R0,R14
+NOSECT   CLEAR QR                      DO NOT FIND LOCAL SYMBOL
+         LTR   TR,TR                   IS PRINT CONDITIONAL?
+         BNM   OFFSET                  NO
+         LA    R15,4                   RETURN CODE
+         B     VSGEX
+         EJECT ,
+*  MARK START OF PROMPT
+*
+         ENTRY VMARK
+VMARK    MVC   CLWOBUF+2(2),CLWOBUF
+         BR    RAR
+         EJECT ,
+*  TYPE THE BUFFER
+*
+VWRITE   VENTER SR,RAR,*
+         IF    CLWMDUMP,VWDUMP         TO WDS?
+VWTERM   WRITE LA:1,CLWOBUF+4,LH:CLWOBUF
+         WAIT  (0)
+         B     VWDONE
+*
+VWDUMP   IF    CLWMDSUP,VW1            DUMP AREA SET UP?
+         GETCLW  4095,4095               GET A BUFFER FOR DUMP
+         BNZ   NOCORE
+         SET   CLWMDSUP                DUMP AREA SET UP
+         ST    R1,CLWDUMPB             SAVE ADD OF DUMP BUFFER
+         CLEAR (@R1,4)                 CLEAR CONTROL WORD
+         LR    SR,R1                   SAVE BUFF POINTER
+         CONTROL LA:1,16               SENSE LAST LINE NUMBER
+         WAIT  (0)
+*         A     R1,=A(1000)             GET NEXT WHOLE LINE NUMBER
+*         CLEAR R0
+*         D     R0,=A(1000)
+*         M     R0,=A(1000)
+*         ST    R1,4(,SR)               SAVE LINENNUMBER IN BUFFER
+         LR    R3,R1                   SAVE
+         CONTROL LA:1,28               SENSE DELTA
+         WAIT  (0)
+         IF    (R1,Z),'LA R1,1000'     Mikey is not ready yet
+         ST    R1,CLWDELTA             SAVE
+         AR    R1,R3                   CALC NEXT LINE
+         ST    R1,4(,SR)               SAVE LINE NUMBER IN BUFFER
+         SPACE
+VW1      L     SR,CLWDUMPB             GET DUMP BUFFER
+         L     TR,@SR                  CONTROL WORD
+         CLI   CLWOBUF+2,X'FF'         CLEAR BUFFER?
+         BE    VW2
+         CLEAR R15                     RETURN CODE IF NO WRITE
+         LH    RR,CLWOBUF              LENGTH OF THIS LINE
+         LA    QR,@TR+4+1(RR)          NEW CONTROL WORD
+         C     QR,=A(4096-4-4)         WILL IT FIT?
+         BL    VW4                     YES
+*
+* TIME TO WRITE TO WDS
+*
+VW2      LTR   R15,TR                  BUFF LENGTH
+         BZ    VW3
+         O     R15,=X'00020000'        OPTION CODE: INSERT
+         CLEAR R14
+         WRITE LA:1,4(SR),(15),MODE=TEXT
+         WAIT  (0)
+VW3      CLI   CLWOBUF+2,X'FF'         WDS BUFFER CLEARED?
+         BE    VWFREE0                 RELEASE BUFFER
+         LA    TR,4(SR,TR)             OLD END OF BUFFER
+         MVC   @SR+4(4),@TR            MOVE UP NEXT LINE NUMBER
+         LA    QR,@RR+4+1              NEW CONTROL WORD
+         CLEAR TR
+VW4      ST    QR,@SR                  NEW CONTROL WORD
+         LA    TR,4(SR,TR)             BUFFER FOR NEW LINE
+         STC   RR,4(,TR)               LENGTH BYTE
+         EX    RR,'MVC   5(*-*,TR),CLWOBUF+4'   MOVE LINE TO BUFFER
+         L4    R1,@TR                  PRE-SET LINE NUMBER
+*         A     R1,=A(1000)             NEXT LINE NUMBER
+         A     R1,CLWDELTA             NEXT LINE NUMBER
+         LA    TR,@TR(RR)              ADD
+         ST4   R1,5(TR)                KEEP AT END OF LAST LINE
+         N     R15,=X'FFFFFFF8'        MASK EDIT RETURN CODE=4
+         BNZ   VWERR
+VWDONE   IF    ^SCBCFCLA,VWEXIT        IDLE ATTN?
+         IF    ^CLWFCMD,BEGIN         IF NOT DOING COMMAND SVC
+         CONTROL  LA:1,32,4            INDICATE ATTENTION
+         WAIT  (0)
+         END   ,
+         LA    R15,4                   ABORT CODE
+         IF    CLWMDSUP,VWABORT        DUMPING?
+VWEXIT   DS    0H
+         CLEAR (CLWOBUF,4)
+VWEX1    VEXIT SR,RAR,LTR
+*
+VWFREE0  CLEAR R15                     GIVE GOOD RETURN
+         B     VWFREE
+VWERR    LA    R15,4                   ERROR CODE
+VWFREE   CLEAR CLWMDUMP+CLWMDSUP
+         LR    SR,R15                  SAVE RETURN
+         FREECLW L:CLWDUMPB,4095        FREE DUMP BUFFER
+         CLEAR (CLWOBUF+2,2)           PRESERVE ERROR MESSAGE
+         LTR   R15,SR                  ERROR OR ATTN?
+         B     VWEX1                   ERROR
+*
+VWABORT  MVI   CLWOBUF+2,X'FF'         MARK BUFF CLEAR
+         VWRITE ,                      CLEAR DUMP BUFFER
+         CLEAR (CLWOBUF,4)
+         VSEG  'Dump aborted'
+         VSEG  =X'15',1                ADD A NEW LINE
+         VCALL SHOWLAST                TELL WHERE WE STOPPED
+         LA    R15,4
+         B     VWEX1                   DONE
+*
+*
+NOCORE   VWRITE 'INSUFFICIENT USER MEMORY TO PROCESS COMMAND'
+         B     VWERR
+         EJECT ,
+*  TYPE AND PROMPT
+*
+VREAD    VENTER SR,RAR,*
+         VSEG  '? '
+         LH    SR,CLWOBUF              COMPUTE COUNTS
+         LH    TR,CLWOBUF+2
+         STH   TR,CLWOBUF
+         SR    SR,TR
+         STH   SR,CLWOBUF+2
+VRAGAIN  DS    0H
+         READ  LA:1,CLWIBUF,CLWIBUFL,LA:CLWOBUF
+         WAIT  (0)
+         BM    VRIO                    BR IF I/O ERROR
+         BP    VRATTN                  BR IF ATTN
+VRRET    STH   R1,CLWIBUFN
+         LR    R0,R1
+         LA    R1,CLWIBUF
+         CLEAR (CLWOBUF,4)
+         VEXIT SR,RAR,LTR
+*
+*
+VRIO     DS    0H
+         SYSQS R1,15,'RETYPE.'
+         WRITE (0),(1),(15)
+         WAIT  (0)
+*
+VREPROM  DS    0H
+         LA    SR,CLWOBUF+4            MOVE PROMPT TO START OF BUFFER
+         AH    SR,CLWOBUF
+         LH    TR,CLWOBUF+2
+         DEX   TR,'MVC  CLWOBUF+4(0),@SR'
+         CLEAR TR
+         STH   TR,CLWOBUF
+         B     VRAGAIN
+*
+         EJECT ,
+*
+VRATTN   IF    (R1,NZER),VREPROM       REPROMPT IF SOMETHING
+         IF    CLWFCMD,VRRET           DONE IF IN COMMAND SVC
+         VPUSH R15,R1,*                SAVE
+         CONTROL  LA:1,32,4            INDICATE ATTENTION
+         WAIT  (0)
+         VPOP  R15,R1,*
+         B     VRRET                   RETURN
+         EJECT ,
+* OBTAIN WORK SPACE FOR CLP
+*
+GETCLW   VENTER SR,SCPR,*
+         CLPSERV  GETCLW,(1),(15)      GET CORE FOR CLP
+         VEXIT SR,SCPR,LTR
+         SPACE 3
+* RELEASE WORK SPACE FOR CLP
+*
+FREECLW  VENTER SR,SCPR,*
+         CLPSERV FREECLW,(1),(15)      FREE CLW
+         VEXIT SR,SCPR,LTR
+         EJECT ,
+*  TEST FOR PRIVILIGED USER
+*
+PRIVTEST VENTER BR,RAR,*
+         CLPSERV PRIVTST               UPDATE PRIVS
+         L     R15,CLWSCP              SCP POINTER
+         WITH  (SCP,R15),'TM  SCPPRIV,KWRIFSPR'
+         IF    O,'CLEAR R15;B PRIVEXIT'      BR IF SO
+         VSEG  'Privileged command'
+         VCALL TYPEIT
+         LA    R15,4                   SET BAD RETURN
+PRIVEXIT VEXIT BR,RAR,LTR
+         SPACE 3
+*  TEST FOR PRIVILEGED USER, BUT DON'T WRITE A MESSAGE
+*
+PRIVTNOM VENTER BR,RAR,*
+         CLPSERV PRIVTST
+         L     R15,CLWSCP              SCP POINTER
+         WITH  (SCP,R15),'TM  SCPPRIV,KWRIFSPR'
+         IF    O,'CLEAR R15'           IS PRIVILEGED
+         ELSE  'LA  R15,4'              IS NOT
+         VEXIT BR,RAR,LTR
+         EJECT ,
+         TITLE 'LOGON ROUTINE'
+*
+* ROUTINE TO HANDLE THE CASE WHERE WE MUST ASK THE USER ABOUT
+* HIS USER ID AND PASSWORD TO ALLOW HIM ON
+*
+CKLWA    RECORD BEGIN
+         VSA   R0,R15
+CKLKWR   DS    XL(KWRSIZE)        ROOM FOR THE KWR RECORD
+CKLABUF  DS    XL20               ROOM FOR THE ACCOUNT RESPONSE
+CKLKBUF  DS    XL20               ROOM FOR THE KEYWORD RESPONSE
+         END   ,
+CKLOGON  VENTER R0,R15,L'CKLWA,LOCAL
+         USING CKLWA,WAR          ADDRESS THE WORK AREA
+         IF    (SCPACCT,NE,'  .   '),CKLDONE    ALREADY HAVE IT
+         SET   CLWSSAM                          MUST BE STAND ALONE
+REASK    MVC   CKLABUF,=CL20' '
+         MVC   CKLKBUF,=CL20' '
+         READ  LA:1,CKLABUF,L'CKLABUF,CKLACCP   PROMPT FOR ACCOUNT
+         WAIT  (0)
+         IF    NZ,REASK
+         READ  LA:1,CKLKBUF,L'CKLKBUF,CKLKEYP   PROMPT FOR KEYWORD
+         WAIT  (0)
+         IF    NZ,REASK
+*
+* NOW VERIFY THAT THEY ARE OK
+*
+         IF    (CKLABUF+2,NE,'.'),BLITZEM   NOGOOD AS IS
+         B     BLITZEM                 **** NO KEYWORD ACCESS ****
+         ATTACH 8
+         IF    NZ,BLITZEM
+         WAIT  (0)
+         IF    NZ,BLITZEM
+         READ  (0),CKLKWR,KWRSIZE,CKLABUF     READ IN THE KWR REC
+         IF    NZ,BLITZEM
+         WAIT  (0)
+         IF    NZ,BLITZEM
+         DETACH (0)
+         WAIT  (0)
+         LA    R5,CKLKWR
+         USING KWR,R5
+         XC    CKLKBUF+4(4),CKLKBUF         MISH
+         XC    CKLKBUF(8),=C'EATATCIT'      MASH
+         CLC   KWRPASS,CKLKBUF
+         IF    NE,BLITZEM
+*
+* OK...IT LOOKS AS IF HE IS OK
+*
+         MVC   SCPACCT,CKLABUF              MOVE IN ACCOUNT HERE
+         WRITE LA:1,GREETING,L'GREETING
+         WAIT  (0)
+         B     CKLDONE
+BLITZEM  L     BR,=A(ENTBASE)
+         B     (LOGOFF-ENTBASE)(,BR)        DROP THEM
+*
+CKLDONE  LABEL ,
+         VEXIT R0,R15
+*
+CKLACCP  DS    0H
+         DC    Y(0)
+         DC    Y(L'CKLAP2)
+CKLAPX   DC    C'@@SYSMODE:'
+         DC    X'00800000'
+         DC    C':'
+         DC    C'ACCOUNT? '
+CKLAP2   EQU   CKLAPX,*-CKLAPX,C'C'
+*
+CKLKEYP  DS    0H
+         DC    Y(0)
+         DC    Y(L'CKLKP2)
+CKLKPX   DC    C'@@SYSMODE:'
+         DC    X'00800400'
+         DC    C':'
+         DC    C'KEYWORD? '
+CKLKP2   EQU   CKLKPX,*-CKLKPX,C'C'
+*
+GRSTART  DS    0C
+         DC    X'27ADF2D127AD86'
+         DC    X'151515'
+         DC    C'***** ORVYL LOGON COMPLETE *****'
+         DC    X'151515'
+GREETING EQU   GRSTART,*-GRSTART,C'C'
+         DROP  WAR
+         DROP  R5
+         EJECT
+* ROUTINE TO MOVE INFO FROM OS/VS CORE TO LOCAL CORE
+*
+*        ROUTINE IS CALLED WITH RAR POINTING TO AN MVC INSTRUCTION. THE
+*        SOURCE IS ASSUMED TO BE IN OS/VS CORE AND THE DESTINATION IN
+*        LOCAL MEMORY. AFTER SIMULATING THE MVC INSTRUCTION, CONTROL
+*        IS RETURNED FOLLOWING THE MVC INSTRUCTION. NOTE: ONE MAY NOT
+*        'EX' AN MVCOS PSEUDO-INSTRUCTION.
+*
+MVCOS    VENTER R0,R15,*               STORE REGS IN TABLE FASHION.
+         LC    R15,@RAR+1              PICK UP MVC LENGTH
+         LA    R15,@R15+1              ADJUST FOR ONE LESS
+         LH    SR,@RAR+2               D(B) OF DESTINATION
+         N     SR,=X'0000FFFF'         CLEAR SIGN BIT(S)
+         SRDL  SR,12                   PUT D IN TR
+         SRL   TR,32-12                RIGHT ADJUST D
+         IF    (SR,NZ),BEGIN           BASE REG
+           AR  SR,SR
+           AR  SR,SR                 ADDRESS WORD IN TABLE
+           AL  TR,@WAR(SR)           ADD B TO D
+         END   ,
+         LR    R1,TR                   DESTINATION POINTER
+         LH    SR,@RAR+4               D(B) OF SOURCE
+         N     SR,=X'0000FFFF'         CLEAR SIGN BIT(S)
+         SRDL  SR,12                   PUT D IN TR
+         SRL   TR,32-12                RIGHT ADJUST D
+         IF    (SR,NZ),BEGIN           BASE REG
+           AR  SR,SR
+           AR  SR,SR                 ADDRESS WORD IN TABLE
+           AL  TR,@WAR(SR)           ADD B TO D
+         END   ,
+         LR    R14,TR                  SOURCE POINTER
+         CLPSERV FETCH,(1),(15),*(14)   DO CORE MOVE
+         LA    RAR,@RAR+6              UPDATE RETURN
+         ST    RAR,@WAR+RAR*4
+         VEXIT R0,R15
+         EJECT ,
+*  CONSTANTS
+*
+         LTORG
+         END   .

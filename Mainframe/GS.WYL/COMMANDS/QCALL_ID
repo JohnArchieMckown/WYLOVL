@@ -1,0 +1,377 @@
+; ======================================================================
+; QCALL IDENTIFY command.                   wyl.gs.wyl.commands@qcall_id
+;
+; This xproc supports personal identification via PIN in the WYLBUR
+; query-client environment.  It will prompt for PIN, then establish
+; identification in the designated server connection.
+;
+; The syntax is:   QCALL IDENTIFY (queryno,univid,prompt,rc)
+;
+;   where     queryno -- a server connection number
+;             univid  -- the user's University ID
+;             prompt  -- prompt string (default is "Enter your PIN: ")
+;             rc      -- variable to receive the return code.  Possible
+;                        returns are OK (success), CANCEL, or ...?
+;
+; Written, 11/18/91, Lynn McRae
+;
+; Modifications:
+;   02/04/92  ltm  Minor wording changes in prompts/text for first-use
+;   01/23/92  ltm  Add SQU around PIN responses; temp extra logging
+;   01/06/92  ltm  Expanded/revised HELP text.
+;   12/27/91  ltm  Added FIRSTUSE support.
+;   11/18/91  ltm  Initial version.
+; ======================================================================
+
+xproc (queryno,univid,pinprompt,rc) begin
+
+   on error, cmd='xreturn error'
+   on attn,  cmd='on attn reenable'
+
+   ses.univid       = ''
+   ses.univid_name  = ''
+   ses.univid_email = ''
+   ses.univid_phone = ''
+   ses.univid_dept  = ''
+   ses.univid_desc  = ''
+
+   if (queryno eq '')                pcall error ('NOPARM','Missing query/server number')
+   if (univid  eq '')                pcall error ('NOPARM','Missing University ID parm')
+   if (vartype('rc') eq 'UNDEFINED') pcall error ('NOPARM','Too few parameters')
+
+   if (verify(queryno,'1234567890') gt 0) pcall error ('BADPARM','Invalid query/server number: ' || queryno)
+   if (pinprompt eq '') pinprompt = 'Enter your PIN: '
+
+   if (size(univid) eq 7) univid = '0' || univid
+   if (size(univid) ne 8) pcall error ('BADID','University ID must be 7 or 8 characters')
+
+   pinTries = 0   ; keep track of bad PIN attempts locally since we do some edits
+   ; without talking to the server
+   done = false
+
+   while (not done) begin
+
+      response = squ(input(pinprompt,'upper,attn,noecho,max=8'))
+
+      if (response eq '?')             response = 'HELP'
+      if (abbrev('QUIT',response,3))   response = 'CANCEL'
+
+      if (ioresult eq 'ATTN') begin               ; Attention
+         rc = 'CANCEL'
+         xreturn (rc)
+      end
+
+      if (abbrev('CANCEL',response,3)) begin      ; Cancel
+         rc = 'CANCEL'
+         xreturn (rc)
+      end
+
+      if (abbrev('HELP',response,3)) begin        ; Help
+         pcall HELP
+         on attn, cmd='on attn reenable'
+      end
+
+      else begin                                  ; we think we have a PIN
+         pcall PROCESS_PIN (queryno,univid,response,pinTries,rc)
+         if (rc eq 'OK') done = true
+         if (rc ne '')   xreturn (rc)
+      end
+
+   end
+
+   return (rc)
+
+end
+
+; ----------------------------------------------------------------------
+; proc FIRST_USE
+; ----------------------------------------------------------------------
+
+proc FIRST_USE (queryno,univid,epin,rc) begin
+
+   write ''
+   write 'This is the first time you''ve used your PIN.  For security,'
+   write 'please choose a new PIN now.'
+
+   done = false
+
+   while (not done) begin
+
+      newpin  = ''
+      newpin1 = ''
+
+      write ''
+      write 'Enter a new PIN (5 to 8 numbers long).'
+      pcall PROMPT_NEWPIN (newpin,rc)
+      if (rc eq 'CANCEL') return (rc)
+      newpin1 = newpin
+
+      write 'Enter your new PIN again for verification.'
+      pcall PROMPT_NEWPIN (newpin,rc)
+      if (rc eq 'CANCEL') return (rc)
+
+      if (newpin ne newpin1) begin
+         write 'The new PINs are not the same.  Please try again,'
+         write 'or type CANCEL to cancel.'
+      end
+      else done = true
+
+   end
+
+   pcall SET_EPIN (univid,newpin,epin)
+
+;  ; temporary logging to track a FIRST-USE problem!  ltm 1/23/92
+;  xcall wyl.gq.dbs.psystem.xproc#uidlog \
+;     ('&(univid)','TRACE','---','QSEND MODPIN   -- &(newpin)/&(epin)')
+
+   try qsend &(queryno) sysUnivId ("MODPIN","&(univid)","&(epin)","2")
+   if (tryid ne 'OK') pcall error (tryid,trymsg)
+
+   pcall QUERY_FETCH (queryno,rc)
+
+   if (rc ne 'OK') write 'Error setting new PIN.  Your prior PIN is still in effect.';
+   else begin
+      write 'Your new PIN is set.'
+      write ''
+      write 'Keep your PIN secret -- your PIN, along with your University ID, is'
+      write 'the electronic equivalent of your handwritten signature.  Sharing a'
+      write 'PIN is a violation of University policy.'
+      write ''
+   end
+
+end
+
+; ----------------------------------------------------------------------
+; proc HELP
+; ----------------------------------------------------------------------
+
+proc HELP () begin
+
+   on attn, cmd='return'
+
+   write ""
+   write "Enter your PIN at the prompt below and press the Return key."
+   write ""
+   write "Your Personal Identification Number (PIN) is associated with your University"
+   write "ID.  It is a 5-to-8 digit number that you can choose yourself and which only"
+   write "you know.  You should never share your PIN or use someone else's ID and PIN."
+   write ""
+   write "Because your PIN should never be visible to anyone but you, it will not be"
+   write "displayed as you type it in.  After you press the Return key, the system"
+   write "will verify that the PIN matches your identification."
+   write ""
+   write "If you cannot remember your PIN, type CANCEL to cancel this prompt.  To get"
+   write "a new PIN, students must bring a photo ID to the Registrar's Office during"
+   write "business hours.  Faculty or staff should contact a CLASS Consultant, or the"
+   write "CLASS Support Center (phone 725-8181)."
+   write ""
+   write "You may change your PIN by using the SET PIN command in Folio, or Prism"
+   write "users can use the MOD PIN form in the Personal Profile application."
+   write ""
+
+end
+
+; ----------------------------------------------------------------------
+; proc PROCESS_PIN
+; ----------------------------------------------------------------------
+
+proc PROCESS_PIN (queryno,univid,pin,pinTries,rc) begin
+
+   if     (verify(pin,'1234567890') ne 0)     rc = 'BADPIN'
+   elseif (size(pin) lt 5 or size(pin) gt 8)  rc = 'BADPIN'
+
+   else begin
+
+      epin = ''
+      firstuse = false
+      pcall SET_EPIN (univid,pin,epin)
+      pin = ''
+
+      try qsend &(queryno) sysUnivId ("SET","&(univid)","&(epin)","2","id,name,email,phone,description")
+      if (tryid ne 'OK') pcall error (tryid,trymsg)
+
+      pcall QUERY_FETCH (queryno,rc)
+
+      if (rc eq 'FIRSTUSE') begin
+         pcall FIRST_USE (queryno,univid,epin,rc)
+         if (rc eq 'CANCEL') return (rc)
+         rc = 'OK'
+      end
+
+   end
+
+   if (rc ne 'OK') begin
+
+      write 'Invalid PIN or unrecognized response.'
+      write ''
+
+      if (pinTries ge 3 or rc eq 'TRYLIMIT') begin
+         write "If you need help remembering or entering your PIN, you may contact"
+         write "the Registrar's Office at 723-5790 (students) or the CLASS Support"
+         write "Center at 725-8181 (Faculty or Staff)."
+         write ""
+         write "For a new PIN, students must bring a photo ID to the Registrar's Office"
+         write "during business hours.  Faculty or staff should contact a CLASS Consultant"
+         write "or the CLASS Support Center."
+         rc = 'TRYLIMIT'
+      end
+
+      else begin
+         write 'Please enter your 5-8 character numeric PIN.'
+         write 'Type HELP for more information, CANCEL to cancel.'
+         write ''
+         pinTries = pinTries + 1
+         rc = ''
+      end
+
+   end
+
+   return (pinTries,rc)
+
+end
+
+; ----------------------------------------------------------------------
+; proc PROMPT_NEWPIN
+; ----------------------------------------------------------------------
+
+proc PROMPT_NEWPIN (newpin,rc) begin
+
+   while (true) begin
+
+      response = squ(input('New PIN? ','attn,upper,noecho,max=8'))
+
+      if (ioresult eq 'ATTN') response = 'CANCEL'
+      if (abbrev('CANCEL',response,3)) begin
+         rc = 'CANCEL'
+         return (rc)
+      end
+
+      if (response eq '?') response = 'HELP'
+      if (abbrev('HELP',response,3)) begin
+         write ''
+         write 'Enter your new Personal Identification Number (PIN),'
+         write 'or type CANCEL to cancel.'
+         write ''
+      end
+
+      elseif (verify(response,'1234567890') ne 0 \
+            or size(response) lt 5 \
+            or size(response) gt 8) begin
+         write ''
+         write 'Your PIN must be a number from 5 to 8 digits long.'
+         write 'Please try again, or type CANCEL to cancel.'
+         write ''
+      end
+
+      elseif (size(response) lt 5 or size(response) gt 8) begin
+         write ''
+         write 'Your PIN must be a number from 5 to 8 digits long.'
+         write 'Please try again, or type CANCEL to cancel.'
+         write ''
+      end
+
+      else begin
+         newpin = response
+         rc = 'OK'
+         return (newpin,rc)
+      end
+
+   end
+
+end
+
+; ----------------------------------------------------------------------
+; proc QUERY_FETCH
+;
+; Returns return code (RC) and sets ses.univ... variables if successful
+; ----------------------------------------------------------------------
+
+proc QUERY_FETCH (queryno,rc) begin
+
+   declare  string  tag, col1, col2, col3, col4, col5, col6
+   morequery = true
+
+   while (morequery) begin
+
+      syscall query_fetch(queryno,tag,col1,col2)
+
+      if (tag eq '100') begin
+
+         if (col1 eq 'INFO') begin          ; INFO table
+            syscall query_fetch(queryno,tag,col1,col2)
+            rc = col1
+         end
+
+         elseif (col1 eq 'DATA') begin      ; DATA table
+            syscall query_fetch(queryno,tag,col1)        ; column headings
+            syscall query_fetch(queryno,tag,col1,col2,col3,col4,col5,col6)
+            ses.univid       = col1
+            ses.univid_name  = col2
+            ses.univid_email = col3
+            ses.univid_phone = col4
+            ses.univid_dept  = col5
+            ses.univid_desc  = col5
+            rc = 'OK'
+         end
+
+      end
+
+      elseif (tag eq '')            morequery = false
+      elseif (tag eq 'END OF FILE') morequery = false
+      elseif (left(tag,1) eq '2')   begin
+         if (col1 eq 'FIRSTUSE') rc = 'FIRSTUSE'
+         morequery = false
+      end
+      elseif (left(tag,1) eq '4')   morequery = false
+      elseif (left(tag,1) eq '5') begin
+         rc = 'ERROR'
+         morequery = false
+      end
+
+      else nullcmd ; ignore all other tags
+
+   end
+
+   return (rc)
+
+end
+
+; ----------------------------------------------------------------------
+; proc SET_EPIN
+; ----------------------------------------------------------------------
+
+proc SET_EPIN (univid,pin,epin) begin
+
+   ; create a 16-byte encrypted value to convey the PIN.  We can take
+   ; advantage of the fact that WYLBUR-as-client and RPC Server
+   ; currently reside on the same machine to make a time-dependent
+   ; scrambled value that will be different each time it's used and will
+   ; only be valid for a few minutes.
+
+   udate   = '19' || substr(date,16,2) || substr(date,10,2) || substr(date,13,2)
+   seconds = right(int(timebin),8,'0')
+
+   tkey = rf_encrypt_v8b(univid,shex(udate || seconds))
+
+   ekey = rf_encrypt_v8b(tkey,right(pin,8,' '))
+   pin = ''
+
+   epin = display(tkey) || display (ekey)
+
+   return (epin)
+
+end
+
+; ----------------------------------------------------------------------
+; proc ERROR
+; ----------------------------------------------------------------------
+
+proc ERROR (xerrId,xerrMsg) begin
+
+   if (xerrId  eq '') xerrid  = 'ERROR'
+   if (xerrMsg eq '') xerrMsg = 'Error processing QCALL IDENTIFY'
+
+   xerrmsg = chstr(xerrMsg,'"','""')
+   xreturn error, errid=&(xerrid) errmsg="&(xerrMsg)"
+
+end

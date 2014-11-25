@@ -1,0 +1,921 @@
+OSCN     TITLE 'WYLBUR''s Scanner'                                              
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+WYLOSCN  CSECT                                                                  
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+OSCN     IDENT 7024                08:41:37 01/24/97  (MPD)                     
+         SPACE 2                                                                
+         USING SA,WAR              ##                                           
+         USING CV                                                               
+         TITLE 'Local DSECTS and Work Areas'                                    
+* save area                                                                     
+*                                                                               
+SA       RECORD BEGIN                                                           
+         DS    F                                                                
+         DS    (12-2+1)F                                                        
+WORD     DS    2F                                                               
+SV15     DS    F                                                                
+PCNT     DS    H                                                                
+FL       DS    X                                                                
+FSQS     EQU   X'80'               Single quoted string                         
+FDQS     EQU   X'40'               Double quoted string                         
+FPS      EQU   X'20'               Parened string                               
+         END                                                                    
+         EJECT                                                                  
+FTBLE    EQU   X'F8'               New table pointer                            
+FLAST    EQU   X'FF'               End                                          
+FPARM    EQU   X'80'               Parm                                         
+FLINNO   EQU   X'60'               Line no. conv                                
+FINTEG   EQU   X'40'               Integer 0 or gtr                             
+FINTEGP  EQU   X'20'               Integer gtr 0                                
+FCMSET   EQU   X'10'               Set 3 command chars                          
+FLIMIT   EQU   X'10'               Limit                                        
+FABBREV  EQU   X'08'               Abbreviation                                 
+         PUSH  DSECTS                                                           
+         COPY  CONTROL             Copy cv/cp                                   
+         POP   DSECTS                                                           
+         SPACE 2                                                                
+*  work area                                                                    
+*                                                                               
+$$$RCP   DSECT                                                                  
+         ORG   CPOSCAN                                                          
+LOC      DS    F                                                                
+LEN      DS    H                                                                
+KW       DS    CL8                                                              
+PRTSTACK DS    H                   Relative pointer to prt stack                
+RA       DS    F                                                                
+PRT      DS    F                                                                
+         TITLE 'WYLBUR''s Scanner'                                              
+WYLOSCN  CSECT                                                                  
+* initialize                                                                    
+*                                                                               
+         ENTRY SCINIT                                                           
+SCINIT   CLEAR CPOSCAN             Reset scan control block                     
+         LA    R1,@R1                                                           
+         ST    R1,LOC              Save location                                
+         STH   R0,LEN              Save length                                  
+         BR    RAR                                                              
+*-                                                                              
+*-       scset added by ch, same as SCINIT except only location, and            
+*-       length are set.  Note that the return address in NOT reset.            
+*-                                                                              
+         ENTRY SCSET                                                            
+SCSET    LABEL ,                                                                
+         ST    R1,LOC                                                           
+         STH   R0,LEN                                                           
+         BR    RAR                                                              
+         EJECT                                                                  
+*  tell location and length                                                     
+*                                                                               
+         ENTRY SCTELL                                                           
+SCTELL   LABEL ,                                                                
+         LH    R0,LEN              Length                                       
+         L     R1,LOC              Location                                     
+         BR    RAR                                                              
+*-                                                                              
+*-      scinfo added by ch, same as SCTELL except R0 never negative.            
+*-                                                                              
+*-       notes: only known place that needs negative return is in               
+*-        LINE near label IMPLIED.  For now we add SCINFO, simple               
+*-        but a bit yucky (having 2 flavors of SCTELL).                         
+*-                                                                              
+         ENTRY SCINFO                                                           
+SCINFO   LABEL ,                                                                
+         LH    R0,LEN              Length                                       
+         L     R1,LOC              Location                                     
+         LTR   R0,R0                                                            
+         BNMR  RAR                 If R0 negative, clear R0                     
+         SR    R0,R0                                                            
+         BR    RAR                                                              
+         EJECT                                                                  
+*  return to point after scan call                                              
+*                                                                               
+         ENTRY SCDONE                                                           
+SCDONE   CLEAR LEN                 Set nothing left to scan                     
+         L     RAR,RA                                                           
+         LTR   R15,R15             SET CC, (SCDONE MACRO SETS CC=NZ)            
+         BR    RAR                                                              
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  Some is better than none !                                                   
+*                                                                               
+*                                                                               
+*  Some scan documentation for: SCAN [<sckw table>],RETURN=YES                  
+*                                                                               
+*  On entry:                                                                    
+*        scancb - must be set up                                                
+*        <SCKW table> is optional                                               
+*                                                                               
+*  On exit:                                                                     
+*        CC=zero, scan terminated with null scan                                
+*        CC=pos, r1,r0 are token loc len                                        
+*           (can this return happen if SCKW table present ??)                   
+*        CC=neg, invalid scan, or missing parm                                  
+*           r1,r0 are invalid token, CPSCNKW is blanked.                        
+*                                                                               
+*  NOTES:                                                                       
+*  CC is not based on any register.  R15 value unknown.                         
+*                                                                               
+*  Generally if no <SCKW table> is specified,  R0,R1 - will                     
+*  return the token scanned and an appropriate CC return                        
+*  code.  This case is very straight forward.                                   
+*                                                                               
+*  IF a <SCKW table> is specified.  Then the line will be scanned               
+*  and for each keyword found the specified routine will be called              
+*  with r15,r0,r1 containing the value of keywords or parms,, the               
+*  exact nature of r15,r0,r1 parms in unknown and must be                       
+*  determined by looking at the code.  If no general match SCKW is              
+*  specified and the token does not match any table entry i am                  
+*  not exactly sure what happens.                                               
+*                                                                               
+*  RETURN=YES works the same as a SCAN [<SCKW table>] call                      
+*  except the call will always return.  In the case of an invalid               
+*  scan, the return values will be as specified above.                          
+*                                                                               
+*  If you know some detail of how scan works,, you may want to                  
+*  add your comments here!   Remember:                                          
+*                                                                               
+*                                                                               
+*    *** Some is better than none.                                              
+*                                                                               
+         EJECT                                                                  
+*-                                                                              
+*-       Scan main entry point.                                                 
+*-                                                                              
+*-                                                                              
+*-                                                                              
+SCAN     XENTER R2,R12,0           Save regs                                    
+         USING SA,WAR                                                           
+BASE     LABEL                                                                  
+         ST    RAR,RA              Return addr                                  
+         ST    R1,PRT              Routing table                                
+GOSCAN   MVC   CPSCANBK,CPOSCAN    Save prev ptrs                               
+         LH    R5,LEN              Get length                                   
+         L     R6,LOC              Get location                                 
+         CLEAR R4,CPLSTSCK                                                      
+         CLEAR FL                  Clear flags                                  
+         B     RESCAN                                                           
+*                                                                               
+RESCANB  LA    R6,@R6+1            Step past blanks                             
+RESCANC  ST    R6,LOC              Save new token  start                        
+RESCAN   LA    R1,@R6(R5)          Point R1 to start of trt                     
+         S     R5,CVONE            Decrease count by one                        
+         BM    DONETST             Br if none left                              
+         CLEAR R2                  Clear trt reg                                
+         EX    R5,TRT                                                           
+         B     *+4(R2)             Br on delim code                             
+         B     EOS                 0  end of string                             
+         B     BLKCOM              4  blank-comma                               
+         B     SQUOTE              8  single quote                              
+         B     DQUOTE              12 double quote                              
+         B     LPAR                16 left paren                                
+         B     RPAR                20 right paren                               
+         B     SLASH               24 slash                                     
+         B     SEMI                28 semicolon                                 
+         B     ASTERISK            32 asterisk                                  
+*-                                                                              
+*-       process end of string                                                  
+*-                                                                              
+DONETST  IF    (R6,EQ,LOC),'LA R5,@R5+1; B DONE'  all done                      
+EOS      TM    FL,FSQS+FDQS+FPS    String?                                      
+         BZ    PREND               Br if not                                    
+ILLSTR   LR    R0,R1               Compute string ptr                           
+         L     R1,LOC                                                           
+         SR    R0,R1                                                            
+         B     BADSCAN                                                          
+*                                                                               
+* process blanks                                                                
+*                                                                               
+BLKCOM   TM    FL,FSQS+FDQS+FPS    String being collected?                      
+         BNZ   GOSTRING            Br if so                                     
+PREND    LR    R0,R1               Calculate                                    
+         S     R0,LOC              Length of token                              
+         BZ    RESCANB             No token if zero                             
+         SR    R5,R1               Update remaining                             
+         AR    R5,R6               Character count                              
+         LA    R6,@R1+1            Update remaining pointer                     
+         B     TOKEN               Go process token                             
+*                                                                               
+* process semicolon                                                             
+*                                                                               
+SEMI     IF    FL.FSQS+FDQS+FPS,GOSTRING  string being collected                
+         SR    R5,R1               Update remaining                             
+         AR    R5,R6               ... char count                               
+         LCR   R5,R5               Flip to indicate done                        
+         LA    R6,@R1+1            Update remaining ptr                         
+         LR    R0,R1               Calc                                         
+         S     R0,LOC              ... token len                                
+         BZ    RESCANB             No token                                     
+         B     TOKEN                                                            
+         EJECT                                                                  
+*  process slash                                                                
+*                                                                               
+SLASH    TM    FL,FSQS+FDQS+FPS    String being collected?                      
+         BNZ   GOSTRING            Br if so                                     
+         IF    CPFSNSEP,GOSTRING   don't separate these chars                   
+         C     R1,LOC              Is this token or previous tok                
+         BNE   PREVTOK             Br if previous token                         
+         LA    R0,1                Set length to 1 for this token               
+         AR    R6,0                Set remaining pointer past it                
+         B     TOKEN               Process                                      
+*-                                                                              
+*-       process single quote                                                   
+*-                                                                              
+SQUOTE   TM    FL,FDQS             "string"?                                    
+         BNZ   GOSTRING            Br if so                                     
+         TM    FL,FSQS             Old string?                                  
+         BO    CSQ                 Br if so                                     
+         TM    FL,FPS              Is it middle of paren string                 
+         BO    SQUOTE1             Yes, only set flag                           
+         C     R1,LOC              See if previous token                        
+         BNE   PREVTOK             Br if previous token                         
+SQUOTE1  OI    FL,FSQS             Set string scan                              
+         B     GOSTRING                                                         
+*                                                                               
+CSQ      AR    R5,R6               Bump ptr                                     
+         LR    R6,R1                                                            
+         SR    R5,R1                                                            
+         BNP   CSQETST             Br if end                                    
+         CLC   0(1,R6),1(R6)       Same kind of quote doubled                   
+         BNE   CSQETST             Br if not                                    
+         DECR  R5                  Eliminate 2nd quote                          
+         LA    R6,2(,R6)                                                        
+         B     RESCAN                                                           
+*                                                                               
+CSQETST  TM    FL,FPS              Is this string within parens                 
+         BE    ESTR                No, go end normally                          
+         NI    FL,255-FSQS-FDQS    Yes, turn off string flags                   
+         LA    R6,@R6+1            Point beyond string                          
+         B     RESCAN              Go finish parens                             
+*                                                                               
+PREVTOK  SR    R6,R1               Get neg of this part length                  
+         LA    R5,1(R6,R5)         Set remaining count                          
+         LR    R6,R1               Set remaining pointer                        
+         S     R1,LOC              Calculate lenght of prevtok                  
+         LR    R0,R1               Put count in r0                              
+         B     TOKEN               Go process                                   
+         EJECT                                                                  
+*  process double quote                                                         
+*                                                                               
+DQUOTE   TM    FL,FSQS             'string'?                                    
+         BNZ   GOSTRING            Br if so                                     
+         TM    FL,FDQS             Old string?                                  
+         BO    CSQ                 Br if so                                     
+         TM    FL,FPS              Is it middle of paren string                 
+         BO    DQUOTE1             Yes, only set flag                           
+         C     R1,LOC              See if previous token                        
+         BNE   PREVTOK                                                          
+DQUOTE1  OI    FL,FDQS             Set string scan                              
+         B     GOSTRING                                                         
+*                                                                               
+ESTR     LA    R6,@R6+1                                                         
+         LR    R0,R6               Compute token size                           
+         S     R0,LOC                                                           
+         B     TOKEN                                                            
+*-                                                                              
+*-       process left paren                                                     
+*-                                                                              
+LPAR     TM    FL,FSQS+FDQS        Quoted string?                               
+         BNZ   GOSTRING            Br if so                                     
+         TM    FL,FPS              Paren string?                                
+         BO    INP                 Br if so                                     
+         C     R1,LOC              See if previous token                        
+         BNE   PREVTOK             Br if previous token                         
+         OI    FL,FPS              Set paren scan                               
+         LA    R2,1                                                             
+         STH   R2,PCNT                                                          
+         B     GOSTRING                                                         
+*                                                                               
+INP      LH    R2,PCNT             Paren count                                  
+         LA    R2,@R2+1                                                         
+         STH   R2,PCNT                                                          
+         B     GOSTRING                                                         
+         EJECT                                                                  
+*  process right paren                                                          
+*                                                                               
+RPAR     TM    FL,FSQS+FDQS        Quoted string?                               
+         BNZ   GOSTRING            Br if so                                     
+         TM    FL,FPS              Paren string?                                
+         BZ    ILLSTR              Br if not                                    
+         LH    R2,PCNT             Decr count                                   
+         DECR  R2                                                               
+         STH   R2,PCNT                                                          
+         LTR   R2,R2                                                            
+         BNZ   GOSTRING                                                         
+         SR    R5,R1               Update str ptr                               
+         AR    R5,R6                                                            
+         LR    R6,R1                                                            
+         B     ESTR                                                             
+*                                                                               
+ASTERISK TM    CPSCNFLG,CPFSCNAS   Is asterisk separate token                   
+         BO    SLASH               Yes, handle as if slash                      
+GOSTRING SR    R5,R1               Update string ptrs                           
+         AR    R5,R6                                                            
+         LA    R6,@R1+1                                                         
+         B     RESCAN                                                           
+         EJECT                                                                  
+*  process a token                                                              
+*                                                                               
+* r0 = length of token on entry -- loc = start of token                         
+TOKEN    L     R1,LOC              Get location                                 
+         LR    R15,R0                                                           
+         MVC   KW,CVBLANKS         Blank kw                                     
+         CLEAR PRTSTACK            Init prt value                               
+         TM    FL,FSQS+FDQS+FPS    Quote or paren string?                       
+         BNZ   PRKW                Br if quote or paren string                  
+         IF    ^CPFSUPLO,BEGIN     Force upper case ...                         
+         LR    R2,R0               Count                                        
+         LR    R3,R1               Ptr                                          
+         L     R3,CVUPPTBL                                                      
+         LR    R2,R0                                                            
+         DEX   R2,'TR @R1(0),@R3'     Convert to upper case                     
+         END                                                                    
+         CL    R15,=A(8)           Max len is 8                                 
+         BL    *+8                 Br if too long                               
+         LA    R15,8               Set to move first 8                          
+         DEX   R15,MVT             Move kw                                      
+PRKW     LTR   R4,R4               Routine?                                     
+         BNZ   SETSR               Br if so                                     
+         LT    R2,PRT              Routing table                                
+         BP    KWSRCH              Br if normal table                           
+         L     R4,RA                                                            
+         B     GORTN                                                            
+*                                                                               
+*                                                                               
+KWNEX    LA    R2,5(R3,R2)         Try next                                     
+KWSRCH   ST    R2,CPLSTSCK         Save last sckw addr                          
+         TM    @R2,FTBLE           Is it push, pop, or end                      
+         BO    KWFND               Br if so                                     
+         IC    R3,@R2              Extract (len-1)                              
+         N     R3,=A(7)                                                         
+         TM    FL,FSQS+FDQS+FPS    Quote or paren string?                       
+         BNZ   NXTRY               Br if quote or paren string                  
+         LTR   R3,R3               Test token len                               
+         BNZ   COMPOK              User kw exists                               
+         CLI   @R2+4,C' '          Blank?                                       
+         BE    KWFND               Yes                                          
+COMPOK   CR    R3,R15              Len ok?                                      
+         BL    NXTRY               No, go on                                    
+         BE    DOCOMP              Equal, go compare                            
+         TM    @R2,FABBREV         Try abbreviation?                            
+         BZ    NXTRY               No                                           
+         CH    R0,=Y(3)            3-chars?                                     
+         BL    NXTRY               No                                           
+DOCOMP   EX    R15,CLC             Compare keywords                             
+         BE    KWFND               Br if found                                  
+NXTRY    TM    @R2,FLIMIT          Limit?                                       
+         BZ    KWNEX               No                                           
+         TM    @R2,FINTEG+FINTEGP  Integer?                                     
+         BNM   KWNEX               No                                           
+         LA    R2,@R3+9(R2)        Try next                                     
+         B     KWSRCH                                                           
+         EJECT                                                                  
+KWFND    NI    FL,255-FSQS-FDQS-FPS  reset string scan                          
+         NI    CPSCNFLG,255-CPFSPRM  reset parm scan                            
+         L3    R4,@R2+1            Routine                                      
+         TM    @R2,FTBLE           Is it push, pop, or end                      
+         BO    TSTLAST             Yes br if so                                 
+         IF    CPSCNFLG.CPFSNRTN,GORTN  ignore any parm if nsckw                
+         TM    @R2,FPARM           Parm?                                        
+         BZ    GORTN               Br if no parm                                
+         O     R4,=A(X'7F000000')  Make sure r4 is non-zero                     
+         STM   R2,R3,WORD          Save r2/r3 values                            
+         ST    R1,CPSCNKLC         Save scanner keyword addr                    
+         ST    R0,CPSCNKLN         Save keyword length                          
+         OI    CPSCNFLG,CPFSPRM    Have keyword.. look for prm                  
+         B     RESCANC             Find parm                                    
+*                                                                               
+TSTLAST  TM    @R2,255-FTBLE       Is it last                                   
+         BO    GORTN               All on, yes                                  
+         BM    GOPOP               Mixed, go pop up one level                   
+* push down current scan table pointer                                          
+         LA    R2,@R2+4            Set for next after pop                       
+         IF    (R4,Z),KWSRCH       Br if no table to push to                    
+         LH    R14,PRTSTACK        Get current stack offset                     
+         LA    R14,@R14+4                                                       
+         CEIL  R14,CPSCNMAX*4      Not too deep                                 
+         STH   R14,PRTSTACK        Replace stack offset                         
+         ST    R2,CPSCNSTK-4(R14)  Save current prt pointer                     
+         LR    R2,R4               Set new prt address                          
+         B     KWSRCH              Go search this table                         
+*                                                                               
+* pop up a save scan table pointer -- ignore if at top level                    
+GOPOP    LH    R14,PRTSTACK        Get current stack pointer                    
+         SH    R14,=H'4'                                                        
+         BM    NXTRY1              Ignore if top level                          
+         STH   R14,PRTSTACK        Put back stack pointer                       
+         L     R2,CPSCNSTK(R14)    Pick up old prt pointer                      
+         B     KWSRCH              Br to continue search                        
+*                                                                               
+NXTRY1   LA    R2,@R2+1            Step past ignored pop                        
+         B     KWSRCH              Continue in same table                       
+         EJECT                                                                  
+SETSR    LM    R2,R3,WORD          Reset r2/r3 values                           
+GORTN    LA    R14,GOSCAN          Point at return point                        
+         IF    CPSCNFLG.CPFGSBLK,'SET CPSCNFLG.CPFSBLK'  set default            
+         IF    CPSCNFLG.CPFSNRTN,'L R4,RA'                                      
+         STH   R5,LEN              Save length                                  
+         ST    R6,LOC              Save location                                
+         STM   R0,R1,CPSAVE        Save ptrs                                    
+         ST    R15,SV15            Save 15                                      
+         CLRHI R4                  Clear high order byte                        
+         IF    (R4,Z),CHKBLNK      Br if no routine                             
+         LTR   R2,R2               Prt?                                         
+         BZ    NTCMV               Br if not                                    
+         CLI   @R2,FLAST           End?                                         
+         BE    NTCMV               Br if so                                     
+*                                                                               
+         IF    (^CPSCNFLG.CPFSNRTN,OR,(@R2+4,EQ,' ')),BEGIN                     
+         TM    @R2,FLINNO          Integer or line no conv?                     
+         BO    LINNOCV             Line no. conv                                
+         BM    INTGRCV             Integer conv                                 
+         END                                                                    
+*                                                                               
+         IF    @R2.FCMSET,'MVC CPCMNM,KW'  Set command chars                    
+NTCMV    LA    R15,KW              Kw ptr                                       
+NOTKWPS  LR    R14,R4              Get ep                                       
+GORTN1   LM    R2,R12,@R13+4                                                    
+         CLRHI RAR                 Needed for XA                                
+         LTR   R0,R0               Set cc                                       
+         BASR  RAR,RAR             Go to parm routine                           
+SCNCON   XENTER R2,R12,0           Save regs                                    
+         BASE  BASE                                                             
+         LA    R14,GOSCAN          Point at return point                        
+CHKBLNK  TM    CPSCNFLG,CPFSBLK    Blank this token?                            
+         BZR   R14                 Br if not                                    
+         BAL   R3,BLANKIT          Go blank token                               
+         NI    CPSCNFLG,255-CPFSPRM  reset parm scan flag                       
+         BR    R14                 Continue scan                                
+*                                                                               
+SCNRES   XENTER R2,R12,0                                                        
+         BASE  BASE                                                             
+         CLEAR FL                                                               
+         L     R6,LOC                                                           
+         LH    R5,LEN                                                           
+         LR    R15,R0                                                           
+         IF    (R15,GT,8),'LA R15,8'                                            
+         DECR  R15                                                              
+         IF    (R0,^POS),RTN       Too late -- just return                      
+         L     R2,CPLSTSCK                                                      
+         IF    (@R2,EQ,X'FF'),BEGIN  resume after "end" sckw...                 
+         LA    R2,@R2+4                                                         
+         B     KWSRCH                                                           
+         END                                                                    
+         IC    R3,@R2              Len in sckw entry                            
+         N     R3,=A(7)                                                         
+         B     KWNEX               Resume scan                                  
+         EJECT                                                                  
+* decimal to binary conv rtn for scan                                           
+*                                                                               
+INTGRCV  LCALL DOINT               Go do cv                                     
+         TM    @R2,FINTEGP         Pos int?                                     
+         BZ    ANYI                No                                           
+         LTR   R0,R0               Test integ                                   
+         BNP   BOO                 Ng                                           
+ANYI     TM    @R2,FLIMIT          Limit?                                       
+         BZ    NTRSET              No                                           
+         ST    R0,WORD             For clc                                      
+         LA    R6,5(R2,R3)         Pt at limit                                  
+         CLC   WORD(4),@R6         Check limit                                  
+         BNH   NTRSET              Ok                                           
+         B     BOO                 Ng                                           
+         EJECT                                                                  
+*-                                                                              
+*-     process line number, max lineno is (F5.8) truncated to (F5.3)            
+*-                                                                              
+LINNOCV  CL    R0,=A(14)           Max length is 14 (F5.8)                      
+         BH    BOO                 Too big                                      
+         CLEAR R15                 Zero counter                                 
+         LR    R6,1                Ptr                                          
+CHKMR    CLI   @R6,C'.'            Period?                                      
+         BE    HVPRD               Yes                                          
+         LA    R15,@R15+1          Kick counter                                 
+         LA    R6,@R6+1            Kick ptr                                     
+         BCT   R0,CHKMR            More?                                        
+         B     WHOL                Integer line no                              
+*                                                                               
+HVPRD    BCT   R0,CHKFR            Fraction?                                    
+WHOL     LTR   R0,R15              Integ count                                  
+         BNP   BOO                 "." not legal                                
+         CLEAR R15                 Zero fraction                                
+WHOLDO   CL    R0,=A(5)            Max length is 5                              
+         BH    BOO                                                              
+         LCALL DOINT               Conv                                         
+         MH    R0,=H'1000'         Set integer value                            
+         AR    R0,R15              Add in fraction                              
+NTRSET   LR    R15,R0              Set return value into r15                    
+         LM    R0,R1,CPSAVE        Reset ptrs                                   
+         B     NOTKWPS             Ready to return                              
+*                                                                               
+CHKFR    CL    R0,=A(9)            8 is max, we truncate to 3                   
+         BNL   BOO                 Ng                                           
+         LR    R14,R0              * fix by noid 2/86, 11 lines *               
+         LR    R5,R6               check to see that all chars                  
+         DECR  R0                  are numeric                                  
+         LA    R6,1(R6)                                                         
+         WHILE (R0,POS),BEGIN                                                   
+         IF    ((@R6,LT,'0'),OR,(@R6,GT,'9')),BOO                               
+         DECR  R0                                                               
+         LA    R6,1(R6)                                                         
+         END                                                                    
+         LR    R0,R14                                                           
+         LR    R6,R5               * fix done *                                 
+         MVC   WORD+1(2),=C'00'    Put zeros                                    
+         LR    R14,R0              Count                                        
+         DEX   R14,MVFR            Mvc   word(0),1(r6)                          
+         LA    R0,3                Cv count  (truncated to 3)                   
+         LA    R1,WORD             Ptr                                          
+         LCALL DOINT               Cv                                           
+         LTR   R5,R15              Any integ count?                             
+         BNP   NTRSET              Fin                                          
+         LR    R15,R0              Save frac                                    
+         LR    R0,R5               Integ count                                  
+         L     R1,CPSAVE+4         Reset start ptr                              
+         B     WHOLDO              Integer line no                              
+*                                                                               
+MVFR     MVC   WORD(*-*),@R6+1                                                  
+         EJECT                                                                  
+DOINT    CL    R0,=A(9)            Max len is 9                                 
+         BH    BOO                 Ng                                           
+         LR    R5,R0               Count                                        
+         LR    R6,R1               Ptr                                          
+CHNEXT   CLI   @R1,C'0'            Too small?                                   
+         BL    BOO                 Yes                                          
+         CLI   @R1,C'9'            Too big?                                     
+         BH    BOO                 Yes                                          
+         LA    R1,@R1+1            Next                                         
+         BCT   R0,CHNEXT           More?                                        
+         DEX   R5,CHPACK           Pack                                         
+         CVB   R0,CPDOUB           Convert                                      
+         BR    RAR                 Return                                       
+         EJECT                                                                  
+BOO      CLEAR R4                  Unset routine                                
+         LH    R5,LEN              Get length                                   
+         L     R6,LOC              Get location                                 
+         LM    R0,R1,CPSAVE        Ptrs                                         
+         TM    @R2,FPARM           Parm?                                        
+         L     R15,SV15            Set 15                                       
+         BZ    NXTRY               No                                           
+         B     BADSCAN             Yuckkk                                       
+         SPACE 6                                                                
+BLANKIT  NI    CPSCNFLG,255-CPFSBLK  reset blank request                        
+         LM    R0,R1,CPSAVE        Get token pointer                            
+         BAL   R2,BLNK             Go blnk token                                
+         TM    CPSCNFLG,CPFSPRM    Is it parm token?                            
+         BZR   R3                  Br if not                                    
+         L     R1,CPSCNKLC         Get keyword pointers                         
+         L     R0,CPSCNKLN         Get keyword length                           
+         LR    R2,R3               Set return address                           
+*                                                                               
+BLNK     LTR   R15,R0              Copy length                                  
+         BNPR  R2                  Return not positive                          
+         MVI   @R1,X'40'           Insert the blank                             
+         BCT   R15,*+6             ** must stay **                              
+         BR    R2                  ** together  **                              
+         DECR  R15                 ** these ins **                              
+         EX    R15,BLNMVC          Blank it out                                 
+         BR    R2                  Return to caller                             
+*                                                                               
+BLNMVC   MVC   @R1+1(*-*),@R1      ** executed mvc **                           
+         EJECT                                                                  
+*  terminal processing                                                          
+*                                                                               
+DONE     LABEL                                                                  
+         IF    (R4,NZ),NOPARM      If missing parm, error >>                    
+*                                                                               
+RTN      CLEAR R0,R1               Zot loc and len                              
+         ST    R0,CPLSTSCK         Reset last sckw ptr                          
+         MVC   KW,CVBLANKS         Clear kw                                     
+         STH   R5,LEN              Save length                                  
+         ST    R6,LOC              Save location                                
+         STM   R0,R1,CPSAVE        Save ptrs                                    
+         L     RAR,RA              Return addr                                  
+         LA    R15,KW                                                           
+         LM    R2,R12,@R13+4                                                    
+         LTR   R0,R0                                                            
+         BR    RAR                                                              
+         EJECT                                                                  
+*-                                                                              
+*-       Invalid scan, we have error                                            
+*-                                                                              
+BADSCAN  LABEL ,                                                                
+         IF    (R0,Z),BEGIN        Imposible, give 1st char min.                
+         LA    R0,1                                                             
+         END                                                                    
+         STM   R0,R1,CPSAVE        Set for call to CVNVALID                     
+         COMMENT                   If error exit, take exit                     
+         IF    CPSCNFLG.CPFRTNER,ERREXIT                                        
+         IF    CPFSRETN,ERREXIT                                                 
+         B     CVNVALID            Otherwise, return invalid                    
+         SPACE 3                                                                
+*-                                                                              
+*-        No parm found, we have error                                          
+*-                                                                              
+NOPARM   LABEL ,                                                                
+         L     R1,CPSCNKLC         Set R0,R1 for error exit                     
+         L     R0,CPSCNKLN                                                      
+         COMMENT                   If error exit, take exit                     
+         IF    CPSCNFLG.CPFRTNER,ERREXIT                                        
+         IF    CPFSRETN,ERREXIT                                                 
+         COMMENT                   Missing parm, give error                     
+         L     R1,WORD             Prt address                                  
+         LTR   R1,R1                                                            
+         BZ    CVABSENT            None                                         
+         CLRHI R1                  For 31-bit addressing mode                   
+         IC    R15,@R1                                                          
+         N     R15,=F'7'           Kw length-1                                  
+         TSEG  @R1+4,@R15+1        Add kw w/o parm                              
+         TSEG  ':',,B                                                           
+         B     CVABSENT            Finish up msg                                
+         EJECT                                                                  
+*-                                                                              
+*-     Error exit, return to caller w/error, or to callers err exit.            
+*-                                                                              
+ERREXIT  LABEL ,                                                                
+*                                                                               
+         IF    CPFSRETN,BEGIN      return to caller w/error                     
+         CLEAR CPFSRETN                                                         
+         MVC   CPSCNKW,CVBLANKS                                                 
+         L     RAR,RA                                                           
+         CLRHI RAR                                                              
+         LM    R2,R12,@R13+4                                                    
+         CLC   CVONE,CVFOUR        set CC=neg                                   
+         BASR  RAR,RAR                                                          
+         END                                                                    
+*                                                                               
+         ELSEIF CPSCNFLG.CPFRTNER,BEGIN return to caller's err exit             
+         CLEAR CPSCNFLG.CPFRTNER                                                
+         L     RAR,CPSCNERT                                                     
+         CLRHI RAR                                                              
+         LM    R2,R12,@R13+4                                                    
+         LTR   R0,R0                                                            
+         BASR  RAR,RAR                                                          
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               no other valid case                          
+         BOMB                                                                   
+         END                                                                    
+         EJECT                                                                  
+*  constants                                                                    
+*                                                                               
+TRT      TRT   @R6(*-*),CLTBL      Scan                                         
+MVT      MVC   KW(0),@R1           Move token                                   
+CLC      CLC   KW(0),@R2+4         Compare keywords                             
+CHPACK   PACK  CPDOUB(8),@R6(0)    Pack instr for ex                            
+*                                                                               
+         DROP  SA                                                               
+         EJECT                                                                  
+***                                                                             
+***  Class Table                                                                
+***                                                                             
+CLTBL    DC    256AL1(4)                                                        
+         ORG   CLTBL+C'a'                                                       
+         DC    9X'00'                                                           
+         ORG   CLTBL+C'j'                                                       
+         DC    9X'00'                                                           
+         ORG   CLTBL+C's'                                                       
+         DC    8X'00'                                                           
+         ORG   CLTBL+C'A'                                                       
+         DC    9X'00'                                                           
+         ORG   CLTBL+C'J'                                                       
+         DC    9X'00'                                                           
+         ORG   CLTBL+C'S'                                                       
+         DC    8X'00'                                                           
+         ORG   CLTBL+C'0'                                                       
+         DC    10X'00'                                                          
+         ORG   CLTBL+C'.'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'$'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'@'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'#'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'&&'                                                      
+         DC    X'00'                                                            
+         ORG   CLTBL+C'_'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'+'                                                       
+         DC    AL1(24)                                                          
+         ORG   CLTBL+C'-'                                                       
+         DC    AL1(24)                                                          
+         ORG   CLTBL+C''          Cent sign                                    
+         DC    X'00'                                                            
+         ORG   CLTBL+C'!'          Exp. point                                   
+         DC    X'00'                                                            
+         ORG   CLTBL+C'<'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'>'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C':'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C';'                                                       
+         DC    AL1(28)                                                          
+         ORG   CLTBL+C'%'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'['                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C']'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'{'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'}'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'\'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'`'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C'|'                                                       
+         DC    AL1(24)                                                          
+         ORG   CLTBL+C'?'                                                       
+         DC    X'00'                                                            
+         ORG   CLTBL+C''''                                                      
+         DC    AL1(8)                                                           
+         ORG   CLTBL+C'"'                                                       
+         DC    AL1(12)                                                          
+         ORG   CLTBL+C'('                                                       
+         DC    AL1(16)                                                          
+         ORG   CLTBL+C')'                                                       
+         DC    AL1(20)                                                          
+         ORG   CLTBL+C'/'                                                       
+         DC    AL1(24)                                                          
+         ORG   CLTBL+C'^'          Add ^ to trt table                           
+         DC    AL1(24)                                                          
+         ORG   CLTBL+C'*'                                                       
+         DC    AL1(32)                                                          
+         ORG                                                                    
+         EJECT                                                                  
+         QLTORG                                                                 
+*box                                                                            
+*                                                                               
+*   SCANTOK -- Routine to scan off the next token; bypassing                    
+*     all the scanner's complicated rules and upper casing.                     
+*                                                                               
+*     On exit, R15 (and cc):                                                    
+*       R15   - 0: token returned; 4: no more text                              
+*       R1,R0 - token loc, len                                                  
+*       (scan loc, len updated)                                                 
+*                                                                               
+*       CPTOKEN  - 16 byte isolated token                                       
+*       CPUPPTOK - 16 byte capitalized token                                    
+*                                                                               
+SCANTOK  XPROC (R2,LSR)                                                         
+         MVC   CPTOKEN,CVBLANKS                                                 
+         MVC   CPUPPTOK,CVBLANKS                                                
+*                                                                               
+         LH    R2,LEN                                                           
+         L     R3,LOC              Get remaining len and addr                   
+*-                                                                              
+*-       Skip leading separators.                                               
+*-                                                                              
+         WHILE ((R2,POS),AND,                                          *        
+               ((@R3,EQ,' '),OR,(@R3,EQ,','),OR,(@R3,EQ,'='))),BEGIN            
+         INCR R3                                                                
+         DECR R2                                                                
+         END                                                                    
+*-                                                                              
+*-       Scan off the next token.                                               
+*-                                                                              
+         IF    (R2,POS),BEGIN      We have some text...                         
+*-                                                                              
+*-       Find ending separator.                                                 
+*-                                                                              
+         LR    R1,R3               Save start of token ptr                      
+*                                                                               
+         WHILE ((R2,POS),AND,                                          *        
+               (@R3,NE,' '),AND,                                       *        
+               (@R3,NE,',')),BEGIN                                              
+         INCR R3                                                                
+         DECR R2                                                                
+         END                                                                    
+*                                                                               
+         LR    R0,R3               Compute                                      
+         SR    R0,R1                 token length                               
+*                                                                               
+         STH   R2,LEN                                                           
+         ST    R3,LOC              Update scanner info                          
+*                                                                               
+         LR    R2,R0                                                            
+         CEIL  R2,L'CPTOKEN                                                     
+         MOVE  R2,CPTOKEN,@R1      Save token                                   
+*                                                                               
+         MVC   CPUPPTOK,CPTOKEN    Copy it                                      
+         L     R15,CVUPPTBL                                                     
+         TR    CPUPPTOK,@R15       Capitalized token                            
+*                                                                               
+         CLEAR R15                 Set A-ok RC                                  
+         END                                                                    
+*-                                                                              
+*-       No more text to scan.                                                  
+*-                                                                              
+         ELSE  BEGIN               No more text...                              
+         CLEAR R0,R1               Null token                                   
+         LA    R15,4               Set RC                                       
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*   SCANWTOK -- Routine to scan off the next token; bypassing                   
+*     all the scanner's complicated rules and upper casing.                     
+*                                                                               
+*     SCANWTOK will scan treat ";" as an end of line terminator                 
+*     which is what Wylbur commands generally require.  If you                  
+*     don't want this then use the SCANTOK routine.                             
+*                                                                               
+*     On exit, R15 (and cc):                                                    
+*       R15   - 0: token returned; 4: no more text                              
+*       R1,R0 - token loc, len                                                  
+*       (scan loc, len updated)                                                 
+*                                                                               
+*       CPTOKEN  - 16 byte isolated token                                       
+*       CPUPPTOK - 16 byte capitalized token                                    
+*                                                                               
+SCANWTOK XPROC (R2,LSR)                                                         
+         MVC   CPTOKEN,CVBLANKS                                                 
+         MVC   CPUPPTOK,CVBLANKS                                                
+*                                                                               
+         LH    R2,LEN                                                           
+         L     R3,LOC              Get remaining len and addr                   
+*-                                                                              
+*-       Scan off the next token.                                               
+*-                                                                              
+         IF    (R2,POS),BEGIN      We have some text...                         
+*-                                                                              
+*-       Skip leading separators.                                               
+*-                                                                              
+         WHILE ((R2,POS),AND,                                          *        
+               ((@R3,EQ,' '),OR,(@R3,EQ,','),OR,(@R3,EQ,'='))),BEGIN            
+         INCR R3                                                                
+         DECR R2                                                                
+         END                                                                    
+*-                                                                              
+*-       Find ending separator.                                                 
+*-                                                                              
+         LR    R1,R3               Save start of token ptr                      
+*                                                                               
+         WHILE ((R2,POS),AND,                                          *        
+               (@R3,NE,';'),AND,                                       *        
+               (@R3,NE,' '),AND,                                       *        
+               (@R3,NE,',')),BEGIN                                              
+         INCR R3                                                                
+         DECR R2                                                                
+         END                                                                    
+*                                                                               
+         LR    R0,R3               Compute                                      
+         SR    R0,R1                 token length                               
+*                                                                               
+         STH   R2,LEN                                                           
+         ST    R3,LOC              Update scanner info                          
+*                                                                               
+         LR    R2,R0                                                            
+         CEIL  R2,L'CPTOKEN                                                     
+         MOVE  R2,CPTOKEN,@R1      Save token                                   
+*                                                                               
+         MVC   CPUPPTOK,CPTOKEN    Copy it                                      
+         L     R15,CVUPPTBL                                                     
+         TR    CPUPPTOK,@R15       Capitalized token                            
+*                                                                               
+         CLEAR R15                 Set A-ok RC                                  
+*-                                                                              
+*-       Are we at the end of the line (at the semi-colon).                     
+*-                                                                              
+         IF    ((R2,POS),AND,(@R3,EQ,';')),BEGIN  At ";"...                     
+         IF    (R0,Z),'LA R15,4'   Nothing left, set RC                         
+         END                                                                    
+         END                                                                    
+*-                                                                              
+*-       No more text to scan.                                                  
+*-                                                                              
+         ELSE  BEGIN               No more text...                              
+         CLEAR R0,R1               Null token                                   
+         LA    R15,4               Set RC                                       
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*   blank last token                                                            
+*                                                                               
+BLNKTOK  XENTER R15,R8,*                                                        
+         IF    CPSCNFLG.CPFSBLK,BEGIN   do if token blanking...                 
+         BASE  BASE                                                             
+         BAL   R3,BLANKIT          Blank token                                  
+         END                                                                    
+         XEXIT R15,R8                                                           
+         DROP  BR                                                               
+*                                                                               
+         QLTORG ,                  ,,, DEBUG OF DETRNG                          
+         EJECT                                                                  
+         VLTORG                                                                 
+         END   .                                                                

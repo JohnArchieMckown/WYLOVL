@@ -1,0 +1,276 @@
+;  wylinst - install a wylbur or milten module
+;
+;  This xproc will build and submit a job to zap a version id into
+;  the test load module and then copy from the test library into the
+;  same subsystem's production library.
+;
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLINST as  "xcall wyl.gs.wyl.lib#wylinst /" rep
+;
+;  command syntax:
+;      wylinst <subsys>
+;
+;  <subsys>:
+;      name of subsystem; there is no default; values allowed are
+;      WYLBUR, TESTWYL, MILTEN, and TESTMIL
+;  <NOPROMPT|PROMPT>:
+;      determines whether to verify actions about to be taken;
+;      default is NOPROMPT for non-destructive acitons, PROMPT for
+;      destructive actions
+;  <DEBUG>:
+;      sets debug mode for this invocation; it will not run, but
+;      will report what it would have run
+;
+;  Updated:
+;
+;  07/22/94  slp  Clean up documentation.
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl boolean x.debug
+  dcl string x.program, x.stem
+  dcl string subsys, prompt
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; initialize variables
+  subsys = ''
+  prompt = 'NO'
+  x.program = 'WYLBUR'
+  x.debug = FALSE
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wylinst tit 'wylinst temporary active' temp
+  x.temp = actno                   ; save temp active file number
+
+  ; scan command
+  pcall scan_command (parm_count, parm_string, \
+    subsys, prompt)
+  if (x.program eq 'WYLBUR') x.stem = 'WYL'
+  else x.stem = 'MIL'
+
+  ; go build job
+  pcall install_module (subsys)
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+;<.page>
+;
+;  scan parameters passed on invoking command
+;
+proc scan_command (pc,ps,subsys,prompt) \
+  begin
+
+  dcl string token,remain,type
+  dcl string delims
+
+  delims = ' ,;=''"'               ; define parm delimiters
+
+  ;  check for at least one parameter
+  remain = ps
+  if (ps eq '') \
+    begin
+    comm Subsys parameter is required.
+    ps = '?'
+    end
+  if (strip(ps) eq '?') pcall error_msg( \
+    'Command syntax: wylinst <subsys> <NOPROMPT|PROMPT>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan:  <subsys> <NOPROMPT|PROMPT>
+  while (remain ne '') \
+    begin
+    syscall scan_parm(token,remain,type,' ,',delims)
+
+    cases \
+      begin
+      case (upper(token) eq 'WYLBUR') \
+        begin
+        subsys = 'WYLBUR'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'TESTWYL') \
+        begin
+        subsys = 'TESTWYL'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'MILTEN') \
+        begin
+        subsys = 'MILTEN'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'TESTMIL') \
+        begin
+        subsys = 'TESTMIL'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'NOPROMPT') prompt = 'NO'
+      case (upper(token) eq 'PROMPT') prompt = 'YES'
+      case (upper(token) eq 'DEBUG') x.debug = TRUE
+      case (TRUE) pcall error_msg('invalid parm '||token)
+      end
+    end
+  if (subsys eq '') pcall error_msg('subsys parm is required')
+  return(subsys,prompt)
+  end
+
+;<.page>
+;
+;  install module from test to sysa linklib
+;
+proc install_module (subsys) \
+  begin
+  dcl number i
+  dcl string timestamp, wver, csect
+
+  if (x.program eq 'WYLBUR') csect = 'VERSION'
+  else csect = 'MILVERS'
+
+  putend //&(x.stem)$NLNK JOB GS.&(x.stem),'Install &(subsys)',REGION=900K
+  timestamp =  SUB(DAT,1,5)||' '||SUB(DAT,10,5)||': '
+  while (wver EQ '') \
+    begin
+    READ STR wver PRO '&(timestamp)' UPLOW
+    if (siz(wver) gt 235) \
+      begin
+      i = SIZ(wver)-235
+      comm Message is &(i) characters too long
+      wver = ''
+      end
+    wver = timestamp || wver
+    end
+  putend //* &(sub(wver,1,67))
+;
+  putend //*
+  putend //*  Zap &(subsys) version id into test library
+  putend //*
+  putend //VERS    EXEC PGM=AMASPZAP,REGION=64K
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSLIB   DD  DSN=WYL.GS.&(x.stem).&(subsys).TEST.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend NAME &(x.program) &(csect)
+  putend * &(SUB(wver,1,69))
+
+  i = 0
+  wver = substr(wver,1,235)
+  while (siz(wver) gt 32) \
+    begin
+    putend REP &(SUB(DIS(i),7)) &(DIS(SUB(wver,1,32)))
+    wver = SUB(wver,33)
+    i = i + 32
+    end
+  putend REP &(SUB(DIS(i),7)) &(DIS(wver))
+;
+  putend //*
+  putend //*  Copy current production load module to backup library
+  putend //*
+  putend //BCOPY   EXEC PGM=IEBCOPY,COND=(0,NE)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSB     DD  DSN=WYL.GS.&(x.stem).&(subsys).SYSB.LINKLIB,DISP=SHR
+  putend //BACK     DD  DSN=WYL.GS.&(x.stem).&(subsys).BACK.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend   COPY INDD=((SYSB,R)),OUTDD=BACK
+;
+  putend //*
+  putend //*  Copy test load module to production library
+  putend //*
+  putend //COPY    EXEC PGM=IEBCOPY,COND=(0,NE)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //TEST     DD  DSN=WYL.GS.&(x.stem).&(subsys).TEST.LINKLIB,DISP=SHR
+  putend //SYSB     DD  DSN=WYL.GS.&(x.stem).&(subsys).SYSB.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend   COPY INDD=TEST,OUTDD=SYSB
+  putend   SELECT MEMBER=((&(x.program),,R))
+
+  putend //*
+  putend //*  Condense backup load library
+  putend //*
+  putend //$BCOND  EXEC PGM=IEBCOPY,COND=(0,NE)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSIN    DD  DUMMY
+  putend //SYSUT1   DD  DSN=WYL.GS.&(x.stem).&(subsys).BACK.LINKLIB,DISP=SHR
+  putend //SYSUT2   DD  DSN=WYL.GS.&(x.stem).&(subsys).BACK.LINKLIB,DISP=SHR
+
+  putend //*
+  putend //*  Condense production load library
+  putend //*
+  putend //$COND   EXEC PGM=IEBCOPY,COND=(0,NE)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSIN    DD  DUMMY
+  putend //SYSUT1   DD  DSN=WYL.GS.&(x.stem).&(subsys).SYSB.LINKLIB,DISP=SHR
+  putend //SYSUT2   DD  DSN=WYL.GS.&(x.stem).&(subsys).SYSB.LINKLIB,DISP=SHR
+
+  if (not x.debug) run unn hold notify
+  else \
+    begin
+    comm run unn hold notify
+    xpause
+    end
+
+  end
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Exec wylinst failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WASMERR errmsg='&(msg)'
+  end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=winserr errmsg="wylinst failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

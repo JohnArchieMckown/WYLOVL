@@ -1,0 +1,270 @@
+SIGAWAIT TITLE 'ORVYL''S Signal/Await routines'
+         COPY  HEADER
+         SPACE 4
+DISABLE  EQU   X'BC'                   Disable 'AND' mask
+SIGAWAIT MODULE TRCNUM=8
+         EJECT
+         COPY  PZERO
+         EJECT
+         COPY  DISPPARM
+         EJECT
+         COPY  SIGPARM
+         EJECT
+ECB      RECORD BEGIN
+         DS    D
+         END   ,
+         SPACE ,
+         EJECT ,
+*********************************************************************
+*  Wait a task based on ECB                                         *
+*                                                                   *
+*   Input - @AWAIT                                                  *
+*                                                                   *
+*  Output - Post bit is cleared in ECB                              *
+*           RVR = Post code (low order word of post code)           *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+AWAIT    PROC  @AWAIT,SCOPE=GLOBAL
+         USING PZERO,R0
+         L     RY,@AWTECB
+         WITH  (ECB,RY)
+*
+*  Disable and set to suspend on next dispatch
+*
+         IF    ^ECB.X'40',BEGIN        Not posted
+         STNSM PZPSWM,DISABLE
+         PSET  @SUSPEND                Suspend task on next dispatch
+         IF    @AWTLONG,'SET @SUSPLNG' | long term wait
+         VCALL SUSPEND                 |
+         LM    RJ,RK,@SUSPCTL          Info about this level of ctl
+         O     RJ,=X'80000000'         | set it as waiting
+*
+*  Check ECB - can we go?
+*
+         LM    RA,RB,ECB               Check posted bit
+WAITLOOP LOOP  BEGIN
+         LR    RS,RA                   |
+         N     RS,=X'40000000'         |
+         IF    NZ,BEGIN                Posted - no waiting
+         PSET  @RESUME                 Turn off suspend
+         N     RJ,=X'7FFFFFFF'         | high bit off
+         STM   RJ,RK,@RESCTL           |
+         VCALL RESUMTS                 |
+         EXIT  WAITLOOP
+         END   ,                       OF Posted - no waiting
+         CDS   RA,RJ,ECB               Set as waiting
+         UNTIL EQUAL,END               Changed - see if posted?
+*
+*  Reenable interrupts
+*
+         SSM   PZPSWM
+*
+*  Force a dispatch
+*
+         VCALL DISPRD
+         END   ,                       OF Not Posted
+*
+*  When we run again, clear posted flag
+*
+         CLEAR ECB.X'40',MODE=LOCKED,REF=ECB    Clear posted flag
+         L     RVR,ECB+4               Load post code - low order
+         DROP  R0
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  Post a task based on ECB                                         *
+*                                                                   *
+*   Input - @SIGNAL                                                 *
+*                                                                   *
+*  Output - Control word posted                                     *
+*            RVR = 0 if wake up action successful                   *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+SIGNAL   PROC  @SIGNAL,SCOPE=GLOBAL
+         L     RY,@SGECB
+         WITH  (ECB,RY)
+         LM    RJ,RK,@SGCODE           Get post code
+         N     RJ,=X'3FFFFFFF'         | clear high bits
+         O     RJ,=X'40000000'         | set post bit
+         LM    RA,RB,ECB
+*
+*  Try to do fast-post
+*
+         LOOP  BEGIN
+         IF    (RA,NEG),DOPOST         Currently waiting, do post
+         CDS   RA,RJ,ECB
+         UNTIL EQUAL,END
+         CLEAR RVR
+         EXIT  SIGNAL                  Did fast post - scram
+*
+*  Task already waiting - post code and resume task
+*
+DOPOST   LOOP  BEGIN                   Set post code
+         CDS   RA,RJ,ECB               |
+         IF    EQUAL,EXIT              We posted - do resume
+         IF    (RA,NEG),NEXT           Still waiting, try again
+         LR    RS,RA
+         N     RS,=X'40000000'
+         IF    NZ,EXIT,SIGNAL          Posted, but not by us
+         END   ,                       OF Set post code
+         LR    RS,RA
+         IF    ('N RS,=X"80000000"',ZERO),EXIT,SIGNAL
+*
+*  We know we have a waiting resume unit now
+*
+         N     RA,=X'7FFFFFFF'
+*
+*  Post code set, now do resume
+*
+         USING PZERO,R0
+         L     RS,@SGASB               ASB to post
+*
+*  Post in this AS
+*    Zero ASB means post in this AS
+         IF    ((RS,ZERO),OR,(RS,EQ,PZCURASB)),BEGIN
+         PSET  @RESUME
+         STM   RA,RB,@RESCTL
+         VCALL RESUMTS
+         CLEAR RVR
+         END   ,                       OF Post in this AS
+         ELSE  BEGIN                   Schedule cross AS post
+         PSET  @SYSRDO
+         PMOV  @SYSRID,@SGSRID
+         PMOV  @SYSRASB,(RS)
+         PMOV  @SYSRLOC,LA:CROSSRES
+         STM   RA,RB,@SYSRPRM
+         VCALL SYSRDO
+         IF    (RVR,NZ),BEGIN
+         ORVWTO 'Signal Cross Post Failed',MODE=SYSLOG
+         ORVWTO @SYSRDO,MODE=SYSLOG
+         END   ,
+         END   ,                       OF Schedule cross AS post
+         DROP  R0
+         PEND  ,
+         EJECT ,
+@CROSPAR EQU   @SYSPARS,8              Expecting 8 bytes of data
+         SPACE ,
+CROSSRES PROC  @SYSRTN
+*
+*  Resume task in this AS
+*
+         PSET  @RESUME                 Resume this task
+         PMOV  @RESCTL,@CROSPAR        |
+         VCALL RESUMTS                 |
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  Wait an address space based ECB                                  *
+*                                                                   *
+*   Input - @AWAIT                                                  *
+*                                                                   *
+*  Output - Post bit is cleared in ECB                              *
+*           RVR = Post code (4 bytes - 2 high order bits)           *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+AWAITAS  PROC  @AWAIT,SCOPE=GLOBAL
+         USING PZERO,R0
+         L     RY,@AWTECB
+         WITH  (ECB,RY)
+*
+*  Disable and set to suspend on next dispatch
+*
+         IF    ^ECB.X'40',BEGIN        Not posted
+         STNSM PZPSWM,DISABLE
+         PSET  @SUSPEND                Suspend AS on next dispatch
+         SET   @SUSPAS                 | set as AS based
+         IF    @AWTLONG,'SET @SUSPLNG' | long term wait
+         VCALL SUSPEND                 |
+         L     RJ,@SUSPID              Suspend ID - ASB
+         O     RJ,=X'80000000'         | set it as waiting
+*
+*  Check ECB - can we go?
+*
+         L     RA,ECB                  Check posted bit
+ASWTLOOP LOOP  BEGIN
+         LR    RS,RA                   |
+         N     RS,=X'40000000'         |
+         IF    NZ,BEGIN                Posted - no waiting
+         PSET  @RESUME                 Turn off suspend
+         N     RJ,=X'7FFFFFFF'         |
+         ST    RJ,@RESUNIT             |
+         VCALL RESUMAS                 |
+         EXIT  ASWTLOOP
+         END   ,                       OF Posted - no waiting
+         CS    RA,RJ,ECB               Set as waiting
+         UNTIL EQUAL,END               Changed - see if posted?
+*
+*  Reenable interrupts
+*
+         SSM   PZPSWM
+*
+*  Force a dispatch
+*
+         VCALL DISPRD
+         END   ,                       OF Not Posted
+*
+*  When we run again, clear posted flag
+*
+         CLEAR ECB.X'40',MODE=LOCKED,REF=ECB    Clear posted flag
+         L     RVR,ECB                 Load post code
+         DROP  R0
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  Post an address space based ECB                                  *
+*                                                                   *
+*   Input - @SIGNAL                                                 *
+*                                                                   *
+*  Output - Control word posted                                     *
+*             RVR = 0                                               *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+SIGNALAS PROC  @SIGNAL,SCOPE=GLOBAL
+         L     RY,@SGECB
+         WITH  (ECB,RY)
+         XTRC  RY,RY,POSTITS           -->
+         L     RJ,@SGCODE              Get post code
+         N     RJ,=X'3FFFFFFF'         | clear high bits
+         O     RJ,=X'40000000'         | set post bit
+         L     RA,ECB
+*
+*  Try to do fast-post
+*
+         CLEAR RVR                     Pre set return code of success
+         LOOP  BEGIN
+         IF    (RA,NEG),DOASPOST       Currently waiting, do post
+         CS    RA,RJ,ECB
+         UNTIL EQUAL,END
+         EXIT  SIGNALAS                Did fast post - scram
+*
+*  Task already waiting - post code and resume task
+*
+DOASPOST LOOP  BEGIN                   Set post code
+         CS    RA,RJ,ECB               |
+         IF    EQUAL,EXIT              We posted - do resume
+         IF    (RA,NEG),NEXT           Still waiting, try again
+         LR    RS,RA
+         N     RS,=X'40000000'
+         IF    NZ,EXIT,SIGNALAS        Posted, but not by us
+         END   ,                       OF Set post code
+*
+*  Post code set, now do resume
+*
+         LR    RS,RA
+         IF    ('N RS,=X"80000000"',ZERO),EXIT,SIGNALAS
+*
+*  We know we have a waiting resume unit now
+*
+         PSET  @RESUME
+         N     RA,=X'7FFFFFFF'
+         ST    RA,@RESUNIT
+         VCALL RESUMAS
+         CLEAR RVR                     Set return code of success
+         PEND  ,
+         EJECT ,
+         XTRCDATA ,
+         END   .

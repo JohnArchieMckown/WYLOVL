@@ -1,0 +1,100 @@
+;
+;;  vcmd -- VISTA command router.
+;;
+;;    This exec handles executing the VLOGON and other VTAM
+;;    commands.  It's job is to determine if the Wylbur the user
+;;    is currently in can handle the command directly, if it can
+;;    the the command preceded by an underscore (e.g., _vlogon)
+;;    is executed by Wylbur.  If the Wylbur is in doesn't support
+;;    VTAM interactions then the command is re-directed to the
+;;    VISTA subsystem.
+;;
+;;    This command uses a variety of internal exec variables and
+;;    functions designed to give us enough information that we can
+;;    call a Milten subsystem as a subroutine.
+;;
+;;    Example calling syntax:
+;;       xcall wyl.gs.wyl.commands#vcmd / vlogon / wyla
+;;
+;;    Check out the Wylbur PUBLOAD initialization exec to see how
+;;    the VLOGON command gets defined.
+;;
+;;    Written, 7/90, Jim Nisbet
+;;
+;;    Modifications:
+;;      7/17/90  Niz  Initial version.
+;
+
+xproc () begin
+   ;
+   ;  Initialization.
+   ;
+   x.pgm = 'VCMD'                  ; our program name
+   x.maint = '(gg.jdn gg.sch)'     ; maintenance people
+
+   if (vartype('ses.vname') eq 'UNDEFINED') ses.vname = ''
+
+   p = index(parm_string,'/')
+   if (p eq 0) begin
+      write 'Internal VCMD error (incorrect syntax).'
+      xreturn
+   end
+
+   cmd = strip(left(parm_string, p-1))
+   parms = strip(substr(parm_string,p+1))
+
+   ;
+   ;  If this is the VISTA subsystem, then we must handle the
+   ;    request.  After executing the VLOGON command, we return
+   ;    to the subsystem which called us.
+   ;
+   if (wylbur eq 'VISTA') begin
+      if (not vsession and upper(cmd) eq 'VLOGON') begin
+         ses.vname = upper(scan_token(parms))
+      end
+
+      try _&(cmd) &(parms)
+
+      if (upper(cmd) eq 'VTAM') begin
+         xreturn cmd=subsys &(origsys)
+      end
+
+      if (vsession) begin
+         if (origsys ne '') begin
+            if (ses.vname eq '') \
+               try write 'Type VGO to resume your session.'
+            else \
+               try write 'Type VGO to resume your ' || ses.vname \
+               || ' session.'
+            xreturn cmd=subsys &(origsys)
+         end
+      end
+
+      logoff clear
+      xreturn
+   end
+
+   ;
+   ;  Execute the command locally if this Wylbur can support it.
+   ;
+   if (vlogon) begin
+      if (wylbur eq 'WYLBUR') begin   ; this should never happen...
+         if (machine eq 'SYSA') begin
+            write 'VLOGON not allowed directly from production WYLBUR.'
+            xreturn
+         end
+      end
+      try _&(cmd) &(parms)
+      xreturn
+   end
+
+   ;
+   ;  Otherwise, pass the command to the VISTA subsystem.
+   ;
+   if (system_up('VISTA')) begin
+      subsys vista &(cmd) &(parms)
+      xreturn
+   end
+
+   write 'VISTA subsystem is not running, &(cmd) not available.'
+end

@@ -1,0 +1,1196 @@
+CONS     TITLE 'MILTEN''s Console Interface'                                    
+*******************************************************************             
+*                                                                 *             
+*     MILTEN/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+MILCONS  CSECT                                                                  
+CONS     IDENT 4072                10:31:57 03/12/04  (SLP)                     
+         REGS  ,,FSR,,,,,,BR,SCBR,PIBR,(FEBR,LSR),CVR,SPR,RAR                   
+*                                                                               
+         SYSDEFN                                                                
+         GBLC  &OPRACCT            Console session account                      
+*                                                                               
+         PUSH  DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+CVDSECT  DSECT                                                                  
+         COPY  CV                                                               
+         EJECT                                                                  
+SCB      RECORD BEGIN                                                           
+         COPY  SCB                                                              
+         END                                                                    
+         EJECT                                                                  
+PDB      RECORD 'PDB'                                                           
+         EJECT                                                                  
+         COPY  FDB                                                              
+         EJECT                                                                  
+SCANCB   RECORD 'SCANCB'                                                        
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+         EJECT                                                                  
+         CVT   DSECT=YES                                                        
+         EJECT                                                                  
+UCBDSECT DSECT                                                                  
+         IEFUCBOB LIST=YES                                                      
+UCB      EQU   UCBOB,,C'X'                                                      
+         EJECT                                                                  
+*push,gen                                                                       
+         IEECUCM FORMAT=NEW                                                     
+*pop                                                                            
+*                                                                               
+         IEZWPL DSECT=YES                                                       
+         EJECT                                                                  
+         POP   DSECTS                                                           
+         EJECT                                                                  
+FEB      RECORD BEGIN                                                           
+         COPY  FEB                                                              
+*****  device dependent line                                                    
+         END                                                                    
+         EJECT                                                                  
+PIB      RECORD BEGIN                                                           
+         COPY  PIB                                                              
+*****  device dependent line                                                    
+PIBPDBCT DS    A                   Pending PDB queue count                      
+PIBPDBQH DS    A                   Pending PDB queue head                       
+PIBPDBQT DS    A                   Pending PDB queue tail                       
+         END                                                                    
+         EJECT                                                                  
+COM      RECORD BEGIN              Os communications area                       
+COMECBPT DS    A                   Ptr to ecb for stop/modify                   
+COMLAST  DS    0A                  Last pointer in parameter list               
+COMEND   EQU   X'80'               - High order bit of last parm ptr            
+COMCIBPT DS    A                   Ptr to command input buffer (cib)            
+         END                                                                    
+         SPACE 2                                                                
+CIB      DSECT                                                                  
+         IEZCIB ,                  OS command input buffer                      
+         EJECT                                                                  
+CTRC#    EQU   25                  No. of trace entries                         
+CTRCP#   EQU   5                   No. of pibtrc entries                        
+*-                                                                              
+         COPY  CONSTRC                                                          
+         EJECT                                                                  
+WTOCBUSR RECORD BEGIN                                                           
+WTOCBFLG FLAG                                                                   
+         FLAG  WTOCBFAC            - Action msg                                 
+         FLAG  WTOCBFJL            - Job log only                               
+         FLAG  WTOCBFID            - Ucmid present (route to console)           
+         FLAG  WTOCBFW             - Width (for mlwto) present                  
+         FLAG  WTOCBFNP            - No "*** jobname ***" pfx wanted            
+*                                                                               
+WTOCBUCM DS    X                   Ucm id                                       
+*                                                                               
+WTOCBWID DS    H                   Screen width                                 
+         END                                                                    
+         EJECT                                                                  
+         COPY  SUBPOOLS                                                         
+         TITLE 'Console Interface'                                              
+MILCONS  CSECT                                                                  
+         SPACE                                                                  
+*box                                                                            
+*                                                                               
+*  CONSDEF -- Routine to process console FEB definition.                        
+*                                                                               
+*    On entry:                                                                  
+*      R15 - SCANCB ptr                                                         
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      0 - ok, R1 - new FEB ptr                                                 
+*      4 - error, R1,R0 - msg loc,len                                           
+*                                                                               
+CONSDEF  XPROC                                                                  
+         LR    R7,R15                                                           
+         WITH  (SCANCB,R7)                                                      
+*                                                                               
+         SEGDEF CVWSG              Wto seg buffer                               
+*                                                                               
+         LA    FEBR,CVFEBQH-(FEBLINK-FEB)  Dummy first entry                    
+         WITH  FEB,BEGIN                                                        
+         WHILE ('LT FEBR,FEBLINK',NZ),BEGIN                                     
+         IF    (FEBTYPE,EQ,FEBTCONS),BEGIN                                      
+         SETMSG 'CONSOLE front-end already defined -- ignored'                  
+         LA    R15,4                                                            
+         EXIT  CONSDEF                                                          
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LA    R0,L'FEB                                                         
+         VCALL GETFEB                                                           
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+         MVI   FEBTYPE,FEBTCONS                                                 
+         MVC   FEBNAME,=CL8'CONSOLE'                                            
+         SET   FEBFPS              Psuedo front-end                             
+         MVC   FEBPMAX,=H'64'      Max no. of consoles we support               
+*                                                                               
+         SCAN  L:=V(DEFPRT),SCANCB                                              
+*                                                                               
+         LA    R1,FEB                                                           
+         CLEAR R15                                                              
+CDEFEXIT PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSPORT -- Routine to process console PIB definition.                       
+*                                                                               
+*    On entry:                                                                  
+*      R1 - FEB ptr                                                             
+*      R15- SCANCB ptr                                                          
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      0 - ok, R1 - new PIB ptr                                                 
+*      4 - error, R1,R0 - msg loc,len                                           
+*                                                                               
+CONSPORT XPROC                                                                  
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+         LR    R7,R15                                                           
+         WITH  (SCANCB,R7)                                                      
+*                                                                               
+         SEGDEF CVWSG              Wto seg buffer                               
+*                                                                               
+         SCAN  ,SCANCB                                                          
+         BZ    CONSPMIS                                                         
+         IF    (R0,NE,3),CONSPNF   Not a unit addr                              
+*                                                                               
+         IF    (@R1,EQ,'000'),'CLEAR R6; B GOTUCM'  psuedo-console              
+*                                                                               
+         L     R15,CVTPTR                                                       
+         WITH  (CVT,R15),'L R15,CVTCUCB'  console ucb table (ucm pfx)           
+         WITH  (UCM,R15),'LM R1,R3,UCMVDATA'  ucme start, len, last             
+         WITH  (UCMLIST,R1),BEGIN                                               
+UCMLOOP  L     R15,UCMUCB                                                       
+         WITH  (UCB,R15),BEGIN                                                  
+         IF    (UCBID,EQ,X'FF'),BEGIN  ucb...                                   
+         LC    R6,UCMID            Save ucmid (for pibno)                       
+         IF    (UCBNAME,EQ,SCNKW),GOTUCM                                        
+         END                                                                    
+         END                                                                    
+         BXLE  R1,R2,UCMLOOP                                                    
+         END                                                                    
+CONSPNF  SEGTB SCNKW                                                            
+         SETMSG 'is not a console -- ignored'                                   
+         LA    R15,4                                                            
+         EXIT  CONSPORT                                                         
+*                                                                               
+CONSPMIS SETMSG 'Missing console unit address'                                  
+         EXIT  CONSPORT                                                         
+*                                                                               
+GOTUCM   LA    R0,L'PIB                                                         
+         VCALL GETPIB                                                           
+         LR    PIBR,R1                                                          
+         WITH  PIB                                                              
+         SET   PIBFPS              Psuedo port                                  
+         ST    FEBR,PIBFEBP        Save feb ptr                                 
+         LA    R15,PIBPDBQH                                                     
+         ST    R15,PIBPDBQT        Make tail accurate                           
+         MVC   PIBDFACT,=C'&OPRACCT'  set default account                       
+         MVC   PIBNAME,SCNKW                                                    
+         MVC   PIBTID,SCNKW                                                     
+         SET   PIBFPTID                                                         
+         STH   R6,PIBNO            Save pibno (ucmid)                           
+*                                                                               
+         SCAN  L:=V(PORTPRT),SCANCB                                             
+*                                                                               
+         LR    R1,PIBR                                                          
+         CLEAR R15                                                              
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSFIN -- Routine to establish MCS console interface.                       
+*                                                                               
+*    On entry:                                                                  
+*      R1 - FEB ptr                                                             
+*                                                                               
+CONSFIN  XPROC                                                                  
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+*                                                                               
+         LA    R7,CVCOMP                                                        
+         EXTRACT (R7),'S',FIELDS=COMM                                           
+         L     R7,CVCOMP           Comm area (in cscb)                          
+         WITH  (COM,R7)                                                         
+         QEDIT ORIGIN=COMCIBPT,CIBCTR=2  queue depth of two                     
+         FAIL  (R15,NZ),'CONSOLE INTERFACE ERROR'                               
+         L     R1,COMECBPT         A(stop/modify ecb)                           
+         ST    R1,CVCMECBP         Put addr in ecb list                         
+         OI    CVCMECBP,X'80'      Set end of list                              
+         IF    ('L3 R6,COMCIBPT+1',NZ),BEGIN  cib present...                    
+         WITH  (CIB,R6)                                                         
+         IF    (CIBVERB,NE,CIBSTART),EXIT                                       
+* start cib is 3rd pos parm of start cmd (for direct start tasks)...            
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(R6)  free cib                             
+         FAIL  (R15,NZ),'CONSOLE INTERFACE ERROR'                               
+         END                                                                    
+*                                                                               
+         SET   FEBFOPEN            Front-end is open                            
+         EJECT                                                                  
+*  start all pre-defined sessions now...                                        
+         LH    R15,FEBPMAX                                                      
+         SLL   R15,2                                                            
+         L     R6,FEBPATP                                                       
+         LR    R5,R6                                                            
+         LA    R6,@R6(R15)                                                      
+         WHILE (R5,LT,R6),BEGIN                                                 
+         LT    PIBR,@R5                                                         
+         IF    NZ,BEGIN                                                         
+         WITH  PIB                                                              
+         LA    R1,PIB                                                           
+         LA    R0,L'SCB                                                         
+         VCALL GETSCB                                                           
+         LR    SCBR,R1                                                          
+         WITH  SCB                                                              
+         SET   SCBSFPS+SCBSFNAR    Pseudo session and no recovery               
+         IF    (PIBINFO,NZ),BEGIN                                               
+         MVC   SCBNAME,CVBLANKS                                                 
+         MVC   SCBNAME(L'PIBINFO),PIBINFO  fill in user name                    
+         END                                                                    
+         SET   SCBFNTIM            Notime                                       
+         MVC   SCBWID,=H'60'       Width                                        
+         MVC   SCBHEIP(4),=H'19,20'  pause,actual heights                       
+*                                                                               
+         L     R15,CVPDBP                                                       
+         WITH  (PDB,R15)                                                        
+         CLEAR PDBHDR                                                           
+         MVC   PDBLENG,=AL2(L'PDBHDR)                                           
+         LA    R1,SCB                                                           
+         VCALL SUBSTART            Start session                                
+         END                                                                    
+         LA    R5,@R5+4                                                         
+         END                                                                    
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSCNTL -- Routine to perform console control operation.                    
+*                                                                               
+*    On entry:                                                                  
+*      R0 - control number                                                      
+*      R1 - FEB ptr                                                             
+*      R15- PDB ptr                                                             
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      -8 - bad control number                                                  
+*      -4 - bad format                                                          
+*       0 - ok (PDB has return data)                                            
+*      12 - error                                                               
+*                                                                               
+CONSCNTL XPROC                                                                  
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+         FAIL  (FEB,NE,'FEB'),BADFEB                                            
+         LR    R7,R15                                                           
+         WITH  (PDB,R7)                                                         
+*                                                                               
+         LA    R6,PDBTEXT                                                       
+         WITH  (FDB,R6)                                                         
+*                                                                               
+         LR    RAR,R0                                                           
+         IF    (RAR,GE,100),BEGIN  priv'd control...                            
+         IF    (RAR,GT,CCTLPMAX),'LA RAR,100'                                   
+         SH    RAR,=H'100'                                                      
+         SLL   RAR,2                                                            
+         L     RAR,CCTLPTBL(RAR)   Processing routine                           
+         BR    RAR                                                              
+         END                                                                    
+*                                                                               
+         IF    (RAR,LGT,CCTLMAX),'CLEAR RAR'                                    
+         SLL   RAR,2                                                            
+         L     RAR,CCTLTBL(RAR)    Processing routine                           
+         BR    RAR                                                              
+         EJECT                                                                  
+CCTLTBL  DC    A(CCTL0)                                                         
+         DC    A(CCTL1)            1:   sense console front-end info            
+         DC    A(CCTL2)            2:   sense console port info                 
+CCTLMAX  EQU   (*-CCTLTBL-4)/4,,C'N'                                            
+*                                                                               
+         DS    0S(CCTLMAX-FDBCMAX,FDBCMAX-CCTLMAX)                              
+         SPACE 2                                                                
+CCTLPTBL DC    A(CCTL0)                                                         
+         DC    A(CCTL101)          101: set console front-end                   
+         DC    A(CCTL102)          102: set console port                        
+CCTLPMAX EQU   (*-CCTLPTBL-4)/4+100,,C'N'                                       
+*                                                                               
+         DS    0S(CCTLPMAX-FDBPMAX,FDBPMAX-CCTLPMAX)                            
+         SPACE 4                                                                
+*****  CONTROL 0:   bad control number                                          
+         SPACE 2                                                                
+CCTL0    LH    R15,=H'-8'                                                       
+         EXIT                                                                   
+*                                                                               
+CCTLBF   LH    R15,=H'-4'                                                       
+         EXIT                                                                   
+*                                                                               
+CCTLRC12 LA    R15,12                                                           
+         EXIT                                                                   
+*                                                                               
+CCTLOK   CLEAR R15                                                              
+         EXIT                                                                   
+         EJECT                                                                  
+*****  CONTROL 1:   sense console front-end info                                
+         SPACE 2                                                                
+CCTL1    IF    (PDBWC,NE,L'FDBT1),CCTLBF  bad parms                             
+         CLEAR FDBF1                                                            
+         MVC   FDBFFTNO,=AL2(CTRC#)  no. of entries                             
+         MVC   FDBFFLEN,=AL2(L'CTRC)  size of an entry                          
+         LA    R2,FDBFFTRC                                                      
+         LM    R3,R5,FEBTRCP+4     R3=next,r4=first,r5=end                      
+         LOOP  BEGIN                                                            
+         S     R3,FEBTRCP          Back up                                      
+         IF    (R3,LT,R4),'LR R3,R5; S R3,FEBTRCP'  last                        
+         MVC   @R2(L'CTRC),@R3     Copy trace entry                             
+         LA    R2,@R2+L'CTRC       Next entry                                   
+         UNTIL ('C R3,FEBTRCP+4',EQ),END                                        
+         MVC   PDBLENG,=AL2(L'PDBHDR+L'FDBF1+CTRC#*L'CTRC)                      
+         B     CCTLOK                                                           
+         EJECT                                                                  
+*****  CONTROL 2:   sense console port info                                     
+         SPACE 2                                                                
+CCTL2    IF    (PDBWC,NE,L'FDBT2),CCTLBF  bad parms                             
+         LH    R15,FDBT2P          Port no.                                     
+         IF    (R15,LGE,FEBPMAX),CCTLRC12  out of bounds                        
+         SLL   R15,2                                                            
+         L     PIBR,FEBPATP                                                     
+         LT    PIBR,@PIBR(R15)     Pib ptr                                      
+         BZ    CCTLRC12                                                         
+         CLEAR FDBF2                                                            
+         WITH  PIB,BEGIN                                                        
+         MVC   FDBFPTNO,=AL2(CTRCP#)  no. of trace entries                      
+         MVC   FDBFPLEN,=AL2(L'CTRCP)  length of a trace entry                  
+*                                                                               
+         LA    R2,FDBFPTRC                                                      
+         LM    R3,R5,PIBTRCP+4     R3=next,r4=first,r5=end                      
+         LOOP  BEGIN                                                            
+         S     R3,PIBTRCP          Back up                                      
+         IF    (R3,LT,R4),'LR R3,R5; S R3,PIBTRCP'  last                        
+         MVC   @R2(L'CTRCP),@R3    Copy trace entry                             
+         LA    R2,@R2+L'CTRCP      Next entry                                   
+         UNTIL ('C R3,PIBTRCP+4',EQ),END                                        
+         END                                                                    
+         MVC   PDBLENG,=AL2(L'PDBHDR+L'FDBF2+CTRCP#*L'CTRCP)                    
+         B     CCTLOK                                                           
+         EJECT                                                                  
+*****  CONTROL 101: set console front-end                                       
+         SPACE 2                                                                
+CCTL101  IF    (PDBWC,NE,L'FDBT101),CCTLBF  bad parms                           
+         IF    FDBTFOPN+FDBTFSTR,BEGIN  open/start...                           
+         CLEAR FEBFCLS+FEBFDOWN                                                 
+         B     CCTLOK                                                           
+         END                                                                    
+*                                                                               
+         IF    FDBTFCLS+FDBTFSTP,BEGIN  close/stop...                           
+         SET   FEBFCLS+FEBFDOWN                                                 
+         B     CCTLOK                                                           
+         END                                                                    
+*                                                                               
+         B     CCTLBF              Bad command code                             
+         EJECT                                                                  
+*****  CONTROL 102: set console port                                            
+         SPACE 2                                                                
+CCTL102  IF    (PDBWC,NE,L'FDBT102),CCTLBF  bad parms                           
+         B     CCTLBF              Temporary                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSUPD -- Routine to check SCB updates.                                     
+*                                                                               
+*    On entry:                                                                  
+*      R1 - SCB ptr                                                             
+*                                                                               
+CONSUPD  XPROC                                                                  
+         LR    SCBR,R1                                                          
+         WITH  SCB                                                              
+         SET   SCBFNTIM            Insist on notime                             
+         MVC   SCBWID,=H'60'       Width                                        
+         MVC   SCBHEIP(4),=H'19,20'  pause,actual heights                       
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSDO -- Routine to do console I/O.                                         
+*                                                                               
+*    On entry:                                                                  
+*      R1 - SCB ptr                                                             
+*      R15 - PDB ptr                                                            
+*                                                                               
+CONSDO   XPROC                                                                  
+         LR    SCBR,R1                                                          
+         WITH  SCB                                                              
+         L     PIBR,SCBPIBP                                                     
+         WITH  PIB                                                              
+         L     FEBR,PIBFEBP                                                     
+         WITH  FEB                                                              
+         LR    R7,R15                                                           
+         WITH  (PDB,R7)                                                         
+*                                                                               
+         IF    (PDBCMD,EQ,TMILBRK),BEGIN  Break read...                         
+         MVI   PDBCMD,TMILREAD     Read complete                                
+         MVI   PDBCPLA,CPLABRK     Ended by break                               
+         MVC   PDBLENG,=AL2(L'PDBHDR)                                           
+         CLEAR PDBCPLB,PDBINCT,(PDBWC,6)                                        
+         B     CONSDSND            Send completion                              
+         END                                                                    
+*                                                                               
+         IF    (PDBCMD,EQ,TMILEOS),BEGIN  clean up for logoff...                
+         FAIL  (SCBR,NE,PIBSCBP),'BAD SCB PTR'                                  
+*                                                                               
+         LR    R1,SCBR                                                          
+         CLEAR SCBR,PIBSCBP                                                     
+         VCALL FREESCB             Free session                                 
+*                                                                               
+         LR    R1,PIBR                                                          
+         VCALL FREEPIB             Free port                                    
+         CLEAR PIBR                (Neatness)                                   
+         EXIT  CONSDO                                                           
+         END                                                                    
+*                                                                               
+         SEGDEF CVWSG              Wto seg routine                              
+         EJECT                                                                  
+         LA    R3,PDBTEXT                                                       
+         LH    R2,PDBOUTCT                                                      
+*                                                                               
+* Niz forgot to handle the case of transparent mode I/O to                      
+* the console. This occurs when commands are sent from                          
+* WYLBUR to UNIX hosts (via the % or ON <hostname> commands                     
+* typically). We need to translate the transparent text                         
+* from ASCII to EBCDIC and handle the carriage returns and                      
+* linefeed combinations. For now, we just translate all that                    
+* to EBCDIC newlines, rather than trying to preserve formatting.                
+* This works for CRLF or LFCR combinations, but won't work                      
+* right for just CR or LF.                                                      
+*                                                                               
+         IF ((PDBMODD.MODDTRAN),AND,(R2,POS)),BEGIN                             
+         LR    R1,R3                                                            
+         WHILE (R2,POS),BEGIN                                                   
+         NI    0(R1),X'7F'       Strip off any parity                           
+         IF    (@R1,EQ,X'0D'),BEGIN                                             
+         IF    ((R2,GE,2),AND,(@R1+1,EQ,X'0A')),BEGIN                           
+         MVI   0(R1),X'15'                                                      
+         LA    R14,1(,R1)                                                       
+         LA    R4,2(,R1)                                                        
+         LR    R15,R2                                                           
+         S     R15,=F'2'                                                        
+         IF    (R15,POS),BEGIN                                                  
+         LR    R5,R15                                                           
+         MVCL  R14,R4                                                           
+         END                                                                    
+         DECR  R2                                                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         MVI   0(R1),X'15'                                                      
+         END                                                                    
+         END                                                                    
+         ELSEIF (@R1,EQ,X'0A'),BEGIN                                            
+         IF    ((R2,GE,2),AND,(@R1+1,EQ,X'0D')),BEGIN                           
+         MVI   0(R1),X'15'                                                      
+         LA    R14,1(,R1)                                                       
+         LA    R4,2(,R1)                                                        
+         LR    R15,R2                                                           
+         S     R15,=F'2'                                                        
+         IF    (R15,POS),BEGIN                                                  
+         LR    R5,R15                                                           
+         MVCL  R14,R4                                                           
+         END                                                                    
+         DECR  R2                                                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         MVI   0(R1),X'15'                                                      
+         END                                                                    
+         END                                                                    
+         ELSE  BEGIN                                                            
+         LC    R15,@R1                                                          
+         L     R14,CVEBCTBL                                                     
+         LA    R14,0(R15,R14)                                                   
+         MVC   0(1,R1),0(R14)                                                   
+         END                                                                    
+         DECR  R2                                                               
+         LA    R1,1(,R1)                                                        
+         END                                                                    
+         SR    R1,R3                                                            
+         STH   R1,PDBOUTCT                                                      
+         LR    R2,R1               Put it back in R2                            
+         END                                                                    
+*                                                                               
+         IF    SCBTFPP,BEGIN       Page/pause read...                           
+         IF    SCBTFAIO,EXIT       don't muck with to msgs                      
+         LA    R15,@R3(R2)                                                      
+         MVC   @R15(L'PMSG),PMSG   Pause message                                
+         LA    R2,@R2+L'PMSG                                                    
+         STH   R2,PDBOUTCT         Save updated count                           
+         END                                                                    
+*                                                                               
+         WHILE (R2,POS),BEGIN                                                   
+         LR    R1,R3                                                            
+         WHILE ((R2,POS),AND,(@R3,NE,X'15')),'LA R3,@R3+1; DECR R2'             
+         LA    R15,CVWSGUSR                                                     
+         WITH  (WTOCBUSR,R15),BEGIN                                             
+         CLEAR WTOCBUSR                                                         
+         IF    PDBMODB.MODBDWAT,'SET WTOCBFAC'  action msg                      
+         SET   WTOCBFW+WTOCBFID    Do mlwto                                     
+         LTH   R0,SCBWID                                                        
+         IF    ^POS,'LA R0,100'                                                 
+         STH   R0,WTOCBWID                                                      
+         MVC   WTOCBUCM,PIBNO+1    Ucm id                                       
+         END                                                                    
+*                                                                               
+         LR    R0,R3                                                            
+         SR    R0,R1                                                            
+         SEGT  (R1),(R0)                                                        
+         SEGWR                                                                  
+         LA    R3,@R3+1                                                         
+         DECR  R2                                                               
+         END                                                                    
+*                                                                               
+         INCR  R15,PIBNIO          Kick i/o count                               
+         INCR  R15,FEBNIO          Kick fe i/o count too                        
+*                                                                               
+         IF    (PDBCMD,EQ,TMILWRIT),BEGIN  write...                             
+         CLEAR PDBOPT                                                           
+         MVC   PDBLENG,=AL2(L'PDBHDR)                                           
+         B     CONSDSND            Send completion                              
+         END                                                                    
+*                                                                               
+         IF    (PDBCMD,NE,TMILREAD),EXIT   skip q-check                         
+         LT    R2,PIBPDBQH                                                      
+         IF    Z,EXIT              Nothing in type-ahead queue                  
+         DECR  R15,PIBPDBCT        Decr queue count                             
+         MVC   PIBPDBQH,@R2        Dequeue                                      
+         IF    (PIBPDBQH,Z),'LA R15,PIBPDBQH; ST R15,PIBPDBQT'                  
+         MOVEL PDB,@R2+4,LH:@R2+4  Move PDB back                                
+         LR    R1,R2                                                            
+         VCALL FREECORE            Release saved copy                           
+*                                                                               
+         IF    (PDBCMD,EQ,FMILREAD),BEGIN  log read text...                     
+         SEGDEF CVWSG                                                           
+         LA    R15,CVWSGUSR                                                     
+         WITH  (WTOCBUSR,R15),BEGIN                                             
+         CLEAR WTOCBUSR                                                         
+         SET   WTOCBFJL            Job log only                                 
+         END                                                                    
+         SETMSG PIBINFO,8                                                       
+         IF    (PIBINFO,Z),'SEG "CONS-"; SETMSG PIBNAME,3'                      
+         SEGT  (R1),(R0)                                                        
+         SEG   ':  '                                                            
+         SETMSG PDBTEXT,LH:PDBLENG                                              
+         SH    R0,=AL2(L'PDBHDR)                                                
+         FLOOR R0,0                                                             
+         IF    SCBMODC.MODCNECH,'SETMSG "(NOECHO)"'                             
+         SEGWR (R1),(R0)                                                        
+         CLEAR CVWSGUSR                                                         
+         END                                                                    
+*                                                                               
+CONSDSND LA    R1,SCB                                                           
+         LA    R15,PDB                                                          
+         VCALL SUBSEND                                                          
+         PEND                                                                   
+*                                                                               
+PMSG     DC    C'TYPE "@" TO CONTINUE'                                          
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSPOST -- Routine to process posts from completion of console              
+*    i/o.                                                                       
+*                                                                               
+*    On entry:                                                                  
+*      R1 - FEB ptr                                                             
+*                                                                               
+CONSPOST XPROC                                                                  
+         LR    FEBR,R1             Feb ptr                                      
+         WITH  FEB                                                              
+         L     R15,CVCMECBP        Stop/modify ecb                              
+         IF    ^@R15.X'40',EXIT,CONSPOST  not posted                            
+         L     R15,CVCOMP                                                       
+         WITH  (COM,R15),BEGIN                                                  
+         IF    ('L3 R7,COMCIBPT+1',Z),EXIT,CONSPOST  odd                        
+         END                                                                    
+*                                                                               
+         WITH  (CIB,R7)                                                         
+         IF    (CIBVERB,EQ,CIBSTOP),'CLEAR R0; VCALL SHUTDOWN'                  
+         IF    (CIBVERB,NE,CIBMODFY),CONSPFRE                                   
+         LC    R3,CIBCONID         Get ucm id                                   
+         IF    (R3,GE,FEBPMAX),'CLEAR R3'  too high                             
+         LR    R15,R3                                                           
+         SLL   R15,2               Times 4 for pat index                        
+         L     R2,FEBPATP                                                       
+         LA    R2,@R2(R15)                                                      
+         LT    PIBR,@R2            Get pib ptr                                  
+         WITH  PIB                                                              
+         IF    Z,BEGIN             No pib, get one...                           
+         LA    R0,L'PIB                                                         
+         VCALL GETPIB                                                           
+         LR    PIBR,R1                                                          
+         ST    PIBR,@R2            Save pib ptr in pat                          
+*                                                                               
+         SET   PIBFPS              Psuedo port                                  
+         ST    FEBR,PIBFEBP        Save feb ptr                                 
+         LA    R15,PIBPDBQH                                                     
+         ST    R15,PIBPDBQT        Make tail accurate                           
+         STH   R3,PIBNO                                                         
+         MVC   PIBDFACT,=C'&OPRACCT'  set default account                       
+         MVC   PIBNAME,CVBLANKS                                                 
+*                                                                               
+         L     R15,CVTPTR                                                       
+         WITH  (CVT,R15),'L R15,CVTCUCB'  console ucb table (ucm pfx)           
+         WITH  (UCM,R15),'LM R2,R3,UCMVDATA'  ucme start, len                   
+         MVC   PIBNAME,=CL8'000'   Assume pseudo-console                        
+         MVC   PIBTID,=CL8'000'                                                 
+         LTH   R15,PIBNO           Console id                                   
+         IF    POS,BEGIN           Real console...                              
+         DECR  R15                                                              
+         LR    R1,R2                                                            
+         MR    R2,R15                                                           
+         AR    R3,R1               Ucme for this ucmid                          
+         WITH  (UCMLIST,R3)                                                     
+         IF    (UCMID,NE,PIBNO+1),EXIT                                          
+         L     R15,UCMUCB                                                       
+         WITH  (UCB,R15)                                                        
+         IF    (UCBID,NE,X'FF'),EXIT                                            
+         MVC   PIBNAME(3),UCBNAME  Console ucb address                          
+         MVC   PIBTID(3),UCBNAME                                                
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LT    SCBR,PIBSCBP                                                     
+         WITH  SCB                                                              
+         IF    Z,BEGIN             No scb, get one...                           
+         LA    R1,PIB                                                           
+         LA    R0,L'SCB                                                         
+         VCALL GETSCB              Get a session                                
+         LR    SCBR,R1                                                          
+         SET   SCBSFNAT+SCBSFNAR+SCBSFPS  no auto stuff, pses                   
+         IF    (PIBINFO,NZ),BEGIN                                               
+         MVC   SCBNAME,CVBLANKS                                                 
+         MVC   SCBNAME(L'PIBINFO),PIBINFO  fill in user name                    
+         END                                                                    
+         SET   SCBFNTIM            Notime                                       
+         MVC   SCBWID,=H'60'       Width                                        
+         MVC   SCBHEIP(4),=H'19,20'  pause,actual heights                       
+         END                                                                    
+*                                                                               
+         L     R6,CVPDBP           PDB area                                     
+         WITH  (PDB,R6)                                                         
+         CLEAR PDBHDR                                                           
+         MVC   PDBLENG,=AL2(L'PDBHDR)                                           
+         MVC   PDBLIN#,SCBNO       Session index number                         
+         LH    R2,CIBDATLN         Read length                                  
+         LA    R15,CIBDATA-1(R2)                                                
+         WHILE ((R2,POS),AND,(@R15,EQ,X'00')),'DECR R15; DECR R2'               
+         IF    ((R2,EQ,1),AND,(@R15,EQ,' ')),'DECR R2'  trail blank             
+         IF    ((R2,EQ,1),AND,(CIBDATA,EQ,'@')),BEGIN  clear/attn...            
+         WHILE ('LT R1,PIBPDBQH',NZ),BEGIN  free type-ahead queue...            
+         DECR  R15,PIBPDBCT        Decr queue count                             
+         MVC   PIBPDBQH,@R1        Dequeue                                      
+         IF    (PIBPDBQH,Z),'LA R15,PIBPDBQH; ST R15,PIBPDBQT'                  
+         VCALL FREECORE            Free saved PDB                               
+         END                                                                    
+         IF    (SCBSUBP,Z),EXIT                                                 
+         IF    (SCBCMD,NE,TMILREAD),BEGIN  no read, idle attn...                
+         MVI   PDBCMD,FMILASYN     Asynchronous                                 
+         SET   PDBCPLB.CPLBIA                                                   
+         LA    R1,SCB                                                           
+         LA    R15,PDB                                                          
+         VCALL SUBSEND                                                          
+         END                                                                    
+         SET   PDBCPLA.CPLAATTN                                                 
+         CLEAR R2                  Nothing read                                 
+         END                                                                    
+*                                                                               
+         MVI   PDBCMD,FMILREAD     Read completion                              
+         IF    (R2,GE,6),BEGIN                                                  
+         LA    R15,CIBDATA-6(R2)   Back up enough for "<attn>"                  
+         MVC   CVWORK(6),@R15                                                   
+         OC    CVWORK(6),CVBLANKS  Caps                                         
+         IF    (CVWORK,NE,'<ATTN>'),EXIT  forget it                             
+         SH    R2,=H'6'                                                         
+         SET   PDBCPLA.CPLAATTN                                                 
+         END                                                                    
+         LA    R15,L'PDBHDR+@R2                                                 
+         STH   R15,PDBLENG         Rdw len                                      
+         MOVE  R2,PDBTEXT,CIBDATA                                               
+         EJECT                                                                  
+         IF    (SCBCMD,EQ,TMILREAD),BEGIN  reply to read...                     
+         SEGDEF CVWSG                                                           
+         LA    R15,CVWSGUSR                                                     
+         WITH  (WTOCBUSR,R15),BEGIN                                             
+         CLEAR WTOCBUSR                                                         
+         SET   WTOCBFJL            Job log only                                 
+         END                                                                    
+         SETMSG PIBINFO,8                                                       
+         IF    (PIBINFO,Z),'SEG "CONS-"; SETMSG PIBNAME,3'                      
+         SEGT  (R1),(R0)                                                        
+         SEG   ':  '                                                            
+         SETMSG PDBTEXT,LH:PDBLENG                                              
+         SH    R0,=AL2(L'PDBHDR)                                                
+         FLOOR R0,0                                                             
+         IF    SCBMODC.MODCNECH,'SETMSG "(NOECHO)"'                             
+         SEGWR (R1),(R0)                                                        
+         CLEAR CVWSGUSR                                                         
+*                                                                               
+         LA    R1,SCB                                                           
+         LA    R15,PDB                                                          
+         VCALL SUBSEND                                                          
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Otherwise, queue it...                       
+         LA    R0,4                                                             
+         AH    R0,PDBLENG          Length of PDB (including link)               
+         LA    R1,CONSQPDB                                                      
+         LA    R2,*+4                                                           
+         VCALL NGETCORE                                                         
+         LR    R2,R1                                                            
+         CLEAR (@R2,4)             Clear link ptr                               
+         LA    R14,@R1+4                                                        
+         LH    R15,PDBLENG                                                      
+         LA    R0,PDB                                                           
+         LR    R1,R15                                                           
+         MVCL  R14,R0              Save PDB                                     
+         INCR  R15,PIBPDBCT        Kick queue size                              
+         L     R15,PIBPDBQT        Old tail                                     
+         ST    R2,PIBPDBQT         New tail                                     
+         ST    R2,@R15             Link up entry                                
+*                                                                               
+         SEGDEF CVWSG                                                           
+         LA    R15,CVWSGUSR                                                     
+         WITH  (WTOCBUSR,R15),BEGIN                                             
+         CLEAR WTOCBUSR                                                         
+         SET   WTOCBFW+WTOCBFID    Do mlwto                                     
+         LTH   R0,SCBWID                                                        
+         IF    ^POS,'LA R0,100'                                                 
+         STH   R0,WTOCBWID                                                      
+         MVC   WTOCBUCM,PIBNO+1    Ucm id                                       
+         END                                                                    
+         SEG   '(Input queued'                                                  
+         IF    (PIBPDBCT,GT,1),'SEG " #"; SEGDC L:PIBPDBCT'                     
+         SEGB  '--Waiting for'                                                  
+         SEGT  CVDEFSYS                                                         
+         SEGWR ')'                                                              
+*                                                                               
+         IF    (SCBSUBP,Z),BEGIN                                                
+         L     R15,CVPDBP                                                       
+         WITH  (PDB,R15)                                                        
+         CLEAR PDBHDR                                                           
+         MVC   PDBLENG,=AL2(L'PDBHDR)                                           
+         LA    R1,SCB                                                           
+         VCALL SUBSTART                                                         
+         END                                                                    
+         END                                                                    
+*                                                                               
+CONSPFRE L     R15,CVCOMP                                                       
+         WITH  (COM,R15),'LA R0,COMCIBPT'                                       
+         QEDIT ORIGIN=(0),BLOCK=(R7)  Free CIB                                  
+         FAIL  (R15,NZ),'CONSOLE INTERFACE ERROR'                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSDIE -- Routine to do final cleanup.  It is entered when                  
+*    MILTEN is terminating.                                                     
+*                                                                               
+*    On entry:                                                                  
+*      R0 - 0: normal, 4: error                                                 
+*      R1 - FEB ptr                                                             
+*                                                                               
+CONSDIE  XPROC                                                                  
+*-                                                                              
+*-       Nothing to do, simply return.                                          
+*-                                                                              
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSCMD -- Routine to process console commands; the scanner                  
+*    is all set up to scan the command.                                         
+*                                                                               
+*    On entry:                                                                  
+*      R1  - FEB ptr                                                            
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+CONSCMD  XPROC                                                                  
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+         LR    R7,R15              Segcb ptr                                    
+         WITH  (SEGCB,R7)                                                       
+         SEGDEF (R7)                                                            
+         SEGWR 'CONSOLE SUPPORT:'                                               
+         SEGWR CVBLANKS,1                                                       
+         SEGWR CVBLANKS,1                                                       
+*-                                                                              
+*-       Format stop/modify interface stuff.                                    
+*-                                                                              
+         SEG   'STOP/MODIFY ECB='                                               
+         L     R2,CVCMECBP                                                      
+         SEGHX L:@R2,8                                                          
+         IF    @R2.X'40','SEG " -- POSTED"'                                     
+         SEGWR                                                                  
+*                                                                               
+         SEGWR CVBLANKS,1                                                       
+         L     R6,CVCOMP                                                        
+         WITH  (COM,R6),BEGIN                                                   
+         L3    R5,COMCIBPT+1       First CIB, if any                            
+*                                                                               
+         WHILE (R5,NZ),BEGIN       Do while CIB's...                            
+         WITH  (CIB,R5)                                                         
+         SEGHX (R5),6                                                           
+         SEG   '  CIB (UCMID='                                                  
+         SEGDC LC:CIBCONID,2                                                    
+         SEGB  ')'                                                              
+         CLEAR R0                                                               
+         IF    (CIBVERB,EQ,CIBMODFY),'SETMSG "MODIFY"'                          
+         IF    (CIBVERB,EQ,CIBSTOP),'SETMSG "STOP"'                             
+         IF    (R0,NZ),'SEGB (R1),(R0)'                                         
+         ELSE  'SEG "VERB="; SEGHX LC:CIBVERB'                                  
+         SEGCOL 35                                                              
+         SEG   '"'                                                              
+         SEG   CIBDATA,LH:CIBDATLN                                              
+         SEG   '"'                                                              
+         SEGWR                                                                  
+*                                                                               
+         L     R5,CIBNEXT                                                       
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGWR CVBLANKS,1                                                       
+         SEGWR CVBLANKS,1                                                       
+*                                                                               
+         SEGHX (FEBR),6                                                         
+         SEG   CVBLANKS,2                                                       
+         SEGTB FEBNAME                                                          
+         SEGDC LH:FEBPMAX                                                       
+         SEGB  ' PORTS '                                                        
+         IF    ^FEBFOPEN,'SEGB "** NOT-OPEN **"'                                
+         IF    (FEB,NE,'FEB'),'SEGB "** INVALID **"'                            
+         SEGWR                                                                  
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CONSFMT -- Routine to do control block formatting.                           
+*                                                                               
+*    On entry:                                                                  
+*      R1  - FEB ptr                                                            
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+CONSFMT  XPROC                                                                  
+         LR    FEBR,R1                                                          
+         WITH  FEB                                                              
+         LR    R7,R15              Segcb ptr                                    
+         WITH  (SEGCB,R7)                                                       
+         SEGDEF (R7)                                                            
+         SEGWR 'CONSOLE SUPPORT:'                                               
+         SEGWR CVBLANKS,1                                                       
+         SEGWR CVBLANKS,1                                                       
+*-                                                                              
+*-       Format stop/modify interface stuff.                                    
+*-                                                                              
+         SEG   'STOP/MODIFY ECB='                                               
+         L     R2,CVCMECBP                                                      
+         SEGHX L:@R2,8                                                          
+         IF    @R2.X'40','SEG " -- POSTED"'                                     
+         SEGWR                                                                  
+*-                                                                              
+*-       This sometimes causes addressing errors;                               
+*-         so we don't do it any more.  6/90, Niz                               
+*-                                                                              
+         AGO   .NOCIB                                                           
+         SEGWR CVBLANKS,1                                                       
+         L     R6,CVCOMP                                                        
+         WITH  (COM,R6),BEGIN                                                   
+         L3    R5,COMCIBPT+1       First CIB, if any                            
+*                                                                               
+         WHILE (R5,NZ),BEGIN       Do while CIB's...                            
+         WITH  (CIB,R5)                                                         
+         SEGHX (R5),6                                                           
+         SEG   '  CIB (UCMID='                                                  
+         SEGDC LC:CIBCONID,2                                                    
+         SEGB  ')'                                                              
+         CLEAR R0                                                               
+         IF    (CIBVERB,EQ,CIBMODFY),'SETMSG "MODIFY"'                          
+         IF    (CIBVERB,EQ,CIBSTOP),'SETMSG "STOP"'                             
+         IF    (R0,NZ),'SEGB (R1),(R0)'                                         
+         ELSE  'SEG "VERB="; SEGHX LC:CIBVERB'                                  
+         SEGCOL 35                                                              
+         SEG   '"'                                                              
+         SEG   CIBDATA,LH:CIBDATLN                                              
+         SEG   '"'                                                              
+         SEGWR                                                                  
+*                                                                               
+         L     R5,CIBNEXT                                                       
+         END                                                                    
+         END                                                                    
+.NOCIB   ANOP                                                                   
+*-                                                                              
+*-       Format console port information.                                       
+*-                                                                              
+         SEGWR CVBLANKS,1                                                       
+         SEGWR CVBLANKS,1                                                       
+*                                                                               
+         SEGHX (FEBR),6                                                         
+         SEG   CVBLANKS,2                                                       
+         SEGTB FEBNAME                                                          
+         SEGDC LH:FEBPMAX                                                       
+         SEGB  ' PORTS '                                                        
+         IF    ^FEBFOPEN,'SEGB "** NOT-OPEN **"'                                
+         IF    (FEB,NE,'FEB'),'SEGB "** INVALID **"'                            
+         SEGWR                                                                  
+*                                                                               
+         L     R5,FEBPATP          Start                                        
+         LH    R6,FEBPMAX                                                       
+         SLL   R6,2                                                             
+         AR    R6,R5               End                                          
+         WHILE (R5,LT,R6),BEGIN                                                 
+         IF    ('LT PIBR,@R5',NZ),BEGIN                                         
+         WITH  PIB                                                              
+         SEGCOL 3                                                               
+         SEGHX (PIBR),6                                                         
+         SEG   ' PORT#'                                                         
+         LR    R15,R5                                                           
+         S     R15,FEBPATP                                                      
+         SRL   R15,2                                                            
+         SEGDC (R15)                                                            
+         SEGB                                                                   
+         SEGB  PIBNAME,3                                                        
+         IF    ('LT SCBR,PIBSCBP',NZ),BEGIN                                     
+         WITH  SCB                                                              
+         SEGB  'SESSION:'                                                       
+         SEG   SCBGRP                                                           
+         SEG   '.'                                                              
+         SEG   SCBUSER                                                          
+         IF    ('L2 R2,SCBANO',NZ),'SEG "#"; SEGDC (R2)'                        
+         END                                                                    
+         SEGWR                                                                  
+         END                                                                    
+         LA    R5,@R5+4                                                         
+         END                                                                    
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'WTO Routine'                                                    
+WTOWA    RECORD BEGIN                                                           
+WTOAREA  DS    CL(L'CVWSGBUF+256)  Work area                                    
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  WTOSEG -- SEG routine to format and queue WTO.                               
+*                                                                               
+*    On entry:                                                                  
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+WTOSEG   XPROC WTOWA                                                            
+         LR    R7,R15                                                           
+         WITH  (SEGCB,R7)                                                       
+         LA    R6,SEGCBUSR                                                      
+         WITH  (WTOCBUSR,R6)                                                    
+*                                                                               
+         IF    ^SEGCBWR,EXIT       Not segwr, ignore                            
+         IF    (R0,NP),EXIT        No text, ignore                              
+         IF    (CVWTONO,GT,50),EXIT  Too many waiting, ignore                   
+*                                                                               
+         IF    (WTOCBFW,AND,(WTOCBWID,Z)),BEGIN                                 
+         MVC   WTOCBWID,=H'60'                                                  
+         END                                                                    
+*                                                                               
+         IF    WTOCBFJL*WTOCBFW,'CLEAR WTOCBFW'  conflicting                    
+*                                                                               
+         MVC   WTOAREA+2(2),=X'8000'  mcs flags (routcde present)               
+         LA    R5,WTOAREA+4                                                     
+         IF    ^WTOCBFNP,BEGIN     Add jobname prefix...                        
+         IF    WTOCBFID+WTOCBFJL,EXIT  implied no jobname prefix                
+         CLEAR WTOCBFW             Inconsistent                                 
+         MVC   @R5(4),=C'*** '                                                  
+         MVC   @R5+4(8),CVMJOBNM                                                
+         LA    R5,@R5+4+8-1                                                     
+         WHILE (@R5,EQ,' '),'DECR R5'                                           
+         MVC   @R5+1(5),=C' *** '                                               
+         LA    R5,@R5+6                                                         
+         END                                                                    
+         LR    R15,R0                                                           
+         IF    WTOCBFW,'CEIL R15,WTOCBWID'                                      
+         MOVE  R15,@R5,@R1                                                      
+         LA    R5,@R15+1(R5)                                                    
+         LA    R15,WTOAREA                                                      
+         LR    R2,R5                                                            
+         SR    R2,R15              Len (including mcs hdr)                      
+         STH   R2,WTOAREA          Save len                                     
+         SH    R2,=H'4'            Data len                                     
+         MVC   @R5(4),=X'00004000'  routcde=2                                   
+         IF    WTOCBFAC,'MVI @R5,X"40"'  desc=2                                 
+         IF    CVFTEST,'MVC @R5(4),=X"00000020"'  routcde=11                    
+*                                                                               
+         IF    WTOCBFID,BEGIN      Route to console...                          
+         MVI   WTOAREA+2,X'E0'     Mcsflags=(reg0,resp)                         
+         CLEAR (@R5+2,2)           No routcdes                                  
+         END                                                                    
+         LA    R5,@R5+4                                                         
+*                                                                               
+         IF    WTOCBFW,BEGIN       Make mlwto...                                
+         SET   WTOAREA+3.X'40'     Mark as mlwto                                
+         MVC   @R5(3),=X'200000'   Line type = d                                
+         LR    R3,R5                                                            
+         CLEAR R14                                                              
+         LR    R15,R0                                                           
+         DR    R14,R2              Calc no. of lines                            
+         IF    (R14,NZ),'LA R15,@R15+1'                                         
+         STC   R15,@R5+3           Save no. of lines                            
+         LA    R5,@R5+4                                                         
+         WHILE ('LA R1,@R1(R2); SR R0,R2',POS),BEGIN  more...                   
+         LR    R15,R0                                                           
+         CEIL  R15,R2                                                           
+         MOVE  R15,@R5+4,@R1       Move in next line                            
+         LA    R15,@R15+1+4                                                     
+         STH   R15,@R5             Line len (plus hdr)                          
+         MVC   @R5+2(2),=X'2000'   Line type = d                                
+         LA    R3,@R5+2                                                         
+         LA    R5,@R15(R5)                                                      
+         END                                                                    
+         MVI   @R3,X'30'           Change last line type to de                  
+         END                                                                    
+*                                                                               
+         LA    R15,WTOAREA                                                      
+         SR    R5,R15              Len of entire wto                            
+         LA    R0,@R5+8            Include link space, etc.                     
+         LA    R1,WTOQSUBP         Subpool number                               
+         LA    R2,WTOGETC          Our ID                                       
+         VCALL NGETCORE                                                         
+WTOGETC  LABEL                                                                  
+         CLEAR (@R1,4)             Link ptr                                     
+         MVC   @R1+4(4),WTOCBUSR   Ucmid & flags                                
+         MOVEL @R1+8,WTOAREA,(R5),REG2=R2                                       
+*-                                                                              
+*-       Add a new WTO entry to the end of the WTO queue.                       
+*-                                                                              
+WTOSTLP  CLEAR R2                  Zero means unlocked                          
+         LA    R3,1                One means locked                             
+         CS    R2,R3,CVWTOLK       Lock out updates                             
+         BNZ   WTOSTLP             Spin lock                                    
+*                                                                               
+         LT    R2,CVWTOQT          Get current queue tail                       
+         IF    Z,'ST R1,CVWTOQH'   Nothing, we are the queue head               
+         ELSE  'ST R1,@R2'         Otherwise link us to the old tail            
+         ST    R1,CVWTOQT          We are the new queue tail                    
+*                                                                               
+         INCR  R15,CVWTONO         Kick count of WTO entries                    
+*                                                                               
+WTOSULP  L     R2,CVWTOLK          Should be non-zero (locked)                  
+         CLEAR R3                  We can now unlock                            
+         CS    R2,R3,CVWTOLK       Unlock                                       
+         BNZ   WTOSULP             Should always fall through                   
+*                                                                               
+         IF    CVWTOECB.X'80','POST CVWTOECB'  Only post if waiting             
+*                                                                               
+         CLEAR WTOCBUSR            Reset                                        
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DOM -- Routine to delete action messages.                                    
+*    Note that this procedure only gets action messages which                   
+*    are not directed to a specific console (ucmid).                            
+*                                                                               
+DOM      XPROC                                                                  
+         STIMER WAIT,BINTVL==A(50)  1/2 second for WTO's to get out             
+         CLEAR CVFTIMER            Dispatcher needs to re-do STIMER             
+*                                                                               
+         LA    R6,DOMTBL           First action message id                      
+         LA    R7,DOMTBL+DOMLIM*4  Ending addr                                  
+         WHILE (R6,LT,R7),BEGIN    Delete messages...                           
+         LT    R1,@R6              Wto id                                       
+         IF    ^NEG,BEGIN                                                       
+         DOM   MSG=(1)                                                          
+         MVC   @R6(4),=F'-1'       Reset                                        
+         END                                                                    
+         LA    R6,@R6+4                                                         
+         END                                                                    
+         PEND                                                                   
+         TITLE 'Wto Routine (Subtask)'                                          
+*box                                                                            
+*                                                                               
+*  WTO -- This runs as a subtask.  It is posted when there is a                 
+*    WTO to issue.  The WTO's are done in a subtask to prevent                  
+*    MILTEN (maintask) from becoming non-dispatchable if the WTO                
+*    should have to wait.                                                       
+*                                                                               
+         ENTRY WTO                                                              
+WTO      BASE                                                                   
+         STKINIT WTOSTK            wto subtask's stack                          
+*                                                                               
+         VCALL AMODE31                                                          
+*                                                                               
+WTOWAIT  WAIT  ECB=CVWTOECB        Wait for work                                
+         CLEAR CVWTOECB                                                         
+*                                                                               
+WTOLOOP  LABEL                                                                  
+*-                                                                              
+*-       Take the first WTO entry off the WTO queue.                            
+*-                                                                              
+WTOLOCK  CLEAR R2                  Zero means unlocked                          
+         LA    R3,1                One means locked                             
+         CS    R2,R3,CVWTOLK       Lock out updates                             
+         BNZ   WTOLOCK             Spin lock                                    
+*                                                                               
+         LT    R4,CVWTOQH          First queue entry                            
+         IF    NZ,BEGIN            We have something...                         
+         L     R3,@R4              Next entry after first                       
+         ST    R3,CVWTOQH          New first queue entry                        
+         IF    (R3,Z),'CLEAR CVWTOQT'  Reset queue tail                         
+*                                                                               
+         DECR  R15,CVWTONO         Kick count of WTO entries                    
+         END                                                                    
+*                                                                               
+WTOUNLK  L     R2,CVWTOLK          Should be non-zero (locked)                  
+         CLEAR R3                  We can now unlock                            
+         CS    R2,R3,CVWTOLK       Unlock                                       
+         BNZ   WTOUNLK             Should always fall through                   
+*                                                                               
+         IF    (R4,Z),WTOWAIT      Nothing to do, go back and wait              
+*                                                                               
+         LA    R7,@R4+4                                                         
+         USING WTOCBUSR,R7                                                      
+         LC    R0,WTOCBUCM         Ucm id (if needed)                           
+         LA    R1,@R4+8                                                         
+         IF    ^WTOCBFJL,BEGIN     Wto...                                       
+         WTO   MF=(E,(1))                                                       
+         END                                                                    
+         ELSE  BEGIN               If no haspserv, comment this out...          
+         CLEAR (@R1+2,2)           Keeps haspserv happy                         
+         HASPSERV WTL,(R1)         Job log only                                 
+         END                                                                    
+         LR    R2,R1               Wto id                                       
+         IF    WTOCBFAC,BEGIN      Action msg...                                
+         LC    R15,@R4+5           Ucm id                                       
+         IF    ^WTOCBFID,'CLEAR R15'  no ucmid = ucmid=0                        
+         IF    (R15,GT,DOMUCMS),EXIT  too high, ignore                          
+         MH    R15,=AL2(DOMLIM*4)                                               
+         LA    R3,DOMTBL(R15)      This consoles dom table                      
+         LT    R1,@R3              Oldest wto id                                
+         IF    ^NEG,BEGIN                                                       
+         DOM   MSG=(1)             Delete oldest wto                            
+         END                                                                    
+         MVC   @R3((DOMLIM-1)*4),@R3+4  move up queue                           
+         ST    R2,@R3+(DOMLIM-1)*4      save new wto id                         
+         END                                                                    
+*                                                                               
+         LR    R1,R4                                                            
+         VCALL FREECORE            Release entry                                
+         B     WTOLOOP                                                          
+*                                                                               
+         DROP  WTOCBUSR,BR                                                      
+*                                                                               
+DOMLIM   EQU   5                   Maximum of 5 action msgs                     
+DOMUCMS  EQU   25                  Ignore anything with gt ucmid                
+DOMTBL   DC    (DOMLIM*DOMUCMS)A(-1)  dom table                                 
+*                                                                               
+WTOSTK   DS    XL512               Wto subtask stack                            
+         QLTORG                                                                 
+         END   .                                                                

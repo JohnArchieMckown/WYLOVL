@@ -1,0 +1,404 @@
+CONT     TITLE  'CONTROL PROGRAM FOR BATCH'
+CONTROL  CSECT
+***********************************************************************
+*                                                                     *
+*                 WYLBUR/BASIC CONTROL PROGRAM                        *
+*                       BATCH VERSION                                 *
+*                                                                     *
+***********************************************************************
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0
+R1       EQU   1
+R2       EQU   2
+R3       EQU   3                  WORK REGISTER
+R4       EQU   4                  DUMP SWITCH
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9
+R10      EQU   10                 BASE FOR 'CONTROLS' WORK AREA
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'CONTROL'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14
+R15      EQU   15
+*
+BASER    EQU   12                 BASE FOR 'CONTROL'
+*
+************************OS ENTRY LINKAGE*******************************
+*
+         SAVE  (14,12),,*
+         BALR  BASER,0            ESTABLISH ADDRESSABILITY FOR
+         USING *,BASER            *
+         LR    R3,13              COPY CALLERS SAVE AREA ADDRESS
+         L     R11,AAREA          ESTABLISH ADDRESSABILITY TO THE
+         USING AREA,R11            USER AREA
+         LA    13,ASAVE           LOAD ADDRESS OF CALLEDS SAVE AREA
+         ST    13,8(0,R3)         PUT CALLEDS SAVE AREA ADDRESS
+*                                  IN CALLERS SAVE AREA
+         ST    R3,4(0,13)         PUT CALLERS SAVE AREA ADDRESS
+*                                  IN CALLEDS SAVE AREA
+         B     GO                 BRANCH AROUND ADDRESS CONSTANTS
+*
+********ADDRESS CONSTANTS FOR EXTERNAL CONTROL SECTIONS****************
+*
+ACWORK   DC    V(CWORK)
+AAREA    DC    V(AREA)
+AINITIAL DC    V(INITIAL)
+APUTLINE DC    V(PUTLINE)
+AGETLINE DC    V(GETLINE)
+ARUNERR  DC    V(RUNERR)
+APRESSIT DC    V(PRESSIT)
+AINLINE  DC    V(INLINE)
+APACKCON DC    V(PACKCON)
+ATRANS   DC    V(TRANS)
+ALODR    DC    V(LODR)
+AEXEC    DC    V(EXEC)
+*
+********************SET UP FOR ADDRESSING CONTROL PROGRAM WORK AREA****
+*
+GO       L     R10,ACWORK         ADDR OF CWORK OUT OF CON AREA
+         USING CWORK,R10
+*
+*****************SET DUMP SWITCH IN A SAFE PLACE***********************
+*
+         L     R4,0(1)            ADDR OF PARM COUNT FIELD
+         LH    R4,0(R4)           TO GET LENGTH
+*
+********************SET UP USER AREA (DUMMY ROUTINE)*******************
+*
+         MVI   ERRORR,X'01'       SET UP WHO CALLED CODE
+         L     15,AINITIAL        ADDR OF ROUTINE TO SET UP USER AREA
+         BALR  14,15              GO SET UP USER AREA
+*
+**********************OPEN INPUT FILE*********************************
+*
+         MVI   ERRORR,X'02'
+         LA    R0,254(R0,R0)      SET UP OPEN CALL IN REG 0
+         L     R15,AGETLINE
+         BALR  14,15
+         MVI   SW2,X'FE'          SET SWITCH TO OPEN
+*
+********************OPEN OUTPUT FILE***********************************
+*
+         MVI   ERRORR,X'03'
+         MVI   SW1,X'FE'          SET SWITCH TO OPEN
+         LA    R1,SW1             SET FOR CALL
+         L     R15,APUTLINE
+         BALR  14,15
+*
+********************GET A CARD FROM THE FILE***************************
+*
+GETACARD MVI   ERRORR,X'04'
+         SR    R0,R0              BLOCK ATTEMPT TO DO OPEN OR CLOSE
+         LA    R1,LINEIN          ADDR OF INPUT BUFFER IN CWORK
+         L     R15,AGETLINE
+         BALR  14,15
+*
+********************TEST FOR AND BRANCH ON END OF FILE*****************
+*
+         LTR   R0,R0              TEST RETURN CODE FOR ZERO=NO EOF
+         BNE   EOF                FILE IS CLOSED GO TO EOF PROCESS
+*
+********************NO END OF FILE SO DRESS BUFFER FOR OUTPUT**********
+*
+         MVI   STOPCHAR,X'40'     FOR MVC
+         MVC   STOPCHAR+1(39),STOPCHAR    CLEAN END OF BUFFER
+         MVI   CCIN,X'40'         FOR CARRIAGE CONTROL
+*
+********************OUTPUT RAW DATA FOR USER TO SEE********************
+*
+         MVI   ERRORR,X'05'
+         LA    R1,CCIN            PUTLINE EXPECTS BUFFER ADDR IN 1
+         L     R15,APUTLINE
+         BALR  14,15
+*
+********************GO MAKE A PRESSED AREA FOR INLINE******************
+*
+RPRESSIT MVI   ERRORR,X'06'
+         L     R15,APRESSIT
+         BALR  14,15
+         LTR   R0,R0              CHECK RETURN CODE
+         BE    RINLINE
+*
+********************NO STATEMENT NUMBER SEND USER ERROR MESSAGE********
+*
+         LA    R1,NOSTMER         ADDRESS OF ERROR MESSAGE
+         BAL   R3,DRIVEM          GO TELL THE USER ABOUT HIS ERROR
+*
+********************WE MUST BE OPEN SO GET ANOTHER CARD****************
+*
+         B     GETACARD
+*
+********************WE CAME HERE ON AN END OF FILE*********************
+*
+EOF      MVI   SW2,X'FF'          SET INPUT FILE FLAG TO CLOSED
+*
+********************GO TO THE LOADER***********************************
+*
+RLODR    MVI   ERRORR,X'0B'
+         L     R15,ALODR
+         BALR  14,15
+*
+********************CHECK RETURN FROM LODER****************************
+*
+         LTR   R0,R0              IS IT A GOOD RETURN
+         BE    RLODR1             NORMAL RETURN CHECK NO GO
+         LR    R1,R0              KICK ERROR FROM LODR  OVER THAT
+         LA    R0,5(R0,R1)         FROM PACKCON AND TRANS
+         BAL   R14,TABLOVL        GO PROCESS TABLE OVERFLOW
+         B     RLODR              TRY AGAIN
+*
+*****************SEE IF EXECUTION IS POSSIBLE**************************
+*
+RLODR1   TM    SW0,X'01'          TEST NO GO SWITCH
+         BNO   REXEC              SKIP HOME-WARD-BOUND IF NO GO OFF
+         LA    R1,FULLNOGO        ADDR OF TABLE FULL NOGO MESSAGE
+         BAL   R3,DRIVEM          GO PUT THE MESSAGE OUT
+         B     HOME               RETURN HOME QUITELY
+*
+******************EXECUTE THE PROGRAM**********************************
+*
+REXEC    MVI   ERRORR,X'0C'
+         SR    R0,R0              FOR EXEC TO START AT BEFINNING
+         L     R15,AEXEC
+REXEC1   BALR  14,15              OFF TO THE EXECUTOR
+         B     HOME               STOP OR END
+         B     PAUSE              PAUSE
+         B     UERROR             USER ERROR 'WE CAN NOT RECOVER'
+         B     DEATH              SYSTEM ERROR - GO DIE
+         B     NOINPUT             END OF FILE ON INPUT
+*****************PROCESS THE PAUSE STATEMENT (BATCH)*******************
+*
+PAUSE    LCR   R0,R0              COMPLEMENTED MEANS CONTINUE
+         B     REXEC1             BACK A NTH TIME
+*
+*****************USER ERROR TEST FOR DUMP SWITCH ON********************
+*
+*
+*        CALL RUNERR WITH 'END OF FILE ON INPUT' MESSAGE
+*
+NOINPUT  LH    R1,=H'6000'         MESSAGE NUMBER
+         L     R15,ARUNERR
+         BALR  R14,R15
+UERROR   LTR   R4,R4
+         BE    HOME               NO PARM GO HOME QUITELY
+         B     DEATH              GO HOME BY WAY OF DUMP
+*
+********************CLOSE THE OUTPUT FILE******************************
+*
+HOME     EQU   *
+         MVI   ERRORR,X'0D'
+         MVI   SW1,X'FF'          SET SWITCH TO CLOSE
+         LA    R1,SW1             SET FOR CALL
+         L     R15,APUTLINE
+         BALR  14,15
+         CLI   SW2,X'FF'          TEST INFILE FOR BEING OPEN
+         BE    RETURN             IF CLOSED SKIP CLOSING
+         MVI   ERRORR,X'0E'       SET WHO CALLED CODE
+         LA    R0,255(R0,R0)      SET UP CLOSE CODE
+         L     R15,AGETLINE       ADDRESS OF INPUT ROUTINE
+         BALR  14,15
+         MVI   SW2,X'FF'          MARK IT CLOSED
+*
+********************RETURN TO OS***************************************
+*
+RETURN   L     13,4(0,13)         RETURN TO CALLER
+         LM    14,12,12(13)       *
+         BCR   15,14              *
+*
+*********************GO TO INLINE FOR SYNTAX ANALYSIS******************
+*
+RINLINE  MVI   ERRORR,X'08'
+         LA    R1,INFIXCON        TELL INLINE WHERE TO STORE CONSTANTS
+         ST    R1,INLCNPTR        FOR THIS STATEMENT
+*        (CONTROL DOES THIS SINCE IT KNOWS WHICH VERSION OF BASIC
+*        APPLIES--TIME SHARING OR BATCH--AND INLINE DOES NOT.)
+         LA    R1,INLINARG        SET UP POINTER TO ARG LIST
+         LH    R0,LINENO          STM NUMBER IN 0
+         L     R15,AINLINE
+         BALR  14,15
+*
+********************TEST AND BRANCH ON TYPE OF RETURN******************
+*
+         LTR   R0,R0
+         BL    RPACKCON           -1 = GOOD LINE NOT CLASSIFIED BELOW
+         BE    RTRANS              0 = BAD SYNTAX TO BE PASSED TO TRANS
+         CH    R0,=H'8'           CHECK FOR UPPER RANGE OF RETURN CODE
+         BH    NOTYET         UNSUPPORTED FEATURE OR ERROR FROM INLINE
+         SLL   R0,2(R0)           MAKE A *4 DISPLACEMENT
+         LR    R1,R0              PUT IN AN ADDRESSING REGISTER
+         LA    R3,ONANDON         LOAD START OF TRANSFER VECTOR
+ONANDON  BC    15,0(R1,R3)        BRANCH TO BRANCH
+         B     ENDSTM              1 = 'END' LOGICAL END OF PROGRAM
+         B     RPACKCON            2 = 'DEF' NEEDS CALL TO PACKCON
+         B     RTRANS              3 = 'DIM'
+         B     RTRANS              4 = DELETE
+         B     RTRANS              5 = 'REM'.,OTHER NOT NEEDING PACKCON
+         B     NOTYET 6 = DEFINE FILE (BLOCKED UNTIL TRANS CAN TAKE IT)
+         B     NOTYET              7 = (FUTURE IMPLEMENTATION)
+         B     NOTYET              8 = (FUTURE IMPLEMENTATION)
+*
+*****************DRIVE TO UNSUPPORTED FEATURE MESSAGE******************
+*
+NOTYET   LA    R1,NOTYETM         SET IN ADDRESS OF MESSAGE
+         BAL   R3,DRIVEM          GO TO MESSAGE DRIVER
+         B     GETACARD           BACK FOR MORE SOURCE
+*
+******************SET LOGICAL END OF PROGRAM ON************************
+*
+ENDSTM   OI    SW0,X'02'          SET LOGICAL END SWITCH
+         B     RTRANS             TO THE TRANSLATOR WITH END STATEMENT
+*
+********************SET CONSTANTS IF ANY IN CONSTANT TABLES************
+*
+RPACKCON MVI   ERRORR,X'09'
+         LH    R0,LINENO          STM NUMBER IN 0
+         L     R15,APACKCON
+         BALR  14,15
+*
+******************TEST AND BRANCH ON TYPE OF RETURN********************
+*
+         LTR   R0,R0              IS IT A GOOD RETURN?
+         BE    RTRANS             IF SO CONTINUE
+         BAL   R14,TABLOVL        GO PROCESS TABLE OVERFLOW
+         B     RPRESSIT           BACK FROM TABLE OVERFLOW TRY AGAIN
+*
+*************************FATAL SYSTEM ERROR****************************
+*
+DEATH    ABEND (0),DUMP
+*
+********************GO TO THE TRANSLATOR*******************************
+*
+RTRANS   MVI   ERRORR,X'0A'
+         LH    R0,LINENO          STM NUMBER IN 0
+         LA    R1,INFIXNO         TRANS WANTS POINT TO INFIX BUFFER
+         L     R15,ATRANS
+         BALR  14,15
+*
+********************TEST AND BRANCH ON TYPE OF RETURN******************
+*
+         B     RTRANS1 NOT DEFINE FILE OPERATION CHECK TABLE OVERFLOW
+         B     NOTYET             DEFINE FILE ENTERED
+         B     NOTYET             DEFINE FILE REPLACED
+         B     NOTYET             DEFINE FILE DELETED
+RTRANS1  LTR   R0,R0              IS IT A GOOD RETURN ?
+         BE    RTRANS2            NORMAL RETURN TEST FOR LOGICAL END
+         LR    R1,R0              KICK ERROR FROM TRANS OVER ERROR
+         LA    R0,1(R0,R1)         FROM PACKCON
+         BAL   R14,TABLOVL        GO PROCESS TABLE OVERFLOW
+         B     RTRANS             GO BACK AND TRY AGAIN
+*
+******************TEST FOR LOGICAL END OF PROGRAM**********************
+*
+RTRANS2  TM    SW0,X'02'          TEST LOGICAL END BIT ON
+         BZ    GETACARD           IF NOT LOGICAL END GET ANOTHER CARD
+         XC    LINECT,LINECT      SET SO NEXT OUTPUT CAUSES NEW PAGE
+         B     RLODR              IF LOGICAL END GO CALL LODR
+*
+******ALL TABLE OVERFLOW ERRORS FROM PACKCON,TRANS AND LODR COME HERE**
+*                                                                     *
+*        AT THIS WRITING ALL THAT IS DONE IS CHECKING FOR SYSTEM      *
+*        LOOP AND RESETING OF THE PARTICULAR TABLE THAT HAS           *
+*        OVERFLOWED SO THAT SYNTAX ANALYSIS CAN CONTINUE.             *
+*                                                                     *
+*        LATER IT IS HOPED TO PROVIDE CODE TO REALOCATE THE USER      *
+*        AREA AT THIS POINT.                                          *
+*                                                                     *
+*        THIS CODE IS ENTERED WITH REG 0 HOLDING THE TABLE CODE:      *
+*          1 = CONSTANT TABLE OVERFLOW             PACKCON = 1
+*          2 = CODE TABLE OVERFLOW                 TRANS   = 1
+*          3 = LINE TABLE OVERFLOW                         = 2
+*          4 = DATA TABLE OVERFLOW                         = 3
+*          5 = FORC TABLE OVERFLOW                         = 4
+*          6 = ARRAY TABLE OVERFLOW                LODR    = 1
+*                                                                     *
+***********************************************************************
+*
+******************SET NO GO SWITCH*************************************
+*
+TABLOVL  OI    SW0,X'01'          PREVENT CALL TO EXECUTOR
+*
+***************CHECK FOR LOOPING***************************************
+*
+         LR    R1,R0              PUT ERROR CODE IN BETTER REG
+         LH    R0,LINENO          GET CURRENT LINE NUMBER
+         CH    R0,LNELOOP         CHECK LAST TIME STM NUMBER
+         BNE   TABLOVL1           HAVE NOT LOOPED GO SET UP FOR NEXT TM
+         CH    R1,TYPLOOP         CHECK LAST TIME ERROR TYPE
+         BNE   TABLOVL1           IF NOT SICK AND LOOPING - SKIP DIE
+         LA    R1,LOOPER          ADDR OF LOOPING ERROR MESSAGE
+         BAL   3,DRIVEM           GO TO MESSAGE DRIVER
+         B     DEATH              GO DIE
+TABLOVL1 STH   R0,LNELOOP         LINE NUMBER TO ITS LOOP CELL
+         STH   R1,TYPLOOP         ERROR TYPE TO ITS LOOP CELL
+*
+*************BRANCH TO PROCESS TABLE OVERFLOW**************************
+*
+         CH    R1,=H'6'           SEE IF ERROR CODE IS IN RANGE
+         BNH   TABLOVL2           IF NOT OUT OF RANGE SKIP DIE
+         LA    R1,LOOPER2         ADDR OF OUT OF RANGE MESSAGE
+         BAL   3,DRIVEM           GO TO MESSAGE DRIVER
+         B     DEATH              GO DIE
+TABLOVL2 LA    R1,0(R1,R1)        MAKE ERROR CODE A *4 DISPLACEMENT
+         LA    R1,0(R1,R1)        *
+         LA    R3,TABLOVL3        SET UP FOR A BRANCH ADDRESS
+TABLOVL3 BC    15,0(R1,R3)        BRANCH TO THE BRANCH
+         B     NUMOVL             BRANCH TO PROCESS NUM TABLE OVERFLOW
+         B     CODOVL             BRANCH TO PROCESS CODE TABLE OVERFLOW
+         B     LNEOVL             BRANCH TO PROCESS LINE TABLE OVERFLOW
+         B     NUMOVL             BRANCH TO PROCESS DATA TABLE OVERFLOW
+         B     FRCOVL             BRANCH TO PROCESS FORC TABLE OVERFLOW
+         B     ARYOVL             BRANCH TO PROCESS ARRAY TABLE OVERFLO
+*
+***************PROCESS THE ACTUAL TABLE OVERFLOW***********************
+*
+NUMOVL   LA    R3,11(R0,R0)       RESET NUMBER OF CONSTANTS COUNTER
+         ST    R3,NUMNUM          *
+         XC    ADATAPTR,ADATAPTR  RESET DATA AND CONSTANT TABLE
+         L     R3,ADATASIZ
+         ST    R3,ACONSPTR
+         BCR   15,14
+CODOVL   XC    ACODEPTR,ACODEPTR  RESET CODE TABLE POINTER
+         BCR   15,R14
+LNEOVL   XC    ALINEPTR,ALINEPTR  RESET LINE TABLE POINTER
+         BCR   15,R14
+FRCOVL   XC    AFORCPTR,AFORCPTR  RESET FORC TABLE POINTER
+         BCR   15,R14
+ARYOVL   XC    ARRAYPTR,ARRAYPTR  RESET ARRAY TABLE POINTER
+         BCR   15,R14
+*
+***********DRIVE UNNUMBERED CONTROL PROGRAM MESSAGES TO THE USER*******
+*
+DRIVEM   OI    ERRORR,X'80'       OR IN FACT THAT WE HAVE AN ERROR
+         L     R15,APUTLINE       ADDR OF OUTPUT ROUTINE
+         BALR  14,15              GO PUT MESSAGE WHERE USER CAN SEE IT
+         BCR   15,R3              RETURN FOR CALLERS OPTION
+*
+********************UNNUMBERED CONTROL PROGRAM ERROR MESSAGES**********
+*
+NOSTMER  DC    CL131' ABOVE STATEMENT DOES NOT HAVE A VALID STATEMENT NX
+               UMBER, STATEMENT IGNORED'
+FULLNOGO DC    CL131' EXECUTION PHASE INHIBITED BECAUSE OF TABLE OVERFLX
+               OWS'
+LOOPER   DC    CL131' PROCESSING TERMINATED, SYSTEM ERROR IN TABLE OVERX
+               FLOW RECOVERY'
+LOOPER2  DC    CL131' PROCESSING TERMINATED, SYSTEM ERROR UNDEFINED TABX
+               LE OVERFLOW'
+NOTYETM  DC    CL131' THE ABOVE STATEMENT HAS BEEN TAGGED AS REQUESTINGX
+                A SERVICE NOT YET SUPPORTED.  STATEMENT IGNORED.'
+***********THE FOLOOWING BELONGS IN CWORK
+LNELOOP  DC    H'0'
+TYPLOOP  DC    H'0'
+         LTORG
+END      EQU   *
+         EJECT
+CWORK    DSECT
+         COPY  CWORK
+         EJECT
+AREA     DSECT
+         COPY  AREA
+         END

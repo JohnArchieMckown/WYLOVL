@@ -1,0 +1,683 @@
+XDIO     TITLE   'DISK I/O ROUTINE 10/14/69'
+*
+READ     CSECT
+*
+*  ROUTINE TO PROCESS CALLS FROM EXEC REFERENCING FILE READS AND WRITES
+*
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0                  LOCAL WORK ONLY..USED BY SVC
+R1       EQU   1                  LOCAL WORK ONLY..USED BY SVC
+R2       EQU   2                  WHEN = 0 READ  WHEN = 4 WRITE
+R3       EQU   3                  ADDRESS OF ARGUMENT LIST (FROM REG 1)
+R4       EQU   4                  LOCAL WORK WHEN NOT INTERNAL BRANCH
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9
+R10      EQU   10                 BASE FOR FILE CONTROL BLOCK
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'XDIO'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14                 LOCAL WORK ONLY..USED BY SVC
+R15      EQU   15                 LOCAL WORK ONLY..USED BY SVC
+*
+         ENTRY FREADT,WRITE,FWRITET
+*
+**READ ENTRY
+         STM   R14,R12,12(R13)    SAVE REGS
+         LA    R2,72(,R13)        BUMP ONE SAVE AREA LENGTH BB 03/21/74
+         ST    R13,4(,R2)         SET UP CHAIN              BB 03/21/74
+         ST    R2,8(,R13)         SET UP CHAIN              BB 03/21/74
+         LR    R13,R2             SET SAVE AREA ADDRESS     BB 03/21/74
+         SR    R2,R2              WHEN R2 IS 0 XDIO WAS CALLED TO READ
+         USING READ,R15           TELL ASSEMBLER SO WE CAN BRANCH
+         B     START              GO TO COMMON ENTRY
+*
+**WRITE ENTRY
+*
+WRITE    STM   R14,R12,12(R13)    SAVE REGS
+         LA    R2,72(,R13)        BUMP ONE SAVE AREA LENGTH BB 03/21/74
+         ST    R13,4(,R2)         SET UP CHAIN              BB 03/21/74
+         ST    R2,8(,R13)         SET UP CHAIN              BB 03/21/74
+         LR    R13,R2             SET SAVE AREA ADDRESS     BB 03/21/74
+         LA    R2,4               WHEN R2 IS 4 XDIO WAS CALLED TO WRITE
+*
+**READ AND WRITE JOIN HERE LOGIC NOW CONTROLED BY CONTENTS OF REG 2
+*
+START    BALR  R12,0              ESTABLISH FINAL ADDRESSABILITY
+         DROP  R15                DROP THE OLD ONE
+         USING *,R12              TELL ASSEMBLER
+         USING AREA,R11           TELL ASSEMBLER ABOUT AREA
+*
+**MOVE ADDRESS OF ARGUMENT LIST TO PERMANENT REG 3
+*
+*   R3 WILL CONTAIN ADDRESS OF LIST WHICH CONTAINS:
+*
+*   WHEN READ (R2=0)  ARG1=ADDRESS OF ITEM TO BE READ
+*                     ARG2=TYPE ITEM 0=NUM 1=STRING
+*                     ARG3=ADDRESS OF FILE NUMBER GIVEN BY USER
+*                     ARG4=LINE NUMBER FOR EOF COND. IF SPECIFIED
+*
+*   WHEN WRITE (R2=4) ARG1=ADDRESS OF ITEM TO BE WRITTEN
+*                     ARG2=TYPE OF ITEM 0=NUM 1=STRING
+*                     ARG3=ADDRESS OF FILE NUMBER GIVEN BY USER
+*                     ARG4=ADDRESS OF RECORD NUMBER
+*
+         LR    R3,R1              ADDR OF ARG LIST AS DESCRIBED ABOVE
+*
+*
+**GO CONVERT LOGICAL FILE NUMBER TO INTEGER
+*
+         L     R1,8(R0,R3)        GET ADDRESS OF LOGICAL NUMBER
+         BAL   R4,FTOI            GO CONVERT (RETURNS RESULT IN R1)
+*
+**GET POINTER TO CORRECT FILE CONTROL BLOCK TABLE ENTRY AND
+**CORRECT FILE CONTROL BLOCK
+*
+         L     R14,AFCB           ADDRESS OF FIRST FCBT ENTRY
+         LA    R15,64(R14)        ADDRESS OF FIRST FCB
+         LA    R0,16(R0,R0)       CONTROL COUNT FOR SEARCH
+LOOKING1 L     R4,0(R0,R14)       GET FCBT ENTRY
+         LA    R4,0(R0,R4)        TAKE OUT HIGH BYTE
+         CR    R4,R1              TEST THIS ON WITH REQUEST
+         BE    FOUND1             WE ARE POINTING AT CORRECT FCB
+         LA    R14,4(R0,R14)      BUMP TO NEXT FCBT ENTRY
+         LA    R15,108(R0,R15)    BUMP TO NEXT FCB ENTRY
+         BCT   R0,LOOKING1        KEEP LOOKING UNTIL DONE OR FOUND
+         B     ERR1         NO CORRESPONDING DEF FILE FOR LOGICAL FILE
+*
+**SET UP AND TELL ASSEMBLER ABOUT FCB
+*
+FOUND1   LR    R10,R15            MOVE ADDR OF FCB TO CORRECT REG
+         USING FCB,R10            TELL ASSEMBLER
+*
+**TEST AND BRANCH FOR FILE CURRENTLY ATTACHED OR NOT
+*
+         L     R0,FCBOID          IF FILE ID IS 0 FILE NOT ATTACHED
+         LTR   R0,R0              TEST IF ATTACHED
+         BNZ   ISOPEN             BRANCH AROUND ATTACH IF IT IS
+*
+**TEST AND BRANCH FOR FILE TO BE ATTACHED SHARE
+*
+         TM    FCBFLG,X'04'       4 BIT ON MEANS FILE TO BE SHARED
+         BZ    NOSHARE            TO NON-SHARE OLD ATTACH IF NOT
+*
+**ATTEMPT TO ATTACH FILE SHARED AND OLD
+*
+         ATTACH 2,FCBFNM,L:FCBFNL,MODE=(SHARE,WAIT,OLD)
+         BZ    WAIT1              BRANCH TO WAIT IF ALL OK
+         BP    SORT1              SORT OUT POSITIVE RETURN CODE
+         LPR   R15,R15            TURN TO POSITIVE RETURN CODE
+         LA    R15,12(R0,R15)     JUMP OVER NORMAL POSITIVE RETURNS
+SORT1    B     *(R15)             SORT OUT RETURN CODES
+         B     ERR3               ATTACH WAS ALREADY STARTED
+         B     ERR4               FILE ALREADY ATTACHED (-SHARE)
+         B     ERR5               FILE ALREADY ATTACHED (SHARE)
+         B     ERR6               MORE THAN 15 DEVICES OR FILES
+         B     ERR7               FILE NAME ILLEGAL
+WAIT1    ST    R0,FCBOID          STORE DOWN FILE ID
+         WAIT  (0)                WAIT FOR ATTACH TO COMPLETE
+         BZ    DONE1              GOOD RETURN FROM ATTACH
+         BP    SORT2              SORT OUT POSITIVE RETURN CODES
+         LA    R15,32(R0,R0)      MAKE POSITIVE OVER LAST NORMAL +
+SORT2    XC    FCBOID(4),FCBOID   BACK OUT FILE ID
+         B     *(R15)             SORT OUT RETURN CODE
+         B     ERR8               ACCESS NOT PERMITED
+         B     ERR9               FILE STORAGE LIMIT EXCEEDED (-OLD)
+         B     ERRA               NO SPACE REMAINS IN FILE DIRECTORY
+         B     NEWSHAR            FILE NOT THERE (OLD)
+         B     ERRC               FILE ALREADY THERE (-OLD)
+         B     ERRD               SYSTEM TABLES OVERFLOWED
+         B     ERRE               FILE SPACE EXHAUSTED (-OLD)
+         B     ERRF               FILE NOT IMMEDIATELY AVAILABLE
+*
+**ATTEMPT TO ATTACH FILE NOT-SHARED AND OLD
+*
+NOSHARE  ATTACH 2,FCBFNM,L:FCBFNL,MODE=(WAIT,OLD)
+         BZ    WAIT2              BRANCH TO WAIT IF ALL OK
+         BP    SORT3              SORT OUT POSITIVE RETURN CODE
+         LPR   R15,R15            TURN TO POSITIVE RETURN CODE
+         LA    R15,12(R0,R15)     JUMP OVER NORMAL POSITIVE RETURNS
+SORT3    B     *(R15)             SORT OUT RETURN CODES
+         B     ERR3               ATTACH WAS ALREADY STARTED
+         B     ERR4               FILE ALREADY ATTACHED (-SHARE)
+         B     ERR5               FILE ALREADY ATTACHED (SHARE)
+         B     ERR6               MORE THAN 15 DEVICES OR FILES
+         B     ERR7               FILE NAME ILLEGAL
+WAIT2    ST    R0,FCBOID          STORE DOWN FILE ID
+         WAIT  (0)                WAIT FOR ATTACH TO COMPLETE
+         BZ    DONE1              GOOD RETURN FROM ATTACH
+         BP    SORT4              SORT OUT POSITIVE RETURN CODES
+         LA    R15,32(R0,R0)      MAKE POSITIVE OVER LAST NORMAL +
+SORT4    XC    FCBOID(4),FCBOID   BACK OUT FILE ID
+         B     *(R15)             SORT OUT RETURN CODE
+         B     ERR8               ACCESS NOT PERMITED
+         B     ERR9               FILE STORAGE LIMIT EXCEEDED (-OLD)
+         B     ERRA               NO SPACE REMAINS IN FILE DIRECTORY
+         B     NEWNSHAR           FILE NOT THERE (OLD)
+         B     ERRC               FILE ALREADY THERE (-OLD)
+         B     ERRD               SYSTEM TABLES OVERFLOWED
+         B     ERRE               FILE SPACE EXHAUSTED (-OLD)
+         B     ERRF               FILE NOT IMMEDIATELY AVAILABLE
+*
+**ATTEMPT TO ATTACH FILE SHARED AND NEW
+*
+NEWSHAR  ATTACH 2,FCBFNM,L:FCBFNL,MODE=(SHARE,WAIT)
+         BZ    WAIT3              BRANCH TO WAIT IF ALL OK
+         BP    SORT5              SORT OUT POSITIVE RETURN CODE
+         LPR   R15,R15            TURN TO POSITIVE RETURN CODE
+         LA    R15,12(R0,R15)     JUMP OVER NORMAL POSITIVE RETURNS
+SORT5    B     *(R15)             SORT OUT RETURN CODES
+         B     ERR3               ATTACH WAS ALREADY STARTED
+         B     ERR4               FILE ALREADY ATTACHED (-SHARE)
+         B     ERR5               FILE ALREADY ATTACHED (SHARE)
+         B     ERR6               MORE THAN 15 DEVICES OR FILES
+         B     ERR7               FILE NAME ILLEGAL
+WAIT3    ST    R0,FCBOID          STORE DOWN FILE ID
+         WAIT  (0)                WAIT FOR ATTACH TO COMPLETE
+         BZ    DONE1              GOOD RETURN FROM ATTACH
+         BP    SORT6              SORT OUT POSITIVE RETURN CODES
+         LA    R15,32(R0,R0)      MAKE POSITIVE OVER LAST NORMAL +
+SORT6    XC    FCBOID(4),FCBOID   BACK OUT FILE ID
+         B     *(R15)             SORT OUT RETURN CODE
+         B     ERR8               ACCESS NOT PERMITED
+         B     ERR9               FILE STORAGE LIMIT EXCEEDED (-OLD)
+         B     ERRA               NO SPACE REMAINS IN FILE DIRECTORY
+         B     ERRB               FILE NOT THERE (OLD)
+         B     ERRC               FILE ALREADY THERE (-OLD)
+         B     ERRD               SYSTEM TABLES OVERFLOWED
+         B     ERRE               FILE SPACE EXHAUSTED (-OLD)
+         B     ERRF               FILE NOT IMMEDIATELY AVAILABLE
+*
+**ATTEMPT TO ATTACH FILE NOT-SHARED AND NEW
+*
+NEWNSHAR ATTACH 2,FCBFNM,L:FCBFNL,MODE=(WAIT)
+         BZ    WAIT4              BRANCH TO WAIT IF ALL OK
+         BP    SORT7              SORT OUT POSITIVE RETURN CODE
+         LPR   R15,R15            TURN TO POSITIVE RETURN CODE
+         LA    R15,12(R0,R15)     JUMP OVER NORMAL POSITIVE RETURNS
+SORT7    B     *(R15)             SORT OUT RETURN CODES
+         B     ERR3               ATTACH WAS ALREADY STARTED
+         B     ERR4               FILE ALREADY ATTACHED (-SHARE)
+         B     ERR5               FILE ALREADY ATTACHED (SHARE)
+         B     ERR6               MORE THAN 15 DEVICES OR FILES
+         B     ERR7               FILE NAME ILLEGAL
+WAIT4    ST    R0,FCBOID          STORE DOWN FILE ID
+         WAIT  (0)                WAIT FOR ATTACH TO COMPLETE
+         BZ    DONE1              GOOD RETURN FROM ATTACH
+         BP    SORT8              SORT OUT POSITIVE RETURN CODES
+         LA    R15,32(R0,R0)      MAKE POSITIVE OVER LAST NORMAL +
+SORT8    XC    FCBOID(4),FCBOID   BACK OUT FILE ID
+         B     *(R15)             SORT OUT RETURN CODE
+         B     ERR8               ACCESS NOT PERMITED
+         B     ERR9               FILE STORAGE LIMIT EXCEEDED (-OLD)
+         B     ERRA               NO SPACE REMAINS IN FILE DIRECTORY
+         B     ERRB               FILE NOT THERE (OLD)
+         B     ERRC               FILE ALREADY THERE (-OLD)
+         B     ERRD               SYSTEM TABLES OVERFLOWED
+         B     ERRE               FILE SPACE EXHAUSTED (-OLD)
+         B     ERRF               FILE NOT IMMEDIATELY AVAILABLE
+*
+**FILE IS NEWLY ATTACHED INITIALIZE CONTROL POINTERS IN FCB
+*
+DONE1    SR    R1,R1              ZERO OUT FOR INITIAL VALUE
+         BCTR  R1,R0              MAKE INITIAL VALUE
+         ST    R1,FCBPHR          PHONEY PHYSICAL RECORD NUMBER
+         ST    R1,FCBRLN          PHONEY LAST LOGICAL RECORD READ
+         ST    R1,FCBWLN          PHONEY LAST LOGICAL RECORD WRITTEN
+         NI    FCBFLG,X'FE'       MARK PHYSICAL RECORD NOT CHANGED
+*
+**BOTH NEWLY ATTACHED AND PRIOR ATTACHED FILES JOIN HERE IN LOGIC
+*
+**GET LOGICAL RECORD REFERENCED ON THIS REQUEST
+*
+ISOPEN   L     R1,12(R0,R3)       GET ADDR OF LOGICAL RECORD NUMBER
+         BAL   R4,FTOI            GO CONVERT IT (RETURN IN R1)
+         LTR   R1,R1              TEST FOR ZERO (NOT VALID)
+         BZ    ERRG               ATTEMPT TO REFERENCE RECORD 0
+         BNP   ERR2               ATTEMPT TO REFERENCE NEGATIVE RECORD
+*
+**WITH THE REQUESTED LOGICAL RECORD NUMBER IN REG 1 COMPUTE THE
+**PHYSICAL RECORD NUMBER UPON WHICH IT IS STORED
+*
+         SR    R4,R4              CLEAR FOR DIVIDE
+         LR    R5,R1              SET LOGICAL RECORD NO. INTO ODD REG
+         BCTR  R5,R0              LOWER TO OBTAIN RELATIVE ZERO
+         MH    R5,FCBLRL+2        MULTIPLY BY LOGICAL RECORD LENGTH
+         L     R6,FCBLPP          GET NO. LOGICAL RECORDS/PHYSICAL
+         MH    R6,FCBLRL+2        MULTIPLY BY LOGICAL LENGTH
+         DR    R4,R6              QUOTIENT (R5) PHYSICAL RECORD WE WANT
+*
+**WE DO NOT PERMIT REFERENCES TO PHYSICAL RECORDS IN EXCESS OF 434279
+*
+         CL    R5,=F'434279'
+         BH    ERR47              GO OFF TO THE ERROR RETURN
+*
+**NOW CHECK AND SEE IF WE HAVE THAT RECORD IN THE BUFFER
+*
+         CL    R5,FCBPHR          DO THEY MATCH
+         BE    SYNC               IF EQUAL WE ARE OK
+*
+**GET PHYSICAL RECORD WRITING OUT OLD ONE FIRST IF REQUIRED
+*
+         TM    FCBFLG,X'01'       HAS THE PHYSICAL RECORD BEEN CHANGED
+         BNO   READIN             BIT 1 OFF PHYSICAL RECORD NOT CHANGED
+         WRITE FCBOID,L:FCBAOB,L:FCBLNR,L:FCBPHR,MODE=WAIT
+         BNZ   ERRH               SYSTEM ERROR IN STARTING A WRITE
+         WAIT  (0)                WAIT FOR WRITE TO COMPLETE
+         BZ    READIN             TEST FOR GOOD RETURN
+         BP    SORT9              GO SORT OUT THE POSITIVE ERRORS
+         LA    R15,24(R0,R0)      SET NEG ONE TO 4 OVER LAST POSITIVE
+SORT9    B     *(R15)             SORTING OUT THE RETURNS
+         B     ERRI               FILE NOT IMMEDIATELY AVAILABLE
+         B     ERRJ               WRITE ACCESS TO THIS FILE PROHIBITED
+         B     ERRK          REWRITING OF EXISTING RECORD NOT PERMITTED
+         B     ERRL               FILE STORAGE LIMIT EXCEEDED
+         B     ERRM               FILE SPACE EXHAUSTED
+         B     ERRN               PERMANENT I/O ERROR
+*
+**NOW PATHS REJOIN TO BRING THE DESIRED PHYSICAL RECORD INTO CORE
+*
+READIN   READ  FCBOID,L:FCBAOB,2048,(R5),MODE=WAIT
+         BNZ   ERRO               SYSTEM ERROR IN STARTING A READ
+         WAIT  (0)                WAIT FOR THE RETURNS
+         BZ    READOK             RECORD IS IN SKIP ERROR PLAY
+         BP    SORTA              GO SORT OUT THE POSITIVE ONES
+         LA    R15,16(R0,R0)      CONVERT NEG TO HIGH POSITIVE
+SORTA    B     *(R15)             SORT OUT THE ERROR RETURNS
+         B     ERRP               FILE NOT IMMEDIATELY AVAILABLE
+         B     ERRQ               READ ACCESS TO THIS FILE PROHIBITED
+         B     MAKEONE            RECORD DOES NOT EXIST
+         B     ERRR               PERMANENT I/O ERROR
+*
+**RECORD REQUESTED NOT IN THE FILE CREATE A FRAMEWORK
+*
+MAKEONE  L     R1,FCBAOB          GET ADDRESS OF BUFFER
+         LA    R0,7(R0,R0)        TO COUNT DOWN 7*256
+         MVC   0(4,R1),NULL         SET IN FIRST NULL
+         MVC   4(255,R1),0(R1)    ZAP IN NEXT 255 BYTES
+MAKEONE2 MVC   256(256,R1),0(R1)  ZAP OUT NEXT 256 BYTES
+         LA    R1,256(R0,R1)      MOVE UP TO NEXT SET
+         BCT   R0,MAKEONE2        LOOP ON THRU
+         SR    R1,R1              ZERO LENGTH (EXPECTED AT READOK)
+*
+**WE HAVE JUST READ A PHYSICAL RECORD IN OR HAVE CREATED A PHYSICAL
+**RECORD.  WE NOW DRESS A FEW VALUES
+*
+READOK   ST    R5,FCBPHR          TAG BUFFER WITH CURRENT PHYSICL RECRD
+         ST    R1,FCBLNR          LENGTH OF PHYSICAL RECORD
+         NI    FCBFLG,X'FE'       MARK PHYSICAL RECORD NOT CHANGED
+*
+**A LITTLE DETOUR HERE TO CHECK THAT RECORD JUST READ WAS FULL LENGTH.
+**IF IT WAS NOT 2048 BYTES THEN WE PAD THE DIFFERENCE WITH THE NULL.
+*
+         CH    R1,=H'2048'        IS THIS A FULL PHYSICAL RECORD
+         BE    ISOPEN             IF SO SKIP END PAD
+         L     R14,FCBAOB         GET ADDRESS OF PHYSICAL RECORD
+         LR    R15,R14            COPY FOR END ADDRESS
+         ALR   R14,R1             FIRST ADDRESS TO BE ZAPPED
+         AL    R15,=F'2048'       ONE HIGHER THAN LAST GOOD ADDRESS
+         L     R0,NULL            SET UP WITH X'80000000'
+BASK     ST    R0,0(R0,R14)       NULL TO PAD OUT PHYSICAL RECORD
+         LA    R14,4(R0,R14)      ADD 4 TO GO UP TO NEXT PAD SPOT
+         CR    R14,R15            SEE IF WE ARE DONE
+         BL    BASK               IF NOT KEEP GOING
+         B     ISOPEN             NOW THE PHYSICAL RECORE IS IN
+*
+**RECOMPUT LOGICAL RECORD AND LOGICAL ELEMENT INDEXES
+*
+*
+WRITST   ST    R1,FCBWLN          WRITE LOGICAL RECORD NUMBER
+         L     R0,FCBPHR          GET PHYSICAL RECORD RECORD IS ON
+         MH    R0,FCBLPP+2     BY NUMBER OF RECORDS IN PHYSICAL RECORD
+         BCTR  R1,R0              LOWER LOGICAL RECORD REQUEST BY ONE
+         SR    R1,R0       WE HOW HAVE INDEX TO LOGICAL RECORD RELATIVE
+*                          TO THE START OF THE PHYSICAL RECORD
+         MH    R1,FCBLRL+2        DISPLACEMENT INTO PHYSICAL RECORD
+         AL    R1,FCBAOB          + ADDR PHYSICAL FOR ADDR OF LOGICAL
+         ST    R1,FCBWLA          STORE LOGICAL RECORD ADDRESS
+         XC    FCBWEI(4),FCBWEI   ZERO LOGICAL ELEMENT INDEX
+         B     ISOPEN      NOW WE ARE THE SAME AS IF REQUESTED RECORD
+*                          HAD BEEN IN CORE WHEN WE ENTERED XDIO.
+*
+READST   ST    R1,FCBRLN          READ LOGICAL RECORD NUMBER
+         L     R0,FCBPHR          GET PHYSICAL RECORD RECORD IS ON
+         MH    R0,FCBLPP+2     BY NUMBER OF RECORDS IN PHYSICAL RECORD
+         BCTR  R1,R0              LOWER LOGICAL RECORD REQUEST BY ONE
+         SR    R1,R0       WE HOW HAVE INDEX TO LOGICAL RECORD RELATIVE
+*                          TO THE START OF THE PHYSICAL RECORD
+         MH    R1,FCBLRL+2        DISPLACEMENT INTO PHYSICAL RECORD
+         AL    R1,FCBAOB          + ADDR PHYSICAL FOR ADDR OF LOGICAL
+         ST    R1,FCBRLA          STORE LOGICAL RECORD ADDRESS
+         XC    FCBREI(4),FCBREI   ZERO LOGICAL ELEMENT INDEX
+         B     ISOPEN      NOW WE ARE THE SAME AS IF REQUESTED RECORD
+*                          HAD BEEN IN CORE WHEN WE ENTERED XDIO.
+*
+**IS THE REQUEST FOR THE SAME LOGICAL RECORD AS LAST TIME FOR THIS
+**FUNCTION?
+*
+SYNC     B     *+4(R2)            SORT ON TYPE OF CALL
+         B     READCK             GO CHECK READ PARMS
+         CL    R1,FCBWLN          SAME LOG REC AS LAST TIME?
+         BE    WRITPATH           GO ON THE WRITE PATH
+         B     WRITST             GO COMPUTE WRITE PARMS
+READCK   CL    R1,FCBRLN          SAME LOG REC AS LAST TIME?
+         BE    READPATH           GO ON THE READ PATH
+         B     READST             GO COMPUTE READ PARMS
+*
+**WE ARE READY NOW TO COPY AN ELEMENT FROM THE INPUT AND PASS IT BACK.
+**WE BREAK LOGIC AT THIS POINT ON WHETHER A NUMBER OR STRING WAS
+**REQUESTED.   (LOGICAL RECORD NUMBER IN REG 1)
+*
+READPATH TM    7(R3),X'01'        BIT 1 MEANS REQUEST FOR STRING
+         BO    READ1              GO HANDLE STRING
+*
+         CLC   FCBREI+2(2),FCBLRL+2 OFF THE END OF LOGICAL RECORD?
+         BNL   KICK        IF SO GO ADVANCE USERS LOGICAL RECORD NUMBER
+         L     R14,FCBRLA         GET ADDRESS OF LOGICAL RECORD
+         L     R15,FCBREI         GET INDEX TO ELEMENT
+         LA    R14,0(R14,R15)     GET ADDR OF ELEMENT
+         CLC   0(4,R14),NULL         IS IT A NULL
+         BE    EOFR               GO ON OUT END OF FILE EXIT
+         L     R1,0(R0,R3)        GET ADDRESS OF TARGET
+         MVC   0(4,R1),0(R14)     MOVE ONTO TARGET
+         LA    R15,4(R0,R15)      BUMP UP INDEX
+         ST    R15,FCBREI         SET NEW READ ELEMENT INDEX
+         B     DONER              OUT THE NORMAL EXIT
+*
+         USING TWORK,R8
+READ1    LR    R5,R1              SAVE R1 TEMP.
+         SENSE 2                  GET TWORK ADR.
+         L     R8,0(R1)           DUE TO LOAD TEXT VERSION
+         LR    R1,R5
+         CLC   FCBLRL+2(2),=H'16'    LRL MUST BE AT LEAST 16
+         BL    ERRS               ELSE  ERROR
+         CLC   FCBREI+2(2),FCBLRL+2      ARE WE AT END OF RECORD
+         BNL   KICK               YES, GO GET NEXT ONE
+         L     R14,FCBRLA         GET ACTUAL RECORD ADDR.
+         L     R15,FCBREI         AND POINTER INTO IT
+         AR    R14,R15            NOW R14 AT START OF READ LOC.
+         CLI   0(R14),X'FF'       IF TRUE THE NEXT STRING
+         BE    KICK                WAS PUT ON NEXT RECORD
+         SR    R5,R5              R5 WILL CONTAIN STRING LENGTH
+         CLC   0(4,R14),NULL      IF TRUE WE ARE READING MORE
+         BE    EOFR                THAN WHATS IN THE FILE
+         CLI   0(R14),X'00'       IF TRUE STRING IS LONGER THAN
+         BNE   READ2               16 CHARS.AND WAS STORED AS
+*                                  ONE BYTE ZERO,ONE BYTE LENGTH,
+*                                  AND THEN THE STRING ITSELF
+         IC    R5,1(R14)          PICK UP LENGTH
+         LA    R4,5(R5)           SAVE UPDATE PTR LENGTH
+         LA    R14,2(R14)         R14 NOW POINTS TO LENGTH
+         B     READ3              GO PUT STRING INTO VARIABLE
+READ2    IC    R5,15(R14)         FOR STRINGS LESS THAN 16 CHARS.
+*                                  STRING STORED THE OLD WAY.
+*                                  I.E. 16 BYTES WITH LAST BYTE
+*                                  CONTAINING THE LENGTH
+         LA    R4,16              SAVE LENGTH TO UPDATE PTR
+READ3    L     R1,0(,R3)          ADDR. OF STRING POINTER TO R1
+RD3      LR    R6,R5              PUT LENGTH OF NEW STRING IN R6
+         L     R7,ASTR1PTR        GET END OF STRINGS POINTER
+         AR    R6,R7              BUMP TO WHERE NEW ONE WILL END
+         C     R6,ASTR2PTR        ARE WE PAST END
+         BNH   RD3A               NO, CONTINUE
+         LR    R2,R15
+         LR    R8,R1
+         LR    R1,R5              LENGTH TO COLL.           BB 03/21/74
+         L     R15,=V(GCOL)
+         BALR  R14,R15            CALL GARBAGE COLLECTOR
+         B     FULL               ERROR EXIT
+         LR    R15,R2             RESTORE R15
+         LR    R1,R8              RESTORE R1
+         B     RD3                BACK AGAIN
+RD3A     ST    R6,ASTR1PTR        STORE NEW POINTER
+         A     R7,ASTRGBEG        NOW GET ACTUAL LOCATION
+         AR    R7,R11              OF THE NEW STRING PLACE
+         ST    R7,0(,R1)          AND STORE IN STRING POINTER
+         STC   R5,0(,R1)          CHANGE LENGTH
+         BCTR  R5,0               MINUS 1 FOR EXECUTE
+         LTR   R5,R5
+         BM    RD2
+         EX    R5,RDMOV           MOVE IN STRING
+RD2      AR    R15,R4             BUMP READ POINTER TO END OF
+         SRL   R15,2               NEW STRING, ROUNDED UP TO
+         SLL   R15,2               TO A FULL WORD BOUNDARY
+         ST    R15,FCBREI         SAVE THIS POINTER
+         B     DONER              BYE-BYE
+*
+**WE FOUND A NULL IN THE SOURCE FIELD FOR THE READ.
+**WE ARE TO ADVANCE THE USERS LOGICAL RECORD NUMBER.
+*
+KICK     L     R1,12(R0,R3)       GET ADDRESS OF LOGICAL RECORD NUMBER
+         LE    R4,0(R0,R1)        GET LOGICAL RECORD NUMBER
+         AE    R4,FONE            ADD ONE TO IT
+         STE   R4,0(R0,R1)        PLACE BACK DOWN FOR USER
+         B     ISOPEN             ALMOST LIKE STARTING OVER
+*
+**A FEW HEX CONSTANTS THAT NEED TO BE ON FULL WORD BOUNDARY
+*
+         DS    0F
+NULL     DC    X'80008000'
+FONE     DC    X'41100000'
+MZERO    DC    X'80000000'
+RDMOV    MVC   0(0,R7),0(R14)
+WRMVC    MVC   0(0,R5),0(R1)
+*
+*
+**WE ARE NOW TO COPY AN ELEMENT FROM DATA STORAGE INTO THE LOGICAL
+**FILE RECORD.  WE BREAK LOGIC AT THIS POINT ON WHETHER A NUMBER
+**OR STRING REQUEST HAS BEEN MADE.  (R1 HAS LOGICAL RECORD NUMBER)
+*
+WRITPATH TM    7(R3),X'01'        BIT 1 MEANS STRING REQUEST
+         BO    WRIT1              GO HANDLE STRING
+*
+         CLC   FCBWEI+2(2),FCBLRL+2 OFF THE END OF LOGICAL RECORD?
+         BNL   KICK        IF SO GO ADVANCE USERS LOGICAL RECORD NUMBER
+         L     R14,FCBWLA         GET ADDRESS OF LOGICAL RECORD
+         L     R15,FCBWEI         GET INDEX TO ELEMENT
+         LA    R14,0(R14,R15)     GET ADDR OF ELEMENT (TARGET)
+         L     R1,0(R0,R3)        GET ADDRESS OF SOURCE
+         MVC   0(4,R14),0(R1)     COPY ELEMENT TO TARGET
+         LA    R15,4(R0,R15)      BUMP UP INDEX
+         ST    R15,FCBWEI         SET NEW WRITE ELEMENT INDEX
+         OI    FCBFLG,X'01'       MARK PHYSICAL RECORD CHANGED
+         B     DONEW    OUT NORMAL EXIT (TO SET PHYSICAL RECORD LENGTH)
+*
+WRIT1    LH    R15,FCBLRL+2       PUT LRL INTO R15 FOR LATER TEST
+         SR    R14,R14            R14 WILL CONTAIN STRINGS LENGTH
+         L     R1,0(,R3)
+         IC    R14,0(R1)          ITS THE FIRST BYTE OF POINTER
+         LH    R5,=H'15'          CHECK IF STRING LESS THAN 16 CHARS.
+         CR    R14,R5              IF IT IS WE STORE OLD WAY
+         BH    WRITA               IF LESS, LEAVE 16 AS LENGTH IN R5
+         LH    R14,=H'16'         ELSE, PUT ACTUAL LENGTH IN R5
+         B     WRITAX
+WRITA    LA    R14,2(R14)
+WRITAX   CR    R14,R15
+         BH    ERRS               ERROR IF TO BIG
+         L     R5,FCBWLA          GET ADDR. OF RECORD
+         L     R4,FCBWEI          AND POINTER WITHIN RECORD
+         CR    R4,R15
+         BNL   KICK
+         LR    R6,R4              SAVE THIS POINTER FOR LATER USE
+         AR    R5,R4              NOW HAVE ACTUAL LOC. IN R5
+         AR    R4,R14             POINT TO WHERE STRING WILL END
+         LA    R4,0(R4)           WIPE HI-ORDER BYTE
+WRITB    CR    R4,R15             IS IT OFF THE END
+         BNH   WRITC              IF ROOM, THEN PUT IT IN
+         MVI   0(R5),X'FF'        ELSE INDICATE STRING WILL START
+*                                  ON NEXT RECORD
+         B     KICK               AND GO TO NEXT RECORD
+WRITC    CH    R14,=H'16'         CHECK FOR SHROTER THAN 16 CHARS.
+         BH    WRIT2              IF NOT, GO STORE LONG STRING
+         MVI   0(R5),X'40'        BLANK OUT THE 16 BYTES WHERE THE
+         MVC   1(15,R5),0(R5)      STRING WILL BE STORED
+         IC    R14,0(R1)
+         L     R1,0(,R1)
+         BCTR  R14,0              MINUS 1 FOR EXECUTE
+         LTR   R14,R14            SEE IF NULL STRING
+         BM    WRITX              IF SO DONT MOVE
+         EX    R14,WRMVC          MOVE IN STRING
+WRITX    LA    R14,1(,R14)        GET LENGTH BACK TO CORRECT VALUE
+         STC   R14,15(R5)         STORE LENGTH BYTE AT END OF STRING
+         LA    R6,16(R6)          BUMP WRITE FILE POINTER
+         B     WRIT3              GO CLEAN-UP
+WRIT2    MVI   0(R5),X'00'        MOVE IN BYTE TO INDICATE LONG STR.
+         IC    R14,0(R1)
+         STC   R14,1(R5)          STORE AWAY THE LENGTH
+         LA    R5,2(,R5)          MOVE TO START OF WHERE STRING TO GO
+         L     R1,0(,R1)
+         BCTR  R14,0              MINUS 1 FOR EXECUTE
+         EX    R14,WRMVC
+         LA    R6,6(R14,R6)       MOVE WRITE POINTER TO WHERE NEXT
+         SRL   R6,2                STRING GOES, ROUNDED TO FULL
+         SLL   R6,2                WORD BOUNDARY
+WRIT3    ST    R6,FCBWEI          SAVE NEW WRITE POINTER
+         OI    FCBFLG,X'01'       MARK PHYSICAL RECORD CHANGE
+*                                 ALL DONE, BYE-BYE
+*                       OUT NORMAL EXIT (TO SET PHYSICAL RECORD LENGTH)
+*
+**HERE AFTER A GOOD WRITE, RECOMPUTE PHYSICAL RECORD LENGTH IF NEEDED.
+*
+DONEW    L     R14,FCBWLA    ADDR OF CURRENT LOGICAL RECORD WRITTEN IN
+         SL    R14,FCBAOB         TAKE OUT START OF BUFFER
+         AL    R14,FCBWEI         ADD IN UPDATED ELEMENT INDEX
+         CL    R14,FCBLNR         CHECK AGAINST OLD LENGTH
+         BNH   EXITW              NOT > THEN OLD LENGTH IS STILL GOOD
+         CL    R14,=F'2048'       SEE IF NEW ONE IS TOO BIG
+         BNH   STORIT             IF NOT GO STORE NEW ONE
+         LH    R14,=H'2048'       MAKE A MAX PHYSICAL RECORD LENGTH
+STORIT   ST    R14,FCBLNR         STORE NEW PHYSICAL RECORD LENGTH
+*
+EXITW    L     R13,4(R13)         RESTORE R13               BB 03/21/74
+         LM    R14,R12,12(R13)    RESTORE REGS
+         B     4(R0,R14)          BACK NON-ERROR RETURN
+*
+**HERE AFTER A GOOD READ
+*
+DONER    L     R13,4(R13)         RESTORE R13               BB 03/21/74
+         LM    R14,R12,12(R13)    RESTORE REGS
+         B     8(R0,R14)          BACK NON-ERROR RETURN
+*
+**NULL CODE FOUND ON ATTEMPT TO READ, IF THE USER SETUP AND EOF EXIT
+**WE WILL NOT SET UP AN ERROR MESSAGE BUT WILL ASK EXEC TO GO TO IT
+**IF HE DID NOT WE WILL ASK FOR AN ERROR MESSAGE TO BE SENT JUST LIKE
+**ANY OTHER ERROR.
+*
+EOFR     L     R1,16(R0,R3)       CHECK FOR EOF STATEMENT NUMBER
+         LTR   R1,R1              IF ZERO WE HAVE AN ERROR RETURN
+         BZ    ERRT               EOF ON READ OF AN ELEMENT
+         L     R13,4(R13)         RESTORE R13               BB 03/21/74
+         LM    R14,R12,12(R13)    RESTORE REGS
+         B     4(R0,R14)          RETURN TO EXEC AT USERS EOF STATEMENT
+*
+**THERE MAY BE SOME OLD CODE AROUND WHICH CALLS FREADT OR FWRITET.
+**THE OLD IDEA WAS THAT A TERMINAL READ OR WRITE WAS REQUIRED TO
+**FLUSH BUFFERS.  THAT STRATEGY WAS NOT USED IN THE FINAL IMPLMENTATION
+**BUT THIS CODE ANTICIPATES IT.   (IT MAY NOT BE NEEDED)
+**
+FREADT   EQU   *
+FWRITET  EQU   *
+         LA    R1,30(R0,R0)       TERMINAL READ OR WRITE CALL MADE
+         BR    R14                GO BACK ERROR RETURN.
+*
+**SET UP ERROR CODES IN REG 1
+*
+E        EQU   1
+ERR1     LA    E,1
+         B     ERR
+ERR2     LA    E,2
+         B     ERR
+ERR3     LA    E,3
+         B     ERR
+ERR4     LA    E,4
+         B     ERR
+ERR5     LA    E,5
+         B     ERR
+ERR6     LA    E,6
+         B     ERR
+ERR7     LA    E,7
+         B     ERR
+ERR8     LA    E,8
+         B     ERR
+ERR9     LA    E,9
+         B     ERR
+ERRA     LA    E,10
+         B     ERR
+ERRB     LA    E,11
+         B     ERR
+ERRC     LA    E,12
+         B     ERR
+ERRD     LA    E,13
+         B     ERR
+ERRE     LA    E,14
+         B     ERR
+ERRF     LA    E,15
+         B     ERR
+ERRG     LA    E,16
+         B     ERR
+ERRH     LA    E,17
+         B     ERR
+ERRI     LA    E,18
+         B     ERR
+ERRJ     LA    E,19
+         B     ERR
+ERRK     LA    E,20
+         B     ERR
+ERRL     LA    E,21
+         B     ERR
+ERRM     LA    E,22
+         B     ERR
+ERRN     LA    E,23
+         B     ERR
+ERRO     LA    E,24
+         B     ERR
+ERRP     LA    E,25
+         B     ERR
+ERRQ     LA    E,26
+         B     ERR
+ERRR     LA    E,27
+         B     ERR
+ERRS     LA    E,28       LOGICAL RECORD LENGTH DOES NOT PERMIT STRINGS
+         B     ERR
+ERRT     LA    E,29               END OF FILE READING DATA
+         B     ERR
+ERR47    LA    E,47               PHYSICAL RECORD NUMBER TO LARGE
+         B     ERR
+FULL     LA    R1,1               TOO MANY CONSTANTS ERROR
+         B     ERRCON
+*
+**THE TYPE OF FUNCTION (READ OR WRITE) IS NOT IMPORTANT HERE.
+**WE TAKE THE NO PLACE TO GO ERROR EXIT FOR READ RESERVING
+**THE PLACE TO GO ERROR EXIT FOR NO DATA.  WRITE EXIT IS
+**SIMPLE OUT THE ERROR RETURN FOR WRITE.  R1 CONTAINS THE ERROR
+**CODE, WITH THE EXEC RESPONSIBLE FOR CALLING REUNERR.
+*
+ERR      AH    R1,=H'7000'        KICK UP TO MARK TYPE OF ERROR
+ERRCON   L     R13,4(R13)         RESTORE R13               BB 03/21/74
+         LM    R14,R0,12(R13)     RESTORE UP TO R1
+         LM    R2,R12,28(R13)     RESTORE AATER R1 BUT NOT R13
+         BR    R14                BACK TO CALLER AT ERROR RETURN
+*
+*
+**FLOAT TO FIX CONVERSION ROUTINE
+*
+FTOI     LE    0,0(R0,R1)         GET ITEM
+         AU    0,FMASK1           X'46000000'
+         STE   0,AEXWORK          STORE IN WORK AREA
+         L     R1,AEXWORK         GET IT BACK
+         N     R1,FMASK2          X'00FFFFFF'
+         BR    R4                 BACK TO CALLER
+         DS    0F
+FMASK1   DC    X'46000000'
+FMASK2   DC    X'00FFFFFF'
+         LTORG
+         EJECT
+TWORK    DSECT
+         COPY  TWORK
+AREA     DSECT
+         COPY  AREA
+         END

@@ -1,0 +1,142 @@
+;
+;  Process (wings) show WINGS command
+;
+;
+xproc () begin
+
+   declare number  x.pathno
+   declare string  cmd_str
+   declare string  x.p_str
+
+   cmd_str = 'SI'                  ; Show wings info
+   x.p_str = upper(strip(parm_string))
+
+   ; show wings status
+
+   if (fpath eq 'WINGSV00') begin
+      try show status wings
+   end
+   else begin
+      try show status &(fpath)
+   end
+
+   ; open wings debug path,  send 'si' show info command,
+   ; read and display result,  close wings debug path.
+   if (vartype('ses.wings_server') eq 'UNDEFINED') \
+      ses.wings_server = ''
+   if (ses.wings_server eq '') \
+      ses.wings_server = '0'
+   pcall db_open
+   pcall write_command(cmd_str)
+   pcall read_response()
+   pcall db_close
+
+   xreturn
+end
+
+
+;
+;  debug path open
+;
+proc db_open() begin
+   declare str msg rc
+
+   msg = 'yourtag=&(fpath)'
+   if (x.p_str eq '') x.p_str = ses.wings_server
+   if (fpath eq 'WINGSV00') begin
+      cases begin
+         case (x.p_str eq '0') msg = 'yourtag=INFOWING'
+         case (x.p_str eq '1') msg = 'yourtag=INFOWIN1'
+         case (x.p_str eq '2') msg = 'yourtag=INFOWIN2'
+         case (x.p_str eq '3') msg = 'yourtag=INFOWIN3'
+         case (x.p_str eq '4') msg = 'yourtag=INFOWIN4'
+         case (x.p_str eq '5') msg = 'yourtag=INFOWIN5'
+         case (true)                    msg = 'yourtag=INFOWING'
+      end
+   end
+   msg = msg || ' pass=DBUG noheader interrupt wait=3'
+   ;write '*** &(msg) ***'
+
+   syscall path_open(x.pathno, msg, rc)
+   if (rc ne 'OK') begin
+      pcall db_close
+      if (rc eq 'TIMEOUT') begin
+         msg = 'The WINGS file server(&(x.p_str)) '
+         msg = msg || 'is not available at this time.'
+         comm &(msg)
+      end
+      else begin
+         comm Path error on open = &(rc)
+      end
+      xreturn
+   end
+
+   syscall path_control(x.pathno, 'wait=10', msg, rc)
+   if (rc ne 'OK') begin
+      if (rc ne 'INVALID OPTION') begin
+         comm path_control=&(rc)
+      end
+   end
+end
+
+;
+;  write debug command to debug path
+;
+proc write_command(cmd_str) begin
+
+   declare string msg, rc, cmd_header
+
+   ; process command
+   cmd_header = sub('DEBUG_COMMAND:  ',1,16)
+   msg = cmd_header || cmd_str
+
+   syscall path_write(x.pathno, 'wait=10', msg, rc)
+   if (rc ne 'OK') begin
+      pcall db_close
+      x.pathno = 0
+      comm Path write error - &(rc)
+      xreturn
+   end
+
+end
+
+;
+;  read command response from debug path
+;  and write response out to terminal
+;
+;
+proc read_response() begin
+
+   declare boolean loop_flag, write_flag
+   declare string msg, rc
+
+   loop_flag = true
+   write_flag = true
+   while (loop_flag) begin
+      syscall path_read(x.pathno, 'wait=300000', msg, rc)
+      if (rc ne 'OK') begin
+         pcall db_close
+         x.pathno = 0
+         comm path read error = &(rc)
+         xreturn
+      end
+      if (sub(msg,1,16) eq sub('EOF:',1,16)) begin
+         loop_flag = false
+      end
+      else begin
+         if (write_flag) begin
+            try comm &(msg)
+            if (tryattn) write_flag = false
+         end
+      end
+   end
+end
+
+
+;
+;  close debug path
+;
+proc db_close() begin
+   try syscall path_close(x.pathno)
+   x.pathno = 0
+end

@@ -1,0 +1,871 @@
+ASMASTER TITLE 'ORVYL''S Address space master task'
+         COPY  HEADER
+         SPACE 4
+DISABLE  EQU   X'BC'                   Disable 'AND' mask
+ASMASTER MODULE TRCNUM=16
+         EJECT
+         COPY  PZERO
+         USING PZERO,R0
+         EJECT
+         COPY  ASB
+         EJECT
+         COPY  DISPPARM
+         EJECT
+         COPY  XITPARM                 Exit processing parameters
+         EJECT
+         COPY  TIMEPARM                Timer mgmt parameters
+         EJECT
+         COPY  IOSIPARM                IOS init parameters
+         EJECT
+         COPY  SIGPARM
+         EJECT
+         COPY  VMPARM
+         EJECT ,
+         COPY  XASPARM                 Cross address space parms
+         EJECT
+ASMSTR   RECORD BEGIN                  Address space master cntl blk
+ASMID    DC    CL4'AMST'               Alpha ID
+         DS    A                       - Available -
+ASMPID   DS    D                       Address of our ASB
+ASMECB   DS    D                       Our ECB for cross AS synch
+ASMMSG   DS    D                       CS message anchor
+ASMXHALT DS    A                       Queue of halted XAS requests
+         END   ,
+         SPACE ,
+@XACTION RECORD BEGIN
+@XACPARM DS    A                       Pointer to XASPARM
+         END   ,
+         SPACE ,
+         EJECT ,
+*********************************************************************
+*  ASMGBLIN - Global init for address space                         *
+*                                                                   *
+*     Input - None                                                  *
+*                                                                   *
+*    Output - None                                                  *
+*                                                                   *
+*********************************************************************
+ASMGBLIN PROC  SCOPE=GLOBAL
+*
+* Call IO supervisor initialization for this ASB
+*
+         PSET  @IOSASC
+         ST    RM,@IOASCAS             Save the ASB address
+         VCALL IOSASC                  Do it's initialization
+*
+*  Allocate lock control blocks
+*
+         VCALL LQEALL                  Allocate CBs for locks
+*
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  ASMLCLIN - Local init for address space                          *
+*                                                                   *
+*     Input - None                                                  *
+*                                                                   *
+*    Output - None                                                  *
+*                                                                   *
+*********************************************************************
+ASMLCLIN PROC  SCOPE=GLOBAL
+*
+* Call initialization routines for task based functions
+*
+         VCALL TERMINAS                Initialize terminal info
+* -->    VCALL FILEUINI                Initialize file system
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*   ASMGBLX - Global termination for address space                  *
+*                                                                   *
+*     Input - None                                                  *
+*                                                                   *
+*    Output - None                                                  *
+*                                                                   *
+*********************************************************************
+ASMGBLX  PROC  SCOPE=GLOBAL
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*   ASMLCLX - Local termination for address space                   *
+*                                                                   *
+*     Input - None                                                  *
+*                                                                   *
+*    Output - None                                                  *
+*                                                                   *
+*********************************************************************
+ASMLCLX  PROC  SCOPE=GLOBAL
+*
+* Call the various cleanup routines
+*
+         VCALL LQEDALL                 We need one less of these
+*
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  ASMTASK - Master task for an address space in the guest          *
+*                                                                   *
+*    Input - PZERO contains the ASB address of this AS              *
+*                                                                   *
+*   Output - None                                                   *
+*                                                                   *
+*********************************************************************
+ASMTASK  PROC  @TENTRY,SCOPE=GLOBAL
+         L     RM,PZCURASB
+         WITH  (ASB,RM)
+*
+*  Allocate our work area
+*
+         VMGET L'ASMSTR,LOC=GLOBHI,FIX=YES
+         LR    RN,RVR
+         WITH  (ASMSTR,RN)
+*
+*  Set up our work area
+*
+         CLEAR ASMSTR
+         MVC   ASMID,=CL4'AMST'        Put in our ID
+         PMOV  ASMPID,PZCURPID         And point to our process ID
+         PMOV  ASBMSTR,LA:ASMSTR       Put our CB addr in ASB
+*-------------------------*
+*  Start up task for user *
+*-------------------------*
+         PSET  @TCREATE
+         MVC   @TCRPSW,@TEPARM         Set PSW
+         MVC   @TCRPRIO,=A(-10)          make this guy a little lower
+         SET   @TCRFSTK
+         VCALL TCREATE
+*
+*  Set up to receive cross address space communications
+*
+         LCALL XASPACE
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XASPACE task - runs in user address space and communicates w/    *
+*                 other tasks in cross-address-space functions      *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*             Returns to caller on receipt of logoff msg            *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+XASPACE  PROC  ,
+         L     RM,PZCURASB
+         WITH  (ASB,RM)
+         L     RN,ASBMSTR
+         WITH  (ASMSTR,RN)
+*
+*  Free up our channel and loop, waiting for work to be done
+*
+ASMWAIT  LOOP  BEGIN                   Wait for work
+         AWAIT ASMECB,LEN=LONG
+         LOOP  BEGIN                   Pull items from chain
+*
+*  We have been posted... what should we do?
+*
+         LM    RX,RY,ASMMSG
+         WITH  (XASPARM,RX)
+         LOOP  BEGIN
+         IF    (RX,ZERO),NEXT,ASMWAIT  Get the command code
+         L     RA,XAPLINK
+         LR    RB,RY
+         CDS   RX,RA,ASMMSG
+         UNTIL EQUAL,END
+         L     RY,XAPCMD
+*
+*  Undefined command
+*
+         IF    ((RY,NEG),OR,(RY,GT,XACLAST)),BEGIN
+         LA    RVR,XARCNIMP            Not implemented
+         B     DOANSWER
+         END   ,
+*
+*  Valid and defined command
+*
+         PSET  @XACTION                Set up to call rtn
+         PMOV  @XACPARM,LA:XASPARM
+         L     RK,BTABLE(RY)             get routine address
+         ACALL (RK)                        and go to it!
+*
+*  Answer back to the user that this request is finished.
+*  RVR contains the post code for the answer
+*
+DOANSWER LABEL ,
+         ST    RVR,XAPRC               Set return code
+         SIGNL L:XAPRECB,LA:XASPARM,L:XAPRASB,L:XAPSYSR
+*
+*  If post back failed, release the memory
+*
+         IF    (RVR,NZ),BEGIN          Failed - Free memory
+         VMFREE L:XAPLEN,A=LA:XASPARM,LOC=GLOBHI,FIX=YES
+         END   ,                       OF Failed - Free memory
+         END   ,                       OF Pull items from chain
+*  Now loop back and wait for more work.
+         END   ,                       OF Wait for work
+         PEND  ,
+         SPACE ,
+BTABLE   DC    A(XALGOF)               Here we really just return
+         DC    A(XARMEMR)              Read local memory
+         TITLE 'Routines for server address space'
+*********************************************************************
+*  XALGOF  - Logoff this address space, cleaning up a bit first     *
+*                                                                   *
+*    Input - @XACTION                                               *
+*                                                                   *
+*   Output - None                                                   *
+*                                                                   *
+*********************************************************************
+XALGOF   PROC  @XACTION
+         L     RM,PZCURASB
+         WITH  (ASB,RM)
+         L     RN,ASBMSTR
+         WITH  (ASMSTR,RN)
+*
+         CLEAR ASBMSTR                 Unlink - we're going away
+         MVI   ASMID,C'a'
+*
+*  First we clean up any messages that we didn't get to respond to.
+*
+ASMPULL  LOOP  BEGIN                   Pull messages from list
+         LM    RX,RY,ASMMSG
+         WITH  (XASPARM,RX)
+         LOOP  BEGIN
+         IF    (RX,ZERO),EXIT,ASMPULL
+         L     RA,XAPLINK
+         LR    RB,RY
+         CDS   RX,RA,ASMMSG
+         UNTIL EQUAL,END
+*
+         LA    RVR,XARCNOAS
+         ST    RVR,XAPRC               Set return code
+         SIGNL L:XAPRECB,LA:XASPARM,L:XAPRASB,L:XAPSYSR
+*
+*  If post back failed, release the memory
+*
+         IF    (RVR,NZ),BEGIN          Failed - Free memory
+         VMFREE L:XAPLEN,A=LA:XASPARM,LOC=GLOBHI,FIX=YES
+         END   ,                       OF Failed - Free memory
+         END   ,                       OF Pull messages from list
+*
+*  Free the ASMASTER control block
+*
+         VMFREE LA:L'ASMSTR,A=LA:ASMSTR,LOC=GLOBHI,FIX=YES
+*
+* Do other address space cleanup
+*
+         VCALL ENQASTRM                Cleanup ENQ/DEQ stuff
+* -->    VCALL FILEUTRM                Cleanup file system stuff
+         VCALL TERMLGOF                Logoff the terminal
+         VCALL NETLOGOF                Clean up network stuff
+         VCALL ACLOGOFF                Finish up Accounting stuff
+*
+         VCALL ASEXIT
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XARMEM - routine to read local memory and pass it to another     *
+*           address space                                           *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - RVR contains code to post back to requestor             *
+*             IF RVR = XARCOK                                       *
+*          or IF RVR = XARCFAIL (the request failed in server AS)   *
+*               XAPDLEN contains then length of data copied         *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+#XARMEM  RECORD BEGIN
+#XARXRID DS    A                       Exit routine ID
+#XARXMSK DS    A                       Save old exit mask
+#XARKEY  DS    A                       Saved PSW key
+         END   ,
+         SPACE ,
+XARMEMR  PROC  @XACTION,#XARMEM
+         L     RN,@XACPARM
+         WITH  (XASPARM,RN)
+         WITH  (XAPMEM,XAPREQ)
+*
+*  Establish the PI exit in case we blow it in processing this
+*  request.  First define the exit routine.
+*
+         PSET  @EXRADD
+         WITH  (XITMSKD,@EXRTYPE),'SET XITMPI'
+         MVC   @EXRPSW(4),=X'070C0000' Set PSW
+         MVC   @EXRPSW+4(4),=A(XAPIXIT+X'80000000')
+         SET   @EXRAFS                 This is a system exit
+         PMOV  @EXRPARM,=A(XARMRST+X'80000000') Restart addr is parm
+         VCALL EXRADD                  Create the exit
+         ST    RVR,#XARXRID            Save exit routine ID
+*
+*  Now enable the exit routine we just defined.
+*
+         PSET  @XITMASK
+         WITH  (XITMSKD,@XITMSK)
+         SET   XITMPI                  Default is to OR this mask on
+         VCALL XITMASK
+*
+         ST    RVR,#XARXMSK            Save old MASK
+*
+*  Get into KEY 0 so we can copy different keys.
+*
+         REGCH (RA,R2)
+         IPK   ,                       Get the old key
+         ST    R2,#XARKEY                so we can save it
+         SPKA  0                           and get into super mode!
+*---------------------------------------*
+*  Move the memory to the global buffer *
+*---------------------------------------*
+         LM    RA,RB,XAPDLOC           Destination loc/len
+         L     RJ,XAPSLOC              Source address
+         LR    RK,RB
+         MVCL  RA,RJ
+         LCR   RB,RB                   Set length copied
+         AL    RB,XAPDLEN
+         ST    RB,XAPDLEN
+         LA    RA,XARCOK               Say it went ok
+*
+*  Branch around restart point
+*
+         IF    FALSE,BEGIN
+XARMRST  LCR   RB,RB                   Set length moved
+         AL    RB,XAPDLEN
+         ST    RB,XAPDLEN
+         LA    RA,XARCFAIL             Say it failed
+         END   ,
+*
+*  Get back into our old key
+*
+         L     RY,#XARKEY              Get old key
+         SPKA  @RY                       and restore it
+*
+*  Delete the exit routine
+*
+         PSET  @EXRDEL                 Remove exit routine def
+         PMOV  @EXRDID,#XARXRID
+         VCALL EXRDEL
+*
+*  Set the exit mask back to what it was before
+*
+         PSET  @XITMASK
+         PMOV  @XITMSK,#XARXMSK
+         SET   @XITMSS                 Set the exit mask to this val
+         VCALL XITMASK
+*
+*  Return to caller w/ post code
+*
+         LR    RVR,RA
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XAPIXIT - Exit routine to recover from PI                        *
+*                                                                   *
+*   Input - @XITDATA                                                *
+*             The parameter passed in the exit data area contains   *
+*             the instruction address that should be set to restart *
+*             the unit of work that failed.                         *
+*                                                                   *
+*  Output - None                                                    *
+*             Unit of work that generated the PI is restarted at    *
+*             the specified address.                                *
+*                                                                   *
+*********************************************************************
+XAPIXIT  PROC  @XITDATA
+         L     RN,@XITDSA
+         WITH  (XITSAREA,RN)
+*
+*  Get the status of the previous level of control (the one that
+*  caused the PI)
+*
+         PSET  @XITGPST
+         VCALL XITGST
+*
+*  Move the IA field into the PSW and put the status back
+*
+         MVC   @XITSPSW+4(4),XITSRPRM
+         VCALL XITPST
+*
+*  We have done our duty in this exit, so return
+*
+         PSET  @EXRDONE
+         VCALL EXRDONE
+         PEND  ,
+         TITLE 'Basic routines for client address space'
+*********************************************************************
+*  XASEND - Send a request to another address space                 *
+*                                                                   *
+*   Input - @XASPACE                                                *
+*             Parameter area pointed to is filled in                *
+*                                                                   *
+*  Output - RVR contains return code                                *
+*             Codes defined in XASPARM maclib member                *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+XASEND   PROC  @XASPACE,SCOPE=GLOBAL
+         L     RN,@XASPARM
+         WITH  (XASPARM,RN)
+         L     RM,@XASASB
+         IF    (RM,ZERO),'L RM,PZCURASB'
+         WITH  (ASB,RM)
+*
+*  Check that this is an ASB
+*
+         IF    (ASBID,NE,=CL4'ASB'),BEGIN
+         LA    RVR,XARCNOAS            AS not available
+         EXIT  XASEND
+         END   ,
+*
+*  Check that this AS points at an ASMSTR
+*
+         LT    RY,ASBMSTR
+         WITH  (ASMSTR,RY)
+         IF    (ZERO,OR,(ASMID,NE,=CL4'AMST')),BEGIN
+         LA    RVR,XARCNOAS            AS not available
+         EXIT  XASEND
+         END   ,
+*
+*  Queue the message to the other ASs chain
+*
+         LM    RJ,RK,ASMMSG
+        $LA    RA,XASPARM
+         LOOP  BEGIN
+         ST    RJ,XAPLINK
+         LA    RB,@RK+1
+         CDS   RJ,RA,ASMMSG
+         UNTIL EQUAL,END
+*
+*  Send our message
+*
+         SIGNL ASMECB,LA:XASPARM,LA:ASB,L:XAPSYSR
+*
+         ASSERT (XARCOK,0)
+         IF    (RVR,NZ),'LA RVR,XARCPOST'       Trouble posting
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XAWAIT - Send a request to another address space                 *
+*                                                                   *
+*   Input - @XASPACE                                                *
+*             Parameter area pointed to is filled in                *
+*                                                                   *
+*  Output - RVR contains return code                                *
+*             Codes defined in XASPARM maclib member                *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+XAWAIT   PROC  @XASPACE,SCOPE=GLOBAL
+         L     RN,@XASPARM
+         WITH  (XASPARM,RN)
+         L     RM,@XASASB
+         WITH  (ASB,RM)
+*
+*  Check that this is an ASB
+*
+         IF    (ASBID,NE,=CL4'ASB'),BEGIN
+         LA    RVR,XARCNOAS            AS not available
+         EXIT  XAWAIT
+         END   ,
+*
+*  Check that this AS points at an ASMSTR
+*
+         LT    RY,ASBMSTR
+         WITH  (ASMSTR,RY)
+         IF    (ZERO,OR,(ASMID,NE,=CL4'AMST')),BEGIN
+         LA    RVR,XARCNOAS            AS not available
+         EXIT  XAWAIT
+         END   ,
+*---------------------------------------*
+*  Do the actual wait for our response  *
+*---------------------------------------*
+         AWAIT L:XAPRECB
+         L     RVR,XAPRC               Pick up our return code
+         PEND  ,
+         TITLE 'Timer functions for level 2 client routines'
+*********************************************************************
+*  XARTXIT - Real time timer exit routine                           *
+*                                                                   *
+*    Input - @XITDATA                                               *
+*              XITSXPRM contains the ECB address to post            *
+*                                                                   *
+*   Output - None                                                   *
+*                                                                   *
+*********************************************************************
+XARTXIT  PROC  @XITDATA
+         L     RN,@XITDSA
+         WITH  (XITSAREA,RN)
+         WITH  (RTEXIT,XITSXPRM)
+         L     RM,RTXPARM+4            Parm = XASPARM addr
+         WITH  (XASPARM,RM)
+         PMOV  XAPRC,LA:XARCTIME       Show that we timed out
+*
+*  Post the ECB pointed to in our parameter area
+*
+         SIGNL L:RTXPARM,LA:XASPARM    Wake up task... it's time
+*
+*  Return from our exit routine
+*
+         PSET  @EXRDONE
+         VCALL EXRDONE
+         PEND  CODE=NO
+         EJECT ,
+*********************************************************************
+*  XASTIME - Setup interval timer                                   *
+*                                                                   *
+*    Input - @XASTIME                                               *
+*                                                                   *
+*   Output - RVR = 0 if timer setup OK                              *
+*                                                                   *
+*********************************************************************
+@XASTIME RECORD BEGIN
+@XASTCLK DS    D                       Time for interval TOD units
+@XASTECB DS    A                       Addr of ECB to post on t-fire
+@XASTPRM DS    A                       Pointer to XAPTIME
+@XASTPC  DS    A                       Post code if we do post
+         END   ,
+         SPACE ,
+XASTIME  PROC  @XASTIME
+         L     RN,@XASTPRM
+         WITH  (XAPTIME,RN)
+         CLEAR XAPTIME
+*
+*  Establish the real time timer exit to time-out this request
+*  if it takes too long.
+*  First define the exit routine.
+*
+         PSET  @EXRADD
+         WITH  (XITMSKD,@EXRTYPE),'SET XITMRTC'
+         MVC   @EXRPSW(4),=X'070C0000' Set PSW
+         MVC   @EXRPSW+4(4),=A(XARTXIT+X'80000000')
+         SET   @EXRAFS                 This is a system exit
+         VCALL EXRADD                  Create the exit
+         ST    RVR,XATXRID             Save exit routine ID
+         IF    (RVR,ZERO),XASTFAIL     Couldn't define exit rtn
+*
+*  Now enable the exit routine we just defined.
+*
+         PSET  @XITMASK
+         WITH  (XITMSKD,@XITMSK)
+         SET   XITMRTC                 Default is to OR this mask on
+         VCALL XITMASK
+*
+         SET   XATFMSK                 Say that this is a valid mask
+         ST    RVR,XATXMSK             Save old MASK
+*
+*  Allocate an exit request ID
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         ST    RVR,XATXSID             Save exit request ID
+         IF    (RVR,ZERO),XASTFAIL     Couldn't get exit request ID
+*
+*  Set the real time timer
+*
+         PSET  @RTSET                  Set real time timer
+         PMOV  @RTSCLK,@XASTCLK
+         SET   @RTSFINT                  it's an interval timer
+         PMOV  @RTSXIT,XATXSID
+         MVC   @RTSPARM(4),@XASTECB        parameter is ECB to post
+         MVC   @RTSPARM+4(4),@XASTPC         and post code
+         VCALL RTSET
+         ST    RVR,XATRTID             Save the timer ID
+         IF    (RVR,ZERO),BEGIN        Real time timer set failed
+XASTFAIL PSET  @XARTIME                Clean up exit environment
+         PMOV  @XARTPRM,LA:XAPTIME
+         ACALL XARTIME
+         LA    RVR,XARCSETUP           Failure in set-up
+         EXIT  XASTIME
+         END   ,                       OF Real time timer set failed
+         CLEAR RVR                     Set all as OK
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XARTIME - Reset timer environment                                *
+*                                                                   *
+*    Input - @XARTIME                                               *
+*                                                                   *
+*   Output - None                                                   *
+*                                                                   *
+*********************************************************************
+@XARTIME RECORD BEGIN
+@XARTPRM DS    A                       Pointer to XAPTIME
+         END   ,
+         SPACE ,
+XARTIME  PROC  @XARTIME
+         L     RN,@XARTPRM
+         WITH  (XAPTIME,RN)
+*
+*  Free the exit request ID
+*
+         IF    ('LT RX,XATXSID',NZ),BEGIN       Exit request ID ok
+         PSET  @XITDEL
+         PMOV  @XITDID,(RX)
+         VCALL XITDEL
+         END   ,
+*
+*  Reset the exit mask
+*
+         IF    XATFMSK,BEGIN           Valid mask stored here
+         PSET  @XITMASK
+         PMOV  @XITMSK,XATXMSK
+         SET   @XITMSS                 Set to what it was before
+         VCALL XITMASK
+         END   ,
+*
+*  Undefine the exit routine
+*
+         IF    ('LT RX,XATXRID',NZ),BEGIN       Exit rtn ID ok
+         PSET  @EXRDEL
+         PMOV  @EXRDID,(RX)
+         VCALL EXRDEL
+         END   ,
+*
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XACTIME - Cancel timer                                           *
+*                                                                   *
+*    Input - @XACTIME                                               *
+*                                                                   *
+*   Output - None                                                   *
+*                                                                   *
+*********************************************************************
+@XACTIME RECORD BEGIN
+@XACTPRM DS    A                       Pointer to XAPTIME
+         END   ,
+         SPACE ,
+XACTIME  PROC  @XACTIME
+         L     RN,@XACTPRM
+         WITH  (XAPTIME,RN)
+*
+*  Cancel the timer whose ID is in this control block
+*
+         PSET  @RTCNCK
+         PMOV  @RTCID,XATRTID
+         VCALL RTCAN
+         PEND  ,
+         TITLE 'Halt function for level 2 client routines'
+*********************************************************************
+*  XAQHALT - Queue up a halted request for later processing         *
+*                                                                   *
+*   Input - @XAQHALT                                                *
+*                                                                   *
+*  Output - None                                                    *
+*             ID queued up on AS chain for deferred processing      *
+*                                                                   *
+*********************************************************************
+@XAQHALT RECORD BEGIN
+@XAQHID  DS    A                       Pointer to XASHALT
+         END   ,
+         SPACE ,
+XAQHALT  PROC  @XAQHALT
+         L     RM,@XAQHID
+         WITH  (XASHALT,RM)
+         L     RN,PZCURASB
+         WITH  (ASB,RN),'L RN,ASBMSTR'
+         WITH  (ASMSTR,RN)
+*
+*  Put this halted request on the queue for this AS
+*
+         L     RX,ASMXHALT
+         LOOP  BEGIN
+         ST    RX,XAHFP
+         CS    RX,RM,ASMXHALT
+         UNTIL EQUAL,END
+*
+         PEND  ,
+         TITLE 'Level 2 routines for client address space'
+*********************************************************************
+*  XALGOFF - Send logoff signal to our own address space            *
+*                                                                   *
+*   Input - None                                                    *
+*                                                                   *
+*  Output - None                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+XALGOFF  PROC  ,XASPARM,SCOPE=GLOBAL
+         L     RN,PZCURASB
+         WITH  (ASB,RN)
+         L     RM,ASBMSTR
+         WITH  (ASMSTR,RM)
+*
+*  Post our own AS with code of ACLGOFF.
+*
+         VCALL ASLOCK                  Make sure we finish first
+*
+         CLEAR XASPARM
+         PMOV  XAPCMD,LA:XACLGOFF      Logoff command code
+         PSET  @XASPACE
+         PMOV  @XASPARM,LA:XASPARM
+         ACALL XASEND
+*
+*  And exit this task
+*
+         PSET  @TEXIT
+         VCALL TEXIT
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XARMEM - Send a read memory request to another address space     *
+*                                                                   *
+*   Input - @XARMEM                                                 *
+*                                                                   *
+*  Output - RVR contains return code                                *
+*             Codes defined in XASPARM maclib member                *
+*           IF RVR = XARCOK or XARCFAIL                             *
+*             @XAMLLEN contains length of memory copied             *
+*                                                                   *
+*********************************************************************
+         SPACE ,
+XAMEM    RECORD BEGIN
+XAMHALT  DS    XL(L'XASHALT)           Area to handle halts
+XAMPARM  DS    XL(L'XASPARM)           Base parameter len
+XAMMEM   DS    XL(L'XAPMEM)            Memory request extension
+XAMTIME  DS    XL(L'XAPTIME)           Area for timer mgmt
+XAMSYSR  DS    A                       Our SYSR id
+XAMECB   DS    D                       ECB to use for request
+         END   ,
+         SPACE ,
+XARMEM   PROC  @XAMEM,SCOPE=GLOBAL
+*
+*  Allocate global memory first
+*
+         VMGET L'XAMEM,LOC=GLOBHI
+         IF    ('LTR RN,RVR',Z),BEGIN
+         LA    RVR,XARCSETUP           Can't post w/out memory
+         EXIT  XARMEM
+         END   ,
+         WITH  (XAMEM,RN)
+         CLEAR XAMEM                   Clear our global work mem
+         WITH  (XASPARM,XAMPARM)         and set up addressability
+         WITH  (XAPMEM,XAPREQ)
+         WITH  (XAPTIME,XAMTIME)
+*
+*  Set up a timer environment if we need one
+*
+         IF    (@XAMTIME,NZ),BEGIN     Set up a timer
+         PSET  @XASTIME
+         PMOV  @XASTCLK,@XAMTIME       Time to wait
+         PMOV  @XASTECB,LA:XAMECB      ECB to post on t-fire
+         PMOV  @XASTPRM,LA:XAPTIME
+         PMOV  @XASTPC,LA:XAMPARM        post code is XASPARM
+         ACALL XASTIME
+         IF    ('LTR RA,RVR',NZ),BEGIN Timer set-up failed
+         VMFREE L'XAMEM,A=LA:XAMEM,LOC=GLOBHI
+         LR    RVR,RA
+         EXIT  XARMEM
+         END   ,                       OF Timer set-up failed
+         END   ,                       OF Set up a timer
+*
+*  Set up basic parameter area for cross address space communication
+*
+         PMOV  XAPCMD,LA:XACRMEM       Read memory cmd
+*
+*  At the most basic level, we need a SYSR id
+*
+         PSET  @SYSRNEW
+         VCALL SYSRNEW
+         IF    ('LTR RM,RVR',ZERO),BEGIN        Couldn't get a SYSR
+         VMFREE L'XAMEM,A=LA:XAMEM,LOC=GLOBHI
+         LA    RVR,XARCSETUP           Trouble posting AS
+         EXIT  XARMEM
+         END   ,
+         ST    RM,XAPSYSR              Save our SYSR id
+         ST    RM,XAMSYSR                and save it locally
+*
+         PMOV  XAPRASB,PZCURASB        Return ASB
+         PMOV  XAPRECB,LA:XAMECB       Return ECB
+         PMOV  XAPSLOC,@XAMSLOC        Source (local address)
+         PMOV  XAPDLOC,@XAMDLOC        Destination (global buffer)
+         PMOV  XAPDLEN,@XAMDLEN         and length
+*
+XARMOK   BEGIN ,                       Try to send block
+*----------------------------*
+*  Now send off our request  *
+*----------------------------*
+         PSET  @XASPACE                Send off the request
+         PMOV  @XASPARM,LA:XASPARM
+         PMOV  @XASASB,@XAMASB         ASB to handle request
+         ACALL XASEND
+         ASSERT (XARCOK,0)
+         IF    (RVR,NZ),EXIT,XARMOK
+*----------------------------*
+*  And wait for our response *
+*----------------------------*
+         PSET  @XASPACE                Wait for the response
+         PMOV  @XASPARM,LA:XASPARM
+         PMOV  @XASASB,@XAMASB         ASB to handle request
+         ACALL XAWAIT
+         END   ,                       OF Try to send block
+         PMOV  @XAMDLEN,XAPDLEN        Set length moved
+         LR    RA,RVR                  Save RC
+*
+*  If there is a timer exit environment, clean it up
+*
+         IF    (@XAMTIME,NZ),BEGIN     Clean up timer env
+         PSET  @XACTIME                Cancel timer
+         PMOV  @XACTPRM,LA:XAPTIME
+         ACALL XACTIME
+*
+         PSET  @XARTIME                Reset timer env
+         PMOV  @XARTPRM,LA:XAPTIME
+         ACALL XARTIME
+         END   ,                       OF Clean up timer env
+*
+*  If we were posted due to a timeout, set up halt processing
+*
+         IF    (RA,EQ,XARCTIME),BEGIN
+         WITH  (XASHALT,XAMHALT)       Set up halt area
+         PMOV  XAHRTN,LA:XARMEMX       Routine to do cleanup
+         PMOV  XAHPARM,LA:XAMEM        Parameter to cleanup rtn
+*
+         PSET  @XAQHALT                Call rtn to queue halted reqs
+         PMOV  @XAQHID,LA:XASHALT
+         ACALL XAQHALT
+         END   ,
+*
+*  Otherwise do synchronous cleanup
+*
+         ELSE  BEGIN
+*
+*  Cleanup work areas
+*
+         PSET  @XACLEAN                Do synchronous cleanup
+         PMOV  @XACID,LA:XAMEM         ID is our work area
+         LCALL XARMEMX
+         END   ,
+         LR    RVR,RA                  Set RC
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  XARMEMX - Cleanup routine for memory requests                    *
+*            Frees the global memory and IDs allocated for request  *
+*              called synchronously for successful reverse posts    *
+*              called asynchronously when a halted request finally  *
+*                posts back (if ever - not even implemented yet)    *
+*                                                                   *
+*    Input -  @XACLEN                                               *
+*                                                                   *
+*   Output -  None                                                  *
+*                                                                   *
+*********************************************************************
+XARMEMX  PROC  @XACLEAN
+         L     RN,@XACID               ID is ptr to work area
+         WITH  (XAMEM,RN)
+*
+*  Free our SYSR id
+*
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,XAMSYSR        Use our own copy of SYSR id
+         VCALL SYSRDEL                   (ie don't trust anyone)
+*
+*  Free our global parameter memory
+*
+         VMFREE L'XAMEM,A=LA:XAMEM,LOC=GLOBHI
+*
+         PEND  ,
+         DROP  R0
+         END   .

@@ -1,0 +1,1187 @@
+STAT     TITLE 'WYLBUR''s Statistics Gathering Routines'                        
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+WYLSTAT  CSECT                                                                  
+         SPACE 2                                                                
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+         SYSDEFN ,                 Define installation params                   
+*                                                                               
+STAT     IDENT 2025                11:49:33 01/25/02  (SLP)                     
+*                                                                               
+         PUSH  DSECTS                                                           
+         COPY  CONTROL             Copy CV/CP                                   
+*                                                                               
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+*                                                                               
+SIN      RECORD BEGIN                                                           
+         COPY  SIN                                                              
+         END                                                                    
+*                                                                               
+PFCB     RECORD BEGIN                                                           
+         COPY  PFCB                                                             
+         END                                                                    
+*                                                                               
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+         CVT   DSECT=YES                                                        
+*                                                                               
+         IHAASVT                                                                
+*                                                                               
+         IHAASCB                                                                
+*                                                                               
+         EJECT                                                                  
+USERCVT  RECORD 'USERCVT'                                                       
+*                                                                               
+         IKJTCB                                                                 
+*                                                                               
+RB       EQU   RBSECT                                                           
+         IKJRB                                                                  
+*                                                                               
+         IHASDWA                                                                
+*                                                                               
+         POP   DSECTS                                                           
+         TITLE 'Statistics Gathering Routines'                                  
+*box                                                                            
+*                                                                               
+*  STATINIT -- Routine to initialize statistics gathering                       
+*    tasks.  Called from the INIT module.                                       
+*                                                                               
+STATINIT XPROC                                                                  
+         L     R1,=A(STATTASK)                                                  
+         IDENTIFY EP=STATTASK,ENTRY=(1)                                         
+         ATTACH EP=STATTASK,ECB=STATECB,SZERO=NO                                
+         ST    R1,STATTCBP         Save STATS task TCB addr                     
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  STATSTOP -- Routine to terminate statistics task.                            
+*    Called from the FAIL module.                                               
+*                                                                               
+STATSTOP XPROC                                                                  
+*-                                                                              
+*-       Stop statistics subtask.                                               
+*-                                                                              
+         IF    (STATTCBP,NZ),BEGIN                                              
+         DETACH STATTCBP           Terminate subtask                            
+         WAIT  ECB=STATECB         Wait for completion                          
+         CLEAR STATTCBP,STATECB                                                 
+         END                                                                    
+*-                                                                              
+*-       Stop monitor subtask if it's started.                                  
+*-                                                                              
+         L     R5,=A(MVT)                                                       
+         WITH  (MVT,R5)                                                         
+         IF    (MVTTCBP,NZ),BEGIN                                               
+         DETACH MVTTCBP            Terminate subtask                            
+         WAIT  ECB=MVTECB          Wait for completion                          
+         CLEAR MVTTCBP,MVTECB                                                   
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+*                                                                               
+STATTCBP DC    F'0'                                                             
+STATECB  DC    F'0'                                                             
+         EJECT                                                                  
+         AGO   .BIGBUCK                                                         
+BUCKSZ#  EQU   16,,C'N'      ****  Size of buckets (must be pwrof2)             
+BUCKSRL# EQU   4,,C'N'       ****  2**N = BUCKSZ#                               
+         AGO   .BUCK                                                            
+*                                                                               
+.BIGBUCK ANOP                                                                   
+BUCKSZ#  EQU   128,,C'N'     ****  Size of buckets (must be pwrof2)             
+BUCKSRL# EQU   7,,C'N'       ****  2**N = BUCKSZ#                               
+.BUCK    ANOP                                                                   
+***                                                                             
+***  Monitor vector table.                                                      
+***                                                                             
+MVT      DC   0D'0',C'MVT '                                                     
+MVTFLAG  FLAG                                                                   
+         FLAG  MVTFUSER            - Only show user mode                        
+         FLAG  MVTFPWATCH          - Watch "CVMONPTR" and not PSW               
+         FLAG  MVTFXWATCH          - Watch exec lineno and not PSW              
+*                                                                               
+MVTACCT  DC    XL8'00'             Account of monitor starter                   
+MVTSCLCK DC    D'0'                TOD clock at start of monitoring             
+MVTTCLCK DC    D'0'                TOD clock at end of monitoring               
+*                                                                               
+MVTMSTRT DC    A(0)                Start of memory being monitored              
+MVTMEND  DC    A(0)                End of memory being monitored                
+MVTMLEN  DC    A(0)                Length of memory being monitored             
+*                                                                               
+MVT#TOT  DC    F'0'                Total number of samples                      
+MVT#TOTN DC    F'0'                No. samples out of range                     
+MVT#TOTW DC    F'0'                No. samples when waiting                     
+MVT#TOTD DC    F'0'                No. samples in dispatcher mode               
+MVTRESET EQU   MVT#TOT,*-MVT#TOT,C'X'                                           
+*                                                                               
+MVTTCBP  DC    F'0'                Monitor subtask TCB ptr                      
+MVTECB   DC    F'0'                Monitor subtask ECB                          
+*                                                                               
+MVTBUCKP DC    A(0)                Bucket table ptr                             
+MVTBUCKL DC    A(0)                Total size of table                          
+*-                                                                              
+*-      The following fields are set if the monitor subtask abends.             
+*-                                                                              
+MVTANXT1 DC    F'0'                Next SVC psw ia                              
+MVTANXT2 DC    F'0'                Next psw ia                                  
+MVTASRSV DC    16F'0'              Registers at time of error                   
+MVTABEND EQU   MVTANXT1,*-MVTANXT1,C'X'                                         
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+WMONWA   RECORD BEGIN                                                           
+WMONFLAG FLAG                                                                   
+         FLAG  WMONFOPT            - Option specified                           
+         FLAG  WMONFSTART          - Start monitoring                           
+         FLAG  WMONFSTOP           - Stop monitoring                            
+         FLAG  WMONFRESET          - Reset counters                             
+         FLAG  WMONFPSTART         - Start monitoring "ptr"                     
+         FLAG  WMONFXSTART         - Start monitoring exec lineno               
+         FLAG  WMONFUSER           - User cpu time only                         
+         FLAG  WMONFALL            - All cpu time                               
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  WMONITOR -- WMONITOR Command.                                                
+*                                                                               
+WMONITOR XPROC WMONWA                                                           
+         LA    R6,WMONWA                                                        
+         USING WMONWA,R6                                                        
+         CLEAR WMONWA                                                           
+*                                                                               
+         L     R5,=A(MVT)                                                       
+         USING MVT,R5                                                           
+*                                                                               
+*TEMP*   IF    ^CPSFSPR,'VCALL NOTVALID'   Only priv'd                          
+ IF ^CPSFSPR,'TSEG "(Note: WMONITOR is an internal command.)",,CR'              
+*                                                                               
+         SCAN WMONPRT                                                           
+         SCANCHK                                                                
+*-                                                                              
+*-       Set appropriate flags.                                                 
+*-                                                                              
+         IF    ^WMONFSTOP,BEGIN                                                 
+         CLEAR MVTFPWATCH+MVTFXWATCH  Assume standard settings                  
+         IF    WMONFPSTART,'SET MVTFPWATCH'  Watch CVMONPTR                     
+         IF    WMONFXSTART,'SET MVTFXWATCH'  Watch exec lineno                  
+         END                                                                    
+*                                                                               
+         IF    (WMONFUSER,OR,WMONFALL),BEGIN                                    
+         IF    WMONFUSER,'SET MVTFUSER'                                         
+         IF    WMONFALL,'CLEAR MVTFUSER'                                        
+*                                                                               
+         SET   WMONFRESET                                                       
+         END                                                                    
+*-                                                                              
+*-       Reset counters.                                                        
+*-                                                                              
+         IF    WMONFRESET,'ACALL WMONRES'  Reset                                
+*-                                                                              
+*-       Start monitoring.                                                      
+*-                                                                              
+         IF    WMONFSTART,'ACALL WMONSTRT'  Start                               
+*-                                                                              
+*-       Stop monitoring.                                                       
+*-                                                                              
+         IF    WMONFSTOP,'ACALL WMONSTOP'  Stop                                 
+*                                                                               
+         B     CVNEXT                                                           
+         PEND                                                                   
+***                                                                             
+***  WMONITOR Options.                                                          
+***                                                                             
+WMONPRT  SCKW  ,WFNULL,NULL                                                     
+         SCKW  START,WFSTART,A                                                  
+         SCKW  PSTART,WFPSTART,A                                                
+         SCKW  XSTART,WFXSTART,A                                                
+         SCKW  STOP,WFSTOP,A                                                    
+         SCKW  RESET,WFRESET,A                                                  
+         SCKW  USER,WFUSER,A                                                    
+         SCKW  ALL,WFALL,A                                                      
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+*                                                                               
+WFNULL   PROC                                                                   
+         ERROR 'Expecting WMONITOR START/XSTART or WMONITOR STOP.'              
+         PEND                                                                   
+*                                                                               
+*                                                                               
+WFSTART  PROC  ,                                                                
+         IF    WMONFSTOP,'VCALL NOTVALID'                                       
+         SET   WMONFSTART                                                       
+         PEND                                                                   
+*                                                                               
+WFPSTART PROC  ,                                                                
+         IF    WMONFSTOP,'VCALL NOTVALID'                                       
+         SET   WMONFSTART+WMONFPSTART                                           
+         PEND                                                                   
+*                                                                               
+WFXSTART PROC  ,                                                                
+         IF    WMONFSTOP,'VCALL NOTVALID'                                       
+         SET   WMONFSTART+WMONFXSTART                                           
+         PEND                                                                   
+*                                                                               
+WFSTOP   PROC  ,                                                                
+         IF    WMONFSTART,'VCALL NOTVALID'                                      
+         SET   WMONFSTOP                                                        
+         PEND                                                                   
+*                                                                               
+WFRESET  PROC  ,                                                                
+         SET   WMONFRESET                                                       
+         PEND                                                                   
+*                                                                               
+WFUSER   PROC  ,                                                                
+         SET   WMONFUSER                                                        
+         PEND                                                                   
+*                                                                               
+WFALL    PROC  ,                                                                
+         CLEAR WMONFUSER                                                        
+         PEND                                                                   
+*                                                                               
+         DROP  MVT,WMONWA                                                       
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WMONRES -- Routine to reset monitoring counters.                             
+*                                                                               
+WMONRES  XPROC                                                                  
+         L     R6,=A(MVT)                                                       
+         WITH  (MVT,R6)                                                         
+*-                                                                              
+*-       Clear buckets.                                                         
+*-                                                                              
+         IF    (MVTBUCKP,NZ),BEGIN  Clear buckets...                            
+         ZOT   L:MVTBUCKP,L:MVTBUCKL                                            
+         END                                                                    
+*-                                                                              
+*-       Clear misc counters.                                                   
+*-                                                                              
+         CLEAR MVTRESET            Clear misc counters                          
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WMONSTRT -- Routine to start monitoring.                                     
+*                                                                               
+WMONSTRT XPROC                                                                  
+         L     R6,=A(MVT)                                                       
+         WITH  (MVT,R6)                                                         
+*                                                                               
+         IF    (MVTTCBP,NZ),BEGIN                                               
+         ABORT 'Monitoring is already active.'                                  
+         END                                                                    
+*-                                                                              
+*-       Build bucket table if it hasn't been allocated.                        
+*-                                                                              
+         IF    (MVTMLEN,Z),BEGIN   First time...                                
+         L     R1,=V(MEMSTART)     Start of WYLBUR code                         
+         L     R0,=V(MEMEND)       End of WYLBUR code                           
+         SR    R0,R1                                                            
+         IF    (R0,LT,=A(4096)),'L R0,=A(4096)'                                 
+         IF    (R0,GT,=A(8*1024*1024)),'L R0,=A(8*1024*1024)'                   
+         A     R0,=A(BUCKSZ#-1)                                                 
+         SRL   R0,BUCKSRL#                                                      
+         SLL   R0,BUCKSRL#         Round up to next bucket                      
+*                                                                               
+         ST    R0,MVTMLEN          Amount of memory                             
+         ST    R1,MVTMSTRT         Start of memory                              
+         AR    R1,R0                                                            
+         ST    R1,MVTMEND          End of memory                                
+*                                                                               
+         L     R0,MVTMLEN          Memory length                                
+         SRL   R0,(BUCKSRL#-2)     4 bytes per bucket                           
+         ST    R0,MVTBUCKL                                                      
+         VCALL GETCORE             Get memory for buckets                       
+         ST    R1,MVTBUCKP                                                      
+         END                                                                    
+*                                                                               
+         ZOT   L:MVTBUCKP,L:MVTBUCKL  Reset buckets                             
+*-                                                                              
+*-       Start up monitoring subtask.                                           
+*-                                                                              
+         VCALL LOCALTOD            Clock at start                               
+         STM   R0,R1,MVTSCLCK                                                   
+         CLEAR MVTTCLCK            Not yet stopped                              
+         CLEAR MVTABEND            Reset any prev abend info                    
+*                                                                               
+         MVC   MVTACCT,CVBLANKS    Save userid                                  
+         MVC   MVTACCT(2),CPSGRP                                                
+         MVI   MVTACCT+2,C'.'                                                   
+         MVC   MVTACCT+3(3),CPSUSER                                             
+*                                                                               
+         L     R1,=A(WMONTASK)                                                  
+         IDENTIFY EP=WMONTASK,ENTRY=(1)                                         
+         ATTACH EP=WMONTASK,ECB=MVTECB,SZERO=NO                                 
+         ST    R1,MVTTCBP          Save subtask's TCB ptr                       
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WMONSTOP -- Routine to stop monitoring.                                      
+*                                                                               
+WMONSTOP XPROC                                                                  
+         L     R6,=A(MVT)                                                       
+         WITH  (MVT,R6)                                                         
+*                                                                               
+         IF    (MVTTCBP,Z),BEGIN                                                
+         ERROR 'Monitoring is not active.'                                      
+         END                                                                    
+*                                                                               
+         DETACH MVTTCBP                                                         
+         WAIT  ECB=MVTECB                                                       
+*                                                                               
+         CLEAR MVTTCBP                                                          
+         CLEAR MVTECB                                                           
+*                                                                               
+         VCALL LOCALTOD            Save clock at stop                           
+         STM   R0,R1,MVTTCLCK                                                   
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHOWWMON -- SHOW WMONITOR Command.                                           
+*                                                                               
+SHOWWMON GENTER                                                                 
+         L     R6,=A(MVT)                                                       
+         USING MVT,R6                                                           
+*                                                                               
+         VCALL COLLOPTS                                                         
+*-                                                                              
+*-       Display general information.                                           
+*-                                                                              
+         IF    (MVTSCLCK,Z),BEGIN                                               
+         TSEG  'Monitoring was never started.',,CR                              
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         TSEG  'Monitoring started on '                                         
+         LM    R0,R1,MVTSCLCK                                                   
+         XPUSH ,,64,PTR=R15                                                     
+         VCALL FMTXDATE                                                         
+         TSEG  (R1),(R0)                                                        
+*                                                                               
+         TSEG  ' by '                                                           
+         TSEG  MVTACCT,,T                                                       
+         TCR                                                                    
+         END                                                                    
+*                                                                               
+         IF    (MVTTCLCK,NZ),BEGIN                                              
+         TSEG  'Monitoring stopped on '                                         
+         LM    R0,R1,MVTTCLCK                                                   
+         XPUSH ,,64,PTR=R15                                                     
+         VCALL FMTXDATE                                                         
+         TSEG  (R1),(R0),CR                                                     
+         END                                                                    
+*                                                                               
+         IF    (MVTTCBP,NZ),BEGIN                                               
+         TSEG  'Monitor task TCB='                                              
+         THEX  L:MVTTCBP,8                                                      
+         TSEG  ')',,CR                                                          
+         END                                                                    
+*-                                                                              
+*-       Check to see if monitor subtask abended.                               
+*-                                                                              
+         IF    MVTECB.X'40',BEGIN                                               
+         TCR                                                                    
+         TSEG  'Monitor abended, posted ECB='                                   
+         THEX  L:MVTECB,8                                                       
+         TCR                                                                    
+*                                                                               
+         TSEG  'PSW IA at failure is '                                          
+         L     R15,MVTANXT2                                                     
+         LA    R0,8                                                             
+         VCALL TLOC                                                             
+         TSEG  ', SVC PSW IA is '                                               
+         L     R15,MVTANXT1                                                     
+         LA    R0,8                                                             
+         VCALL TLOC                                                             
+         TCR                                                                    
+*                                                                               
+         TSEG  'Registers saved at memory location '                            
+         THEX  LA:MVTASRSV,8                                                    
+         TCR                                                                    
+         END                                                                    
+*                                                                               
+         TCR                                                                    
+*                                                                               
+         TSEG  'Watch mode: '                                                   
+         SETMSG 'PSW'                                                           
+         IF    MVTFPWATCH,'SETMSG "memory location (CVMONPTR)"'                 
+         IF    MVTFXWATCH,'SETMSG "exec file line-numbers"'                     
+         TSEG  (R1),(R0),CR                                                     
+*                                                                               
+         TCR                                                                    
+         TSEG  'Tracing: '                                                      
+         SETMSG 'ALL (USER and DISPATCHER cpu time)'                            
+         IF    MVTFUSER,'SETMSG "USER (excludes dispatcher cpu time)"'          
+         TSEG  (R1),(R0),CR                                                     
+*                                                                               
+         TCR                                                                    
+*                                                                               
+         TSEG  'WYLBUR code size is '                                           
+         L     R15,MVTMLEN                                                      
+         A     R15,=A(1023)                                                     
+         SRL   R15,10              Number of kilobytes                          
+         TNUM  (R15)                                                            
+         TSEG  'K'                                                              
+         TCR                                                                    
+*                                                                               
+         TSEG  'Starting addr = '                                               
+         THEX  L:MVTMSTRT,8                                                     
+         TCR                                                                    
+*                                                                               
+         TSEG  'Ending addr   = '                                               
+         THEX  L:MVTMEND,8                                                      
+         TCR                                                                    
+*                                                                               
+         TSEG  'Bucket size   = '                                               
+         TNUM  LA:BUCKSZ#                                                       
+         TSEG  ' bytes'                                                         
+         TCR                                                                    
+         TCR                                                                    
+*                                                                               
+         TSEG  'Total samples'                                                  
+         TCOL  32                                                               
+         TSEG  ':'                                                              
+         TNUM  L:MVT#TOT,10                                                     
+         TCR                                                                    
+*                                                                               
+         TSEG  'Samples in dispatcher mode'                                     
+         TCOL  32                                                               
+         TSEG  ':'                                                              
+         TNUM  L:MVT#TOTD,10                                                    
+         TCR                                                                    
+*                                                                               
+         TSEG  'Samples when waiting'                                           
+         TCOL  32                                                               
+         TSEG  ':'                                                              
+         TNUM  L:MVT#TOTW,10                                                    
+         TCR                                                                    
+*                                                                               
+         TSEG  'Samples out of range'                                           
+         TCOL  32                                                               
+         TSEG  ':'                                                              
+         TNUM  L:MVT#TOTN,10                                                    
+         TCR                                                                    
+         TCR                                                                    
+*-                                                                              
+*-       Display bucket table.                                                  
+*-                                                                              
+         TSEG  '----',,CR                                                       
+         TCR                                                                    
+*                                                                               
+         L     R4,MVTBUCKP         Fullword bucket counter table                
+         L     R5,MVTMSTRT         Start of WYLBUR code                         
+         WHILE (R5,LT,MVTMEND),BEGIN  Go through bucket table...                
+         L     R2,@R4              Get bucket                                   
+         IF    (R2,NZ),BEGIN                                                    
+*                                                                               
+         IF    MVTFXWATCH,BEGIN    Show exec lineno instead...                  
+         XPUSH R0,R3                                                            
+         LR    R2,R5                                                            
+         S     R2,MVTMSTRT         Offset is combined exec/lineno               
+         LR    R3,R2                                                            
+         SRL   R3,13               Exec file number                             
+         N     R2,=A(X'1FFF')      Exec line number                             
+         IF    (R3,Z),'TSEG "Private;    "'                                     
+         ELSE  'TSEG "Pubload "; TNUM LA:@R3+CV#FEXEC-1'                        
+         TSEG  '; lines '                                                       
+         TNUM  (R2),4                                                           
+         TSEG  '/'                                                              
+         TNUM  LA:@R2+BUCKSZ#-1                                                 
+         XPOP  R0,R3                                                            
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         LR    R15,R5                                                           
+         LA    R0,8                                                             
+         VCALL TLOC                                                             
+         END                                                                    
+*                                                                               
+         TCOL  32                                                               
+         TSEG  ':'                                                              
+         TNUM  (R2),10                                                          
+         TCR                                                                    
+         BNZ   CVABORT                                                          
+         END                                                                    
+*                                                                               
+         LA    R5,@R5+BUCKSZ#                                                   
+         LA    R4,@R4+4                                                         
+         END                                                                    
+*                                                                               
+         TCR                                                                    
+         TSEG  'End of counters.'                                               
+         B     CVNEXT                                                           
+*                                                                               
+         DROP  MVT,BR                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WMONTASK -- Resource profiler subtask.                                       
+*                                                                               
+         DROP  CPR                 No user addressability                       
+*                                                                               
+WMONTASK BASE                                                                   
+         L     CVR,=V(CV)          CV ptr                                       
+         CLEAR CPR                 No user CP                                   
+         CLEAR R8,R13              No stack either!                             
+*                                                                               
+         L     R6,=A(MVT)                                                       
+         USING MVT,R6                                                           
+*-                                                                              
+*-       Switch into 31-bit mode (if MVS/XA).                                   
+*-                                                                              
+         IF    (^CVFXA,OR,^CVFXA31),WMONCONT  Not XA, forget it                 
+         LA    R2,WMONCONT                                                      
+         O     R2,=A(X'80000000')  We want 31-bit mode                          
+         BSM   0,R2                Go for it                                    
+WMONCONT LABEL                                                                  
+*-                                                                              
+*-       Do subtask initialization stuff.                                       
+*-                                                                              
+         CHAP  +5                  This task is the highest priority            
+*                                                                               
+         ESTAE WMONSTAE,PURGE=NONE,ASYNCH=YES  Trap abends                      
+*-                                                                              
+*-       Do CPU monitoring.                                                     
+*-                                                                              
+WMONLOOP LABEL                                                                  
+*                                                                               
+         STIMER WAIT,TUINTVL==A(28)  Wait a short time                          
+*                                                                               
+         INCR  R15,MVT#TOT         Count sample                                 
+*-                                                                              
+*-       Watching value of address in CV, not PSW.                              
+*-                                                                              
+         IF    MVTFPWATCH,BEGIN    Monitor CVMONPTR...                          
+         LT    R2,CVMONPTR         Get address                                  
+         N     R2,=A(X'7FFFFFFF')  Zap XA 31-bit mode                           
+         BNZ   WMONADDR            We have an address                           
+*                                                                               
+         INCR  R15,MVT#TOTW        Count "waiting" trace                        
+         B     WMONLOOP            Loop back                                    
+         END                                                                    
+*-                                                                              
+*-       Watching current user's exec lineno, not PSW.                          
+*-                                                                              
+*-       Somewhat elaborite code to form a dummy address within the             
+*-         the range of Wylbur's loadmodule, so our common                      
+*-         monitoring code can be used.                                         
+*-                                                                              
+         IF    MVTFXWATCH,BEGIN    Monitor exec lineno...                       
+         LT    R5,CVCURJCB         Current user                                 
+         IF    NZ,BEGIN            We have a current user...                    
+         WITH  (JCB,R5),'L R4,JCBCPX'  Current user's CP                        
+         IF    (R4,Z),EXIT         No CP                                        
+*                                                                               
+         WITH  (CP,R4),BEGIN                                                    
+         IF    CPFEXEC,BEGIN       Currently in exec mode...                    
+         LT    R1,CPEXLINE         Exec lineno                                  
+         IF    NP,EXIT             Screwy, forget it                            
+         CLEAR R0                                                               
+         D     R0,=F'1000'         Convert to integer lineno                    
+         CEIL  R1,=A(8000)         Truncate at line 8000.                       
+         L     R2,CP#XSET          Exec file number                             
+         S     R2,=A(CV#FEXEC-1)   First publoaded exec is 1                    
+         IF    (R2,NEG),'CLEAR R2'  All XLOADed exec are "0"                    
+         SLL   R2,13               Shift over                                   
+         AR    R2,R1                                                            
+*                                                                               
+         A     R2,MVTMSTRT         For common logic below (hack)                
+         B     WMONADDR                                                         
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         IF    CVFDISP,'INCR R15,MVT#TOTD'  Dispatch mode                       
+         ELSE  'INCR R15,MVT#TOTW'  Count "waiting" trace                       
+         B     WMONLOOP            Loop back                                    
+         END                                                                    
+*-                                                                              
+*-       Get mother tasks TCB ptr, and then look at the first RB.               
+*-         If it's a PRB then WYLBUR is running, if it's an SVRB                
+*-         then WYLBUR has issued an SVC (probably a WAIT SVC).                 
+*-                                                                              
+         L     R5,CVTCBP           WYLBUR mother task TCB ptr                   
+         WITH  (TCB,R5),BEGIN                                                   
+         L     R4,TCBRBP                                                        
+         WITH  (RB,R4)                                                          
+*-                                                                              
+*-       If top RB is not a PRB then count it, and then run down the            
+*-         RB queue to look for the PRB.  Since WYLBUR is running               
+*-         while we are doing this, there is no guarantee that the              
+*-         chain won't change while we are looking.  The following              
+*-         code is careful not to get into "infinate" loops; but                
+*-         it could get an addressing exception.                                
+*-                                                                              
+         IF    (RBSTAB1.RBFTP,NZ),BEGIN  Not running PRB...                     
+         INCR  R15,MVT#TOTW        Waiting (or in an SVC)                       
+*                                                                               
+         LA    R2,100              Max loop count                               
+         LOOP  BEGIN                                                            
+         L     R4,RBLINK           Next RB ptr (or TCB ptr if last)             
+         N     R4,=A(X'FFFFFF')    24-bit addr                                  
+         IF    (R4,EQ,R5),WMONLOOP   End of chain and no PRB (!)                
+         IF    (RBSTAB1.RBFTP,Z),EXIT  Found the PRB, great                     
+         DECR  R2                                                               
+         IF    (R2,NP),WMONLOOP    Something is strange, forget it              
+         END                                                                    
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Running, look at PSW...                      
+         L     R2,RBOPSW+4                                                      
+         N     R2,=A(X'FFFFFF')                                                 
+*-                                                                              
+*-       PSW is in WYLBUR's code, increment the appropriate                     
+*-         bucket.                                                              
+*-                                                                              
+WMONADDR IF    ((R2,GE,MVTMSTRT),AND,(R2,LE,MVTMEND)),BEGIN                     
+         IF    CVFDISP,BEGIN       Now running in dispatcher...                 
+         INCR  R15,MVT#TOTD        Count dispatcher mode                        
+         IF    MVTFUSER,WMONLOOP   Only want user time, scram                   
+         END                                                                    
+*                                                                               
+         SL    R2,MVTMSTRT         Offset from start                            
+         SRL   R2,BUCKSRL#         "Offset / BUCKSZ#"                           
+         SLL   R2,2                Times 4 for word offset                      
+         A     R2,MVTBUCKP         Add in Bucket table base                     
+         LA    R15,1                                                            
+         AL    R15,@R2                                                          
+         ST    R15,@R2             Kick bucket counter                          
+         END                                                                    
+*-                                                                              
+*-       PSW is not in WYLBUR's mainline code, count that too.                  
+*-                                                                              
+         ELSE  BEGIN               Not in range...                              
+         INCR  R15,MVT#TOTN        Not in range                                 
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         B     WMONLOOP                                                         
+*                                                                               
+         DROP  MVT,BR                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  WMONSTAE -- Monitor task's ESTAE exit routine.                               
+*    Save the PSW and registers and then continue abending.                     
+*                                                                               
+WMONSTAE LABEL                                                                  
+         WITH  (WMONSTAE,R15),BEGIN                                             
+         IF    (R0,EQ,12),BEGIN    No SDWA...                                   
+         CLEAR R15                 Abend, no retries                            
+         BR    RAR                                                              
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LR    R6,R1               SDWA ptr                                     
+         USING SDWA,R6                                                          
+*                                                                               
+         LR    R5,RAR              Save return addr                             
+*                                                                               
+         BASE                                                                   
+*                                                                               
+         L     CVR,=V(CV)          CV ptr                                       
+         CLEAR CPR                 No CP                                        
+         CLEAR R8,R13              No stack                                     
+*                                                                               
+         L     R4,=A(MVT)                                                       
+         USING MVT,R4                                                           
+*-                                                                              
+*-       We have addressability to everything now, save a few things            
+*-         and then split.                                                      
+*-                                                                              
+         MVC   MVTANXT1,SDWANXT1   Save SVC psw ia                              
+         MVC   MVTANXT2,SDWANXT2   Save program psw ia                          
+         MVC   MVTASRSV(16*4),SDWASRSV   Save registers                         
+*-                                                                              
+*-       Continue abending.                                                     
+*-                                                                              
+         LA    R1,SDWA             Needed for SETRP                             
+         SETRP RC=0                Continue abending                            
+*                                                                               
+         CLEAR R15                 No retries                                   
+         BR    R5                                                               
+*                                                                               
+         DROP  MVT,SDWA,BR                                                      
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  STATTASK -- Statistics gathering Subtask.                                    
+*                                                                               
+         DROP  CPR                 No user addressability                       
+*                                                                               
+TIMEVAL  EQU   1*60                1 minute interval                            
+*                                                                               
+STATTASK BASE                                                                   
+         L     CVR,=V(CV)          CV ptr                                       
+         CLEAR CPR                 No user CP                                   
+         CLEAR R8,R13              No stack either!                             
+*                                                                               
+STATSLP  STIMER WAIT,BINTVL==A(TIMEVAL*100)  Wait a bit                         
+*-                                                                              
+*-       Calculate percent CPU used.                                            
+*-                                                                              
+         L     R3,=A(TIMEVAL)      Total number of seconds                      
+         L     R15,CVWTCLK         Total voluntary wait time                    
+         S     R15,PRVWTCLK        Number of seconds we waited                  
+         SR    R3,R15              Number of seconds not waiting                
+         IF    NEG,'CLEAR R3'      (Hmmm)                                       
+         ST    R3,CV#CPU           Save CPU seconds used                        
+         MVC   PRVWTCLK,CVWTCLK    Save old clock (for next time)               
+*-                                                                              
+*-       Calculate pages per second.                                            
+*-                                                                              
+         L     R3,CVNPIO           Current no. of page I/O's                    
+         L     R15,PREVNPIO        Count TIMEVAL seconds ago                    
+         ST    R3,PREVNPIO         Update old counter                           
+         SR    R3,R15              No. of page I/O's in interval                
+         IF    NEG,'CLEAR R3'      (Safety)                                     
+         CLEAR R2                                                               
+         D     R2,=A(TIMEVAL)      R3 = page I/O's per second                   
+         STH   R3,CV#IOSEC         Save page I/O's per second                   
+         STCK  WORKCLCK            Current clock                                
+         MVC   CV#IOCLK,WORKCLCK   Save high word of clock                      
+*-                                                                              
+*-       Calculate page I/O times per PFCB.                                     
+*-                                                                              
+         LT    R6,CVFPFCB                                                       
+         IF    NZ,BEGIN            We have a paging system...                   
+         LOOP  BEGIN                                                            
+         WITH  (PFCB,R6)                                                        
+         IF    (PFCBNP,NZ),BEGIN   Some pages...                                
+         IF    (PFCBPNIO,NZ),BEGIN Calculate incremental numbers...             
+         L     R3,PFCBNIO          Current number of page I/O's                 
+         S     R3,PFCBPNIO         Number of I/O's this increment               
+         LR    R4,R3               Save for calculation later                   
+         CLEAR R2                                                               
+         D     R2,=A(TIMEVAL)      R3 = page I/O's per second                   
+         STH   R3,PFCB#IOS         Save page I/O's per second                   
+*                                                                               
+         IF    (PFCBPCLK,Z),'MVC PFCBPCLK,PFCBCLK'  First time case             
+         LM    R2,R3,PFCBCLK       Current total I/O wait time                  
+         SDL   R2,PFCBPCLK         Amount of wait time this incr                
+         SRDL  R2,12+6             .000001*64 of a sec                          
+         D     R2,=A(1000/64)      R3 = I/O wait in .001 seconds                
+         CLEAR R2                                                               
+         IF    (R4,NZ),'DR R2,R4'  R3 = ms wait per page I/O                    
+         ELSE  'CLEAR R3'                                                       
+         STH   R3,PFCB#IOT         Save page I/O response time                  
+         END                                                                    
+*                                                                               
+         MVC   PFCBPNIO,PFCBNIO    Update previous fields                       
+         MVC   PFCBPCLK,PFCBCLK    Ditto                                        
+         END                                                                    
+         LA    R6,PFCBNEXT                                                      
+         UNTIL (R6,GE,CVLPFCB)                                                  
+         END                                                                    
+         END                                                                    
+*-                                                                              
+*-       Check for abandoned test system.                                       
+*-                                                                              
+         IF    ^CVFNOTIM,BEGIN     Test system only...                          
+         IF    (CVNUSERS,NZ),'MVC CVTIMLFT,CVTIMOUT'  Reset timer               
+         ELSE  BEGIN                                                            
+         LH    R15,CVTIMLFT                                                     
+         SH    R15,=AL2(TIMEVAL)                                                
+         IF    ^POS,BEGIN          Abandoned testwyl...                         
+         WTO   'No activity. Ciao'                                              
+         ABEND 222,,STEP                                                        
+         END                                                                    
+         STH   R15,CVTIMLFT                                                     
+         END                                                                    
+         END                                                                    
+*                                                                               
+         B     STATSLP             Loop back                                    
+*                                                                               
+         DROP  BR                                                               
+*-                                                                              
+*-       Work cells.                                                            
+*-                                                                              
+PREVNPIO DC    F'0'                Previous number of page I/O's                
+PRVWTCLK DC    XL8'00'             Previous total wait time                     
+*                                                                               
+WORKCLCK DS    D                   Working STCK area                            
+*                                                                               
+         QLTORG                                                                 
+         TITLE 'WYLBUR Logging Routines'                                        
+         USING CP,CPR              General assumptions                          
+         USING CV,CVR                                                           
+*box                                                                            
+*                                                                               
+*  LOGCMD -- Routine to queue an event log of the current command.              
+*                                                                               
+*    On entry:                                                                  
+*      R15   - 8 character log entry type                                       
+*                                                                               
+LOGCMD   XPROC                                                                  
+         LA    R15,=CL8'LOGCMD  '                                               
+         SETMSG CPCMD,LH:CPCMDLEN   Command text                                
+         LCALL LOGEVENT                                                         
+         PEND                                                                   
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  LOGEVENT -- Routine to queue an event log entry.                             
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - message loc, len                                                 
+*      R15   - 8 character log entry type                                       
+*                                                                               
+LEVWA    RECORD BEGIN                                                           
+LEVTYPE  DS    CL8                 Log entry type                               
+LEVLOC   DS    F                   Message loc                                  
+LEVLEN   DS    F                   Message len                                  
+*                                                                               
+LEVCLCK  DS    D                   Working STCK area                            
+LEVAREA  DS    CL32                Format work area                             
+*                                                                               
+LEVBUF   DS    CL256                                                            
+         END                                                                    
+*                                                                               
+LOGEVENT XPROC LEVWA                                                            
+         CEIL  R0,180              Max length                                   
+         ST    R0,LEVLEN                                                        
+         ST    R1,LEVLOC                                                        
+         IF    (R15,Z),BEGIN                                                    
+         LA    R15,=CL8' '                                                      
+         END                                                                    
+         MVC   LEVTYPE,@R15                                                     
+*                                                                               
+*        Build log entry.                                                       
+*                                                                               
+         LA    R6,LEVBUF           R6 - MSG BUF PTR                             
+         LR    R2,R6               BLANK BUFFER                                 
+         LA    R3,L'LEVBUF                                                      
+         CLEAR R4                                                               
+         L     R5,=X'40000000'                                                  
+         MVCL  R2,R4                                                            
+*                                                                               
+         COMMENT                   ADD TYPE                                     
+         MVC   LEVBUF(L'LEVTYPE),LEVTYPE                                        
+         LA    R6,LEVBUF+L'LEVTYPE                                              
+         INCR  R6                                                               
+         INCR  R6                                                               
+*                                                                               
+         COMMENT                   ADD TIME STAMP                               
+         VCALL LOCALTOD                                                         
+         STM   R0,R1,LEVCLCK                                                    
+         LA    R15,LEVAREA                                                      
+         VCALL FMTDATE             FORMAT "MM/DD/YYYY"                          
+         LR    R2,R6                                                            
+         LR    R3,R0                                                            
+         LR    R4,R1                                                            
+         LR    R5,R0                                                            
+         MVCL  R2,R4                                                            
+         AR    R6,R0                                                            
+         INCR  R6                                                               
+*                                                                               
+         LM    R0,R1,LEVCLCK                                                    
+         LA    R15,LEVAREA                                                      
+         VCALL FMTTIME             FORMAT "HH:MM:SS:HH"                         
+         LR    R2,R6                                                            
+         LR    R3,R0                                                            
+         LR    R4,R1                                                            
+         LR    R5,R0                                                            
+         MVCL  R2,R4                                                            
+         AR    R6,R0                                                            
+         INCR  R6                                                               
+*                                                                               
+         COMMENT                   ADD USER                                     
+         MVC   @R6(2),CPSGRP                                                    
+         MVI   @R6+2,C'.'                                                       
+         MVC   @R6+3(3),CPSUSER                                                 
+         LA    R6,@R6+6                                                         
+         INCR  R6                                                               
+*                                                                               
+         IF    CPFEXEC,BEGIN       ADD EXEC FLAG                                
+         MVI   @R6,C'X'                                                         
+         L     R15,CP#XSET                                                      
+         LA    R1,@R6+2                                                         
+         LA    R0,4                                                             
+         VCALL BTD                                                              
+         END                                                                    
+         LA    R6,@R6+7                                                         
+*                                                                               
+         COMMENT                   ADD MESSAGE                                  
+         LR    R2,R6                                                            
+         L     R3,LEVLEN                                                        
+         L     R4,LEVLOC                                                        
+         LR    R5,R3                                                            
+         MVCL  R2,R4                                                            
+         A     R6,LEVLEN                                                        
+         INCR  R6                                                               
+*                                                                               
+         COMMENT                   ADD LOG RECORD TO CIRCULAR BUFFER            
+         LR    R0,R6                                                            
+         LA    R1,LEVBUF                                                        
+         SR    R0,R1                                                            
+         ACALL WRITWLOG                                                         
+*                                                                               
+         CLEAR R15                                                              
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*   SHOW WLOG                                                                   
+*                                                                               
+*                                                                               
+SHOWWLOG XPROC ,                                                                
+*                                                                               
+         IF    ^CPSFSPR,BEGIN      Priv'd command                               
+         VCALL NOTVALID                                                         
+         END                                                                    
+*                                                                               
+         TSEG  'Log record count: '                                             
+         L     R2,CVLOGCNT                                                      
+         TNUM  (R2)                                                             
+         TWRITE                                                                 
+         CLEAR R2                                                               
+         ACALL READWLOG                                                         
+         WHILE (R15,Z),BEGIN                                                    
+         TSEG  (R1),(R0),CR                                                     
+         ACALL READWLOG                                                         
+         END                                                                    
+         TWRITE                                                                 
+*                                                                               
+         B     CVNEXT                                                           
+         PEND  ,                                                                
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*   INITIALIZE WLOG                                                             
+*                                                                               
+*   GET BUFFER, SET UP POINTERS                                                 
+*                                                                               
+*                                                                               
+INITWLOG XPROC ,                                                                
+*                                                                               
+         L     R0,=AL4(CVLOGBSZ)                                                
+         ST    R0,CVLOGSZ                                                       
+         CLEAR CVLOGCNT                                                         
+*                                                                               
+         COMMENT                   GET OVERFLOW BUFFER                          
+         L     R0,CVLOGSZ                                                       
+         VCALL GETCORE                                                          
+         ST    R1,CVLOGBF2                                                      
+         ST    R1,CVLOGPT2                                                      
+*                                                                               
+         COMMENT                   GET BUFFER                                   
+         L     R0,CVLOGSZ                                                       
+         VCALL GETCORE                                                          
+         ST    R1,CVLOGBF                                                       
+         ST    R1,CVLOGPT                                                       
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*   FREE WLOG BUFFERS                                                           
+*                                                                               
+*   NOTE:                                                                       
+*   NOT CALLED ,, HEY IT SHOULD BE CALLED BY WYLBUR CLEANUP!                    
+*                                                                               
+FREEWLOG XPROC ,                                                                
+*                                                                               
+         COMMENT                   FREE BUFFERS                                 
+         L     R1,CVLOGBF                                                       
+         IF    (R1,NZ),BEGIN                                                    
+         VCALL FREECORE                                                         
+         END                                                                    
+         L     R1,CVLOGBF2                                                      
+         IF    (R1,NZ),BEGIN                                                    
+         VCALL FREECORE                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   CLEAR POINTERS                               
+         CLEAR CVLOGBF                                                          
+         CLEAR CVLOGPT                                                          
+         CLEAR CVLOGBF2                                                         
+         CLEAR CVLOGPT2                                                         
+         CLEAR CVLOGSZ                                                          
+         CLEAR CVLOGCNT                                                         
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*   WRITE LOG RECORD                                                            
+*                                                                               
+*   ON ENTRY:                                                                   
+*      R1,R0 - LOG RECORD LOC,LEN                                               
+*                                                                               
+*   NOTE:                                                                       
+*   RECORDS GREATER THAN 200 CHARS WILL BE TRUNCATED                            
+*                                                                               
+*   NOTE:                                                                       
+*   THERE ARE TWO BUFFERS THAT ARE CIRCULARLY FILED.                            
+*   SEE CODE FOR DETAILS.                                                       
+*                                                                               
+*                                                                               
+WRITWLOG PROC  ,                                                                
+*                                                                               
+         COMMENT                   ENTRY CHECKS                                 
+         IF    (CVLOGBF,EQ,0),WLGEXIT  NO LOG BUFFER, EXIT                      
+         IF    (R0,NP),WLGEXIT                                                  
+         CEIL  R0,200                                                           
+*                                                                               
+         COMMENT                   BUMP LOG COUNT                               
+         INCR  R3,CVLOGCNT                                                      
+*                                                                               
+         COMMENT                   IF NOT ENOUGH ROOM IN BUFFER                 
+         COMMENT                      MOVE LOG TO OVERFLOW BUFFER               
+         L     R2,CVLOGPT          R2 - WHERE NEW RECORD WILL END               
+         AR    R2,R0                                                            
+         INCR  R2                                                               
+         L     R3,CVLOGBF          R3 - END OF BUFFER                           
+         A     R3,CVLOGSZ                                                       
+         IF    (R2,GE,R3),BEGIN    IF NOT ENOUGH SPACE                          
+         L     R3,CVLOGBF2                                                      
+         L     R2,CVLOGBF             MAKE PRIMARY BUFFER OVERFLOW              
+         ST    R2,CVLOGBF2                                                      
+         L     R2,CVLOGPT                                                       
+         ST    R2,CVLOGPT2                                                      
+         ST    R3,CVLOGBF             MAKE OVERFLOW NEW PRIMARY                 
+         ST    R3,CVLOGPT             SET NEW PRIMARY TO EMPTY                  
+         END                                                                    
+*                                                                               
+         COMMENT                   WRITE RECORD TO LOG BUFFER                   
+         L     R2,CVLOGPT                                                       
+         STC   R0,@R2                                                           
+         INCR  R2                                                               
+         LR    R3,R0                                                            
+         LR    R4,R1                                                            
+         LR    R5,R3                                                            
+         MVCL  R2,R4                                                            
+         L     R2,CVLOGPT                                                       
+         INCR  R2                                                               
+         AR    R2,R0                                                            
+         ST    R2,CVLOGPT                                                       
+*                                                                               
+WLGEXIT  LABEL ,                                                                
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*  READWLOG -                                                                   
+*                                                                               
+*  ON ENTRY:                                                                    
+*        R2 - NEXT RECORD PTR,,                                                 
+*             (SET TO ZERO FOR FIRST, SEE RETURN FOR NEXT)                      
+*                                                                               
+*  ON EXIT:                                                                     
+*        R1,R0 - RECORD LOC, LEN                                                
+*        R2 - NEXT RECORD PTR                                                   
+*        R15 - R15=0 IF OK, R15=NZ IF NO MORE RECORDS                           
+*                                                                               
+*                                                                               
+*  CAUTION:                                                                     
+*  IF YOU PASS ARBITARY R2, THIS ROUTINE WILL BOMB                              
+*                                                                               
+*                                                                               
+READWLOG PROC  ,                                                                
+*                                                                               
+         COMMENT                   SET POINTER FOR FIRST                        
+         IF    (R2,EQ,0),BEGIN                                                  
+         L     R2,CVLOGBF2         SET TO START OF OVERFLOW                     
+         IF    (CVLOGPT2,EQ,CVLOGBF2),BEGIN   IF OVERFLOW BUF EMPTY             
+         L     R2,CVLOGBF                       SET TO PRIMARY                  
+         END                                                                    
+         END                                                                    
+*                                                                               
+         COMMENT                   READ THRU OVERFLOW                           
+         IF    ((R2,GE,CVLOGBF2),AND,(R2,LT,CVLOGPT2)),BEGIN                    
+         LC    R0,@R2                                                           
+         INCR  R2                                                               
+         LR    R1,R2                                                            
+         AR    R2,R0                                                            
+         IF    (R2,GE,CVLOGPT2),BEGIN                                           
+         L     R2,CVLOGBF                                                       
+         END                                                                    
+         CLEAR R15                                                              
+         B     RLOGEXIT                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   THEN READ THRU REGULAR                       
+         IF    ((R2,GE,CVLOGBF),AND,(R2,LT,CVLOGPT)),BEGIN                      
+         LC    R0,@R2                                                           
+         INCR  R2                                                               
+         LR    R1,R2                                                            
+         AR    R2,R0                                                            
+         IF    (R2,GE,CVLOGPT),BEGIN   IF AT END OF BUFFER, SET                 
+         LA    R2,CV                     R2 TO EOF GENERATING VALUE             
+         END                                                                    
+         CLEAR R15                                                              
+         B     RLOGEXIT                                                         
+         END                                                                    
+*                                                                               
+         COMMENT                   IF NOT IN EITHER BUF, EOF                    
+         LA    R15,4                                                            
+*                                                                               
+RLOGEXIT LABEL ,                                                                
+         PRETURN (R0,R2)                                                        
+         PEND  ,                                                                
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  QSERVSEG -- Seg processing routine for QSERV text.                           
+*                                                                               
+*    On entry:                                                                  
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+QSERVSEG XPROC                                                                  
+*                                                                               
+         LR    R6,R15                                                           
+         WITH  (SEGCB,R6)                                                       
+*-                                                                              
+*-       SEGCR/SEGWR.                                                           
+*-                                                                              
+         IF    (SEGCBCR,OR,SEGCBWR),BEGIN  Write...                             
+*-                                                                              
+*-       Issue QSERV SVC.                                                       
+*-                                                                              
+*-         The 16 character QSERV entry type (e.g. PRISMLOG, EVENT)             
+*-         is pointed to by the USR field in the SEGCB.  If it isn't            
+*-         filled in, then we will use "WYLBUR" as a universal                  
+*-         default.                                                             
+*-                                                                              
+         IF    CVFRLG,EXIT         Not implemented on RLG yet                   
+*                                                                               
+         INCR  R15,CVNQSERV        Count the number of QSERVs                   
+*                                                                               
+         LT    R15,SEGCBUSR        Get entry type ptr                           
+         IF    Z,'LA R15,=CL16"WYLBUR"'  Universal default                      
+*                                                                               
+         QSERV (R15),(R1),(R0)     Queue request                                
+         IF    NZ,'INCR R15,CVNQSERR'  Count the error                          
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+         VLTORG                                                                 
+*-                                                                              
+*-       This module should be the last included in the WYLBUR                  
+*-       link-edit, hence the following symbol will represent the               
+*-       end of WYLBUR's code.  The CPU time profiler                           
+*-       needs to know the start and ending address of WYLBUR's                 
+*-       code.                                                                  
+*-                                                                              
+         ENTRY MEMEND                                                           
+MEMEND   DS    0D                                                               
+         DC    CL32'END OF WYLBUR CODE'                                         
+*                                                                               
+         END   .                                                                

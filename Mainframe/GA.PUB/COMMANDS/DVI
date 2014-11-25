@@ -1,0 +1,770 @@
+XPROC () BEGIN
+; DVIXER -- print a TeX DVI file.
+; New XPROC version for all batch DVIXER 08/16/88
+
+  DECLARE STRING REVDATE   ; last revision date
+  REVDATE = '03/13/89'
+
+; Recent revision log --
+; 03/13/89 Initialize FORMCODE before checking for a:filename so
+;          we don't bypass init in this case.
+;          Allow the input to be a file that was uploaded transparent
+;          and saved in WYLBUR.
+; 08/16/88 remove SYS.MEMBER - WYLBUR BUG (see SCRIPT exec).
+;          Fixed response to user if DVI name given is *
+
+DECLARE STRING FORMCODE INDSN MEMBER X.HELPDSN TEMPDSN ZERO ZEROS
+DECLARE STRING DV TEMPINPUT
+X.HELPDSN = 'WYL.GA.PUB.LIBDATA#TEXHELP'
+
+DECLARE STRING SX1 DSINFO DVIOPT PARMSTMT1 PARMSTMT2 S1 DVIFILE G1 G2
+DECLARE STRING X.DSNPARM LISTDIR OPTION S2 COPYREPLY FORMREPLY
+
+DECLARE NUM COPIES USERFILE WORKFILE NUMINPUT DD BLANKPOS SIZEOPT
+DECLARE NUM LONGOPT BLOCKS XL LCOL N0 N3 N4 N5 EXTRACTLIB
+
+DECLARE BOOLEAN B0 CONTINUE TRANSL MAC
+
+;
+;  BLOCKS - USED IN DVICON PROC
+;  CONTINUE - FLAG FOR CONTINUE ON RUN OPTIONS
+;  COPIES - COPIES OPTION
+;  COPYREPLY - USER'S REPLY TO NUMBER OF COPIES TO PRINT OF DVI
+;  DSINFO - DSNINFO RETURN FROM DSN CHECKER
+;  X.DSNPARM - HOLDS INPUT NAME USER ENTERS
+;  DV - DATASET VERIFICATION
+;  DVIFILE - NAME OF CONVERTED FILE FROM DVICON
+;  DVIOPT - DVIXER OPTIONS
+;  EXTRACTLIB - NUM POSITION OF '#' OR '(' AFTER LIBRARY NAME
+;  FORMCODE - FORMS CODE
+;  FORMREPLY - USER'S REPLY TO WHICH 9700 FORM TO PRINT ON
+;  G1,G2 - USED IN DVICON PROC
+;  INDSN - DATASET NAME TO BE VERIFIED THRU CHECKDSN
+;  LCOL - USED IN DVICON PROC
+;  LISTDIR - USER'S REPLY TO QUESTION RE PRINTING DIRECTORY OF LIBRARY
+;  LONGOPT - NEED MORE THAN 1 LINE FOR DVIXER PARM STATEMENT
+;  MAC - USED IN DVICON PROC
+;  MEMBER - MEMBER NAME (IF ANY)
+;  MEMNAME - IF MEMBER NAME GIVEN IN () - CONTAINS MEMBER NAME
+;  MEMSIZE - SIZE OF MEMNAME
+;  N0 - MISC. TEMPORARY
+;  OPTION - ONE OF DVIXER OPTIONS
+;  PARMSTMT1 - 1ST LINE OF PARM.DVIXER IF OPTIONS LINE TOO LONG
+;  PARMSTMT2 - 2nd LINE OF PARM.DVIXER IF OPTIONS LINE TOO LONG
+;  SIZEOPT - SIZE OF DVIXER OPTIONS STRING - MAY NEED 2 JCL LINES
+;  S2, - Misc. temporary
+;  SX1 - WORK VARIABLE FOR DSN CHECKER
+;  TEMPDSN - USED IN DVICON PROC
+;  TEMPINPUT - USED TO STRIP OFF MEMBER NAME
+;  TRANSL - USED IN DVICON PROC
+;  USERFILE - Number of user's active file
+;  XL - USED IN DVICON PROC
+;  ZERO - USED IN DVICON PROC
+;  ZEROS - USED IN DVICON PROC
+;
+;  CONSTANTS ---------------------------------------------------
+;
+;  List of allowable 9700 forms:
+DECLARE STRING FORM9700
+FORM9700  =  ' BOND 3HOL BLUE ARCB RAGB BOOK '
+
+; ------------------------- here's the code -----------------------
+
+FORMCODE = 'BOND'
+USERFILE = ACTNO ; Save user's active file number
+COMM DVIXER version of &(REVDATE) -- Print a TeX DVI file
+COMM For help, reply '?' to any question.
+COMM
+
+;*******************************************************************
+; check if user typed DVI a:filename.  If so, go to DVICON Proc
+;********************************************************************
+PARM_STRING = UPPER(STRIP(PARM_STRING))
+IF (SUBSTR(PARM_STRING,2,1) EQ ':') BEGIN ;  Use A:filename etc.
+    X.DSNPARM=PARM_STRING
+    PCALL DVICON(DVIFILE)
+    IF (DVIFILE EQ '') GOTO GETDSN ; and try again
+    INDSN=DVIFILE
+    GOTO GET_COPIES ; conversion completed
+END
+;********************************************************************
+; look for Library member noted by () so you can strip off member
+; name and leave PARM_STRING with just Library name.
+; If user does NOT give Tex source input, goto INIT, else goto GOTPARM
+;********************************************************************
+X.DSNPARM = UPPER(SCAN_TOKEN(PARM_STRING)) ; X.DSNPARM contains lib. name
+;                                 ; only if member in () but contains
+;                                 ; lib & member if member is #
+PARM_STRING=SCAN_SKIP(PARM_STRING) ; Strips off (memname) into PARM_STRING
+IF(X.DSNPARM EQ '') GOTO INIT
+; DSN in PARM. -- see if user gave dsn(member)
+MEMNAME=SCAN_TOKEN(PARM_STRING)  ; next token ex: '(memname)'
+MEMSIZE=SIZE(MEMNAME)
+IF (MEMSIZE GT 8) BEGIN ; member name too long
+    X.DSNPARM = X.DSNPARM||MEMNAME
+    WRI X.DSNPARM||' INVALID.'
+    WRI 'Member name too long (can''t be longer than 8 characters)'
+    WRI ''
+    GOTO GETDSN
+END
+IF (MEMSIZE GT 2) BEGIN;
+    IF (SUB(MEMNAME,1,1) EQ '(' AND SUB(MEMNAME,MEMSIZE,1) EQ ')') BEGIN
+        X.DSNPARM=X.DSNPARM||MEMNAME  ; put member back (scan_token stripped it)
+        PARM_STRING=SCAN_SKIP(PARM_STRING)  ; and take it out of parm
+    END
+END
+GOTO GOTPARM
+
+;%%%%%%%%%%%%%%%%%%%
+;     START
+;%%%%%%%%%%%%%%%%%%%
+START:
+; here to restart
+X.DSNPARM  =  ''
+GOTO INIT
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTPARM
+;%%%%%%%%%%%%%%%%%%%
+;********************************************************************
+; Look for '*' as Tex source input.  If found, put fully qualified
+; name in X.DSNPARM
+;********************************************************************
+GOTPARM:
+IF (X.DSNPARM EQ '*') BEGIN
+    IF (PREFIX EQ '') BEGIN ; * is undefined
+        WRI '* is undefined.'
+        X.DSNPARM=''
+        GOTO INIT
+    END
+    X.DSNPARM=PREFIX
+END
+COMM DVI Input is &(X.DSNPARM)
+
+;%%%%%%%%%%%%%%%%%%%
+;     INIT
+;%%%%%%%%%%%%%%%%%%%
+INIT:
+CONTINUE = FALSE
+FORMCODE ='BOND' ; default x9700 form
+IF (X.DSNPARM NE '') GOTO GOODDSN1 ; Got filename, don't ask for help
+;
+TRY REA STR X.DSNPARM UPP PRO 'Do you want instructions (YES/NO)? '
+WRI ''
+IF (TRYATTN) GOTO QUIT
+IF (INDEX('.YES.Y.OK.HELP.?.','.&(X.DSNPARM).') EQ 0) GOTO GETDSN
+TRY LIST 29/48 FRO &(X.HELPDSN) UNN ; intro
+WRI ' '
+
+;%%%%%%%%%%%%%%%%%%%
+;     GETDSN
+;%%%%%%%%%%%%%%%%%%%
+GETDSN:
+TRY REA STR X.DSNPARM UPP PRO 'Dsname of DVI file: '
+IF (TRYATTN) GOTO QUIT
+IF(X.DSNPARM EQ'') GOTO GETDSN
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTDSN
+;%%%%%%%%%%%%%%%%%%%
+GOTDSN:
+X.DSNPARM = UPPER(STRIP(X.DSNPARM)) ; strip leading and/or trailing characters
+IF (SUBSTR(X.DSNPARM,2,1) EQ ':') BEGIN ;  Use A:filename etc.
+    PCALL DVICON(DVIFILE)
+    IF (DVIFILE EQ '') GOTO GETDSN ; and try again
+    INDSN=DVIFILE
+    GOTO GET_COPIES ; conversion completed
+END
+IF(INDEX('.HELP.?.','.&(X.DSNPARM).') EQ 0) GOTO GOODDSN1
+TRY LIST 84/93 FRO &(X.HELPDSN) UNN
+GOTO GETDSN
+
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOODDSN1
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+; check for '*' or '#' or '('
+;*****************************************************************
+GOODDSN1:
+IF (X.DSNPARM EQ '*') BEGIN
+    IF (PREFIX EQ '') BEGIN ; * is undefined
+        WRI '* is undefined.'
+        X.DSNPARM=''
+        GOTO GETDSN
+    END
+    X.DSNPARM=PREFIX
+END
+IF(INDEX(X.DSNPARM,'#') GT 0) GOTO ISLIB1
+IF(INDEX(X.DSNPARM,'(') GT 0) GOTO ISLIB2
+GOTO GOTDSN1
+
+;%%%%%%%%%%%%%%%%%%%
+;     ISLIB1
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+;   here if library member with '#'
+;*****************************************************************
+ISLIB1:
+IF(SUB(X.DSNPARM,1,1) EQ'#') BEGIN
+    MEMBER =SUB(X.DSNPARM,2)
+    INDSN =LIBRARY||X.DSNPARM
+    GOTO CHECKDSN1
+END
+N0 = INDEX(X.DSNPARM,'#')
+MEMBER =SUB(X.DSNPARM,N0+1)
+TEMPINPUT=SUB(X.DSNPARM,1,N0-1)||'('||MEMBER||')'
+GOTO GOTDSN1
+
+;%%%%%%%%%%%%%%%%%%%
+;     ISLIB2
+;%%%%%%%%%%%%%%%%%%%
+;*****************************************************************
+;   here if library member with ()
+;*****************************************************************
+ISLIB2:
+IF(SUB(X.DSNPARM,1,1) EQ'(') BEGIN ; got (member)
+    MEMBER =SUB(X.DSNPARM,2)        ; strip (
+    IF(SUB(MEMBER,SIZ(MEMBER)) EQ')') MEMBER=SUB(MEMBER,1,SIZ(MEMBER)-1)  ; stri
+    IF (SIZ(MEMBER) GT 8) BEGIN ; bad name, too long
+        WRI X.DSNPARM||' INVALID.'
+        WRI 'Member name too long (can''t be longer than 8 characters)'
+        WRI ''
+        GOTO GETDSN
+    END
+    INDSN =LIBRARY||X.DSNPARM
+    GOTO CHECKDSN1
+END
+N0 = INDEX(X.DSNPARM,'(')
+MEMBER = SUB(X.DSNPARM,N0+1)
+IF(SUB(MEMBER,SIZ(MEMBER)) NE')') BEGIN ; illegal input
+    WRI X.DSNPARM||' is not a legal input'
+    GOTO GETDSN
+END
+MEMBER = SUB(MEMBER,1,SIZ(MEMBER)-1)
+
+;%%%%%%%%%%%%%%%%%%%
+;     GOTDSN1
+;%%%%%%%%%%%%%%%%%%%
+GOTDSN1:
+IF (TEMPINPUT NE '') INDSN = TEMPINPUT ; NO MEMBER
+ELSE INDSN=X.DSNPARM
+
+;%%%%%%%%%%%%%%%%%%%
+;     CHECKDSN1
+;%%%%%%%%%%%%%%%%%%%
+CHECKDSN1:
+INDSN = DSNFORMAT(INDSN) ; DSNFORMAT provides fully qualified name
+PCALL DSNCHECK(INDSN,DSINFO)
+IF (DSINFO EQ '') BEGIN
+    X.DSNPARM = '' ; show no dsn
+    GOTO INIT ; and try again
+END
+;  NOTE:  If DVI is EDIT format:  Only valid if it was saved after
+;  a "USE ... TRANSPARENT in SAMSON.  Convert it just like we do if
+;  we do the USE TRANSPARENT.
+
+IF(SUBSTR(DSINFO,73,1) EQ 'U') BEGIN ;file is EDIT format - convert
+    X.DSNPARM=INDSN
+    PCALL DVICON(DVIFILE)
+    IF (DVIFILE EQ '') GOTO GETDSN ; and try again
+    INDSN=DVIFILE
+    GOTO GET_COPIES
+END
+IF(SUBSTR(DSINFO,69,2) EQ 'PO') GOTO LIBRARY; if library
+IF(MEMBER EQ'') GOTO NOTMEM
+MEMBER =''
+GOTO NOTMEM
+
+;%%%%%%%%%%%%%%%%%%%
+;     LIBRARY
+;%%%%%%%%%%%%%%%%%%%
+LIBRARY:
+IF(MEMBER NE'')GOTO NOTMEM
+
+;%%%%%%%%%%%%%%%%%%%
+;     GETMEM
+;%%%%%%%%%%%%%%%%%%%
+GETMEM:
+WRI ''
+TRY WRI INDSN||' is a library; you must specify a member name.'
+WRI ''
+LISTDIR = YESNO('Do you want a listing of the directory of the library?')
+WRI ''
+IF (LISTDIR EQ 'YES') TRY SHO DIR ALL IN &(INDSN)
+;GOTO START
+GETMEM_AGAIN:
+TRY REA STR X.DSNPARM UPP PRO'Member name (CR=restart)? '
+IF (TRYATTN) GOTO START
+X.DSNPARM = STRIP(X.DSNPARM)
+IF(INDEX('.HELP.?.','.&(X.DSNPARM).') NE 0) BEGIN
+    COMM
+    COMM The dsname you have specified (&(INDSN)) is a library.
+    COMM Please specifiy which member of the library you wish to use.
+    COMM The name must be 8 characters or fewer.
+    COMM
+    GOTO GETMEM_AGAIN
+END
+IF (SUBSTR(X.DSNPARM,1,3) EQ 'WYL') X.DSNPARM=(SUBSTR(X.DSNPARM,12)) ; strip out DD name
+IF ((INDEX(X.DSNPARM,'#') NE 0) OR (INDEX(X.DSNPARM,'(') NE 0)) BEGIN
+    ; library and member name given, strip out member name
+    N0=SIZE(X.DSNPARM)
+    EXTRACTLIB = (INDEX(X.DSNPARM,'#'))
+    IF (EXTRACTLIB NE 0) X.DSNPARM=SUBSTR(X.DSNPARM,EXTRACTLIB+1)
+    ELSE BEGIN    ; () found
+         EXTRACTLIB = (INDEX(X.DSNPARM,'('))
+         N0=N0-EXTRACTLIB
+         X.DSNPARM=SUBSTR(X.DSNPARM,EXTRACTLIB+1,N0-1)
+    END
+END
+MEMBER=STRIP(X.DSNPARM)
+IF(MEMBER EQ'') GOTO INIT
+IF(SUB(MEMBER,1,1) EQ'#') BEGIN
+    MEMBER =SUB(MEMBER,2)
+    INDSN=INDSN||'('||MEMBER||')'
+END
+
+;%%%%%%%%%%%%%%%%%%%
+;     NOTMEM
+;%%%%%%%%%%%%%%%%%%%
+NOTMEM:
+IF(MEMBER EQ'')GOTO GET_COPIES
+IF(SIZ(MEMBER)GT 8) BEGIN ; Illegal membername
+    WRI MEMBER||' - Illegal member name.'
+    GOTO GETMEM
+END
+INDSN=INDSN||'('||MEMBER||')'
+DV=DSNVER('&(INDSN)')  ; check for bad member etc.
+IF (DV NE 'OK') BEGIN ; Bad member or name
+    IF (DV EQ 'BAD MEMBER') WRI MEMBER||' is not a member of '||INDSN
+    ELSE WRI INDSN||'#'||MEMBER||':  '||DV
+    GOTO GETMEM
+END
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GET_COPIES
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GET_COPIES:
+; PROMPT FOR COPIES OPTION
+;
+WRI ' '
+TRY READ STRING COPYREPLY UPP PRO 'How many copies do you want (CR=default 1)? '
+IF (TRYATTN) GOTO QUIT
+IF ((COPYREPLY EQ '') OR (INDEX('.YES.Y.OK.','.&(COPYREPLY).') NE 0)) BEGIN
+    COPIES=1
+    GOTO GET_FORM
+END
+COPYREPLY = STRIP(COPYREPLY)
+IF (COPYREPLY NE '') BEGIN ; user specified something
+    IF(INDEX('.HELP.?.','.&(COPYREPLY).') NE 0) BEGIN ; HELP
+        COMM
+        COMM For multiple copies of your DVIXER output, enter the
+        COMM number of copies you want.
+        GOTO GET_COPIES
+    END
+COPIES =NCONVERT(COPYREPLY)
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GET_FORM
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GET_FORM:
+; PROMPT FOR FORM OPTION
+;
+WRI ' '
+PROMPT_FORM:
+TRY READ STR FORMREPLY UPP PRO 'Printer Form (CR=BOND)? '
+IF (TRYATTN) GOTO GET_COPIES
+FORMREPLY = STRIP(FORMREPLY)
+IF ((FORMREPLY EQ '') OR (INDEX('.YES.Y.OK.','.&(FORMREPLY).') NE 0)) \
+   GOTO GOT_FORM ; take default
+; got a form code
+IF (FORMREPLY NE '') BEGIN ; user specified something
+    IF (INDEX('.HELP.?.','.&(FORMREPLY).') NE 0) BEGIN ; HELP
+        WRI ''
+        TRY LIST 147/161 FRO &(X.HELPDSN) UNN
+        GOTO PROMPT_FORM
+    END
+IF ((SIZE(FORMREPLY) EQ 4) AND (INDEX('.BOND.3HOL.BLUE.ARCB.RAGB.BOOK.','.&(FORMREPLY).') NE 0)) FORMCODE=FORMREPLY
+ELSE BEGIN ; bad form code
+    WRI ''
+    WRI '<.b+>'||FORMREPLY||'<.b-> is an invalid form code. Please type one of the'
+    WRI 'forms codes:  '||FORM9700
+    WRI 'Type <.b+>?<.b-> if you need more information.'
+    WRI ' '
+    GOTO PROMPT_FORM
+END
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;         GOT_FORM
+;%%%%%%%%%%%%%%%%%%%%%%%%
+GOT_FORM:
+; end of "get forms" code
+
+OPEN WORK3 TITLE 'JCL FILE FOR DVI/DVIXER'
+WRI ''
+PUTEND //DVIXER JOB
+PUTEND // EXEC DVIXER,DVI='&(INDSN)',
+PUTEND //     COPIES='&(COPIES)',FORMS='&(FORMCODE)',
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    PROMPT_DVI_OPTS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+PROMPT_DVI_OPTS:
+TRY REA STR DVIOPT UPP PRO 'DVI printer options: (CR=NONE) '
+IF (TRYATTN) GOTO QUIT
+
+; user needs help
+ IF (INDEX('.HELP.?.','.&(DVIOPT).') NE 0) BEGIN
+     WRI ' '
+     TRY LIST 164/190 FRO &(X.HELPDSN) UNN ; LIST OF OPTIONS
+     GOTO PROMPT_DVI_OPTS
+ END
+; user doesn't want any dvixer options
+ IF ((DVIOPT EQ '') OR (INDEX('.NO.N.','.&(DVIOPT).') NE 0)) BEGIN
+     PUTEND //     PARM='dialog%nodialog'
+     GOTO READY_TO_RUN
+ END
+
+; user gave options
+  IF (DVIOPT NE '') BEGIN
+      SIZEOPT=SIZE(DVIOPT)
+      IF (SIZEOPT GT 30) BEGIN
+          LONGOPT=1
+          PARMSTMT1='//  PARM=('||'''dvixer%nodialog'''||','||''''
+          PARMSTMT2='// '
+          WHILE (SIZEOPT GT 0) BEGIN
+              BLANKPOS=INDEX('&(DVIOPT)',' ')
+              IF ((BLANKPOS EQ 0) AND (SIZEOPT GT 0)) BEGIN ;last option given
+                  PARMSTMT2=PARMSTMT2||'''&(DVIOPT)'''||')'
+                  GOTO END_OPTIONS
+              END
+          OPTION=SUBSTR(DVIOPT,1,BLANKPOS-1)
+          DVIOPT=SUB(DVIOPT,BLANKPOS+1,SIZEOPT-BLANKPOS)
+          SIZEOPT=SIZE(DVIOPT)
+          IF (LONGOPT EQ 1) BEGIN
+              PARMSTMT1=PARMSTMT1||OPTION||''''||','
+              LONGOPT=0
+      END
+      ELSE PARMSTMT2=PARMSTMT2||''''||OPTION||''''||','
+     END
+  END
+  ELSE PUTEND // PARM='dvixer%nodialog &(DVIOPT)'
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    END_OPTIONS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+END_OPTIONS:
+PUTEND &(PARMSTMT1)
+PUTEND &(PARMSTMT2)
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    READY_TO_RUN
+;%%%%%%%%%%%%%%%%%%%%%%%%
+READY_TO_RUN:
+; GET READY TO RUN THE JOB
+;
+CONTINUE = FALSE
+WRI ' '
+TRY REA STR S2 UPP PRO 'Enter RUN Options, QUIT, PAUSE, or RESTART (CR=run): '
+IF (TRYATTN) GOTO QUIT
+IF (S2 EQ '') GOTO END_RUN_OPTS
+IF(INDEX('.HELP.?.','.&(S2).') EQ 0) GOTO PARSE_RUN
+COMM
+TRY LIST 193/208 FRO &(X.HELPDSN) UNN
+GOTO READY_TO_RUN
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    PARSE_RUN
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;
+; Normal response (RUN, CONTINUE, etc.)
+;
+PARSE_RUN:
+S2 = S2||' '
+PCALL FWORD(S2,S2,'CONTINUE',CONTINUE,S1) ; look for CONTINUE
+ IF (~CONTINUE) PCALL FWORD(S2,S2,'CONT',CONTINUE,S1) ; look for CONT
+ IF (CONTINUE) GOTO END_RUN_OPTS
+IF(SUB(S2,1,3) EQ'LIS') GOTO LIST_JCL
+IF(S2 EQ 'L') GOTO LIST_JCL
+IF(SUB(S2,1,3) EQ'PAU') GOTO PAUSE
+IF(SUB(S2,1,3) EQ'QUI') GOTO QUIT
+IF(SUB(S2,1,3) EQ'EXI') GOTO QUIT
+IF(SUB(S2,1,3) EQ'RES') BEGIN ; clean up
+   S2 = ''
+   X.DSNPARM=''
+   GOTO INIT
+   END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    END_RUN_OPTS
+;%%%%%%%%%%%%%%%%%%%%%%%%
+END_RUN_OPTS:
+; fixup "hold=yes"
+  PCALL FWORD(S2,S2,'HOLD=',B0,S1) ; look for HOLD=
+    IF (B0) BEGIN ; Found HOLD= something
+    S1=UPPER(S1)
+  IF (S1 EQ 'Y' OR S1 EQ 'YES') BEGIN ; found HOLD=YES
+    S2=S2 ; remove from run options string
+    S2=STRIP(S2)||' HOLD ' ; put it back the right way
+    END
+  END
+WRI ' '
+TRY RUN NOTIFY &(S2)
+IF (~TRYERR) GOTO QUIT ; ran OK
+WRI S2||': Invalid RUN options.'
+GOTO READY_TO_RUN ; prompt for new RUN options
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;    LIST_JCL
+;%%%%%%%%%%%%%%%%%%%%%%%%
+LIST_JCL:
+LIST
+GOTO READY_TO_RUN
+PAUSE:
+COMM The DVI JCL is in the active file.
+COMM Type XGO to resume.
+XPAUSE
+GOTO READY_TO_RUN
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;        QUIT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+QUIT:
+IF (ACTNO NE USERFILE) PICK &(USERFILE)
+IF (CONTINUE) BEGIN
+X.DSNPARM=''
+CLEAR VALUES
+GOTO INIT
+END
+COMM Exiting DVI
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;        OUT
+;%%%%%%%%%%%%%%%%%%%%%%%%
+OUT:
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;   PROC DSNCHECK
+;%%%%%%%%%%%%%%%%%%%%%%%%
+; Data set checker subroutine  ------------------------------------
+; DSNAME INPUT IN CHECKDSN; DSNINFO RETURN IN DSINFO
+PROC DSNCHECK (CHECKDSN,DSINFO) BEGIN
+;DECLARE STRING SX1
+SX1 = DSNVER(CHECKDSN) ;DSNVER verifies existence & status of file
+DSINFO = ''
+IF (SX1 EQ 'OK' OR SX1 EQ 'BAD MEMBER') DSINFO = DSNINFO(CHECKDSN)   ; OK
+   ELSE WRI 'Error:  Data set '||CHECKDSN||' is '||SX1  ; error
+RETURN(CHECKDSN,DSINFO)
+END
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;   PROC FWORD
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;----------------- find and extract a word -----------------------
+PROC FWORD(IN,OUT,WORD,FLAG,VALUE) BEGIN
+;  IN is input string
+;  OUT is output string (with word removed)
+;  WORD is word to look for
+;  FLAG is TRUE if the word was found, else FALSE
+;  VALUE is the argument value found if WORD ended in = sign
+
+DECLARE STRING XIN
+DECLARE BOOLEAN EQF
+EQF=FALSE
+FLAG = FALSE
+VALUE=''
+XIN=' '||TRANSLATE(IN, ' ', ',')||' '  ; commas to blanks; pad
+WORD = ' '||STRIP(WORD) ; pad word so find only if delimited
+IF (SUBSTR(WORD,SIZE(WORD),1) NE '=') WORD=WORD||' ' ; pad on rt.
+   ELSE EQF=TRUE ; we have WORD= so look for argument
+OUT = IN
+WL = SIZE(WORD)
+IX = INDEX(XIN,WORD) ; find word
+IF (IX GT 0) BEGIN ; Found the word
+   FLAG = TRUE
+;  Remove word from string...
+   IF (IX EQ 1) F1=''             ;  word was first
+      ELSE F1=SUBSTR(IN,1,IX-1)   ;  part ahead of word
+   IF (SIZE(IN) LE IX+WL-2) F2='' ;  word was last
+      ELSE F2=SUBSTR(IN,IX+WL-1)  ;  part after word
+   IF (EQF) BEGIN ; this is word=value, get value
+   IX = FIND(F2,' ,') ; next delimiter
+   IF (IX EQ 0) BEGIN ; no more delims in line, take it all
+      VALUE=F2
+      F2=''
+      END
+      ELSEIF (IX EQ 1) BEGIN ; immediate delim, null arg
+         VALUE=''
+         IF (SIZE(F2) GT 1) F2=SUBSTR(F2,2)
+         ELSE F2=''
+         END
+      ELSE BEGIN ; some arg
+         VALUE=SUBSTR(F2,1,IX-1)
+         IF (SIZE(F2) GT IX) F2=SUBSTR(F2,IX+1)
+         ELSE F2=''
+         END
+      END
+   IF (F1 NE '' AND F2 NE '') BEGIN ; check for extra comma now
+      IF (SUBSTR(F1,SIZE(F1),1) EQ ',' AND SUBSTR(F2,1,1) EQ ',') F2=SUBSTR(F2,2
+      END
+;  Make sure some delimiter is left between parts
+   IF (F1 NE '' AND F2 NE '') BEGIN ; got two parts
+      S1=SUBSTR(F1,SIZE(F1),1) ; last of the first
+      S2=SUBSTR(F2,1,1)        ; first of the last
+      S1=S1||S2                ; trailing+leading delimiters
+      IF (FIND(S1,', ') EQ 0) F1=F1||' ' ; put in a blank
+      END
+   OUT=F1||F2
+   OUT=STRIP(OUT,'B',',')
+   OUT=STRIP(OUT)
+   OUT=STRIP(OUT,'B',',')
+   END
+RETURN(OUT,FLAG,VALUE)
+END
+;IF (INDEX('.Q.QUIT.','.&(DVIOUT).') NE 0) GOTO QUIT
+
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;   PROC DVICON
+;%%%%%%%%%%%%%%%%%%%%%%%%
+;-------convert file uploaded from micro to Wylbur format---------
+PROC DVICON(DVIFILE) BEGIN
+    ZERO = S'00'
+    ZEROS = COPIES(ZERO,64)
+IF (SUB(X.DSNPARM,2,1) NE ':') BEGIN ; convert format of WYLBUR dataset
+            TRY USE &(X.DSNPARM) KEEP
+            IF (TRYATTN) RETURN(DVIFILE)
+            IF (TRYERR) RETURN(DVIFILE)
+        END
+        ELSE BEGIN ; upload from micro
+        QUIET TRY USE &(X.DSNPARM) TRANSPARENT KEEP
+        IF (TRYERR) BEGIN
+            COMM Could not find file in specified drive.  Only specify a drive if
+            COMM you are using Samson.  If you are in Samson, make sure you have
+            COMM first issued the command SET TERMINAL SAMSON (if using an IBM PC)
+            COMM or SET TERM MACSAM (if using an APPLE MACINTOSH).
+            COMM Try again.
+            WRI ''
+            RETURN(DVIFILE)
+        END
+    END
+    LCOL=SIZE(FIRST)
+    G1=SUB(LINE(FIRST),1,1) ;  left guard character
+    G2=SUB(LINE(FIRST),LCOL,1)  ; right guard character
+    IF (G1 NE G2) GOTO BADFILE  ; don't match...
+    IF (G1 EQ '@') BEGIN ; untranslated file
+        TRANSL=FALSE
+        GOTO OK
+    END
+    IF (G1 EQ '|' OR G1 EQ '-') BEGIN ; Been translated to EBCDIC
+        TRANSL=TRUE
+        GOTO OK
+    END
+
+; invalid file
+BADFILE:
+    IF (FIRST NE '') LIST FIRST MIXED
+    WRI 'Not a valid uploaded file.'
+    RETURN(DVIFILE)
+
+OK:
+    TEMPDSN=SUBSTR(DATE,1,2)||SUBSTR(DATE,4,2)||SUBSTR(DATE,7,2)
+    TEMPDSN='TEXTMP.D'||SUB(DATE,20,2)||SUB(DATE,23,3)||'.T'||TEMPDSN
+    TEMPDSN=DSNFORMAT(TEMPDSN) ; NAME FOR TEMP FILE
+    WRI 'Your DVI file has to be converted into the proper file format for DVIXER'
+
+GET_ODSN:
+    WRI ''
+    TRY REA STR DVIFILE UPP PRO 'Name for converted DVI file: '
+    IF (TRYATTN) GOTO QUIT
+    IF(INDEX('.HELP.?.','.&(DVIFILE).') NE 0) BEGIN
+        TRY LIST 210.1/215 FRO &(X.HELPDSN) UNN
+        GOTO GET_ODSN
+    END
+    N4=(INDEX('&(DVIFILE)','#'))
+    N5=(INDEX('&(DVIFILE)','('))
+    IF (N4 NE 0 OR N5 NE 0) BEGIN
+        WRI ''
+        COMM You have specified a library member.  For purposes of this program, give a
+        COMM a <.B+>SEQUENTIAL<.B-> dataset name for the converted file.
+        GOTO GET_ODSN
+    END
+    TRY DVIFILE=DSNFORMAT(DVIFILE)
+    IF (TRYERR) GOTO GET_ODSN
+    S1=DSNVER(DVIFILE)
+    IF (S1 NE 'NOT THERE' AND S1 NE 'BAD MEMBER') BEGIN
+        WRI ''
+        WRI DVIFILE||' already exists.  '
+        IF(YESNO('Do you want to replace it? ') EQ 'YES') BEGIN
+            SCR &(DVIFILE)
+            GOTO GOT_ODSN
+        END
+        GOTO GET_ODSN
+    END
+GOT_ODSN:
+
+;  Convert the file
+   MAC=FALSE
+   IF (SUB(LINE(FIRST),2,1) EQ 'I') BEGIN ; Macintosh file with INFO
+       MAC=TRUE
+       POI 'D' 2 (1) NOLIST ; Find "data" line
+       XL=*-.001 ; Last non-data line
+       DEL 0/&(XL) NOLIST ; remove info/header
+   END
+   CH 66/66 TO '' IN 1/L-1 NOLIST ; strip trailing guard from all
+                                  ; but last line
+   CH 1/1 TO '' NOLIST            ; strip leading guard char.
+   LCOL=SIZE(LINE(LAST))          ; strip trailing guard from
+   S0=SUB(LINE(LAST),1,LCOL-1)    ; last line (which might be short)
+   S0=LEFT(S0,64,ZERO) ; pad to LRECL
+   PUTLINE LAST &(S0)
+
+; Translate
+
+   IF (TRANSL) EVAL ALL EXPR(LINE_PUT(EVAL_LNO, ASCII(LINE(EVAL_LNO))))
+
+; reblock
+   IF (MAC) BEGIN ; Mac, the 64 bytes includes D for "data" in col. 2
+               ; so only 63 real data bytes
+       CH 1/1 TO '' NOLIST ; Get rid of the "D"
+       SAVE &(TEMPDSN) LRECL=63(64) TEMP QUI
+       USE &(TEMPDSN) LRECL=64 CLR
+       S0=LINE(LAST)   ; repad last line in case the 63/64 stuff was odd
+       S0=LEFT(S0,64,ZERO) ; pad to LRECL
+       PUTLINE LAST &(S0)
+       SCR &(TEMPDSN) QUI
+   END ;
+
+; common to Mac, PC (Mac now converted to 64 byte lines)
+
+   BLOCKS=INT((LINES+15)/16)  ; output block count
+   N0=LINES-INT(LINES/16)*16  ; LINE COUNT MOD 16
+   IF (N0 EQ 0) N1=0
+   ELSE BEGIN ; need to fill
+       N1=16-N0              ; How many needed to fill
+       REPEAT BEGIN
+           PUTEND &(ZEROS)
+           N1=N1-1
+       END
+       UNTIL (N1 EQ 0)         ; Fill to multiple of 16
+   END ; fill
+   SAVE &(TEMPDSN) LRECL=64(96) TEMP
+
+
+   OPEN CONJCL TITLE 'JCL for DVICON'
+   PUTEND // JOB ,TIME=(,1)
+   PUTEND // EXEC IOPROGM,PARM='INLRECL=1024'
+   PUTEND //IN DD DSN=&(TEMPDSN),DISP=SHR
+   PUTEND //OUT DD DSN=&(DVIFILE),DISP=(,CATLG),
+   PUTEND //  UNIT=DISK,SPACE=(1024,(&(BLOCKS),1),RLSE)
+   PUTEND // EXEC NOLIST,COND=(0,NE)
+   RUN NOTIFY
+   WRI 'Job is running...'
+   SYNCH * WAIT=60
+   WRI 'File is converted.  Output file is:'
+   SHO DSN ONLY &(DVIFILE) SPACE TYPE
+ENDDVI:
+   RETURN(DVIFILE)
+END

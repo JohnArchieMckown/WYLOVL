@@ -1,0 +1,825 @@
+KEYS     TITLE 'WYLBUR''s Keyed File Routines'                                  
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*box                                                                            
+*                                                                               
+*  Module history:                                                              
+*     6/89  Niz    Original version (based on KWWR).                            
+*    03/92  SCH    Charlie worked on KEYS, changes unknown                      
+*    11/93  PJG    Add Christa VSAM interface for user-id                       
+*     1/95  SLP    Modify Christa interface for second try at                   
+*                  installation                                                 
+*     9/98  MPD    Remove BDAM interface                                        
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+WYLKEYS  CSECT                                                                  
+*                                                                               
+KEYS     IDENT 2010                10:26:04 01/10/02  (SLP)                     
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+         PUSH  DSECTS                                                           
+*                                                                               
+         COPY  CONTROL             Copy CV/CP                                   
+*                                                                               
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         POP   DSECTS                                                           
+         EJECT                                                                  
+         COPY  UID                 Copy User-ID record layout                   
+         EJECT ,                                                                
+WYLKEYS  CSECT                                                                  
+*-                                                                              
+*-       KEYS Global Information                                                
+*-                                                                              
+*-       These fields are DC at the beginning of the KEYS module                
+*-       immediately following the IDENT eyecatcher.                            
+*-                                                                              
+KEYSTMXL EQU   16*1024             Maximum user transaction length              
+KEYSBUFL EQU   KEYSTMXL+L'USRHDR                                                
+KEYSTBL  DS    0D                                                               
+         DC    CL8'KEYSTBL:'                                                    
+KEYCNIO  DC    F'0'                Total number of I/O's                        
+KEYCNRD  DC    F'0'                Number of read requests                      
+KEYCNWR  DC    F'0'                Number of write requests                     
+KEYCNADD DC    F'0'                Number of add requests                       
+KEYCNDEL DC    F'0'                Number of delete requests                    
+KEYSECB  DS    F                                                                
+         SPACE ,                                                                
+KEYSCHRC DC    A(0)                Return code from Christa path                
+KEYSTCDE DC    A(0)                Last Christa VSAM return code                
+KEYSLCDE DC    A(0)                Last Christa SEND return code                
+KEYSCHAD DC    A(0)                Addr of Christa interface module             
+         SPACE ,                                                                
+CHRPLIST DS    0A                  Christa interface parameter list             
+CHRPFUNC DC    A(KEYUFUNC)         Addr of Christa function requested           
+CHRPWORK DC    A(KEYUWORK)         Addr of Christa work cell                    
+CHRPTRAN DC    A(0)                Addr of Christa transaction                  
+         SPACE 2                                                                
+KEYUFUNC DC    A(0)                Christa request function code                
+KEYUWORK DC    A(-1)               Addr of Christa work area                    
+*                                  (returned by Christa -- we don't             
+*                                  touch)                                       
+*                                                                               
+KEYDOMID DC    A(0)                MSG id to be DOMed after INIT ok             
+*                                                                               
+KEYSFLAG FLAG  ,                   Global flags                                 
+         FLAG  KEYCFINIT           - Christa interface initialized              
+         FLAG  KEYCFOPEN           - Christa interface is opened                
+         FLAG  KEYCFBUSY           - Christa transaction in progress            
+         FLAG  KEYCFNA             - Christa is not available                   
+*                                                                               
+KEYFWORK FLAG  ,                   Work space for SET command flags             
+         FLAG  KEYFUCPR            UserID Access: Christa primary               
+*                                                                               
+KEYFILE  DS    CL1                 Last file accessed                           
+         EJECT ,                                                                
+         COPY  CHRIOREQ            Copy Christa interface block                 
+         SPACE 2                                                                
+         COPY  USINPRMS            Copy Christa init parm layout                
+         SPACE 2                                                                
+         COPY  CHRPARMS            Copy Christa global parms layout             
+         EJECT ,                                                                
+         TITLE 'KEYOPEN -- Open the keyed file'                                 
+*box                                                                            
+*                                                                               
+*  KEYOPEN -- Routine to open the Christa Userid file.                          
+*                                                                               
+*    This routine establishes the connection to the CHRISTA                     
+*    job.                                                                       
+*                                                                               
+KEYOPEN  PROC  (R0,LSR)                                                         
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*                                                                               
+* LOAD the Christa I/O interface module, and obtain a buffer                    
+* large enough for all transactions to the various files                        
+* (USERID, Kerberos, and eventually, PASSWORD).                                 
+*                                                                               
+* This initialization is one-time.                                              
+*                                                                               
+         IF    ^KEYCFINIT,BEGIN                                                 
+         L     R0,=A(KEYSBUFL)                                                  
+                                                                                
+         VCALL GETCORE             We must get this                             
+         ST    R1,CHRPTRAN                                                      
+         OI    CHRPTRAN,X'80'                                                   
+         SET   KEYCFINIT                                                        
+         CLEAR KEYDOMID                                                         
+         END                                                                    
+*                                                                               
+         IF    ^KEYCFOPEN,BEGIN                                                 
+*                                                                               
+* Note: We load the Christa I/O module each time in case the code               
+*       changed. This is admittedly a very rare occurrence, but                 
+*       it's easier to deal with updates by just shutting down                  
+*       and restarting the Christa interface instead of taking                  
+*       WYLBUR down.                                                            
+*                                                                               
+         LOAD  EP=CHRISIO,ERRET=CHLDERR  Obtain Christa entry point             
+         ST    R0,KEYSCHAD         Save address of Christa interface            
+*                                                                               
+         L     R1,CHRPTRAN         Point at area to build transaction           
+         USING USINPRMS,R1                                                      
+         L     R2,CVCHRIS          Point at global Christa parms                
+         USING CHRPARMS,R2                                                      
+         MVC   USINID,=C'USIN'     Transaction type is INIT                     
+         MVC   USINPATH,CHRUPATH   Copy path name and time-out                  
+         MVC   USINTOUT,CHRUTIME    into init transaction                       
+*                                                                               
+*  Set up the parameter list for the call                                       
+*                                                                               
+         LA    R0,CHRFINIT                                                      
+         ST    R0,KEYUFUNC                                                      
+*                                                                               
+         LA    R1,CHRPLIST         Point at the parm list                       
+         L     R15,KEYSCHAD        Address of Christa interface                 
+         BASSM R14,R15             Call the initialization routine              
+         ST    R15,KEYSLCDE        Save initialization return code              
+*                                                                               
+         IF    (R15,Z),BEGIN       If initialization was successful,            
+         SET   KEYCFOPEN             flag user-id file as now open              
+         IF    (KEYDOMID,NZ),BEGIN Delete prior action message                  
+         DOM   MSG=KEYDOMID                                                     
+         CLEAR KEYDOMID                                                         
+         END                                                                    
+         END                                                                    
+         ELSE  BEGIN               Else, report error                           
+         IF    (KEYDOMID,Z),BEGIN    but only once                              
+         BTX   CPDOUB,8,(R15)                                                   
+         MVC   MSG1RC(8),CPDOUB                                                 
+         WTO   TEXT=MSG1DESC,MCSFLAG=BUSYEXIT,DESC=2                            
+         IF    (R15,Z),BEGIN                                                    
+         ST    R1,KEYDOMID         Delete this when successful                  
+         END                                                                    
+         END                                                                    
+         CLEAR CVFCHRUCPR          Turn off Christa path                        
+         L     R15,=F'-3'          Indicate open not successful                 
+         END                                                                    
+*                                                                               
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         CLEAR R15                 Christa already open                         
+         END                                                                    
+*                                                                               
+         ST    R15,KEYSCHRC        Save the Christa return code                 
+         EXIT  KEYOPEN                                                          
+*-                                                                              
+*-  An error has occurred while LOADing the interface module                    
+*-  and the LOAD macro will transfer here.                                      
+*-                                                                              
+CHLDERR  DS    0H                                                               
+         IF    (KEYDOMID,Z),BEGIN  Only WTO once                                
+         LR    R2,R1               Get ABEND code                               
+         BTX   CPDOUB,8,(R15)                                                   
+         MVC   MSG2SYSC(8),CPDOUB                                               
+         LR    R15,R2              Get reason code                              
+         BTX   CPDOUB,8,(R15)                                                   
+         MVC   MSG2RC(8),CPDOUB                                                 
+         WTO   TEXT=MSG2DESC,MCSFLAG=BUSYEXIT,DESC=2                            
+         IF    (R15,Z),BEGIN                                                    
+         ST    R1,KEYDOMID         Delete this when successful                  
+         END                                                                    
+         END                                                                    
+         CLEAR CVFCHRUCPR          Turn off Christa path                        
+         L     R15,=F'-3'          Set error return                             
+         ST    R15,KEYSCHRC        Save the Christa return code                 
+*                                                                               
+         PEND                                                                   
+MSG1DESC DC    AL2(MSG1END-MSG1)                                                
+MSG1     DC    C'User id interface init failed (RC='                            
+MSG1RC   DC    C'00000000).'                                                    
+         DC    C' Check CHRISTA job.'                                           
+MSG1END  EQU   *                                                                
+*                                                                               
+MSG2DESC DC    AL2(MSG2END-MSG2)                                                
+MSG2     DC    C'User id interface LOAD failed '                                
+         DC    C'(ABEND code '                                                  
+MSG2SYSC DC    C'00000000, reason code '                                        
+MSG2RC   DC    C'00000000).'                                                    
+         DC    C' Check CHRISTA job.'                                           
+MSG2END  EQU   *                                                                
+                                                                                
+         TITLE 'KEYCLOSE -- Close the Christa UserID file'                      
+*box                                                                            
+*                                                                               
+*  KEYCLOSE -- Routine to close the master keyed file.                          
+*                                                                               
+*    This routine is called by termination.                                     
+*                                                                               
+*    (Well, actually it isn't yet.  The above comment was copied                
+*    from the existing close code, which also was never called                  
+*    during termination.  But it is called when the Christa                     
+*    UserID path is turned off (SET CHRISUID CHRISTA OFF),                      
+*    and a call to it during termination should be added.)                      
+*                                                                               
+KEYCLOSE PROC  ,                                                                
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+         SPACE 2                                                                
+*-                                                                              
+*-  Terminate user-id processing using the Christa interface.                   
+*-                                                                              
+         CLEAR CVFCHRUCPR          Turn off Christa path                        
+         IF    ^KEYCFOPEN,EXIT     Close only if currently open                 
+         CLEAR KEYCFOPEN           Clear Christa flags                          
+*                                                                               
+         LA    R0,CHRFCLOS                                                      
+         ST    R0,KEYUFUNC                                                      
+*                                                                               
+         LA    R1,CHRPLIST         Point at the parm list                       
+         L     R15,KEYSCHAD        Get address of interface routine             
+         BASSM R14,R15             Go do the termination                        
+*                                                                               
+         DELETE EP=CHRISIO         Delete Christa load module                   
+         CLEAR KEYSCHAD             and the address                             
+*                                                                               
+         PEND                                                                   
+         TITLE 'KEYGET -- Get a keyed record'                                   
+*box                                                                            
+*                                                                               
+*  KEYGET -- Routine to get a record's data given the key.                      
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - Point to transaction data to be sent to                          
+*              Christa                                                          
+*      R2,R3 - Point to transaction data return area                            
+*      R4    - Indicates which file:                                            
+*              'U' = USERID file                                                
+*              'K' = KLOGIN file                                                
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*       -3 - keys file not available                                            
+*       -2 - record error (invalid data in keys file)                           
+*       -1 - I/O error                                                          
+*        0 - record found:                                                      
+*               R0 = actual data length (which might not                        
+*                    be the same size as the return area                        
+*                    if larger, than data was truncated).                       
+*               R1 = return area address                                        
+*        1 - record not found                                                   
+*                                                                               
+KEYGET   XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*                                                                               
+         IF    (KEYFUCPR,AND,^KEYCFOPEN),BEGIN  Try to get it open              
+         ACALL KEYOPEN                                                          
+         END                                                                    
+*                                                                               
+         IF    KEYCFOPEN,BEGIN                                                  
+         IF    ^CPRFKEYS,'ACALL KRSCGET' Get excl cntrl of interface            
+*                                                                               
+         STC   R4,KEYFILE          Save file code                               
+         LR    R4,R3               Save return data ptr                         
+         LR    R5,R2               ...and length                                
+*                                                                               
+         INCR  R15,KEYCNIO         Incr total interface call count              
+         INCR  R15,KEYCNRD         Incr GET call count                          
+*                                                                               
+         L     R14,CHRPTRAN        Move the caller's transaction                
+         USING USRREQ,R14                                                       
+         LA    R14,REQDATA                                                      
+         LR    R2,R1                                                            
+         CEIL  R0,KEYSTMXL                                                      
+         LR    R3,R0                                                            
+         LR    R15,R0                                                           
+         MVCL  R14,R2                                                           
+         LA    R2,RQTREAD          It's a read request                          
+         ACALL CHRISIO             Send request to subsystem                    
+*                                                                               
+         IF    (R15,Z),BEGIN       Move data to caller's area                   
+         L     R14,CHRPTRAN        Point at return transaction                  
+         L     R15,REQLEN          Get return length                            
+         S     R15,=A(L'USRHDR)      minus the header                           
+         LR    R3,R15              Save actual length for later                 
+         CEIL  R15,R5                                                           
+         LR    R0,R4                                                            
+         LA    R14,REQDATA                                                      
+         LR    R1,R15                                                           
+         MVCL  R0,R14                                                           
+         SR    R15,R15             Restore zero return code                     
+         LR    R0,R3               Get actual length                            
+         LR    R1,R4                and return buffer address                   
+         END                                                                    
+*                                                                               
+         END                                                                    
+         ELSE  BEGIN                                                            
+         L     R15,=F'-3'          Indicate Christa not available               
+         CLEAR R0                                                               
+         LR    R1,R4                                                            
+         END                                                                    
+*                                                                               
+         ST    R15,KEYSCHRC        Save Christa rc for debugging                
+         PRETURN (R0,R1)                                                        
+         DROP  R14                                                              
+         IF    CPRFKEYS,'ACALL KRSCFREE'                                        
+         LT    R15,KEYSCHRC                                                     
+         PEND                                                                   
+         TITLE 'KEYPUT -- Routine to replace a keyed record'                    
+*box                                                                            
+*                                                                               
+*  KEYPUT -- Routine to replace an existing record given                        
+*    the key.                                                                   
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - Point to transaction data to be sent to                          
+*              Christa                                                          
+*      R2    - Indicates which file:                                            
+*              'U' = USERID file                                                
+*              'K' = KLOGIN file                                                
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      -3 - keys file not available                                             
+*      -2 - record error (invalid data in keys file)                            
+*      -1 - I/O error                                                           
+*       0 - record updated                                                      
+*       1 - record not found                                                    
+*       2 - record not updated; try again (update count mismatch)               
+*                                                                               
+KEYPUT   XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*                                                                               
+         LR    R4,R1               Save input data ptr                          
+         LR    R5,R0               ...and length                                
+*                                                                               
+         IF    (KEYFUCPR,AND,^KEYCFOPEN),BEGIN  Try to get it open              
+         ACALL KEYOPEN                                                          
+         END                                                                    
+*                                                                               
+         IF    KEYCFOPEN,BEGIN                                                  
+         IF    ^CPRFKEYS,'ACALL KRSCGET'  Get exclusive control                 
+*                                                                               
+         STC   R2,KEYFILE          Save file indicator                          
+*                                                                               
+         INCR  R15,KEYCNIO         Kick I/O count                               
+         INCR  R15,KEYCNWR         Number of writes                             
+*                                                                               
+         L     R14,CHRPTRAN        Move the caller's transaction                
+         USING USRREQ,R14                                                       
+         LA    R14,REQDATA                                                      
+         LR    R2,R1                                                            
+         CEIL  R0,KEYSTMXL                                                      
+         LR    R3,R0                                                            
+         LR    R15,R0                                                           
+         MVCL  R14,R2                                                           
+         LA    R2,RQTUPD                                                        
+         ACALL CHRISIO             Send request to subsystem                    
+         END                                                                    
+         ELSE  BEGIN                                                            
+         L     R15,=F'-3'          Christa not available                        
+         END                                                                    
+*                                                                               
+         ST    R15,KEYSCHRC        Save Christa rc for debugging                
+         IF    CPRFKEYS,'ACALL KRSCFREE'  Free exclusive control                
+         LT    R15,KEYSCHRC        Set rc based on R15 (caller looks)           
+         PEND                                                                   
+         TITLE 'KEYADD -- Add a new keyed record'                               
+*box                                                                            
+*                                                                               
+*  KEYADD -- Routine to add a new keyed record.                                 
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - Point to transaction data to be sent to                          
+*              Christa                                                          
+*      R2    - Indicates which file:                                            
+*              'U' = USERID file                                                
+*              'K' = KLOGIN file                                                
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      -3 - keys file not available                                             
+*      -2 - record error (invalid data in keys file)                            
+*      -1 - I/O error                                                           
+*       0 - record added                                                        
+*       3 - record already exists                                               
+*       4 - no more room in master file                                         
+*                                                                               
+KEYADD   XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*                                                                               
+         LR    R4,R1               Save new data ptr                            
+         LR    R5,R0               ...and length                                
+*                                                                               
+         IF    (KEYFUCPR,AND,^KEYCFOPEN),BEGIN  Try to get it open              
+         ACALL KEYOPEN                                                          
+         END                                                                    
+*                                                                               
+         IF    KEYCFOPEN,BEGIN                                                  
+         IF    ^CPRFKEYS,'ACALL KRSCGET' Get excl cntrl of interface            
+*                                                                               
+         STC   R2,KEYFILE          Save file indicator                          
+*                                                                               
+         INCR  R15,KEYCNIO         Incr total interface call count              
+         INCR  R15,KEYCNADD        Incr ADD call count                          
+*                                                                               
+         L     R14,CHRPTRAN        Move the caller's transaction                
+         USING USRREQ,R14                                                       
+         LA    R14,REQDATA                                                      
+         LR    R2,R1                                                            
+         CEIL  R0,KEYSTMXL                                                      
+         LR    R3,R0                                                            
+         LR    R15,R0                                                           
+         MVCL  R14,R2                                                           
+         LA    R2,RQTADD                                                        
+         ACALL CHRISIO             Send request to subsystem                    
+         END                                                                    
+         ELSE  BEGIN                                                            
+         L     R15,=F'-3'          Christa not available                        
+         END                                                                    
+*                                                                               
+         ST    R15,KEYSCHRC        Save Christa rc for debugging                
+         IF    CPRFKEYS,'ACALL KRSCFREE'                                        
+         LT    R15,KEYSCHRC        Set RC based on R15 (caller looks)           
+         PEND                                                                   
+         TITLE 'KEYDEL -- Delete a keyed record'                                
+*box                                                                            
+*                                                                               
+*  KEYDEL -- Routine to delete a keyed record.                                  
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - Point to transaction data to be sent to                          
+*              Christa                                                          
+*      R2    - Indicates which file:                                            
+*              'U' = USERID file                                                
+*              'K' = KLOGIN file                                                
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      -3 - keys file not available                                             
+*      -2 - record error (invalid data in keys file)                            
+*      -1 - I/O error                                                           
+*       0 - record deleted                                                      
+*       1 - record not found                                                    
+*                                                                               
+KEYDEL   XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*                                                                               
+         IF    (KEYFUCPR,AND,^KEYCFOPEN),BEGIN  Try to get it open              
+         ACALL KEYOPEN                                                          
+         END                                                                    
+*                                                                               
+         IF    KEYCFOPEN,BEGIN                                                  
+         IF    ^CPRFKEYS,'ACALL KRSCGET' Get excl cntrl of interface            
+*                                                                               
+         STC   R2,KEYFILE          Save file indicator                          
+*                                                                               
+         INCR  R15,KEYCNIO         Incr total interface call count              
+         INCR  R15,KEYCNDEL        Incr DEL call count                          
+*                                                                               
+         L     R14,CHRPTRAN        Move the caller's transaction                
+         USING USRREQ,R14                                                       
+         LA    R14,REQDATA                                                      
+         DROP  R14                                                              
+         LR    R2,R1                                                            
+         CEIL  R0,KEYSTMXL                                                      
+         LR    R3,R0                                                            
+         LR    R15,R0                                                           
+         MVCL  R14,R2                                                           
+*                                                                               
+         LA    R2,RQTDEL                                                        
+         ACALL CHRISIO             Send request to subsystem                    
+         END                                                                    
+         ELSE  BEGIN                                                            
+         L     R15,=F'-3'          Christa not available                        
+         END                                                                    
+*                                                                               
+         ST    R15,KEYSCHRC        Save Christa rc for debugging                
+         IF    CPRFKEYS,'ACALL KRSCFREE'                                        
+         LT    R15,KEYSCHRC        Set rc based on R15 (caller looks)           
+         PEND                                                                   
+         TITLE 'KEYINFO -- Display KEYS counters'                               
+*box                                                                            
+*                                                                               
+*  SHOWKINF -- SHOW KINFO Command.                                              
+*                                                                               
+SHOWKINF XPROC                                                                  
+         VCALL COLLOPTS                                                         
+*                                                                               
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+*-                                                                              
+*-       General keys information.                                              
+*-                                                                              
+         TSEG  'Keys information:',,CR                                          
+         TCR                                                                    
+*                                                                               
+         TCOL  2                                                                
+         TNUM  L:KEYCNIO                                                        
+         TSEG  '  Total requests',,CR                                           
+*                                                                               
+         TCOL  2                                                                
+         TNUM  L:KEYCNRD                                                        
+         TSEG  '  GETs',,CR                                                     
+*                                                                               
+         TCOL  2                                                                
+         TNUM  L:KEYCNWR                                                        
+         TSEG  '  PUTs',,CR                                                     
+*                                                                               
+         TCOL  2                                                                
+         TNUM  L:KEYCNADD                                                       
+         TSEG  '  ADDs',,CR                                                     
+*                                                                               
+         TCOL  2                                                                
+         TNUM  L:KEYCNDEL                                                       
+         TSEG  '  DELETEs',,CR                                                  
+         TCR                                                                    
+*                                                                               
+         TSEG  ' Last SEND return code was '                                    
+         TNUM  L:KEYSLCDE                                                       
+         TCR                                                                    
+*                                                                               
+         TSEG  ' Last VSAM return code was '                                    
+         TNUM  L:KEYSTCDE                                                       
+         TCR                                                                    
+*                                                                               
+         TSEG  ' Last function return code was '                                
+         TNUM  L:KEYSCHRC                                                       
+         TSEG  ' for function code '                                            
+         TNUM  L:KEYUFUNC                                                       
+         TCR                                                                    
+         TCR                                                                    
+         B     CVNEXT                                                           
+         PEND                                                                   
+         TITLE 'Subroutines'                                                    
+*box                                                                            
+*                                                                               
+*  KRSCGET -- Routine to get exclusive control of the keys resource.            
+*    If another user already has it, this user will wait.                       
+*                                                                               
+*    Entry/exit:                                                                
+*      R15,R0,R1 -- unchanged                                                   
+*                                                                               
+*  Note:  The caller must call KRSCFREE to free the exclusive                   
+*         control.                                                              
+*                                                                               
+KRSCGET  PROC  (R15,LSR)                                                        
+         FAIL  CPRFKEYS,KEYSERR1,'Keys resource error.'                         
+*                                                                               
+         SET   CPRFKEYS            Keys resource in use                         
+         GETRSC KEY,ATTN=NO        Get exclusive control                        
+         FAIL  NZ,KEYSERR2,'Keys resource error.'                               
+         PEND                                                                   
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  KRSCFREE -- Routine to free exclusive control of the keys                    
+*    resource.  (Can be called from the command processor if a                  
+*    routine should fail to release the resource at the end of the              
+*    command.)                                                                  
+*                                                                               
+*    Entry/exit:                                                                
+*      R15,R0,R1 -- unchanged                                                   
+*                                                                               
+KRSCFREE XPROC (R15,LSR)                                                        
+         FREERSC KEY,CHECK=NO      Free if held                                 
+         CLEAR CPRFKEYS            Keys no longer exclusively owned             
+         PEND                                                                   
+         EJECT                                                                  
+         TITLE 'CHRISIO - Send CHRISTA I/O transaction'                         
+*box                                                                            
+*                                                                               
+*  CHRISIO - Send CHRISTA I/O transaction                                       
+*                                                                               
+*  On entry:                                                                    
+*              R0 - Transaction length                                          
+*              R2 - Christa function code                                       
+*              R6 - Addr of KEYS work area                                      
+*                                                                               
+*    Return:   R15 - Christa return code                                        
+*                                                                               
+CHRISIO  PROC  ,                                                                
+         USING KEYSTBL,R6                                                       
+         L     R1,CHRPTRAN                                                      
+         WITH  (USRREQ,R1)         Addressability to transaction                
+         CLEAR USRHDR              Clear transaction header                     
+         MVC   REQID,=C'USIO'      Set transaction id                           
+         ST    R2,REQTYPE          Set requested function                       
+         A     R0,=A(L'USRHDR)                                                  
+         ST    R0,REQLEN           Set total transaction length                 
+         IF    (KEYFILE,EQ,'K'),BEGIN                                           
+         SET   REQFKERB            Set Kerberos I/O request                     
+         END                                                                    
+         ELSE  BEGIN                                                            
+         SET   REQFID              Set user-id I/O request                      
+         END                                                                    
+         SET   REQFIMRET           Set immediate return requested               
+         CLEAR KEYSECB             Clear wait/ecb                               
+         LA    R0,KEYSECB          Address of wait/ecb                          
+         ST    R0,REQECBPT         Save in christa request block                
+*                                                                               
+         LA    R0,CHRFSEND                                                      
+         ST    R0,KEYUFUNC                                                      
+*                                                                               
+         LA    R1,CHRPLIST         Get parameter list address                   
+         L     R15,KEYSCHAD        Address of user-id routine                   
+         BASSM R14,R15             Call christa front-end                       
+         IF    (R15,NZ),BEGIN                                                   
+         ACALL CHRISCDS            Process return codes                         
+         EXIT  CHRISIO                                                          
+         END   ,                                                                
+         CLEAR R0                  Must wait until posted                       
+         LA    R1,KEYSECB          Address of wait ecb                          
+         VCALL WAITECB             Wait for completion                          
+*                                                                               
+*  Now get the results from the I/O call (causes the Christa                    
+*  interface module to transfer the data to our transaction                     
+*  buffer).                                                                     
+*                                                                               
+         LA    R0,CHRFPPRO         Set post processing transaction code         
+         ST    R0,KEYUFUNC                                                      
+*                                                                               
+         LA    R1,CHRPLIST                                                      
+         L     R15,KEYSCHAD        Address of user-id routine                   
+         BASSM R14,R15             Call CHRISTA front-end                       
+         IF    (R15,NZ),BEGIN                                                   
+         ACALL CHRISCDS            Process return codes                         
+         END   ,                                                                
+         PEND  ,                                                                
+         TITLE 'CHRISCDS - Translate CHRISTA return code'                       
+*box                                                                            
+*                                                                               
+*  CHRISCDS - Convert Christa return codes                                      
+*                                                                               
+*    Entry:    R6 - Addr of KEYS work area                                      
+*              R15 - Return code from CHRISTA transaction call.                 
+*                    Received transaction is in KEYUREQ.                        
+*                                                                               
+*    Returns:  R15   -3 Keys file is not available                              
+*                    -2 Record data error                                       
+*                    -1 I/O error                                               
+*                     0 Operation successful                                    
+*                     1 Record not found/Not deleted                            
+*                     2 Record not updated; (update count mismatch)             
+*                     3 Record already exists                                   
+*                     4 No more room in master file                             
+*                                                                               
+*                     The CHRISTA interface is disabled for any                 
+*                     interface return code greater than 4.                     
+*                                                                               
+         SPACE ,                                                                
+CHRISCDS PROC  ,                                                                
+         USING KEYSTBL,R6                                                       
+         IF    (R15,NZ),BEGIN                                                   
+         ST    R15,KEYSLCDE        Save last send return code                   
+         CLEAR KEYSTCDE            Clear return code area                       
+         LR    R3,R15              Save christa return code                     
+         IF    (R3,GT,4),BEGIN     Interface problem or CHRISTA down            
+         ACALL KEYCLOSE            Termination call to CHRISTA                  
+         SET   KEYCFNA             Terminate any further calls                  
+         L     R15,=F'-3'          Presume that CHRISTA is not there            
+         END                                                                    
+         ELSE  BEGIN   (4)         Check transaction return calls               
+         L     R2,CHRPTRAN         Address of transaction buffer                
+         WITH  (USRREQ,R2)         Addressability to transaction                
+         MVC   KEYSTCDE,REQR15     Set last transaction codes                   
+         L     R3,REQRETRN         Load transaction return                      
+         IF    (R3,EQ,REQRRNF),'L R15,=A(1)'     Not/Found                      
+         IF    (R3,EQ,REQRDUP),'L R15,=A(3)'     Exists                         
+         IF    (R3,EQ,REQRFUL),'L R15,=A(4)'     No room                        
+         IF    (R3,EQ,REQRIOE),'L R15,=A(-1)'    I/O error                      
+         END                                                                    
+         END                                                                    
+         PEND  ,                                                                
+         LTORG                                                                  
+         VLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SET CHRISTA {KPATH=pathname} | {KTIME=nnn} |                                 
+*              {UPATH=pathname} | {UTIME=nnn} | DEBUG                           
+*                                                                               
+*                                                                               
+SETCHR   XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+         IF    ^CPSFSPR,'VCALL NOTVALID'  Not priv'd, sorry                     
+         SCAN  STCHROPT                                                         
+         B     CVNEXT                                                           
+         PEND                                                                   
+*                                                                               
+STCHROPT SCKW  ,STCHRNUL,NULL                                                   
+         SCKW  KPATH,STCHKPAT,(A,P)                                             
+         SCKW  KTIME,STCHKTIM,(A,P,PI),99999                                    
+         SCKW  UPATH,STCHUPAT,(A,P)                                             
+         SCKW  UTIME,STCHUTIM,(A,P,PI),99999                                    
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+STCHRNUL PROC                                                                   
+         TSEG  'Missing Christa option; specify KPATH, UPATH, '                 
+         SETMSG 'KTIME, or UTIME value.'                                        
+         B     CVABTMSG                                                         
+         PEND                                                                   
+*                                                                               
+STCHKPAT PROC                                                                   
+         IF    ((0(R1),EQ,''''),OR,(0(R1),EQ,'"')),'VCALL NOTVALID'             
+         SCUPTOK R1                                                             
+         L     R5,CVCHRIS          Point at Christa global parms                
+         WITH  (CHRPARMS,R5)                                                    
+         MVC   CHRKPATH,0(R1)      Update path name                             
+         PEND                                                                   
+*                                                                               
+STCHKTIM PROC                                                                   
+         L     R5,CVCHRIS          Point at Christa global parms                
+         WITH  (CHRPARMS,R5)                                                    
+         ST    R0,CHRKTIME         Update timeout value                         
+         PEND                                                                   
+*                                                                               
+STCHUPAT PROC                                                                   
+         IF    ((0(R1),EQ,''''),OR,(0(R1),EQ,'"')),'VCALL NOTVALID'             
+         SCUPTOK R1                                                             
+         L     R5,CVCHRIS          Point at Christa global parms                
+         WITH  (CHRPARMS,R5)                                                    
+         MVC   CHRUPATH,0(R1)      Update path name                             
+         PEND                                                                   
+*                                                                               
+STCHUTIM PROC                                                                   
+         L     R5,CVCHRIS          Point at Christa global parms                
+         WITH  (CHRPARMS,R5)                                                    
+         ST    R0,CHRUTIME         Update timeout value                         
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SET CHRISUID CHRISTA={PRIMARY|SECONDARY|OFF}                                 
+*                                                                               
+*                                                                               
+SETCHRU  XPROC                                                                  
+         IF    ^CPSFSPR,'VCALL NOTVALID'  Not priv'd, sorry                     
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+         MVC   KEYFWORK,CVFL6      Copy global Christa flag to                  
+*                                  temporary work area                          
+         SCAN  STCHUPR                                                          
+         SCANCHK                                                                
+         SPACE ,                                                                
+         IF    (^KEYFUCPR),'ACALL KEYCLOSE'                                     
+         IF    (KEYFUCPR,AND,^KEYCFOPEN),'ACALL KEYOPEN'                        
+         MVC   CVFL6,KEYFWORK      Set resulting config 'for real'              
+         B     CVNEXT              Go get next command                          
+         PEND                                                                   
+*                                                                               
+STCHUPR  SCKW  ,STCHUNUL,NULL                                                   
+         SCKW  CHRISTA,STCHUCHR,(A,P)                                           
+         SCKW  ,V(NOTVALID)                                                     
+*                                                                               
+STCHUNUL PROC                                                                   
+         SETMSG 'Missing UserID access method; specify CHRISTA='                
+         B     CVABTMSG                                                         
+         PEND                                                                   
+*                                                                               
+STCHUCHR PROC                                                                   
+         SCUPTOK R1                Pick off the next token                      
+         CLC   =C'PRIMARY',0(R1)   If user wants CHRISTA=PRIMARY                
+         IF    EQ,BEGIN                                                         
+         SET   KEYFUCPR            Set Christa primary                          
+         END   ,                                                                
+         CLC   =C'OFF',0(R1)       If user wants CHRISTA=OFF                    
+         IF    EQ,'CLEAR KEYFUCPR'  Turn off Christa access                     
+         PEND                                                                   
+         EJECT ,                                                                
+*box                                                                            
+*                                                                               
+*  SHOW CHRISTA                                                                 
+*                                                                               
+SHOWCHR  XPROC                                                                  
+         L     R6,=A(KEYSTBL)      Estab base for KEYS global info              
+         WITH  (KEYSTBL,R6)                                                     
+         L     R2,CVCHRIS                                                       
+         USING CHRPARMS,R2                                                      
+*                                                                               
+         TSEG  'Christa Keyword path is '                                       
+         TSEG  CHRKPATH                                                         
+         TCR                                                                    
+*                                                                               
+         TSEG  'Christa Keyword timeout value = '                               
+         TNUM  L:CHRKTIME          Christa timeout value                        
+         TSEG  ' (hundredths of a second)'                                      
+         TCR                                                                    
+*                                                                               
+         TSEG  'Christa UserID path is '                                        
+         TSEG  CHRUPATH                                                         
+         TCR                                                                    
+*                                                                               
+         TSEG  'Christa UserID timeout value = '                                
+         TNUM  L:CHRUTIME          Christa timeout value                        
+         TSEG  ' (hundredths of a second)'                                      
+         TCR                                                                    
+         TCR                                                                    
+         DROP  R2                                                               
+*                                                                               
+         IF    ^KEYCFOPEN,BEGIN                                                 
+         TSEG  'Christa not open'                                               
+         END   ,                                                                
+         TCR                                                                    
+         B     CVNEXT                                                           
+         PEND                                                                   
+*                                                                               
+         END   .                                                                

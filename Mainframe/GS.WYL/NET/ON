@@ -1,0 +1,615 @@
+;
+;;  ON -- ON command.
+;;
+;;
+;;  This exec file implements a Unix-style "remote shell" command
+;;  for Wylbur users.  The "SYSCALL NET_xxx" function in Wylbur
+;;  provide the basic capability to open a TCP/IP connection to
+;;  another computer.  Documentation for the PATH and NET
+;;  SYSCALLs can be obtained from Anne Janzer (gg.ahj@forsythe).
+;;
+;;
+;;  Session variables used:
+;;    ses.on_cur      = current remote session number
+;;                            (index for arrays below).
+;;    ses.on_hosts[]  = remote host name.
+;;    ses.on_pno[]    = our path number for current connection.
+;;    ses.on_ano[]    = working active file (used by NET_TALK).
+;;
+;;
+;;  Created 4/02/88, Niz
+;;
+;;  Modifications:
+;;    4/12/88  Niz    Cleanup.
+;;    5/08/88  Niz    Add "set term=terminal;" prefix so RN will
+;;                    work nicely.
+;;    6/06/88  Niz    Changed from "rsh" command to "on" command.
+;;    6/17/88  Niz    Add "input=range" option.
+;;    6/29/88  Niz    Add "output=lineno" option.
+;;    7/28/88  Niz    Make NOTALK attn quit right away.
+;
+
+
+
+xproc () begin
+   x.origact = actno
+   x.origheight = height
+   x.attn = 0           ; attn counter (see attnexit)
+
+   x.pgm = 'ON'                   ; program name
+   x.maint = '(netexec-maint)'           ; maintenance people
+
+   x.userid = ''                  ; userid
+   x.input = ''                   ; input range
+   x.output = ''                  ; output starting lineno
+   x.net_mode = ''                ; net_talk mode (char, line, etc.)
+   x.notalk = false               ; NOTALK option specified
+
+   x.host = ''                    ; current host name
+   x.pno = 0                      ; current netpath number
+   x.ano = 0                      ; current NET_TALK working actno
+
+   on error cmd 'xcall wyl.gs.wyl.net#\
+      _error(x.pgm, x.maint, errid, errmsg, errinfo)'
+   on attn  cmd 'xcall wyl.gs.wyl.net#\
+      _attn(x.pgm, x.maint, x.attn)'
+
+   set terminal height 0          ; turn off page/pause
+   set exec auth                  ; needed to open priv'd path
+   set exec over                  ; see Niz for details
+
+   x.on_port = 514           ; const: rsh TCP port number
+   x.maxses = 10             ; const: max number of ON sessions
+   x.default_host = 'lindy'  ; const: universal default host
+
+   dcl str rc
+
+;
+;  Initialize ON session variables if this is the first time.
+;
+
+   if (vartype('ses.on_cur') eq 'UNDEFINED') begin
+      try dcl num ses.on_cur
+      try dcl str ses.on_hosts[x.maxses]
+      try dcl str ses.on_pno[x.maxses]
+      try dcl str ses.on_ano[x.maxses]
+   end
+
+;
+;  If "ses.on_debug = true" then we don't do error recovery.
+;
+
+   if (vartype('ses.on_debug') ne 'UNDEFINED') begin
+      if (ses.on_debug) begin
+         on error clear
+         on attn clear
+      end
+   end
+
+;
+;  If the user specified a parm then he wants to open a connection
+;    to the host he specified.
+;
+
+   cpos = index(parm_string, ':')
+   if (cpos eq 0) begin
+      write 'Expecting "ON host : command".'
+      pcall cleanup('error')
+   end
+
+   opts = left(parm_string, cpos-1)
+   cmd = substr(parm_string, cpos+1)
+
+   host = ''
+   syscall scan_parm(host, opts)
+   if (cmd ne '') begin
+      if (host eq '%') begin
+         host = sys.host
+         if (host eq '') host = x.default_host  ; Universal default
+      end
+
+      pcall command_options(opts)
+
+      if (x.output ne '') begin
+         pcall on_batch_cmd(host, cmd)
+         pcall cleanup('')
+      end
+      else begin
+         pcall on_open(host, cmd)
+      end
+
+      if (x.pno eq 0) pcall cleanup('error')
+   end
+
+   else begin
+      if (ses.on_cur ne 0) begin
+         x.cur = ses.on_cur
+         x.host = ses.on_hosts[x.cur]
+         x.pno = ses.on_pno[x.cur]
+         x.ano = ses.on_ano[x.cur]
+      end
+      else begin
+         write 'No remote command is in progress.'
+         pcall cleanup('error')
+      end
+   end
+
+; <.page>
+;
+;  Talk loop.
+;
+
+   done = false
+   x.talk_reprompt = true
+   x.cleanup = ''
+
+   repeat begin
+      talk_opts = ''
+      if (not x.talk_reprompt) talk_opts = 'noreprompt'
+
+      syscall net_talk(x.pno, talk_opts, x.ano, rc)
+
+      x.talk_reprompt = false
+
+      cases begin
+         case (rc eq 'ATTN') begin
+            pcall on_attn()
+         end
+
+         case (rc eq 'END OF FILE') begin
+            pcall on_close()
+         end
+
+         case (true) begin
+            write ''
+            write '-----'
+            write 'ON command trouble, \
+               unrecognized NET_TALK return code: '||rc
+            write '-----'
+            done = true
+         end
+      end
+
+      if (x.pno eq 0) done = true
+   end
+   until (done)
+
+   pcall cleanup(x.cleanup)
+end
+
+
+
+;<.page>
+;
+;  command_options -- Routine to process local ON command options.
+;
+;    The options are specified after the host name and before the
+;    colon.
+;
+
+proc command_options(opts) begin
+   dcl string token, dummystr
+
+;
+;  Process collect options.
+;
+
+   try syscall collect_scan(opts)
+   if (tryerr or tryattn) begin
+      write 'Command stopped.'
+      pcall cleanup('')
+   end
+
+   if (xdump) x.net_mode = 'line'
+
+;
+;  Now process our options.
+;
+
+   while (opts ne '') begin
+      syscall scan_parm(token, opts)
+      token = lower(token)
+
+      cases begin
+         case (token eq 'as') begin
+            syscall scan_parm(token, opts)
+            if (token eq '') begin
+               write 'Missing userid after AS.'
+               pcall cleanup('')
+            end
+            x.userid = token
+         end
+
+         case (abbrev('input', token, 3)) begin
+            syscall scan_parm(token, opts, dummystr, ' =,')
+            if (token eq '') begin
+               write 'Expecting INPUT=lineno/lineno.'
+               pcall cleanup('')
+            end
+            x.input = token
+         end
+
+         case (abbrev('output', token, 3)) begin
+            syscall scan_parm(token, opts, dummystr, ' =,')
+            if (token eq '') begin
+               write 'Expecting OUTPUT=lineno.'
+               pcall cleanup('')
+            end
+            x.output = token
+         end
+
+         case (abbrev('notalk', token, 5)) begin
+            x.notalk = true
+            x.net_mode = 'line'
+         end
+
+         case (true) begin
+            write token ||': unrecognized ON option.'
+         end
+      end
+   end
+end
+
+
+
+; <.page>
+;
+;  on_attn -- Attention stopped the net_talk.
+;
+
+proc on_attn() begin
+   x.attn = x.attn + 1             ; count the ATTN
+
+   if (x.notalk) begin             ; terminate if NOTALK mode...
+      pcall on_close
+      x.cleanup = 'attn'
+      return
+   end
+
+   if (x.attn lt 3) begin          ; Ctrl-C the first few times...
+      pcall on_write(s'03')
+      return
+   end
+
+   x.attn = 0
+   write ''
+   write '----'
+   yn = yesno('Do you want to continue waiting', 'yes no attn')
+   if (yn ne 'YES') begin
+      write '[Connection closed]'
+      pcall on_close
+      x.cleanup = 'attn'
+      return
+   end
+
+   write '----'
+end
+
+
+
+; <.page>
+;
+;  on_open -- Routine to open a new connection.
+;
+
+proc on_open(host, cmd) begin
+   dcl str rc
+   dcl num c, pno
+
+   if (host eq '%') begin
+      host = sys.host
+      if (host eq '') host = x.default_host  ; Universal default
+   end
+
+;
+;  Find slot for this new remote session.
+;
+
+   c = 1
+   while (c le x.maxses) begin
+      if (ses.on_pno[c] eq 0) goto open_got
+      c = c + 1
+   end
+   write 'Too many remote commands already active.'
+   write 'Please close a connection before opening a new one.'
+   return
+
+open_got:
+
+;
+;  Open connection to remote host.
+;
+
+   open_opts = 'host=' || host \
+      || ' port=' || x.on_port \
+      || ' indata=lf outdata=lf priv ' \
+      || x.net_mode
+
+   start_time = timebin
+   try syscall net_open(pno, open_opts, rc)
+   if (rc ne 'OK') begin
+      if (rc eq 'ATTN') \
+         write 'No response from ' || host \
+         || ' after ' || int(timebin-start_time) || ' seconds.'
+      elseif (rc eq 'RESET') begin
+         write host || ' refused the command connection.'
+         write '---'
+         write 'The remote computer may not support rsh command \
+            connections.'
+         write 'Unix computers typically do, many \
+            others do not.'
+      end
+      else \
+         write 'Can''t open connection: ' || rc
+   end
+
+   if (pno eq 0) return
+
+;
+;  Tidy up command a bit.  Right now that means prefixing the
+;    command with a 'set term=' command.  This is horribly Unix
+;    specific, but there is not much that can be done about it.
+;
+
+   term_name = lower(tclass)
+   if (term_name eq 'cit161') term_name = 'vt100'
+   if (samson) term_name = 'vt100'
+   if (term_name eq '' or term_name eq 'tty') \
+      actual_cmd = cmd
+   else \
+      actual_cmd = 'set term=' || term_name || '; ' || cmd
+
+;
+;  Send Unix RSH protocol information.
+;
+
+   locuser = substr(account,5,2)||'.'||substr(account,1,3)
+   remuser = x.userid
+
+   if (remuser eq '') begin
+      remuser = host_user(host)
+      while (remuser eq '') begin
+         remuser = input('Enter your ' || upper(host) || \
+            ' user-id? ', 'attn')
+         if (ioresult eq 'ATTN') pcall cleanup('attn')
+      end
+   end
+
+   if (remuser eq 'guest') begin
+      locuser = 'guest'
+      remuser = 'guest'
+   end
+
+   try syscall net_write(pno, '', \
+      '0' || s'0' || \
+      locuser || s'0' || \
+      remuser || s'0' || \
+      actual_cmd || s'0', \
+      rc)
+
+;
+;  Send input lines from the Active file, if any were specified.
+;
+
+   if (x.input ne '') begin
+      dummyl = 0
+      try syscall net_writefile(pno, 'lines='||x.input, dummyl, rc)
+      if (rc ne 'OK') \
+         write '[Trouble sending input lines; rc=' || rc || ']'
+
+      dummystr = ''
+      try syscall net_control(pno, 'eof', dummystr, rc)
+      if (rc ne 'OK') \
+         write '[Trouble with input eof; rc=' || rc || ']'
+
+   end
+
+;
+;  Open an Active file for responses from this session.
+;
+
+   origact = actno
+   open on title '&(host) responses for \
+      &(tran(squash(lower(cmd)), '"', "'"))' temp
+
+;
+;  Save information about current remote session.
+;
+
+   ses.on_cur = c
+   ses.on_hosts[c] = host
+   ses.on_pno[c] = pno
+   ses.on_ano[c] = actno
+
+   x.cur = c
+   x.host = host
+   x.pno = pno
+   x.ano = actno
+
+   pick &(origact)
+end
+
+
+
+; <.page>
+;
+;  on_close -- Routine to close the current remote connection.
+;
+
+proc on_close() begin
+   dcl str msg, rc
+
+   if (x.cur eq 0) begin
+      write '[No connection is open.]'
+   end
+
+   else begin
+      syscall net_close(x.pno)
+
+      pick &(x.ano)
+      close
+
+      ses.on_cur = 0
+      ses.on_hosts[x.cur] = ''
+      ses.on_pno[x.cur] = 0
+      ses.on_ano[x.cur] = 0
+
+      x.cur = 0
+      x.host = ''
+      x.pno = 0
+      x.ano = 0
+   end
+end
+
+
+
+; <.page>
+;
+;  on_batch_cmd -- Routine to execute a remote command (batch
+;     style).
+;
+
+proc on_batch_cmd(host, cmd) begin
+   dcl str rc
+   dcl num c, pno
+
+   if (host eq '%') begin
+      host = sys.host
+      if (host eq '') host = x.default_host  ; Universal default
+   end
+
+;
+;  Open connection to remote host.
+;
+
+   open_opts = 'host=' || host \
+      || ' port=' || x.on_port \
+      || ' indata=lf outdata=lf priv ' \
+      || x.net_mode
+
+   start_time = timebin
+   try syscall net_open(pno, open_opts, rc)
+   if (rc ne 'OK') begin
+      if (rc eq 'ATTN') \
+         write 'No response from ' || host \
+         || ' after ' || int(timebin-start_time) || ' seconds.'
+      elseif (rc eq 'RESET') begin
+         write host || ' refused the command connection.'
+         write '---'
+         write 'The remote computer may not support rsh command \
+            connections.'
+         write 'Unix computers typically do, many \
+            others do not.'
+      end
+      else \
+         write 'Can''t open connection: ' || rc
+   end
+
+   if (pno eq 0) return
+
+;
+;  Tidy up command a bit.  Right now that means prefixing the
+;    command with a 'set term=' command.  This is horribly Unix
+;    specific, but there is not much that can be done about it.
+;
+
+   term_name = lower(tclass)
+   if (term_name eq 'cit161') term_name = 'vt100'
+   if (samson) term_name = 'vt100'
+   if (term_name eq '' or term_name eq 'tty') \
+      actual_cmd = cmd
+   else \
+      actual_cmd = 'set term=' || term_name || '; ' || cmd
+
+;
+;  Send Unix RSH protocol information.
+;
+
+   locuser = substr(account,5,2)||'.'||substr(account,1,3)
+   remuser = x.userid
+
+   if (remuser eq '') begin
+      remuser = host_user(host)
+      while (remuser eq '') begin
+         remuser = input('Enter your ' || upper(host) || \
+            ' user-id? ', 'attn')
+         if (ioresult eq 'ATTN') pcall cleanup('attn')
+      end
+   end
+
+   if (remuser eq 'guest') begin
+      locuser = 'guest'
+      remuser = 'guest'
+   end
+
+   try syscall net_write(pno, '', \
+      '0' || s'0' || \
+      locuser || s'0' || \
+      remuser || s'0' || \
+      actual_cmd || s'0', \
+      rc)
+
+;
+;  Send input lines from the Active file, if any were specified.
+;
+
+   if (x.input ne '') begin
+      dummyl = 0
+      try syscall net_writefile(pno, 'lines=' || x.input, dummyl, rc)
+      if (rc ne 'OK') \
+         write '[Trouble sending input lines; rc=' || rc || ']'
+
+      dummystr = ''
+      try syscall net_control(pno, 'eof', dummystr, rc)
+      if (rc ne 'OK') \
+         write '[Trouble with input eof; rc=' || rc || ']'
+   end
+
+;
+;  Put any response lines in the Active file.
+;
+
+   if (x.output ne '') begin
+      dummyl = 0
+      rf_opts = 'start=' || x.output
+      if (lower(x.output) eq 'end') rf_opts = ''
+      try syscall net_readfile(pno, rf_opts, dummyl, rc)
+      if (rc ne 'END OF FILE') \
+         write '[Trouble with output; rc=' || rc || ']'
+   end
+
+   syscall net_close(pno)
+end
+
+
+
+; <.page>
+;
+;  on_write -- Routine to send text to the current remote session.
+;
+
+proc on_write(text, opts) begin
+   if (vartype('opts') eq 'UNDEFINED') opts = ''
+
+   rc = ''
+   syscall net_write(x.pno, opts, text, rc)
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   set exec noover
+
+   set terminal height &(x.origheight)
+
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

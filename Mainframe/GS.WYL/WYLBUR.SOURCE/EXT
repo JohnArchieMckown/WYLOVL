@@ -1,0 +1,638 @@
+EXT      TITLE 'WYLBUR''s External Device Interface'                            
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+WYLEXT   CSECT                                                                  
+*                                                                               
+EXT      IDENT 2025                11:49:23 01/25/02  (SLP)                     
+         REGS  FSR,,,,,,,BR,(WAR,LSR),PAR,PBR,CPR,CVR,SPR,RAR                   
+*                                                                               
+         PUSH  DSECTS                                                           
+         COPY  CONTROL                                                          
+         EJECT                                                                  
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+         COPY  FFINFO                                                           
+*                                                                               
+         TITLE 'External Device Interface Routines'                             
+*box                                                                            
+*                                                                               
+*  EXTOPEN -- Routine to open an external file.                                 
+*                                                                               
+*    On entry:                                                                  
+*      CPFINFOP - FFINFO WA (file information dsect)                            
+*      DSNWA contains information about the file (OLDIBM)                       
+*                                                                               
+*    On exit:                                                                   
+*      R15=0 if open ok.  Errors exit via CVERROR.                              
+*                                                                               
+*    NOTE:                                                                      
+*    All errors exit to CVERROR.  A few "recoverable errors"                    
+*    will be passed back to the caller.. or maybe not.                          
+*    code is in progress. the errors that may be passed back                    
+*    or handled right here are the "file exists" error on                       
+*    save. and the "password required" access error for                         
+*    read/write.                                                                
+*                                                                               
+*    NOTE:                                                                      
+*    ERROR STUFF IS IN PROGRESS, HANDLE RECOVERABLE ERRORS HERE                 
+*    OR NOT THAT IS THE QUESTION. 'EXISTS' AND 'PASSWORD' ARE                   
+*    WHAT WE HAVE TO DEAL WITH. AND EVENTUALLY 'CONDENSE' AND                   
+*    'BADGUESS' (SPACE REQUIREMENT GUESS IS WRONG).  FIGURE                     
+*    IT OUT AND FIX IT.                                                         
+*                                                                               
+EXTOPEN  XPROC ,                                                                
+         ACALL ZAPFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*                                                                               
+EXTORTRY FAIL  CPRFEXT,BADOPEN,'External data path open error.'                 
+         SET   CPRFEXT             External data path now active                
+*                                                                               
+         VCALL LOCALTOD                                                         
+         ST    R0,DSNCLCK          Save initial time of day                     
+*                                                                               
+         COMMENT                   CALL OPEN ROUTINES                           
+         LA    R1,FFINFO           R1 - FILE INFO DSECT                         
+         IF     (FFFWINGS),' VCALL WGSOPEN'                                     
+         ELSEIF (FFFUNIX),' VCALL UFSOPEN'                                      
+         ELSEIF (FFFSAM),' VCALL SAMOPEN'                                       
+         ELSEIF (FFFNET),' VCALL NETOPEN'                                       
+         ELSEIF (FFFOLD),' VCALL DSKOPEN'                                       
+         ELSE  BEGIN                                                            
+         KAPUT BADDEV,'EXTOPEN: invalid/unknown device type.'                   
+         END                                                                    
+*-                                                                              
+*-  DONT PROCESS DEVICE=OLDIBM ERRORS,, (HELP ??)                               
+*-                                                                              
+         COMMENT                   ** DEBUG **                                  
+* THIS IS COPIED FROM OLD CODE, I AM NOT SURE WHAT THIS IS                      
+* ALL ABOUT OR HOW IT WORKS, WHO CHECKS RETURNS ON EXTOPEN ??                   
+* MOST DO NOT. MAIL DOES. SO MAYBE DSKOPEN ONLY RETURNS                         
+* ERRORS FOR FILES OPENED OUTPUT ? THAT WOULD BE MAIL AND SAVE.                 
+* BUT HOW DOES DSKOPEN KNOW. I DO NOT KNOW. I HAVE MERELY                       
+* TRANSCRIBED. AND SOME DAY DSKOPEN (IE.OLDIBM) WILL BE HISTORY.                
+*  -- GG.SCH                                                                    
+         IF    FFFOLD,BEGIN        OLDIBM ** DEBUG **                           
+         B     EXTOEXIT                                                         
+         END                                                                    
+*-                                                                              
+*-       Process any open errors.                                               
+*-                                                                              
+         IF    (R15,NZ),BEGIN      IF ERROR DO, EXTCLOSE                        
+         XPUSH R15                                                              
+         VCALL EXTCLOSE                                                         
+         XPOP  R15                                                              
+         COMMENT                   ** DEBUG **                                  
+         COMMENT                   TEMPORARY WINGS PATCH                        
+         COMMENT                   FIX TO DO, FIX HERE                          
+         IF    (CPERRID,EQ,'EXISTS  '),EXTOEXIT                                 
+         IF    (CPERRID,EQ,'NOTYOURS'),EXTOEXIT                                 
+         IF    (CPERRID,EQ,'DIFFVOL '),EXTOEXIT                                 
+         IF    (CPERRID,EQ,'CHANGFMT'),EXTOEXIT                                 
+*                                                                               
+         COMMENT ** DEBUG ** SAMSON RETURNS THIS                                
+         COMMENT ** THIS CODE WILL NOT WORK WHEN SAMSON                         
+         COMMENT ** IS UPGRADED TO NOT USE DSN WORK AREA                        
+         COMMENT ** FIX, FIX, FIX !!                                            
+         IF    (CPERRID,EQ,'FEXISTS '),BEGIN                                    
+         CLEAR CPFERROR+CPFABORT                                                
+         TCLEAR                                                                 
+         VCALL SEGDSN                                                           
+         TSEG  'is already '                                                    
+         IF    (DSNON,Z),'TSEG "there."'                                        
+         ELSE  BEGIN                                                            
+         TSEG  'on '                                                            
+         TSEG  DSNON,,T                                                         
+         END                                                                    
+         TCR                                                                    
+         SETMSG 'Replace'                                                       
+         VCALL YESREQ                                                           
+         SET   CPLFLG2.CPFSCRTC    Ok to replace now                            
+         B     EXTORTRY            Try it again                                 
+         END                                                                    
+*                                                                               
+         COMMENT                   ERRORS EXIT TO CVERROR                       
+         B     CVERROR                                                          
+         END                                                                    
+*                                                                               
+EXTOEXIT LABEL ,                                                                
+         PEND                                                                   
+         DROP  R6                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  EXTOPENE -- Routine to open an external file.                                
+*                                                                               
+*    On entry:                                                                  
+*      CPFINFOP - FFINFO WA (file information dsect)                            
+*      DSNWA contains information about the file (OLDIBM)                       
+*                                                                               
+*    On exit:                                                                   
+*      R15=0 if open ok, else non-zero                                          
+*                                                                               
+*    NOTE:                                                                      
+*    All errors are reported back to the caller in this                         
+*    version of EXTOPEN.                                                        
+*                                                                               
+EXTOPENE XPROC ,                                                                
+         ACALL ZAPFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*                                                                               
+         FAIL  CPRFEXT,BADOPEN,'External data path open error.'                 
+         SET   CPRFEXT             External data path now active                
+*                                                                               
+         VCALL LOCALTOD                                                         
+         ST    R0,DSNCLCK          Save initial time of day                     
+*                                                                               
+         COMMENT                   CALL OPEN ROUTINES                           
+         LA    R1,FFINFO           R1 - FILE INFO DSECT                         
+         IF     (FFFWINGS),' VCALL WGSOPEN'                                     
+         ELSEIF (FFFUNIX),' VCALL UFSOPEN'                                      
+         ELSEIF (FFFSAM),' VCALL SAMOPEN'                                       
+         ELSEIF (FFFNET),' VCALL NETOPEN'                                       
+         ELSEIF (FFFOLD),' VCALL DSKOPEN'                                       
+         ELSE  BEGIN                                                            
+         KAPUT BADDEV,'EXTOPEN: invalid/unknown device type.'                   
+         END                                                                    
+*-                                                                              
+*-       Perform a close on error.                                              
+*-                                                                              
+         IF    (R15,NZ),BEGIN      IF ERROR DO, EXTCLOSE                        
+         XPUSH R15                                                              
+         VCALL EXTCLOSE                                                         
+         XPOP  R15                                                              
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  R6                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  EXTREAD -- Routine to read the next line from an external file.              
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - Line buffer location, length                                     
+*      Device work area contains inforamation about the file.                   
+*      DSNWA contains information about the file. (OLDIBM)                      
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      R1,R0 - text location length                                             
+*      R2 - line number                                                         
+*      R15=ZERO - line read.  R15=NZ, end of file.                              
+*                                                                               
+EXTREAD  XPROC                                                                  
+         ACALL ZAPFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+         XPUSH R0,R1                                                            
+*-                                                                              
+*-       Give "in progress" status message if requested.                        
+*-                                                                              
+         IF    DSNFSTAT,BEGIN      Give status message...                       
+         VCALL LOCALTOD                                                         
+         S     R0,DSNCLCK          Number of seconds (roughly)                  
+         IF    (R0,LT,10),EXIT     Wait a bit longer, scram                     
+*                                                                               
+         TSEG  '('                                                              
+         TNUM  L:DSNLCNT                                                        
+         IF    ('LT R2,DSNLTOT',NZ),'TSEG " of "; TNUM (R2)'                    
+         TSEG  ' lines read so far) '                                           
+         TSEG  X'0D'               (CR)                                         
+         TMARK ,                   (Avoid automatic NL)                         
+         TWRITE                                                                 
+*                                                                               
+         SET   CPFSTMSG            Status message needs erasing                 
+         VCALL LOCALTOD                                                         
+         ST    R0,DSNCLCK          Save the current clock                       
+         END                                                                    
+*-                                                                              
+*-       Call the appropriate read routine.                                     
+*-                                                                              
+         XPOP   R0,R1                                                           
+         IF     (FFFWINGS),' VCALL WGSREAD'                                     
+         ELSEIF (FFFUNIX),' VCALL UFSREAD'                                      
+         ELSEIF (FFFSAM),' VCALL SAMREAD'                                       
+         ELSEIF (FFFNET),' VCALL NETREAD'                                       
+         ELSEIF (FFFOLD),' VCALL DSKREAD'                                       
+         ELSE  BEGIN                                                            
+         KAPUT BADDEV,'EXTREAD: invalid/unknown device type.'                   
+         END                                                                    
+*                                                                               
+         IF    Z,'INCR R3,DSNLCNT'  Lines read count                            
+*                                                                               
+         PRETURN (R0,R2)                                                        
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  EXTWRITE -- Routine to write the next line to an external file.              
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line text location, length                                       
+*      R2 - line number                                                         
+*      Device work area contains information about the file.                    
+*      DSNWA contains information about the file. (OLDIBM)                      
+*                                                                               
+*    Only returns if ok.                                                        
+*                                                                               
+EXTWRITE XPROC                                                                  
+         ACALL ZAPFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*-                                                                              
+*-       Call the appropriate write routine.                                    
+*-                                                                              
+         IF     (FFFWINGS),' VCALL WGSWRITE'                                    
+         ELSEIF (FFFUNIX),' VCALL UFSWRITE'                                     
+         ELSEIF (FFFSAM),' VCALL SAMWRITE'                                      
+         ELSEIF (FFFNET),' VCALL NETWRITE'                                      
+         ELSEIF (FFFOLD),' VCALL DSKWRITE'                                      
+         ELSE  BEGIN                                                            
+         KAPUT BADDEV,'EXTWRITE: invalid/unknown device type.'                  
+         END                                                                    
+*                                                                               
+         INCR  R2,DSNLCNT          Count the lines written                      
+*-                                                                              
+*-       Give "in progress" status message if requested.                        
+*-                                                                              
+         IF    DSNFSTAT,BEGIN      Give status message...                       
+         VCALL LOCALTOD                                                         
+         S     R0,DSNCLCK          Number of seconds (roughly)                  
+         IF    (R0,LT,10),EXIT     Wait a bit longer, scram                     
+*                                                                               
+         TSEG  '('                                                              
+         TNUM  L:DSNLCNT                                                        
+         IF    ('LT R2,DSNLTOT',NZ),'TSEG " of "; TNUM (R2)'                    
+         TSEG  ' lines written so far) '                                        
+         TSEG  X'0D'               (CR)                                         
+         TMARK ,                   (Avoid automatic NL)                         
+         TWRITE                                                                 
+*                                                                               
+         SET   CPFSTMSG            Status message needs erasing                 
+         VCALL LOCALTOD                                                         
+         ST    R0,DSNCLCK          Save the current clock                       
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  EXTCLOSE -- Routine to close an external file.                               
+*                                                                               
+*  ON ENTRY:                                                                    
+*      Device work area contains information about the file.                    
+*      DSNWA contains information about the file. (OLDIBM)                      
+*                                                                               
+*  ON EXIT:                                                                     
+*    R15=ZERO, all ok.  always returned.                                        
+*                                                                               
+*  NOTE:                                                                        
+*  EXTCLOSE routine should be robust.  It should be able to                     
+*  be called more than once to close the same file without                      
+*  complaining.  In effect, it should never return R15=NZ.                      
+*                                                                               
+*                                                                               
+EXTCLOSE XPROC                                                                  
+         ACALL ZAPFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*                                                                               
+         IF    CPRFEXT,BEGIN       Only close if already open...                
+         CLEAR CPRFEXT             Indicate no longer owned                     
+*                                                                               
+         IF     (FFFWINGS),' VCALL WGSCLOSE'                                    
+         ELSEIF (FFFUNIX),' VCALL UFSCLOSE'                                     
+         ELSEIF (FFFSAM),' VCALL SAMCLOSE'                                      
+         ELSEIF (FFFNET),' VCALL NETCLOSE'                                      
+         ELSEIF (FFFOLD),' VCALL DSKCLOSE'                                      
+         ELSE  BEGIN                                                            
+         KAPUT BADDEV,'EXTCLOSE: invalid/unknown device type.'                  
+         END                                                                    
+*-                                                                              
+*-       Erase status message if necessary.                                     
+*-                                                                              
+         IF    CPFSTMSG,BEGIN      Erase status message...                      
+*                                                                               
+* TPUSH the current terminal buffer, so that our blanking                       
+* of the status message doesn't wipe out any final                              
+* message from the command which did the EXTOPEN. This can                      
+* happen, for example, if a USE aborts with > 999999 lines.                     
+*                                                                               
+         TPUSH ,                                                                
+         CLEAR CPFSTMSG            Turn off status message flag                 
+         TSEG  X'0D'               CR (no LF)                                   
+         TSEG  CVBLANKS,50         Blank out message                            
+         TSEG  X'0D'               CR (no LF)                                   
+         TMARK ,                   (Avoid automatic NL)                         
+         TWRITE                                                                 
+         TPOP  JUNK                                                             
+         END                                                                    
+         END                                                                    
+         CLEAR R15                 FOR NOW ALL OK                               
+         PEND                                                                   
+         DROP  R6                                                               
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+*  ZAPFINFO -                                                                   
+*                                                                               
+*  TEMP ZAP, UNTIL NEW DATA SET NAME SCANNING IN PLACE.                         
+*  MAKE SURE FFTYPE FLAG EXITS AND IS SET.  WE SET                              
+*  BASED ON DSNDTYPE IF FFTYPE FLAG IS NOT SET.                                 
+*                                                                               
+*                                                                               
+ZAPFINFO PROC  ,                                                                
+*                                                                               
+         COMMENT                   IF NO FFINFO WA, MAKE ONE                    
+         VCALL MKFFINFO                                                         
+         L     R6,CPFINFOP                                                      
+         USING FFINFO,R6                                                        
+*                                                                               
+         COMMENT                   IF NO FFTYPE, SET ONE                        
+         IF    (FFTYPE,EQ,0),BEGIN                                              
+         IF    (DSNDTYPE,EQ,1),' SET FFFOLD'                                    
+         IF    (DSNDTYPE,EQ,2),' SET FFFSAM'                                    
+         IF    (DSNDTYPE,EQ,3),' SET FFFNET'                                    
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         DROP  R6                                                               
+         AGO   .SKIP2                                                           
+         TITLE 'SET/SHOW DEVICE Commands'                                       
+SDEVWA   RECORD BEGIN                                                           
+SDEVFLAG FLAG                                                                   
+         FLAG  SDEVFREP            - Ok to replace                              
+         FLAG  SDEVFOPT            - Specific option specified                  
+*                                                                               
+SDEV     DS    XL(L'DEV)                                                        
+         END                                                                    
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  SETDEV -- SET DEVICE Command.                                                
+*                                                                               
+SETDEV   GENTER L'SDEVWA                                                        
+         USING SDEVWA,WAR                                                       
+         CLEAR SDEVWA                                                           
+*                                                                               
+         LA    R6,SDEV                                                          
+         USING DEV,R6                                                           
+         OSCAN                                                                  
+         IF    Z,BEGIN                                                          
+         ERROR 'Device name is missing.'                                        
+         END                                                                    
+         IF    (R0,GT,8),BEGIN                                                  
+         ERROR 'Device name is too long (max is 8 characters).'                 
+         END                                                                    
+         MVC   DEVNAME,@R15        Set device name                              
+*                                                                               
+         IF    ^CPSFSPR,BEGIN      For the moment...                            
+         ABORT 'Operand missing.'                                               
+         END                                                                    
+*-                                                                              
+*-       Scan for SET DEVICE options.                                           
+*-                                                                              
+SDEVSCAN OSCAN SDEVPRT                                                          
+*-                                                                              
+*-       Delete the device entry if nothing was specified.                      
+*-                                                                              
+         IF    ^SDEVFOPT,BEGIN                                                  
+         SETMSG DEVNAME                                                         
+         ACALL DELDEV                                                           
+         IF    NZ,BEGIN            Not found...                                 
+         TSEG  DEVNAME,,TB                                                      
+         ERROR 'is not found to reset.'                                         
+         END                                                                    
+         B     CVNEXT                                                           
+         END                                                                    
+*-                                                                              
+*-       Add a new device entry.                                                
+*-                                                                              
+         SETMSG DEVNAME                                                         
+         ACALL FINDDEV                                                          
+         IF    Z,BEGIN             Device already exists...                     
+         IF    ^SDEVFREP,BEGIN                                                  
+         TSEG  DEVNAME,,TB                                                      
+         TSEG  'is already a device.',,CR                                       
+         SETMSG 'Replace'                                                       
+         VCALL YESREQ                                                           
+         END                                                                    
+*                                                                               
+         SETMSG DEVNAME                                                         
+         ACALL DELDEV              Delete previous definition                   
+         IF    NZ,BEGIN                                                         
+         TSEG  'Internal device error (DELDEV).  '                              
+         ERROR 'Please report to systems.'                                      
+         END                                                                    
+         END                                                                    
+*                                                                               
+         LA    R1,DEV                                                           
+         ACALL ADDDEV              Add the device to our table                  
+         IF    NZ,BEGIN            Problems...                                  
+         ERROR 'No more room to add new device.  No action taken.'              
+         END                                                                    
+         B     CVNEXT                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SET DEVICE Options.                                                          
+*                                                                               
+SDEVPRT  OSCKW AS,SDEVAS                                                        
+         OSCKW REPLACE,SDEVREP,A                                                
+         OSCKW ,V(INVALID)                                                      
+         SPACE 2                                                                
+SDEVDEV  OSCKW SAMSON,SDEVSAM,A                                                 
+         OSCKW NETWORK,SDEVNET,A                                                
+         OSCKW ,V(INVALID)                                                      
+         SPACE 2                                                                
+SDEVREP  SET   SDEVFREP                                                         
+         BR    RAR                                                              
+*                                                                               
+SDEVAS   SET   SDEVFOPT                                                         
+         OSCAN SDEVDEV                                                          
+         ERROR 'Missing device-type after AS.'                                  
+*                                                                               
+SDEVSAM  SET   DEVTSAM             Samson                                       
+         B     SDEVSCAN                                                         
+*                                                                               
+SDEVNET  SET   DEVTNET             Network                                      
+         B     SDEVSCAN                                                         
+*                                                                               
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHOWDEV -- SHOW DEVICE Command.                                              
+*                                                                               
+SHOWDEV  GENTER                                                                 
+         IF    (CPDEVCNT,Z),BEGIN                                               
+         SETMSG 'No user devices set.'                                          
+         B     CVNXTMSG                                                         
+         END                                                                    
+*                                                                               
+         TSEG  'Device    Type',,CR                                             
+         CLEAR R5                                                               
+         LA    R6,CPDEVTBL                                                      
+         WHILE (R5,LT,CPDEVCNT),BEGIN                                           
+         WITH  (DEV,R6)                                                         
+         TSEG  DEVNAME                                                          
+         TSEG  CVBLANKS,2                                                       
+*                                                                               
+         SETMSG '*** Unknown ***'                                               
+         IF    DEVTSAM,'SETMSG "Samson disk"'                                   
+         IF    DEVTNET,'SETMSG "Network disk"'                                  
+         TSEG  (R1),(R0),CR                                                     
+*                                                                               
+         LA    R6,DEVNEXT                                                       
+         LA    R5,@R5+1                                                         
+         END                                                                    
+         B     CVNEXT                                                           
+*                                                                               
+         DROP  BR                                                               
+         TITLE 'Subroutines'                                                    
+*box                                                                            
+*                                                                               
+*  ADDDEV -- Local routine to add a new device to the user's                    
+*    device table.                                                              
+*                                                                               
+*    On entry:                                                                  
+*      R1 - DEV entry ptr                                                       
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - ok                                                                   
+*      4 - out of room, no action taken                                         
+*                                                                               
+ADDDEV   XENTER R2,R8,,LOCAL                                                    
+         LR    R6,R1                                                            
+         USING DEV,R6                                                           
+*                                                                               
+         LA    R15,4               Assume out of room                           
+         IF    (CPDEVCNT,GE,DEVMAX#),ADEVEXIT                                   
+*-                                                                              
+*-       Open up a space in the device table and add the new entry.             
+*-                                                                              
+         MVC   CPDOUB,DEVNAME      Save name for loop below                     
+*                                                                               
+         CLEAR R4                                                               
+         LA    R5,CPDEVTBL                                                      
+         WHILE (R4,LT,CPDEVCNT),BEGIN                                           
+         WITH  (DEV,R5)                                                         
+         IF    (DEVNAME,GT,CPDOUB),BEGIN  Insertion point...                    
+         LH    R2,CPDEVCNT                                                      
+         SR    R2,R4                                                            
+         MH    R2,=AL2(L'DEV)                                                   
+         MOVEL @R13,DEV,(R2)       Save the rest of the device table            
+         CLEAR DEV                 Leave one entry                              
+         MOVEL DEVNEXT,@R13,(R2)   Move the rest back                           
+         B     ADEVCOM                                                          
+         END                                                                    
+*                                                                               
+         LA    R5,DEVNEXT                                                       
+         LA    R4,@R4+1                                                         
+         END                                                                    
+*                                                                               
+ADEVCOM  MVC   @R5(L'DEV),DEV      Add the new device entry                     
+         INCR  R15,CPDEVCNT        Keep count accurate                          
+         CLEAR R15                 Good RC                                      
+ADEVEXIT XEXIT R2,R8,LTR                                                        
+         DROP  DEV,BR                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DELDEV -- Local routine to delete a device from the user's                   
+*    device table.                                                              
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - device name loc, len                                             
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - ok                                                                   
+*      4 - not found                                                            
+*                                                                               
+DELDEV   XENTER R2,R8,,LOCAL                                                    
+         LCALL FINDDEV             Loop up the device                           
+         IF    Z,BEGIN             It's found...                                
+         LR    R3,R1                                                            
+         WITH  (DEV,R3)                                                         
+         CLEAR DEV                 Clear free entry                             
+*                                                                               
+         LR    R15,R0              Device entry number                          
+         LA    R15,@R15+1                                                       
+         LH    R2,CPDEVCNT                                                      
+         SR    R2,R15                                                           
+         IF    POS,BEGIN           Move up remainder of table...                
+         MH    R2,=AL2(L'DEV)                                                   
+         MOVEL DEV,DEVNEXT,(R2)    Remove free entry                            
+         END                                                                    
+*                                                                               
+         DECR  R15,CPDEVCNT                                                     
+         CLEAR R15                 Aok                                          
+         END                                                                    
+         XEXIT R2,R8,LTR                                                        
+         DROP  BR                                                               
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CLRDEV -- Routine to clear the user device table.                            
+*                                                                               
+CLRDEV   XENTER R2,R8                                                           
+         CLEAR CPDEVCNT            Easy, no?                                    
+         XEXIT R2,R8                                                            
+         DROP  BR                                                               
+.SKIP2   ANOP                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  FINDDEV -- Routine to find the user's device entry, given it's               
+*    name.                                                                      
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - device name loc, len                                             
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 = ok (R0=device number, R1=DEV entry ptr)                              
+*      4 = not found                                                            
+*                                                                               
+FINDDEV  XPROC ,                                                                
+         MVC   CPDOUB,CVBLANKS                                                  
+         CEIL  R0,8                                                             
+         LR    R15,R0                                                           
+         MOVE  R15,CPDOUB,@R1      Save device name                             
+*                                                                               
+         CLEAR R15                 Assume good RC                               
+*                                                                               
+         CLEAR R0                                                               
+         LA    R1,CPDEVTBL                                                      
+         WHILE (R0,LT,CPDEVCNT),BEGIN                                           
+         WITH  (DEV,R1)                                                         
+         IF    (DEVNAME,EQ,CPDOUB),FDEVEXIT                                     
+         IF    (DEVNAME,GT,CPDOUB),EXIT                                         
+         LA    R1,DEVNEXT                                                       
+         A     R0,CVONE                                                         
+         END                                                                    
+*                                                                               
+         LA    R15,4               Not found                                    
+FDEVEXIT LABEL ,                                                                
+         PRETURN (R0,R1)                                                        
+         PEND  ,                                                                
+         QLTORG                                                                 
+*                                                                               
+         VLTORG                                                                 
+*                                                                               
+         END   .                                                                

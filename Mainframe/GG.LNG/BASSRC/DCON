@@ -1,0 +1,888 @@
+DCON     TITLE 'DCONVERT ROUTINE -- JANET GALLO'
+DCONVERT CSECT
+*
+*      DCONVERT CONVERTS A SHORT FORM FLOATING POINT NUMBER TO EBCDIC.
+*        CALLING SEQUENCE:
+*            DCONVERT MUST BE CALLED WITH THE ADDRESS OF ITS ENTRY
+*            POINT IN REGISTER 15, AND REGISTER 1 MUST POINT TO AN
+*            ARGUMENT LIST AS FOLLOWS:
+*                    WORD 1 - FLOATING POINT NUMBER TO BE CONVERTED
+*                    WORD 2 - ADDRESS OF 16 CHARACTER WORKAREA
+*                             ON A DOUBLE WORD BOUNDARY
+*                    WORD 3 - ADDRESS OF 14 CHARACTER AREA FOR RESULT
+*                             TO BE RETURNED
+*                    WORD 4 - WORD IN WHICH NUMBER OF EBCDIC
+*                             CHARACTERS IN NUMBER WILL BE RETURNED
+*                             RIGHT ADJUSTED IN HEX.
+*                    WORD 5 - HOLD END OF IMAGE FOR IMAGE CALL ONLY
+*
+*            FOR EXAMPLE, REG 1 MAY POINT TO THE FOLLOWING LIST
+*                             AT CALL TO DCONVERT       ON RETURN
+*                WORD 1 -     X'41F00000'               X'41F00000'
+*                WORD 2 -     A(WORKAREA)               A(WORKAREA)
+*                WORD 3 -     A(RESULT)                 A(RESULT)
+*                WORD 4 -     0, OR ADDR. OF IMG. SPEC. X'00000003'
+*                WORD 5 -     ADDR. OF END OF IMAGE (IF IMAGE TYPE)
+*                       WHERE WORKAREA IS A 16 BYTE AREA ON A DOUBLE
+*                       WORD BOUNDARY, AND ON RETURN RESULT WILL
+*                       CONTAIN LEFT ADJUSTED '40F1F5'
+*
+*            DCONVERT USES THE BASIC SAVE CONVENTIONS
+*            THE RESULTING EBCDIC NUMBER IS RETURNED LEFT ADJUSTED
+*            IN THE RETURN AREA.  THE UNUSED BYTES NOT INCLUDED IN
+*            THE RETURNED COUNT MAY CONTAIN ANY VALUES, THEY ARE
+*            NOT BLANKED OR ZEROED.
+*            NO INSTRUCTIONS OR CONSTANTS ARE CHANGED WITHIN THE
+*            PROGRAM DURING EXECUTION
+*
+*
+*        NUMBER CONVERSION:
+*            THE METHOD OF NUMBER CONVERSION WAS CHOSEN TO TAKE
+*            ADVANTAGE OF THE SPEED OFFERED BY THE CONVERT TO DECIMAL
+*            INSTRUCTION (CVD).  THE FLOATING POINT NUMBER IS FIRST
+*            CONVERTED TO AN INTEGER AND AN EXPONENT, THEN THE CVD
+*            INSTRUCTION IS USED TO CONVERT IT TO PACKED DECIMAL, AND
+*            FINALLY THE UNPACK INSTRUCTION (UNPK) PUTS IT INTO EBCDIC.
+*
+*            FIRST, MOVE THE HEX POINT SUCH THAT AN INTEGER WITH SIX
+*            SIGNIFICANT DIGITS RESULTS.  FOR EACH POSITION THE HEX
+*            POINT IS MOVED, TO THE RIGHT OR LEFT, THE FRACTION PART
+*            OF THE NUMBER IS MULTIPLIED OR DIVIDED BY HEX (A/10).
+*
+*            FOR EXAMPLE, LET THE FLOATING POINT NUMBER BE X'41266666'.
+*            THIS IS EQUIVALENT TO HEX 2.66666.  THE HEX POINT MUST BE
+*            MOVED 5 PLACES TO THE RIGHT TO MAKE IT AN INTEGER, SO IT
+*            IS MULTIPLIED BY HEX (A/10) TO THE 5TH POWER WHICH GIVES
+*            HEX 3A97F.F. THE INTEGER PART OF THE NUMBER STILL DOES NOT
+*            CONTAIN THE FULL 6 SIGNIFICANT FIGURES OF THE ORIGINAL
+*            NUMBER SO IT MUST BE MULTIPLIED ONCE MORE BY HEX (A/10) TO
+*            GET 249EFF.  CVD CONVERTS THIS TO DECIMAL 2400000.  THE
+*            DECIMAL EXPONENT IS A COUNT OF HOW MANY PLACES THE HEX
+*            POINT WAS MOVED AND ITS SIGN INDICATES THE DIRECTION OF
+*            MOVEMENT, OR IN THIS CASE -6, SO THE DECIMAL NO. IS 2.4.
+*
+*            DCONVERT TAKES AN AVERAGE OF ABOUT 375 MICROSECONDS
+*            PER CALL.
+*
+*        NUMBER FORMS:
+*            THE GENERAL FORM OF THE NUMBER IS -1.234567E+05
+*            SINCE IN SOME CASES, 8 SIGNIFICANT FIGURES MAY BE GIVEN,
+*            THE MAXIMUM NUMBER OF BYTES IN A NUMBER IS 14.
+*            INTEGERS ARE OUTPUT WITHOUT A DECIMAL POINT
+*                           0
+*                           2536442
+*                          -435
+*            POSITIVE NUMBERS ARE PRECEDED BY A BLANK INSTEAD OF A +
+*            NEGATIVE NUMBERS ARE  PRECEDED BY THEIR MINUS SIGN
+*                           25.435
+*                          -6.8002
+*            ALL DECIMAL NUMBERS WERE CONVERTED FROM HEX NUMBERS OF 6
+*            SIGNIFICANT HEX DIGITS.  THOSE WHICH CONVERTED INTO 8
+*            DECIMAL DIGITS ARE OUTPUT WITH 8 SIGNIFICANT DIGITS.  ALL
+*            OTHERS ARE 7 SIGNIFICANT DIGITS.
+*                          -1.0345674
+*                           2020202
+*            WHENEVER A NUMBER CAN BE REPRESENTED IN 7 (OR SOMETIMES 8)
+*            DIGITS WITHOUT THE USE OF AN EXPONENT, IT IS SO OUTPUT.
+*            WHEN AN EXPONENT IS NEEDED IT IS OF THE FORM E+01 OR E-25.
+*                           100120.19
+*                          -.0000005
+*                           1.777722E+07
+*            ALL UNNECESSARY LEADING AND TRAILING ZEROS ARE OMITTED
+*            EXCEPT TRAILING ZEROS ARE KEPT WHEN AN EXPONENT FOLLOWS
+*                           .001
+*                          -1.05
+*                           50.03000E+25
+*                          -5.697600E-78
+*
+R0       EQU    0              WORKING REGISTER
+R1       EQU    1              ARGUMENT LIST POINTER
+R2       EQU    2              WORKING REGISTER
+R3       EQU    3              ZERO BEFORE THE DEC PT, NON ZERO AFTER
+R4       EQU    4              WORKING REGISTER
+R5       EQU    5              WORKING REGISTER
+R6       EQU    6              WORKING REGISTER
+R7       EQU    7              INCREMENTS THRU UNPACKED DECIMAL WORD
+R8       EQU    8              INCREMENTS THRU OUTPUT BUFFER
+R9       EQU    9              WORKING REGISTER
+R10      EQU    10             CONTAINS 1, THE BXLE LOOPS INCREMENT
+R11      EQU    11             CONTAINS THE BXLE LOOPS LIMIT
+R13      EQU    13             POINTER TO SAVE AREA
+R14      EQU    14             RETURN REGISTER
+R15      EQU    15             POINTER TO WORKAREA
+PKDECMAL EQU    8              DISPLACEMENT OF PACKED DECIMAL NUMBER
+*                              WITHIN WORKAREA
+UPKDEC   EQU    0              DISPLACEMENT OF UNPACKED DECIMAL
+*                              NUMBER WITHIN WORKAREA
+EXPON    EQU    8              DISPLACEMENT OF EXPONENT WITHIN
+*                              WORKAREA
+FLOATNO  EQU    8              DISPLACEMENT WITHIN WORKAREA OF TEMP.
+*                              STORAGE FOR FLOATING POINT NUMBER
+         SAVE  (14,12),,*    SAVE CONVENTION
+         BALR  12,0          REGISTER 12 IS BASE REGISTER
+         USING *,12
+         LA    R2,72(R13)    BASIC SAVE CONVENTIONS
+         ST    R2,8(0,13)
+         ST    R13,4(R2)
+         LR    R13,R2
+*
+*        INITIALIZE
+*
+         LA    10,1          LOOP INCREMENT REGISTER
+         L     R15,4(R1)     LOAD ADDRESS OF WORKAREA
+         SR    R8,R8         ZERO OUT COUNT REGISTER
+         L     R2,8(R1)      LOAD ADDRESS OF RESULT
+         SR    R2,R10        LOAD ADDRESS JUST BEFORE RESULT
+*
+*        FLOATING POINT NUMBER TO BE CONVERTED
+*
+*        IF NUMBER IS ZERO, STORE IT IN BUFFER
+*
+         L     R4,0(R1)      LOAD NUMBER TO BE CONVERTED
+         N     R4,MASK1      MASK OUT CHAR. - LEAVE LAST 3 BYTES
+         BNZ   NONZERO       BRANCH IF THE FRACTION PART IS NOT ZERO
+*
+*        FRACTION PART OF THE FLOATING POINT NUMBER IS ZERO.  STORE A
+*        BLANK FOR THE SIGN AND THEN AN EBCDIC 0 IN THE BUFFER.
+*
+ZERO     L     R4,12(R1)          SEE IF IMAGE SPEC
+         LTR   R4,R4
+         BZ    ZERO1              NO, HANDLE STRAIGHT ZERO
+         BAL   R5,IMAGSCAN        CHECK IMAGE TYPE
+         L     R5,12(R1)          GET LENGTH OF IMAGE
+         S     R5,=F'2'
+         LTR   R11,R11            SEE IF EXPONENT REQUIRED
+         BNE   EXPIMG             YES, GO HANDLE IT
+         LA    R11,1(R2,R8)       START OF OUTPUT
+         MVI   0(R11),C' '        BLANKS TO LEFT
+         LTR   R5,R5              IF THERE IS ANY
+         BM    WITHDP0
+         EX    R5,IMG2MVC
+WITHDP0  LTR   R9,R9              ANY SPACE TO RIGHT OF DP
+         BNL   WITHDP             YES, GO HANDLE IT
+         AR    R5,R10             CHECK IF ROOM FOR $
+         LA    R5,0(R5,R11)       HERE IS WHERE IT SHOULD GO
+         CLI   0(R4),C'$'         IS IT A $ SPEC
+         BNE   ST0                NO, JUST PUT IN THE ZERO
+         CR    R11,R5             IS THERE ROOM FOR $
+         BE    ERROR              NO, ERROR
+         MVI   0(R5),C'0'         PUT IN THE 0
+         BCTR  R5,0               BACK UP TO PUT IN
+         MVI   0(R5),C'$'         THE $ SIGN
+         B     PUT1               AND WE ARE DONE
+ST0      MVI   0(R5),C'0'          PUT IN THE ZERO ONLY
+         B     PUT1               AND FINISHED
+WITHDP   LTR   R6,R6              IS THERE SPACE ON LEFT
+         BZ    WITHDP1            NO, DONT PUT 0 IN FRONT
+         LA    R11,0(R2,R6)       HERES WHERE 1 LEADING 0 GOES
+         MVI   0(R11),C'0'        PUT IT IN
+         CLI   0(R4),C'$'         SEE IF ITS $ SPEC
+         BE    WITHDPW            YES, GO HANDLE IT
+         AR    R11,R10            RE-ADJUST POINTER
+         B     WITHDP1            GO PUT IN THE DP
+WITHDPW  BCTR  R11,0              BACK UP AND SEE IF ROOM FOR $
+         LA    R5,1(R2,R8)        SEE WHERE IT MUST GO
+         CR    R5,R11             IS THERE ROOM
+         BNH   WITHDPX            NO, THEN ERROR, MAYBE
+         AR    R11,R10            UNLESS ROOM FOR JUST THE $
+         CR    R5,R11
+         BNE   ERROR              NO, THERES NOT SO ITS AN ERROR
+         MVI   0(R11),C'$'        YES, PUT $ INSTEAD OF 0
+         AR    R11,R10            RE-ADJUST POINTER
+         B     WITHDP1            AND GO HANDLE DP AND RIGHT SIDE
+WITHDPX  MVI   0(R11),C'$'        YES, PUT IT IN
+         A     R11,=F'2'          RE-ADJUST POINTER
+WITHDP1  MVI   0(R11),C'.'        PUT IN THE DP
+         BCTR  R9,0               MOVE IN ZEROS ON RIGHT
+         LTR   R9,R9              IF THERES ROOM
+         BM    PUT1               NO, THEN DONE
+         LA    R11,1(R11)         POINT TO AFTER DP
+         MVI   0(R11),C'0'        PUT IN FIRST ONE
+         BCTR  R9,0               ANY MORE FIT ?
+         LTR   R9,R9
+         BM    PUT1               NO, THEN DONE
+         EX    R9,IMG2MVC         PUT IN TRAILING ZEROS
+         B     PUT1               AND WE ARE DONE
+EXPIMG   LA    R11,1(R2,R8)       HERES WHERE IMAGE STARTS
+         MVI   0(R11),C'0'
+         EX    R5,IMG2MVC
+         MVI   0(R11),C' '        EXCEPT FIRST POSITION HOLDS BLANK
+         MVI   2(R11),C'.'        PUT IN THE DP IN RIGHT PLACE
+         S     R5,=F'2'           NOW FIND WHERE "E+" GOES
+         LA    R11,0(R11,R5)
+         MVI   0(R11),C'E'        PUT IN THE E
+         MVI   1(R11),C'+'        AND THE +
+         B     PUT1               AND NOW WE ARE DONE
+ZERO1    SR    R4,R4         ZERO OUT REGISTER 4
+         LA    R4,64         LOAD EBCDIC BLANK
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE BLANK IN THE BUFFER
+         LA    R4,240        INSERT EBCDIC ZERO
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE IT IN BUFFER
+         B     PUT           BRANCH TO CHECK FORMATTING OPTIONS
+*
+*        NON-ZERO FLOATING POINT NUMBER TO BE CONVERTED
+*
+NONZERO  SWR   4,4           ZERO OUT FLOATING POINT REG 4
+         LE    4,0(R1)       LOAD FLOATING POINT NUMBER
+         LPER  4,4           MAKE IT POSITIVE
+         L     R7,0(R1)      LOAD FLOATING POINT NUMBER
+         N     R7,MASK2      MASK OUT SIGN AND FRACTION PART
+         LR    R11,R7        SAVE THIS CHARACTERISTIC
+         SR    R6,R6         INITIALIZE REGISTERS
+         SR    R0,R0         INITIALIZE REGISTERS
+         S     R7,FORTYSOX   SUBTRACT X'46000000' FROM THE CHAR. TO GET
+*                            RELATIVE DISPLACEMENT OF DECIMAL PT. FROM
+*                            THE RIGHT END OF THE FRACTION
+         BNZ   ADJU          BRANCH IF DECIMAL POINT IS NOT AT LEFT END
+*                            OF FRACTION
+*
+*        NUMBER HAS A CHAR. OF X'46' - THE SIGN MAY BE NEG. OR POS.
+*
+         LR    R3,R11        SAVE CHARACTERISTIC
+         L     R4,0(R1)      LOAD FLOATING POINT NUMBER INTO REG 4
+         N     R4,MASK1      MASK OUT SIGN AND CHARACTERISTIC
+*                            THE FRACTION PART MAY BE CONSIDERED TO BE
+*                            A WHOLE NO. AND BE CONVERTED TO DECIMAL.
+         B     CONVERT       GO TO CONVERT THE NUMBER
+*
+*        NUMBER HAS A CHARACTERISTIC OTHER THAN X'46'
+*
+ADJU     LA    R9,8          INC REG FOR REFERENCING CONSTANTS IN TABLE
+         BM    MULT          BRANCH IF CHAR. IS LESS THAN '46'
+*
+*        CHARACTERISTIC IS GREATER THAN X'46' - MUST DIVIDE BY A POWER
+*        OF (10/16) TO CHANGE NUMBER BASE.  THE POWER IS (CHAR.-X'46').
+*        THE HIGH ORDER DIGIT TIMES EIGHT GIVES THE ADDRESS OF THE
+*        PROPER POWER IN HITABLE; THE LOW ORDER DIGIT TIMES EIGHT
+*        ADDRESSES TABLE.  FOR EXAMPLE, THE CONSTANT FOR POWER X'25' IS
+*        (HITABLE + 16) TIMES (TABLE + 40) = (10/16) TO THE 32ND POWER
+*        TIMES (10/16) TO THE 5TH POWER = (10/16) TO THE 37TH POWER =
+*        (10/16) TO THE X'25'TH POWER.
+*
+DIVIDE   SLDL  R6,4          SHIFT HIGH ORDER 4 BITS OF CHAR INTO REG 6
+         LTR    R6,R6        IS IT ZERO?
+         BZ     DSFT         BRANCH IF YES
+         LR     R5,R6        PUT THE NON-ZERO DIGIT IN REG 5
+         MR     R4,R9        MULT. BY 8 TO GET THE RIGHT DISPLACEMENT
+         S     R11,ITWENTY   TEMPORARILY SUBTRACT 20 FROM THE CHAR. TO
+*                            PREVENT OVERFLOW
+         LA    R0,32         SAVE THE 20 TO ADD BACK IN LATER
+         L     R4,0(R1)      LOAD THE FLOATING POINT NUMBER
+         S     R4,ITWENTY    SUBTRACT 20 FROM ITS CHAR.
+         ST    R4,FLOATNO(R15)  STORE IN WORKAREA
+         LE    4,FLOATNO(R15)  PICK UP NEW VALUE IN FLOATING PT. REG 4
+         LPER  4,4           MAKE IT POSITIVE
+         DD     4,HITABLE(R5) DIVIDE BY THE CONSTANT POWER
+         LTR    R7,R7        TEST LOWER 4 BITS OF 1ST BYTE OF CHAR.
+         BZ     TOG          BRANCH IF ZERO
+DSFT     SRL    R7,4         SHIFT  FIRST 4 BITS OF A 28 BIT SHIFT
+DLOW     SRL    R7,24        REMAINDER OF SHIFT TO RIGHT ADJUST NUMBER
+         MR     R6,R9        MULTIPLY BY 8 TO GET DISPLACEMENT IN TABLE
+         DD    4,TABLE(R7)   DIVIDE BY CONSTANT POWER
+         B     TOG           CONTINUE
+*
+*        CHARACTERISTIC IS LESS THAN X'46' - MUST MULTIPLY BY A POWER
+*        OF (10/16) TO CHANGE NUMBER BASE.  TABLE AND HITABLE CONSTANTS
+*        ADDRESSED AS ABOVE.
+*
+MULT     LPR    R7,R7        MAKE SIGN POSITIVE
+         SLDL  R6,4          SHIFT HIGH ORDER 4 BITS OF CHAR INTO REG 6
+         LTR   R6,R6         IS IT ZERO?
+         BZ    MSFT          BRANCH IF YES
+         LR    R5,R6         PUT THE NON-ZERO DIGIT INTO REG 5
+         MR    R4,R9         MULTIPLY BY 8 TO GET THE RIGHT CONSTANT
+*                            IN HITABLE
+         LA    R0,32         TO PREVENT UNDERFLOW, 20 WILL BE
+         LNR   R0,R0         TEMPORARILY ADDED TO THE CHARACTERISTIC
+         A     R11,ITWENTY   AND SAVED IN REG 0 TO BE SUBTRACTED LATER.
+         L     R4,0(R1)      LOAD THE FLOATING POINT NUMBER
+         A     R4,ITWENTY    ADD 20 TO THE CHARACTERISTIC
+         ST    R4,FLOATNO(R15)  STORE THE NEW VALUE
+         LE    4,FLOATNO(R15) LOAD NEW VALUE INTO FLT. PT. REG 4
+         LPER  4,4           MAKE IT POSITIVE
+         MD    4,HITABLE(R5) MULTIPLY BY CONSTANT POWER
+         LTR   R7,R7         TEST LOW 4 BITS OF 1ST BYTE OF CHAR
+         BZ    TOG           BRANCH IF ZERO
+MSFT     SRL   R7,4          SHIFT FIRST 4 BITS OF A 28 BIT SHIFT
+MLOW     SRL   R7,24         RIGHT ADJUST NUMBER
+         MR    R6,R9         MULTIPLY BY 8 TO ADDRESS CONSTANT IN TABLE
+         MD    4,TABLE(R7)   MULTIPLY
+*
+*        SEE IF ADDITIONAL MULTIPLICATION OR DIVISION IS REQUIRED.
+*
+TOG      STD   4,FLOATNO(R15) STORE NEW FLOATING POINT NUMBER
+         L     R7,FLOATNO(R15) LOAD NEW FLOATING POINT NUMBER
+         N     R7,MASK2      MASK OUT ALL EXCEPT CHARACTERISTIC
+         LR    R3,R7         SAVE CHARACTERISTIC
+         SR    R7,R11        COMPARE CHAR TO THAT IN PREVIOUS ITERATION
+         BZ    ON            BRANCH IF EQUAL
+         LR    R11,R3        SAVE CHAR FOR COMPARE AFTER NEXT ITERATION
+         BP    DLOW          BRANCH IF DIFFERENCE IS POSITIVE
+*                            MUST DIVIDE BY A POWER OF (10/16)
+         LPR   R7,R7         MAKE DIFFERENCE POSITIVE
+         B     MLOW          BRANCH - MUST MULT. BY POWER OF (10/16)
+*
+*        NO FURTHER MULTIPLICATION OR DIVISION REQUIRED.
+*        ROUND THE NUMBER IN THE DOUBLE LENGTH FLOATING REG 4 TO SINGLE
+*        WORD LENGTH
+*
+ON       TM    FLOATNO+4(R15),X'80' IS HIGH ORDER BIT OF 2ND HALF = 1
+         BZ    GOON          BRANCH IF NO
+         AR    R11,R10       REG 11 CONTAINS PROPER CHAR - MAKE FRACT.
+*                            PART = 1
+         ST    R11,FLOATNO+4(R15) TEMPORARILY STORE VALUE
+         AE    4,FLOATNO+4(R15)   ROUND UP
+         STE   4,FLOATNO(R15) STORE NEW VALUE
+*
+*        IS THE NEW VALUE ZERO?
+*
+GOON     L     R4,FLOATNO(R15) LOAD NEW NUMBER INTO REG 4
+         N     R4,MASK1      MASK OUT SIGN AND CHARACTERISTIC
+         BZ    ZERO          BRANCH IF NUMBER IS ZERO
+*
+*        CONVERT FROM HEX TO DECIMAL
+*
+CONVERT  CVD   R4,PKDECMAL(R15) CONVERT TO PACKED PKDECMAL(R15)
+         UNPK  UPKDEC(8,R15),PKDECMAL+3(5,R15)  UNPACK
+         OI    UPKDEC+7(R15),X'F0'   REPLACE SIGN WITH ZONE
+         SRA   R3,24         RIGHT ADJUST CHARACTERISTIC IN REG 3
+         AR    R3,R0         ADJUST BY FACTOR USED TO PREVENT
+*                            OVERFLOW/UNDERFLOW
+         MVI   EXPON(R15),X'FF'  FLAG MEANS NO EXPONENT UNLESS CHANGED
+*
+*        DETERMINE SIGN AND PUT IN BUFFER
+*
+         SR    R4,R4         INITIALIZE REGISTER
+         TM    0(R1),X'80'   TEST SIGN BIT IN ORIGINAL NUMBER
+         BZ    POSITIVE      BRANCH IF SIGN BIT IS 0
+         LA    R4,96         EBCDIC MINUS
+         B     STORE         BRANCH TO STORE IT
+POSITIVE LA    R4,64         EBCDIC SPACE TO INDICATE + SIGN
+STORE    LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE MINUS OR SPACE IN BUFFER
+         SR    R7,R7         INITIALIZE
+         LA    R11,7         0 - 7 MAX. NO. OF DIGITS IN NUMBER
+*
+*        DELETE LEADING ZEROS
+*
+ZEROLOOP IC    R4,UPKDEC(R15,R7)  GET NEXT CHARACTER
+         CL    R4,FZERO      IS IT ZERO
+         BNE   CHECKS        BRANCH IF NO
+         BXLE  R7,R10,ZEROLOOP  LOOP IF YES
+         B     DECI          ALL ZEROS SHOULD HAVE BEEN FOUND BEFORE
+*
+*        DETERMINE THE EXPONENT OR DECIMAL PLACE
+*
+CHECKS   CL    R3,FORTY      IS CHAR LESS THAN X'40'
+         BL    SCIENT        IF YES, IT WILL PROBABLY REQUIRE EXPONENT
+         CL    R3,FORTYSIX   IS CHAR LARGER THAN X'46'
+         BH    SCIENT        IF YES, IT WILL PROBABLY REQUIRE EXPONENT
+*
+*         NO EXPONENT REQUIRED
+*
+         L     R4,12(R1)          SEE IF IMAGE SPEC.
+         LTR   R4,R4
+         BNZ   IMG1SPEC           YES, HANDLE NO. EXP. NEEDED TYPE
+CHECKS1  LR    R11,R3        SAVE CHARACTERISTIC
+         LA    R10,1              RE-SET R10 WHICH MAY BE DESTROYED
+         SR    R3,R3         ZERO REG 3 TO INDICATE NO DEC. POINT YET
+         LA    R5,63         LOAD CHARACTERISTIC BIAS MINUS 1
+         SR    R11,R5        SUBTRACT THIS FROM THE CHARACTERISTIC
+         CR    R7,R11        COMPARE THIS WITH THE POSITION OF THE
+*                            FIRST NON-ZERO CHARACTER
+         BH    FRACTION      BRANCH IF HIGH TO INSERT DECIMAL POINT
+*
+*        PUT DIGITS IN RESULT FIELD
+*
+CONTIN   C     R7,=F'7'           BESURE NOT LONGER THAN UNPACKED NO.
+         BNH   CONTIN1
+         LA    R4,240             STICK A ZERO IN
+         B     HERE
+CONTIN1  IC    R4,UPKDEC(R15,R7) GET NEXT CHARACTER
+HERE     LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE IT
+         BXLE  R7,R10,CONTIN LOOP UNTIL DECIMAL POINT POSITION IS
+*                            REACHED OR END OF NUMBER IS REACHED
+DECI     LTR   R3,R3         HAS DECIMAL POINT BEEN STORED
+         BNZ   OUT           BRANCH IF YES
+FRACTION CL    R11,SEVEN     IS IT A WHOLE NUMBER
+         BE    PUT           BRANCH IF YES
+         IC    R4,POINT+3    INSERT DECIMAL POINT
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE DECIMAL POINT
+         LR    R3,R8         SET REG 3 NON ZERO TO SHOW DEC. PT. STORED
+         LA    R11,7         LOOP LIMIT IS END OF NUMBER
+         B     CONTIN        BRANCH BACK TO LOOP
+*
+*        DELETE TRAILING ZEROS
+*
+OUT      CLI   EXPON(R15),X'FF'  DOES THE NUMBER HAVE AN EXPONENT
+         BE    OUTOUT        BRANCH IF NO - DELETE ZEROS
+         LR    R8,R3          LOAD POSITION OF END OF EXPONENT
+         B     PUT           BRANCH TO END
+OUTOUT   IC    R4,0(R8,R2)   INSERT LAST CHARACTER STORED IN BUFFER
+         CL    R4,FZERO      IS IT ZERO
+         BNE   PT            BRANCH IF NO
+         SR    R8,R10        SUBTRACT 1 FROM BUFFER POINTER
+         B     OUTOUT        LOOP
+*
+*        DELETE UNNECESSARY DECIMAL POINT
+*
+PT       CL    R4,POINT      WAS LAST CHARACTER STORED A DEC. PT.?
+         BNE   PUT           BRANCH IF NO
+         SR    R8,R10        IF YES, SUBTRACT 1 FROM BUFFER POINTER
+*                            NUMBER IS AN INTEGER - DEC. PT. IS DELETED
+         B     PUT           BRANCH TO OUTPUT
+*
+*        EITHER THE NUMBER HAS SOME TRAILING ZEROS THAT CAN BE DELETED
+*        OR IT WILL REQUIRE AN EXPONENT
+*
+SCIENT   S     R3,FORTY      SUBTRACT THE CHAR. BIAS FROM THE CHAR.
+         SR    R0,R0         INITIALIZE
+         LTR   R7,R7         IS THE FIRST NON-ZERO DIGIT IN THE
+*                            LEFTMOST POSITION OF THE 8 DIGIT NUMBER
+         BNZ   AROUND        BRANCH IF NO
+         AR    R3,R10        IF YES, THIS IS A 6 DIGIT HEX NUMBER THAT
+*                            HAS BECOME AN 8 DIGIT DECIMAL NUMBER
+*                            ADD 1 TO EXPONENT TO COMPENSATE
+         LTR   R3,R3         IS EXPONENT NOW ZERO
+         BNZ   THERE         BRANCH IF NO
+         SR    R11,R11       SET LIMIT FOR DECIMAL POINT LOOP IF YES
+         L     R0,12(R1)          IS IT IMAGE TYPE
+         LTR   R0,R0
+         BZ    HERE               NO, BRANCH TO DECIMAL PT. LOOP
+         LR    R4,R0              BE SURE ITS IN R4 FOR IMAG SCAN
+         LA    R3,X'3F'           RESET R3
+         B     IMG1SPEC           GO PROCESS IMAGE
+THERE    LA    R0,1          INITIALIZE
+AROUND   LTR   R3,R3         FIND THE SIGN OF THE EXPONENT
+         BP    EXP           BRANCH IF POSITIVE - NUMBER WILL HAVE EXP.
+         LPR   R5,R3         MAKE EXPONENT POSITIVE
+         A     R0,SEVEN      REG 0 WILL BE 0 FOR A 7 SIGN. FIG. NUMBER
+*                            AND 1 FOR AN 8 DIGIT NUMBER, SO THIS ADD
+*                            GIVES THE NUMBER OF SIGN. FIGS. IN NUMBER
+         CR    R5,R0         IS EXP. LARGER THAN NO. OF SIGN. FIGS.?
+         BNL   EXP           BRANCH IF YES - NUMBER WILL HAVE EXP.
+         LR    R9,R3         SAVE EXPONENT
+         LR    R3,R5         LOAD POSITIVE EXPONENT
+         LR    R5,R7         LOAD POSITION OF 1ST NON-ZERO CHARACTER
+         LR    R6,R7         LOAD POSITION OF 1ST NON-ZERO CHARACTER
+         B     INCREMET      BRANCH TO INCREMENT LOOP REGISTER
+LOOP     IC    R4,UPKDEC(R15,R5) LOOK AT NEXT DIGIT
+         CL    R4,FZERO      IS IT ZERO?
+         BE    INCREMET      BRANCH IF YES
+         LR    R6,R5         IF NO,NOTE POSITION OF LAST NON-ZERO DIGIT
+INCREMET BXLE  R5,R10,LOOP   LOOP TO END OF NUMBER
+         LR    R11,R6        LOAD POSITION OF LAST NON-ZERO DIGIT
+         SR    R6,R7         SUBTRACT TO FIND NUMBER OF PLACES BETWEEN
+*                            FIRST AND LAST NON-ZERO DIGITS
+         AR    R6,R3         ADD IN EXPONENT
+         L     R4,12(R1)          WAS IT IMAGE SPEC
+         LTR   R4,R4
+         BNZ   IMINC
+         CR    R6,R0         IS THIS VALUE LARGER THAN THE NUMBER OF
+*                            SIGNIFICANT FIGURES?
+         BH    PREXP         BRANCH IF YES - NUMBER WILL HAVE EXP.
+IMINC    IC    R4,POINT+3    INSERT DEC. PT. - NUMBER WON'T HAVE EXP.
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE DECIMAL POINT
+         L     R4,12(R1)          SEE IF IMAGE SPEC.
+         LTR   R4,R4
+         BNZ   IMG2SPEC           YES, HANDLE DECIMAL PLACES ONLY TYPE
+         B     DECREMET      BRANCH TO INSERT LEADING ZEROS
+*
+*        INSERT LEADING ZEROS
+*
+INSZERO  LA    R4,240        INSERT EBCDIC ZERO
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE ZERO
+DECREMET BCT   R3,INSZERO    COUNT NUMBER OF LEADING ZEROS
+         LR    R3,R8         SET REG 3 NON-ZERO TO SHOW DEC. PT. STORED
+         B     CONTIN        BRANCH TO STORE REST OF NUMBER
+PREXP    IC    R4,UPKDEC(R15,R7) INSERT FIRST NON-ZERO DIGIT
+         LR    R3,R9         PUT EXPONENT IN REG 3
+EXP      LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE FIRST NON-ZERO DIGIT
+         IC    R4,POINT+3    INSERT DECIMAL POINT
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE DECIMAL POINT
+         L     R4,12(R1)          SEE IF IMAGE SPEC.
+         LTR   R4,R4
+         BNZ   IMG3SPEC           YES, HANDLE EXP. FORM OF NUMBER
+         LA    R11,7         INITIALIZE
+EXP1     LR    R9,R8         SAVE BUFFER POINTER
+*
+*        STORE EXPONENT
+*
+         SR    R8,R7         SUBTRACT POSITION OF FIRST NON-ZERO DIGIT
+         AR    R8,R11        ADD 7 TO GET POSITION OF EXPONENT
+         LA    R7,1(R7)      INCREMENT TO NEXT DIGIT IN NUMBER
+         LA    R4,197        LOAD EBCDIC E
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE E
+         LTR   R3,R3         FIND SIGN OF EXPONENT
+         BM    LESS          BRANCH IF MINUS
+         LA    R4,78         OTHERWISE LOAD EBCDIC PLUS
+         B     STRSIGN       BRANCH TO STORE THE SIGN
+LESS     LA    R4,96         STORE EBCDIC MINUS
+STRSIGN  LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE THE SIGN
+         LPR   R3,R3         MAKE THE EXPONENT POSITIVE
+         CVD   R3,PKDECMAL(R15) CONVERT THE EXPONENT TO PACKED DECIMAL
+         UNPK  EXPON(2,R15),PKDECMAL+6(2,R15) UNPACK THE EXPONENT
+         OI    EXPON+1(R15),X'F0'  OR OUT THE SIGN
+         IC    R4,EXPON(R15) INSERT FIRST DIGIT OF THE EXPONENT
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE FIRST DIGIT OF EXPONENT
+ONECHAR  IC    R4,EXPON+1(R15) INSERT SECOND DIGIT OF THE EXPONENT
+         LA    R8,1(R8)      INCREMENT COUNT
+         STC   R4,0(R2,R8)   STORE SECOND DIGIT OF EXPONENT
+         LR    R3,R8         SET REG 3 NON-ZERO TO SHOW DEC. PT. STORED
+         LR    R8,R9         RELOAD BUFFER POINTER
+         C     R11,=F'7'
+         BNH   CONTIN
+         L     R11,=F'7'
+         B     CONTIN        STORE REST OF NUMBER
+ERROR    EQU   *                  HERE WILL GO CODE TO FILL IMAGE FIELD
+*                                 WITH *** TO INDICATE IMPROPER FIELD.
+         LA    R11,1(,R2)         ADDR. OF OUTPUT TO R2
+         L     R4,12(R1)          GET LENGTH OF SPEC
+         S     R4,=F'2'          MINUS 2 FOR 1ST CHAR AND EXECUTE
+         MVI   0(R11),C'*'        FILL WITH ****
+         LTR   R4,R4
+         BM    PUT1
+         EX    R4,IMG2MVC
+         B     PUT1
+PUT      L     R4,12(R1)          SEE IF IMAGE ENTRY
+         LTR   R4,R4              IF SO, COUNTS ALREADY BEEN STORED
+         BNZ   PUT1               SO SKIP COUNT STORE
+         ST    R8,12(R1)     STORE COUNT
+PUT1     L     R13,4(R13)    RESTORE REG 13
+         LM    14,12,12(13)  RESTORE REST OF REGISTERS
+         BR    R14           BRANCH BACK
+         TITLE  'IMAGE SPEC. HANDLER FOR DCONVERT'
+IMG1SPEC EQU   *                  HANDLE NUMBER WITH NO EXP.
+*
+*        R2    POINTS TO OUTPUT BUFFER
+*        8-(X'46'-R3) IS WHERE PAST R15 DP GOES (OR R3-62)
+*        R4    POINTS TO IMAGE
+*        R15   POINTS TO EBCDIC CHARACTERISTIC
+*
+         BAL   R5,IMAGSCAN        SEE WHAT IMAGE LOOKS LIKE
+         LTR   R11,R11            SEE IF EXPON. SPEC. GIVEN
+         BZ    IMG1SPC2           NO, GO PROCESS OTHER TYPE
+         S     R3,=F'63'          COMPUTE ADJUSTED EXPON.
+         SR    R3,R7              ADJ. FOR SIGNIF.
+         LA    R8,1(R8)           BUMP TO WHERE OUTPUT GOES
+         IC    R11,UPKDEC(R15,R7) GET LEADING DIGIT
+         B     IMG2SPC1           GO PROCESS EXPONENT
+IMG1SPC2 LR    R0,R3              SAVE R3 FOR WHEN WE GO BACK
+         S     R3,=F'62'          COMPUTE WHERE DP GOES
+         LR    R11,R3             SEE IF NUMBER FITS IN SPEC
+         SR    R11,R7
+         CR    R11,R6
+         BH    ERROR              NO, THEN ITS AN ERROR
+         LR    R5,R6              FIGURE OUT HOW MANY LEADING
+         SR    R5,R3              BLANKS NEED BE WIPED OUT
+         AR    R5,R7              TO ADJUST FOR SIGNIFICANT DIG. START
+         BCTR  R5,0               MINUS 1 FOR EXECUTE
+         LA    R11,0(R2,R8)       HERE WHERE IT STARTS
+         SR    R10,R10
+         IC    R10,0(R11)          PICK UP SIGN FOR LATER
+         LR    R14,R11            REMEMBER WHERE SIGN FOUND
+         LTR   R5,R5              SEE IF ANY LEADING BLANKS TO DELETE
+         BNL   IMG1SP22           YES, GO DO IT
+         CLI   0(R11),C'-'        NO, BE SURE SIGNS NOT MINUS
+         BE    ERROR              IF SO NO ROOM FOR IT, SO ERROR
+         CLI   0(R4),C'$'         IF $ SPEC WE DONT HAVE ROOM EITHER
+         BE    ERROR              SO, ERROR
+         B     IMG1SPC3           ELSE, GO ON BUT SKIP BLANKING
+IMG1SP22 MVI   0(R11),C' '        BLANK OUT BUFFER
+         EX    R5,IMG2MVC
+         AR    R8,R5              RE-ADJUST OUTPUT POINTER
+         LA    R11,0(R2,R8)       COMPUTE WHERE SIGN SHOULD GO
+         STC   R10,0(R11)          STORE SIGN
+         LA    R11,2(R11)         PUT IN TRAILING ZEROS TO END
+         LTR   R9,R9              ANY TO BLANK OUT ?
+         BH    IMG1SP24           YES, GO DO IT
+         CLI   0(R4),C'$'         IS IT $ SPEC
+         BNE   IMG1SPC4           NO, ALL O.K.
+         C     R10,=F'96'         WAS IT MINUS
+         BNE   IMG1SP23           NO, GO CECK FOR ROOM FOR $
+         C     R6,=F'3'           IS THERE ROOM FOR - AND $
+         BL    ERROR              NO, THEN ITS AN ERROR
+         S     R11,=F'3'          BACK UP TO PUT IN - AND $
+         MVI   0(R11),C'-'
+         MVI   1(R11),C'$'
+         B     IMG1SPC4           GO HANDLE REST OF NUMBER
+IMG1SP23 C     R6,=F'2'           IS THERE ROOM FOR $
+         BL    ERROR              NO, THEN ERROR
+         S     R11,=F'2'          BACK UP TO PUT IN $
+         MVI   0(R11),C'$'
+         B     IMG1SPC4           GO PROCESS REST OF NUMBER
+IMG1SP24 MVI   0(R11),C'0'
+         EX    R9,IMG2MVC         ZERO OUT BUFFER
+         MVI   EXPON(R15),X'00'   SO TRAILING ZEROS WONT DELETE
+         LR    R3,R0              RE-STORE R3
+         LA    R11,1(R2,R8)       FIND WHERE NEXT CHAR WILL GO
+         CR    R14,R11            CANT STORE SIGN OVER DIGIT
+         BL    CHECK$             IF O.K. CHECK FOR $ SIGN
+         BH    CHECKM             IF HI, CHECK MINUS
+         CLI   0(R4),C'$'         IF ONLY 1 POS. CANT STORE - AND $
+         BE    ERROR              SO, IF $ THEN ERROR
+         B     CHECKS1            ELSE ITS O.K.
+CHECKM   C     R10,=F'96'          IF ITS MINUS, THERE NO ROOM
+         BE    ERROR              SO ITS AN ERROR
+         CLI   0(R4),C'$'         NO ROOM FOR $ IF ITS $ SPEC
+         BE    ERROR              SO, GO TO ERROR
+         B     CHECKS1            ELSE, IT IS O.K.
+CHECK$   CLI   0(R4),C'$'         DOES SPEC START WITH A DOLLAR
+         BNE   CHECKP             NO, EITHER ITS # OR A DP
+CHECK$$  BCTR  R11,0              BACK UP TO CHECK
+         C     R10,=F'96'          WAS A MINUS SIGN STORED
+         MVI   0(R11),C'$'        MOVE IN $ REGARDLESS
+         BNE   CHECKS1            NO MINUS SO ALL O.K.
+         BCTR  R11,0              BACK UP ONE TO RE-STORE MINUS
+         CR    R14,R11            IS THERE ROOM FOR - ALSO
+         BH    ERROR              NO, THEN ERROR
+         MVI   0(R11),C'-'
+         B     CHECKS1            NOW GO PROCESS NUMBER
+CHECKP   CLI   0(R4),C'.'         DID SPEC START WITH DP
+         BNE   CHECKS1            NO, THEN ITS # AND WE GO PROCESS NO.
+         LA    R4,1(R4)           SEE IF NEXT SPEC. IS $
+         CLI   0(R4),C'$'
+         BNE   CHECKS1            NO, THEN ALL O.K. AND WE GO PROCESS
+         B     CHECK$$            ELSE, BACK TO HANDLE IT
+IMG1SPC3 BCTR  R8,0               SO NUMBER STARTS AT FIRST POS.
+         LA    R11,0(R2,R8)       PUT IN TRAILING ZEROS
+         AR    R11,R6
+         LTR   R9,R9              ANY TO PUT IN ?
+         BM    IMG1SPC4           NO, SKIP MOVE
+         MVI   0(R11),C'0'
+         EX    R9,IMG2MVC
+IMG1SPC4 MVI   EXPON(R15),X'00'   SO TRAILING ZEROS WONT DELETE
+         LR    R3,R0              RE-STORE R3
+         B     CHECKS1            GO PROCESS NUMBER
+         EJECT
+IMG2SPEC EQU   *                  HANDLE NUMBER WITH NO EXP. AND
+*                                 ONLY DECIMAL PLACES
+*
+*        R2    POINTS TO OUTPUT BUFFER
+*        R3-1  NUMBER OF LEADING ZEROS AFTER DP
+*              (THERE ARE NONE INFRONT OF DP)
+*        R4    POINTS TO IMAGE
+*        R15   POINTS TO EBCDIC CHARACTERISTIC
+*
+         BAL   R5,IMAGSCAN
+         LTR   R11,R11            SEE IF EXPON. SPEC GIVEN
+         BZ    IMG2SPC2           NO, GO HANDLE OTHER CASES
+         IC    R11,UPKDEC(R15,R7) STORE LEAD DIGIT
+         LCR   R3,R3              THIS IS WHAT EXPON MUST BE
+IMG2SPC1 STC   R11,0(R2,R8)
+         IC    R11,POINT+3        AND STORE DP
+         LA    R8,1(R8)           BUMP OUTPUT POINTER
+         STC   R11,0(R2,R8)       AND STORE IT
+         B     IMG3SPC1           GO PROCESS EXPONENT
+IMG2SPC2 LTR   R9,R9              ANY POSITIONS TO RIGHT OF DP ?
+         BNH   ERROR              NO, ERROR
+         LR    R5,R6
+         AR    R5,R9
+         LA    R11,0(R2,R8)
+         BCTR  R11,0
+         SR    R0,R0
+         LR    R14,R11            SAVE WHERE SIGN FOUND
+         IC    R0,0(R11)          GET SIGN
+         MVI   0(R11),C' '        WIPE OUT OLD SIGN
+         LA    R11,1(R11)         REPOSITION R11
+         MVI   0(R11),C' '        BLANK OUT SPEC SPACE
+         EX    R5,IMG2MVC
+         AR    R5,R8              POINT TO END OF SPEC
+         BCTR  R5,0
+         BCTR  R6,0               FOR 1ST POS. ALREADY PASSED
+         AR    R8,R6              HERES WHERE DP GOES
+         LA    R11,0(R2,R8)       PUT SIGN IN FRONT OF DP
+IMG2SP22 BCTR  R11,0
+         CR    R14,R11            SEE IF SIGN OR $ NEEDED
+         BL    TM$                IF ROOM FOR BOTH GO CHECK IT
+         BH    NEITHER            IF NO ROOM DONT ALLOW IT
+         C     R0,=F'96'          ALLOW JUST 1, I.E. - OR $
+         BE    MINUS$             GOT AT LEASR A MINUS
+         CLI   0(R4),C'$'         DO WE HAVE AT LEAST A $
+         BNE   IMG2SP23           NO, JUST GO PUT IN DP
+         MVI   0(R11),C'$'        ELSE STORE $ IN FRONT OF DP
+         B     IMG2SP23           THEN GO ON
+NEITHER  C     R0,=F'96'          WAS IT MINUS
+         BE    ERROR              YES, THEN ERROR
+         CLI   0(R4),C'$'         IS $ REQUIRED
+         BE    ERROR              YES, THEN ERROR
+         B     IMG2SP23           ELSE GO ON AND PROCESS DP
+MINUS$   CLI   0(R4),C'$'         IS $ REQUIRED
+         BE    ERROR              YES, ERROR (CANT HAVE BOTH - AND $)
+         STC   R0,0(R11)          NO, JUST STORE -
+         B     IMG2SP23           AND GO CONTINUE PROCESSING
+TM$      CLI   0(R4),C'$'         IS $ NEEDED
+         BNE   TM$$               NO, GO SEE IF - NEEDED
+         MVI   0(R11),C'$'        ELSE MOVE IN $
+         BCTR  R11,0              BACK UP TO PUT IN - IF NEEDED
+TM$$     C     R0,=F'96'          IS - NEEDED
+         BNE   IMG2SP23           NO, GO PROCESS REST OF NO.
+         MVI   0(R11),C'-'        ELSE MOVE IN - ALSO
+         B     IMG2SP23           AND GO CONTINUE TO PROCESS NO.
+         STC   R0,0(R11)
+IMG2SP23 IC    R0,POINT+3
+         STC   R0,0(R2,R8)        STORE IT
+         LA    R11,1(R2,R8)       ZERO OUT RIGHT HAND SIDE
+         LTR   R6,R6              DONT DO IT IF 0
+         BM    IMG2SP24
+         MVI   0(R11),C'0'
+         EX    R6,IMG2MVC
+IMG2SP24 MVI   EXPON(R15),X'00'   SO TRAILING ZEROS WONT GO
+         LR    R11,R9             LOAD NUMBER OF CHARS TO RIGHT
+         LA    R0,240             CHARACTER ZERO
+         C     R11,=F'7'          MAXIMUM OF 7 SIGN. DIGS.
+         BNH   IMG2SPC4           GO PROCESS NUMBER
+         L     R11,=F'7'
+         B     IMG2SPC4
+IMG2SPC3 LA    R8,1(R8)
+         STC   R0,0(R2,R8)
+IMG2SPC4 BCT   R3,IMG2SPC3
+         LR    R3,R5              GET END OF BUFFER INTO R3
+         B     CONTIN
+IMG2MVC  MVC   1(0,R11),0(R11)
+         EJECT
+IMG3SPEC EQU   *                  HANDLE NUMBER REQUIRING EXP
+*
+*        R2    POINTS TO OUTPUT
+*        R3    CONTAINS THE EXPONENT REQUIRED
+*        R4    POINTS TO IMAGE
+*        R15   POINTS TO EBCDIC CHARACTERISTIC
+*
+         BAL   R5,IMAGSCAN
+         LTR   R11,R11            SEE IF EXP. SPEC GIVEN
+         BZ    IMG3SPC2           NO, THEN TRY IT OUT ON ANOTHER SPEC
+IMG3SPC1 LA    R11,1(R2,R8)       GET START OF SPEC
+         L     R5,12(R1)          GET LENGTH OF SPEC TO ZERO OUT
+         S     R5,=F'4'           LESS 2 FOR CHARS STORED AND
+         MVI   0(R11),C'0'        SUBTR. 2 FOR EXECUTE
+         EX    R5,IMG2MVC
+         MVI   EXPON(R15),X'00'   TO INDICATE THERE IS AN EXPONENT
+         LR    R11,R6
+         AR    R11,R9
+         AR    R11,R7             COMPUTE WHERE "E" WILL GO
+         S     R11,=F'2'
+         B     EXP1               NOW LIKE NORMAL E FIELD, GO PROCESS
+IMG3SPC2 LA    R11,1(R2,R8)       FILL WITH ZEROS
+         L     R5,12(R1)
+         MVI   0(R11),C'0'
+         EX    R5,IMG2MVC
+         LTR   R3,R3              ANY LEADING DIGITS
+         BM    IMG3SPC3           NO, GO PROCESS LIKE SPEC2
+         LA    R3,63(R3)          RE-ADJUST EXPONENT
+         LA    R8,1               AND OUTPUT POINTER
+         B     IMG1SPC2
+IMG3SPC3 LCR   R3,R3              CONVERT TO POSITIVE EXPONENT
+         BCTR  R8,0               BACK UP R8
+         B     IMG2SPC2
+         EJECT
+IMAGSCAN EQU   *                  SUB-ROUT. TO HANDLE IMAGE SPEC SCAN
+*
+*        ENTERS WITH R4 POINTING TO IMAGE
+*
+*        EXITS WITH:
+*              R6=CHARS. TO LEFT OF DP
+*              R9=CHARS. TO RIGHT OF DP  (-1 IF NO DP AT ALL)
+*              R11=0 -> NO EXP. SPEC GIVEN
+*                =1 -> EXP. SPEC GIVEN
+*
+*        RETURNS BY A BRANCH REGISTER R5
+*
+         SR    R6,R6              INITIALIZE LEFT COUNT
+         SR    R9,R9              INITIALIZE RIGHT COUNT
+         BCTR  R9,0
+         LA    R11,=C'#$'          INITIALIZE TYPE POINTER
+IMAGS1   CLI   0(R4),C'#'         DOES SPEC BEGIN WITH #
+         BE    IMAGS2             YES, GO START SCAN
+         CLI   0(R4),C'$'         DOES SPEC BEGIN WITH $
+         BNE   IMAGS3             NO, THEN IT BEGINS WITH A DP
+         AR    R11,R10             SET PTR TO POINT TO $
+IMAGS2   AR    R6,R10             BUMP LEFT COUNT
+         AR    R4,R10             BUMP IMAGE SPEC POINTER
+         C     R4,16(R1)          END OF IMAGE
+         BH    IMAGS3
+         CLC   0(1,R4),0(R11)      DO WE HAVE ANOTHER LIKE CHAR. ?
+         BE    IMAGS2             YES, GO BACK AND BUMP
+IMAGS3   CLI   0(R4),C'.'         HAVE WE A DP ?
+         BNE   IMAGS5             NO, GO SEE IF DONE OR EXCL. FOUND
+         AR    R9,R10
+IMAGS4   AR    R4,R10             PASS OVER DP
+         C     R4,16(R1)          END OF IMAGE
+         BH    IMAGS5
+         CLC   0(1,R4),0(R11)      HAVE WE MORE CHARACTERS ?
+         BNE   IMAGS5             NO, GO SEE IF DONE OR EXCL. FOUND
+         AR    R9,R10             YES, BUMP RIGHT COUNT
+         B     IMAGS4             GO BACK FOR MORE
+IMAGS5   SR    R11,R11              INITIALIZE EXP. CFLAG
+         CLI   0(R4),C'!'         IS THERE AN EXCL. AT END ?
+         BNE   IMAGOUT            NO, THEN DONE
+         LA    R11,3               SET TO CHECK FOR 3 MORE EXCL.'S
+IMAGS6   AR    R4,R10             BUMP TO NEXT ONE
+         C     R4,16(R1)          END OF IMAGE
+         BH    IMAGSER
+         CLI   0(R4),C'!'         NEXT ONE AN EXCL. ?
+         BNE   IMAGSER            ERROR, MUST BE 4 OF THEM
+         BCT   R11,IMAGS6          BACK FOR MORE IF NOT DONE
+         AR    R4,R10
+         LR    R11,R6             CHECK TO BE SURE THERE ARE 4 #
+         LTR   R9,R9
+         BM    IMAGS7
+         AR    R11,R9
+IMAGS7   LA    R11,0(R11)
+         C     R11,=F'4'
+         BL    IMAGSER
+         LR    R11,R10             SET EXP. FIELD FLAG
+IMAGOUT  L     R0,12(R1)         GET START OF SPEC
+         SR    R4,R0              R4 NOW HAS LENGTH OF SPEC
+         ST    R4,12(R1)          THIS VALUE TO BE RETURNED FROM DCON
+         LR    R4,R0              RE-SET R4 TO START OF IMAGE
+         BR    R5                 RETURN TO CALLER
+IMAGSER  L     R0,12(R1)          SET UP NORMAL REGS THEN RETURN
+         SR    R4,R0
+         ST    R4,12(R1)
+         LR    R4,R0
+         B     ERROR              BUT, RETURN TO ERROR CODE
+         TITLE 'DCONVERT CONSTANTS AND WORK AREAS'
+         DS    0F
+MASK1    DC    X'00FFFFFF'   MASK OUT SIGN AND CHARACTERISTIC
+MASK2    DC    X'7F000000'   MASK OUT SIGN AND FRACTION PART
+FORTY    DC    X'00000040'   CONSTANT TO TEST CHARACTERISTIC
+FORTYSIX DC    X'00000046'   CONSTANT TO TEST CHARACTERISTIC
+FORTYSOX DC    X'46000000'   CONSTANT TO TEST CHARACTERISTIC
+FZERO    DC    X'000000F0'   EBCDIC ZERO
+SEVEN    DC    X'00000007'   CONSTANT TO TEST NO. OF SIGN. FIGS.
+POINT    DC    X'0000004B'   EBCDIC DECIMAL POINT
+ITWENTY  DC    X'20000000'   CONSTANT TO PREVENT OVERFLOW/UNDERFLOW
+         ORG   *-8
+TABLE    DS    0D            TABLE OF POWERS OF (10/16)
+         ORG   *+8
+         DC    D'0.6250000000000000E00'       POWER = 1
+         DC    D'0.3906250000000000E00'       POWER = 2
+         DC    D'0.2441406250000000E00'       POWER = 3
+         DC    D'0.1525878906250000E00'       POWER = 4
+         DC    D'0.9536743164062500E-01'      POWER = 5
+         DC    D'0.5960464477539060E-01'      POWER = 6
+         DC    D'0.3725290298461912E-01'      POWER = 7
+         DC    D'0.2328306436538694E-01'      POWER = 8
+         DC    D'0.1455191522836683E-01'      POWER = 9
+         DC    D'0.9094947017729280E-02'      POWER = 10
+         DC    D'0.5684341886080799E-02'      POWER = 11
+         DC    D'0.3552713678800499E-02'      POWER = 12
+         DC    D'0.2220446049250311E-02'      POWER = 13
+         DC    D'0.1387778780781443E-02'      POWER = 14
+HITABLE  DC    D'0.8673617379884033E-03'      POWER = 15
+         DC    D'0.5421010862427520E-03'      POWER = 16
+         DC    D'0.2938735877055716E-06'      POWER = 32
+         DC    D'0.1593091911132447E-09'      POWER = 48
+         DC    D'0.8636168555094419E-13'      POWER = 64
+         END

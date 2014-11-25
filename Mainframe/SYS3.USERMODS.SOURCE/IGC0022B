@@ -1,0 +1,626 @@
+//AOSQSNAP JOB ,'QSNAP  - SVC 222',TIME=(,15)
+//ASMCL    PROC
+//ASM EXEC PGM=IEV90,PARM='NODECK'
+//SYSLIB   DD  DSN=SYS4.DUMMYMAC,DISP=SHR,DCB=BLKSIZE=6320
+//         DD  DSN=SYS1.MACLIB,DISP=SHR
+//         DD  DSN=SYS4.MACLIB,DISP=SHR
+//         DD  DSN=SYS2.MACLIB,DISP=SHR
+//         DD  DSN=SYS3.MACLIB,DISP=SHR
+//SYSLIN   DD  DSN=&&LOADSET,UNIT=VIO,SPACE=(2960,(60,30),RLSE),
+//             DISP=(MOD,PASS),DCB=OBJECT
+//SYSPRINT DD  SYSOUT=$
+//SYSPUNCH DD  SYSOUT=B
+//SYSTERM  DD  SYSOUT=C
+//SYSUT1   DD  DSN=&&SYSUT1,UNIT=VIO,
+//             SPACE=(4628,(120,10),,,ROUND),DCB=BLKSIZE=4628
+//LKED     EXEC  PGM=IEWL,ACCT=(MULTSTEP,SYS4),
+//            PARM=(DCBS,LET,LIST,MAP,RENT),COND=(5,LT,ASM)
+//SYSLIB   DD  DSN=SYS4.DUMMYLIB,DISP=SHR
+//SYSLIN   DD  DSN=*.ASM.SYSLIN,DISP=(OLD,PASS)
+//         DD  DDNAME=SYSIN
+//SYSLMOD  DD  DSN=&&GOSET(MAIN),SPACE=(6233,(25,5,1),RLSE),
+//             DCB=LOADMOD,UNIT=DISK,DISP=(NEW,KEEP)
+//SYSPRINT DD  SYSOUT=$
+//SYSUT1   DD  DSN=&&SYSUT1,UNIT=VIO,SPACE=(6233,(90,30),,,ROUND)
+// PEND
+// EXEC ASMCL,REGION=1024K
+//ASM.SYSLIB  DD DSN=SYS1.MACLIB,DISP=SHR,
+//    DCB=(BLKSIZE=6320)
+//        DD DSN=SYS1.AMODGEN,DISP=SHR
+//ASM.SYSIN   DD *
+QSNAP    TITLE '            Q U I C K   S N A P   S V C'
+*
+* THIS SVC ROUTINE WILL SNAP AREAS OF CORE OR REGISTERS TO
+* THE SYSTEM LOG, CONSOLE, OR THE JOB LOG OF THE ISSUING JOB
+*
+*
+*  3/3/81 -- BARRY P. BENIGHT,  CIT SYSTEMS GROUP
+*
+         SPLEVEL SET=2                                                  *MVS/XA*
+         SPACE 3
+         MACRO
+&L       REGISTER
+.*
+.* DEFINES REGISTERS R0-R15 AND F0-F6
+.*
+         LCLA      &RNO
+&RNO     SETA      0
+.LOOP    ANOP
+R&RNO    EQU       &RNO
+&RNO     SETA      &RNO+1
+         AIF       (&RNO LE 15).LOOP
+&RNO     SETA      0
+.LP2     ANOP
+F&RNO    EQU       &RNO
+&RNO     SETA      &RNO+2
+         AIF       (&RNO LE 6).LP2
+         MEND
+         SPACE 2
+         MACRO
+&L       BTX   &LOC,&LEN,&VAL
+         LCLC  &CHR
+&L       MSG   &LOC,&LEN     LOAD THE LOCATION AND LENGTH
+&CHR     SETC  '&VAL'(2,K'&VAL-2)       GET THE REGISTER
+         AIF   ('&CHR' EQ 'R15').NOLOAD
+         AIF   ('&CHR' EQ '15').NOLOAD
+         LR    R15,&CHR      GET THE VALUE
+.NOLOAD  BAL   R14,BTX
+         MEND
+         SPACE 2
+         MACRO
+&L       MSG       &LOC,&LEN
+         LCLA      &LLEN
+         LCLC      &ST
+&LCLA    SETA      0
+         AIF       ('&LOC' EQ '').NOLOC
+         AIF       ('&LOC '(1,2) EQ 'X''').HSTR
+         AIF       ('&LOC'(1,1) EQ '''').QSTR
+         AIF       ('&LOC'(1,1) EQ '(').PARENS
+.*
+.*  OK.  THE LOC IS A SYMBOL
+.*
+&L       LA        1,&LOC
+&LLEN    SETA      L'&LOC
+         AGO       .LENGTH
+.NOLOC   MNOTE     8,'INVALID STRING'
+         MEXIT
+.HSTR    ANOP
+&L       LA        1,=&LOC
+&LLEN    SETA      (K'&LOC-2)/2
+         AGO       .LENGTH
+.QSTR    ANOP
+&L       LA        1,=C&LOC
+&LLEN    SETA      K'&LOC-2
+         AGO       .LENGTH
+.PARENS  ANOP
+&ST      SETC      '&LOC'(2,K'&LOC-2)
+         AIF       ('&ST' EQ '1').NOLOD
+         AIF       ('&ST' EQ 'R1').NOLOD
+&L       LR        1,&ST
+         AGO       .LOADED
+.NOLOD   ANOP
+&L       DS        0H
+.LOADED  ANOP
+.*
+.*
+.LENGTH  ANOP
+         AIF       ('&LEN' EQ '').DOLEN
+         AIF       ('&LEN'(1,1) EQ '(').PLEN
+         LA        0,&LEN
+         AGO       .GOTLEN
+.PLEN    ANOP
+&ST      SETC      '&LEN'(2,K'&LEN-2)
+         AIF       ('&ST' EQ '0').GOTLEN
+         AIF       ('&ST' EQ 'R0').GOTLEN
+         LR        0,&ST
+         AGO       .GOTLEN
+.*
+.DOLEN   LA        0,&LLEN
+.GOTLEN  ANOP
+         MEND
+         SPACE 2
+         MACRO
+&L       SEG       &LOC,&LEN,&TYPE
+         LCLC      &C
+.*
+.* ADD DATA TO A BUFFER
+.*
+&L       MSG       &LOC,&LEN
+         AIF       ('&TYPE' EQ '').DOIT
+&C       SETC      '&TYPE'(1,2)
+.DOIT    BAL   R14,SEG&C
+         MEND
+         EJECT
+CVTDSECT DSECT 0
+         CVT   DSECT=YES                                                *MVS/XA*
+         EJECT
+         IKJTCB
+         EJECT
+RB       DSECT 0
+         IKJRB
+         EJECT
+         IHACDE
+CDE      EQU   CDENTRY,*-CDENTRY,C'X'
+         EJECT
+         IHAXTLST
+XL       EQU   XTLST,*-XTLST,C'X'
+         EJECT
+*
+* GETMAINED WORK AREA
+*
+QSWORK   DSECT 0
+QSSTART  EQU   *
+WTOPARM  DS    0F
+MSGLEN   DS    H
+MCSFL    DS    H
+MSGAREA  DS    CL110
+*
+* ANOTHER DEFN FOR THE FORMAT OF SEG'D CORE
+*
+         ORG   MSGAREA
+         DS    CL2           INDENT VALUE                               *MVS/XA*
+CORAD    DS    CL8           ADDRESS OF LINE                            *MVS/XA*
+         DS    C'  '
+WORD1    DS    CL8           DATA IN WORD 1
+         DS    C' '
+WORD2    DS    CL8
+         DS    C' '
+WORD3    DS    CL8
+         DS    C' '
+WORD4    DS    CL8
+         DS    C' '
+LBAR     DS    C'|'          LEFT BAR
+CVCHAR   DS    CL16          CONVERTED CHARACTERS
+RBAR     DS    C'|'          RIGHT BAR
+SEGCLEN  EQU   *-MSGAREA     LENGTH OF SEG'D CORE
+         ORG
+*
+* END OF CORE DEFN
+*
+MSGROUT  DS    F
+*
+DWORK    DS    D             SCRATCH WORK AREA
+DREGS    DS    D
+SVRB     DS    A             LOCAL SVRB ADDRESS
+QSINIT   EQU   QSWORK,*-QSWORK,C'X'    AREA CLEARED AT INIT
+QSTACK   DS    256F          SAVE STACK
+QSLEN    EQU   *-QSWORK      LENGTH OF GETMAINED AREA
+         EJECT
+QSPARM   DSECT 0
+PARMFL   DS    X             FLAG BYTE
+FMSG     EQU   X'01'         PRINT TEXT
+FREGS    EQU   X'02'         PRINT REGS
+FADCON   EQU   X'04'         DUMP STORAGE
+FSCON    EQU   X'08'         DUMP STORAGE S TYPE CONTS
+FWTO     EQU   X'10'         WRITE TO CONSOLE
+FWTL     EQU   X'20'         WRITE TO SYSLOG
+*
+PARMCNT  DS    X             COUNT OF REGS OR BYTES
+PARMADDR DS    X             SPARE                                      *MVS/XA*
+PARMACON DS    AL3           ADCON
+PARMREGS EQU   PARMACON,L'PARMACON
+         ORG   PARMACON
+         DS    X             SPARE
+PARMSCON DS    S             SCON
+         ORG
+         EJECT
+QSNAP    START 0
+QSNAP    AMODE 31                                                       *MVS/XA*
+QSNAP    RMODE ANY                                                      *MVS/XA*
+         REGISTER
+         ENTRY IGC0022B
+IGC0022B EQU   QSNAP
+*
+         USING QSNAP,R6      ESTABLISH MODULE BASE
+         USING RBBASIC,R5    THE SVRB
+         USING TCB,R4        AND THE TCB
+         ST    R14,RBEXSAVE  SAVE THE RETURN ADDRESS
+         MODESET   EXTKEY=RBT234,WORKREG=2   GET THE USERS KEY
+         GETMAIN   RU,LV=QSLEN,SP=230  GET THE WORK AREA                *MVS/XA*
+         LR    R11,R1
+         USING QSWORK,R11
+         XC    QSINIT,QSINIT CLEAR AREA
+         LA    R13,QSTACK    GET THE STACK POINTER
+         ST    R5,SVRB       SAVE POINTER TO OUR SVRB
+         L     R5,RBLINK     GET THE CALLERS RB ADDRESS
+         L     R7,RBOPSW+4   AND THE CALLERS RESUME PSW
+         USING QSPARM,R7     ADDRESS THE PARM AREA
+         L     R12,=A(X'80000000')      SET UP 'AND' REGISTER           *MVS/XA*
+         N     R12,RBOPSW+4             FOR SAVING CALLER'S AMODE       *MVS/XA*
+         LA    R1,6(,R7)     POINT PAST THE PARMS
+         OR    R1,R12                   RESTORE AMODE                   *MVS/XA*
+         MODESET   EXTKEY=ZERO
+         ST    R1,RBOPSW+4   AND RESTORE THE RESUME ADDRESS
+         MODESET   EXTKEY=RBT234,WORKREG=2   GET HIS KEY BACK
+*
+* PUT IN THE IDENT
+*
+         SEG   'QSNAP AT '
+         LA    R15,QSPARM    ADDRESS OF THE SVC INST
+         BCTR  R15,0
+         BCTR  R15,0         POINT AT THE SVC INST
+         LR    R10,R15       SAVE FOR A SECOND
+         BTX   DWORK,,(R15) CONVERT TO HEX                              *MVS/XA*
+         SEG   (R1),(R0)     AND MOVE IT INTO THE BUFFER
+*
+* FIND MODULE NAME AND ENTRY POINT
+*
+* FIRST WE MAKE SURE THE RB IS AN SVRB OR A PRB, OTHERWISE
+* THE RBCDE1 IS DOESN'T POINT TO A CDE.
+*
+         TM    RBSTAB1,RBFTP           SEE IF IT IS A PRB
+         BZ    CDEOK                   YES.  SO WE HAVE A CDE
+         TM    RBSTAB1,RBFTSIRB        IS IT A SIRB OR SVRB?
+         BZ    ABSONLY                 IF NOT IT IS AN IRB (NG).
+         TM    RBSTAB1,RBFTIRB         IS IT AN SVRB?
+         BZ    ABSONLY                 IF NOT THEN NO CDE
+CDEOK    SR    R9,R9
+         ICM   R9,7,RBCDE1   GET THE CDE ENTRY FOR THE RB
+         LTR   R9,R9         IS IT ZERO?
+         BZ    ABSONLY       YEP, SO SKIP OFFSET INFO FOR THIS ONE
+         USING CDE,R9
+         TM    CDATTR,CDMIN  IS IT A MINOR
+         BZ    GOTMAJ        IF NOT, DONT WORRY
+         L     R9,CDXLMJP    IF SO, GET THE MAJOR
+GOTMAJ   L     R2,CDXLMJP    GET THE EXTENT LIST (XTLST)
+         USING XL,R2
+         L     R2,XTLMSBAA   GET THE ENTRY POINT ADDRESS
+         LA    R2,0(R2)                CLEAR AMODE BEFORE SUBTRACT      *MVS/XA*
+         SR    R10,R2        AND FROM THAT GET THE OFFSET
+*
+* NOW WE SEE IF WE REALLY WANT TO USE THE OFFSET
+*
+         BNP   ABSONLY       IF IT IS NEGATIVE WE DON'T WANT TO
+         C     R10,=A(X'FFFFFF')
+         BH    ABSONLY       OR IF IT GREATER THAN 16M
+*
+* OK LETS TELL ABOUT WHAT WE FOUND
+*
+         SEG   ' ('
+         SEG   CDNAME,8,T    PUT IN THE NAME
+         SEG   '+'           BE CORRECT
+         BTX   DWORK,6,(R10) CONVERT THE OFFSET TO HEX
+         SEG   (R1),(R0)     MOVE THAT IN
+         SEG   ')'
+ABSONLY  SEG   ':',,WR       WRITE THE BLASTED INFO LINE OUT
+         DROP  R9,R2         ALL DONE WITH THESE
+         L     R5,SVRB       RESTORE THE POINTER TO OUR RB
+*
+* PROCESS THE QSNAP OPERANDS
+*
+         TM    PARMFL,FMSG
+         BZ    NOTMSG
+*
+*  OK SO IT IS A MESSAGE FOR US
+*
+         BAL   R14,SCONVERT  GET THE ADDRESS OF THE DATA
+         SEG   '    '
+         SR    R0,R0
+         IC    R0,PARMCNT    GET THE LENGTH OF THE MESSAGE
+         SEG   (R3),(R0),WR  AND SEG IT TOO
+         B     DONE
+*
+* IF IT IS REGISTERS
+*
+NOTMSG   TM    PARMFL,FREGS
+         BZ    NOTREGS
+         UNPK  DREGS(7),PARMREGS(4)    UNPACK THE REGISTERS
+         SR    R2,R2
+         IC    R2,PARMCNT    GET COUNT OF REGISTERS
+         CH    R2,=H'6'
+         BNH   *+8           MAX OF SIX REGS
+         LA    R2,6          ENFORCE IT
+         LA    R2,DREGS-1(R2)          LAST REG IN LIST
+         LA    R3,DREGS      FIRST REG IN LIST
+         SEG   '    '
+*
+* LOOP...FORMATTING OUT THE REGISTER NUMBER AND CONTENTS
+*
+RGLOOP   CR    R3,R2         WE DONE YET
+         BH    RGLEND        YEP, SCRAM
+*
+         SR    R10,R10
+         IC    R10,0(,R3)    GET THE REG # + X'F0'
+         LA    R0,X'0F'      AND A MASK
+         NR    R10,R0        GET REG # IN R10
+*
+* CONVERT TO PRINTABLE
+*
+         CVD   R10,DWORK                CONVERT IT TO DECIMAL
+         UNPK  DWORK(3),DWORK+6(2)      CONVERT IT TO CHARS
+         LA    R0,3                     NORMAL LENGTH
+         OI    DWORK+2,X'F0'            MAKE SURE IT IS A NUMBER
+         CLI   DWORK+1,X'F0'            A 2 DIGIT NUMBER?
+         BNE   *+12
+         BCTR  R0,R0                    NOW ONLY 2 CHARS
+         MVC   DWORK(2),DWORK+1         MOVE THEM UP
+         MVI   DWORK,C'R'               PUT IN THE DESIGNATOR
+         SEG   DWORK,(R0)               SEG IN THE DESIGNATOR
+         SEG   '='
+         SLL   R10,2                    SET UP FOR OFFSET
+         L     R10,RBGRSAVE(R10)       GET THE CALLER'S REGISTER
+         BTX   DWORK,8,(R10)            CONVERT IT TO HEX
+         SEG   DWORK,8,B                AND SEG IT IN
+         LA    R3,1(,R3)                UPDATE COUNT
+         B     RGLOOP                   AND CONTINUE TO LOOP
+*
+* ALL DONE WITH THE REGS. WRITE THE OUTPUT LINE
+*
+RGLEND   BAL   R14,SEGWRITE
+         B     DONE                    THEN GO TO THE END
+*
+* IT BETTER BE A DUMP STORAGE
+*
+NOTREGS  TM    PARMFL,FADCON+FSCON
+         BZ    DONE
+         TM    PARMFL,FADCON
+         BO    GOTAD                    IF IT IS AN ADCON
+         BAL   R14,SCONVERT  CHANGE IT IF IT'S AN SCON
+         B     GOTCON
+GOTAD    ICM   R3,15,PARMADDR          GET THE 31-BIT ADDRESS           *MVS/XA*
+         LA    R3,0(R3)                CLEAR THE AMODE BIT              *MVS/XA*
+         LTR   R12,R12                 IS IT AMODE 31?                  *MVS/XA*
+         BM    GOTCON                  IF SO BRANCH                     *MVS/XA*
+         N     R3,=A(X'FFFFFF')        CLEAR HIGH ORDER BYTE            *MVS/XA*
+GOTCON   SR    R0,R0
+         IC    R0,PARMCNT    COUNT OF DATA TO SNAP
+         SEG   (R3),(R0),C   SEG THE CORE
+*
+* OK.  ALL IS WELL AND FINISHED
+*
+DONE     FREEMAIN  RU,LV=QSLEN,A=(R11),SP=230                           *MVS/XA*
+         MODESET   EXTKEY=ZERO               BACK IN KEY ZERO
+*
+* NOW WE RESTORE THE USER REGISTERS
+*
+         L     R15,RBGRSAVE+15*4       FIRST R15
+         LM    R0,R1,RBGRSAVE          THEN THE OTHERS
+         L     R14,RBEXSAVE            GET THE RETURN ADDRESS
+         BR    R14                     AND GO BACK
+         EJECT
+*
+* UTILITY ROUTINES FOR QSNAP
+*
+SCONVERT SR    R3,R3
+         IC    R3,PARMSCON   GET THE BASE REGISTER
+         SRL   R3,4          SHIFT IT DOWN TO LOW ORDER POS
+         SLL   R3,2          AND MULTIPLY IT BY 4
+         SR    R2,R2         CLEAR A SPOT FOR IT
+         LTR   R3,R3         IS IT R0 AS A BASE?
+         BE    *+8
+         L     R2,RBGRSAVE(R3)         GET THE BASE ADDRESS
+         LA    R2,0(R2)      CLEAR AMODE BIT                            *MVS/XA*
+         LTR   R12,R12                 CHECK AMODE                      *MVS/XA*
+         BM    GOON                    IF AMODE 31 BRANCH               *MVS/XA*
+         N     R2,=A(X'FFFFFF')        ELSE CLEAR HIGH ORDER BYTE       *MVS/XA*
+GOON     LH    R3,PARMSCON   GET THE THING AGAIN
+         N     R3,=A(X'FFF') WANT ONLY THE DISPLACEMENT
+         AR    R3,R2         AND GET OUR ADDRESS
+         BR    R14           THEN GO BACK
+*
+* BTX -- ROUTINE TO CONVERT THE VALUE IN R15 TO HEX IN THE
+*  LOCATION POINTED TO BY R1 FOR THE LENGTH IN R0.
+*
+BTX      STM   R15,R3,12(R13) SAVE THE REGISTERS
+         LA    R2,8          GET THE MAXIMUM LENGTH
+         CR    R2,R0
+         BL    *+6
+         LR    R2,R0         GET THE ACTUAL LENGTH IF LESS
+         SLL   R2,4          SHIFT INTO POSITION FOR 1ST OPERAND
+         EX    R2,UNPINST    UNPACK THE VALUE INTO THE LOCATION
+*
+* VALUE IN R15 HAS BEEN UNPACKED INTO OUR BUFFER
+*
+         SRL   R2,4          MOVE THE LENGTH BACK DOWN
+         BCTR  R2,0          AND DECREMENT IT
+*
+*  NOW ALL THAT NEEDS TO BE DONE IS TRANSLATE THE VALUE IN THE
+*  DESTINATION INTO VALID HEX
+*
+         EX    R2,TRINST     EXECUTE THE TR INSTRUCTIN
+         EX    R2,MVCINST    THEN MOVE IT INTO THE DESTINATION
+*
+* OK. ALL DONE
+*
+         LM    R15,R3,12(R13) RESTORE THE REGISTERS
+         BR    R14           GO BACK HOME
+*
+UNPINST  UNPK  0(*-*,R13),12(5,R13)
+TRINST   TR    0(*-*,R13),HEXTAB-C'0'
+MVCINST  MVC   0(*-*,R1),0(R13)
+*
+* SEG -- MOVE DATA INTO THE MESSAGE BUFFER
+*        R1 CONTAINS LOCATION R0 THE LENGTH
+*
+SEG      STM   R0,R5,0(R13)  STORE THE REGISTERS
+         LTR   R0,R0         ANYTHING TO SEG?
+         BNP   SEGDONE       IF NOT DON'T BOTHER
+         LA    R2,L'MSGAREA  MAX LENGTH OF AREA
+         SH    R2,MSGLEN     LESS THE CURRENT LENGTH
+         BNP   SEGDONE       IF MAX WE CAN ADD IS <=0 THEN BYE
+         CR    R2,R0         SEE IF WE WANT TO ADD MORE THAN THAT
+         BNH   *+6           IF NOT DONT WORRY
+         LR    R2,R0         OTHERWIZE USE VALUE HE GAVE US
+         LA    R3,MSGAREA
+         AH    R3,MSGLEN     ADD THE CURRENT LENGTH
+         BCTR  R2,0          SUBTRACT ONE FOR THE EXECUTE
+         EX    R2,MOVEIT     THEN MOVE THE DATA IN
+         AH    R2,MSGLEN     ADD THE LENGTH IN
+         LA    R2,1(,R2)     AND PUT BACK WHAT THE BCTR TOOK
+         STH   R2,MSGLEN     THEN UPDATE THE COUNT
+SEGDONE  LM    R0,R5,0(R13)  RESTORE THE REGISTERS
+         BR    R14           THEN GO BACK FROM WHENCE WE CAME
+*
+MOVEIT   MVC   0(*-*,R3),0(R1)
+*
+* SEGB -- SEG DATA INTO THE BUFFER BUT BE SURE THERE IS AT LEAST
+*         ONE TRAILING BLANK
+*
+SEGB     STM   R0,R15,0(R13)
+         LA    R13,64(,R13)  UPDATE THE STACK POINTER
+         SEG   (R1),(R0)     SEG IN THE DATA FIRST
+         LR    R5,R1         GET POINTER TO DATA
+         AR    R5,R0         THEN POINT AT THE END
+         BCTR  R5,0          THE TRUE END
+         CLI   0(R5),C' '    IS THERE A BLANK THERE?
+         BE    SEGB2
+         SEG   ' '           IF NOT SEG ONE IN
+SEGB2    SH    R13,=H'64'    WANT TO RESTORE THE REGISTER
+         LM    R0,R15,0(R13) RESTORE THEM
+         BR    R14           THEN GO BACK HOME
+*
+* SEGT -- SEG DATA INTO THE BUFFER BUT TRIM TRAILING BLANKS
+*
+SEGT     STM   R0,R15,0(R13)
+         LA    R13,64(,R13)  UPDATE THE STACK POINTER
+         LR    R3,R0         GET A COPY OF THE COUNT
+         BCTR  R1,0          POINT AT ACTUAL END OF DATA
+SEGTLP   LA    R4,0(R3,R1)   POINT AT IT
+         CLI   0(R4),C' '    IS IT A BLANK
+         BNE   SGTLPE        IF NOT WE ARE ALL DONE
+         BCT   R3,SEGTLP     IF SO WE KEEP ON LOOPING
+SGTLPE   LA    R1,1(,R1)     GET BACK OUR GOOD POINTER
+         SEG   (R1),(R3)     AND SEG IN WHAT WE NEED
+         SH    R13,=H'64'    RESTORE STACK POINTER
+         LM    R0,R15,0(R13) AND THE OTHER REGISTERS
+         BR    R14           THEN RETURN TO CALLER
+*
+* SEGC -- SEG CORE INTO THE BUFFER AND FORMAT IT NICE
+*
+SEGC     STM   R0,R15,0(R13)
+         LA    R13,64(,R13)  UPDATE THE POINTER
+         CLC   MSGLEN,=H'0'  IS THERE ANYTHING IN THE BUFFER?
+         BE    SGCBUFOK
+         BAL   R14,SEGWRITE  IF SO WRITE IT OUT NOW TO MAKE ROOM
+SGCBUFOK LA    R1,0(,R1)     MASK OUT HIGH BYTE
+         LR    R10,R1        ACTUAL STARTING LOCATION
+         LR    R9,R0         LENGTH
+         AR    R9,R10        GIVES ACTUAL ENDING LOCATION
+         LR    R8,R1
+         SRL   R8,4
+         SLL   R8,4          GET A 16 BYTE BOUNDARY
+*
+* NOW WE LOOP, MOVING IN 16 BYTES AT A TIME TILL WE ARE DONE
+*
+SEGCLP   MVC   MSGAREA(SEGCLEN),BLANKS
+         BTX   CORAD,,(R8)  CONVERT THE ADDRESS                         *MVS/XA*
+         L     R15,0(,R8)
+         BTX   WORD1,,(R15)
+         L     R15,4(,R8)
+         BTX   WORD2,,(R15)
+         L     R15,8(,R8)
+         BTX   WORD3,,(R15)
+         L     R15,12(,R8)
+         BTX   WORD4,,(R15)  ALL THE CORE IS SEGGED
+         MVI   LBAR,C'|'
+         MVI   RBAR,C'|'     PUT IN OUR NEAT LITTLE BARS
+         MVC   CVCHAR,0(R8)  MOVE IN THE CORE
+         TR    CVCHAR,TRAN   THEN TRANSLATE IT
+*
+* NOW WE CHECK TO SEE WHETHER WE ARE AHEAD OF OUR TIME.
+* THAT IS, WE SEE IF WE ARE SEGGING CORE BEFORE THE START ADDRESS
+* AND IF WE ARE, OR RATHER DID, WE FIX IT UP HERE.
+*
+         CR    R8,R10        DID WE?
+         BNL   SEGC1         NOPE
+*
+* WE DID HERE, BLANK OUT BAD STUFF
+*
+         BTX   CORAD,,(R10) MOVE IN ACTUAL STARTING ADDRESS             *MVS/XA*
+         LR    R3,R10
+         SR    R3,R8         LENGTH WE OVERSHOT
+         LR    R2,R3
+         BCTR  R2,0          REDUCE IT BY 1
+         EX    R2,BLNKIT     MOVE IN JUNK
+         SR    R2,R2         GET READY FOR DIVIDE
+         D     R2,=F'4'      GET US A WORD NUMBER AND A BYTE NUM
+         MH    R3,=H'9'      NUMBER OF BYTES/WORD
+         SLL   R2,1          NUMBER OF BYTES/BYTE
+         AR    R2,R3         GET TOTAL NUMBER OF BYTES TO BLANK
+         BCTR  R2,0          DEC FOR EX
+         EX    R2,BLNK2      THEN DO THE BLANK
+*
+* OK. NOW WE WRITE OUT THE BUFFER
+*
+SEGC1    LA    R1,SEGCLEN
+         STH   R1,MSGLEN
+         BAL   R14,SEGWRITE
+*
+* UPDATE THE ADDRESS AND SEE IF WE ARE DONE?
+*
+         LA    R8,16(,R8)    UPDATE THE ADDRESS
+         CR    R8,R9         ARE WE DONE?
+         BNH   SEGCLP        NOPE.  SO GO BACK FOR MORE
+*
+* ALL DONE SO WE CAN JUST GO HOME
+*
+         SH    R13,=H'64'
+         LM    R0,R15,0(R13) RESTORE REGISTERS
+         BR    R14
+*
+BLNKIT   MVC   CVCHAR(*-*),=C'................'
+BLNK2    MVC   WORD1(*-*),BLANKS
+*
+*
+* SEGWR -- SEG DATA IN THEN WRITE OUT THE BUFFER
+*
+SEGWR    STM   R0,R15,0(R13)
+         LA    R13,64(,R13)
+         SEG   (R1),(R0)     MOVE THE DATA IN
+         BAL   R14,SEGWRITE  THEN GO WRITE IT
+         SH    R13,=H'64'
+         LM    R0,R15,0(R13) RESTORE THE REGISTERS
+         BR    R14
+*
+*
+* SEGWRITE -- WRITE THE BUFFER OUT TO THE CORRECT LOCATION
+*
+SEGWRITE STM   R0,R15,0(R13) SAVE THE REGISTERS
+         LH    R1,MSGLEN     GET THE LENGTH
+         LA    R1,4(,R1)     ADD THE LENGTH OF THE PARM
+         STH   R1,MSGLEN     AND PUT IT BACK
+         LA    R1,WTOPARM(R1)        POINT AT THE END OF THE AREA
+         MVC   0(4,R1),DESC  MOVE IN THE DESCRIPTOR AND ROUT CODES
+*
+         TM    PARMFL,FWTL+FWTO    WTO NEEDED?
+         BZ    LOG                 BR IF NOT
+         MVI   MCSFL,X'80'         INIT MCS FLAGS
+         TM    PARMFL,FWTL         MODE=WTL SPECIFIED?
+         BZ    *+8                 BR IF NOT
+         OI    MCSFL,X'02'         FLAG HARDCOPY ONLY
+         WTO   MF=(E,WTOPARM)      ISSUE WTO
+         B     WRTDONE
+*
+LOG      HASPSERV WTL,WTOPARM      MODE=LOG - WRITE TO JOB LOG
+*
+WRTDONE  SR    R1,R1
+         STH   R1,MSGLEN     SAVE THE MSGLEN AGAIN
+         LM    R0,R15,0(R13) RESTORE THE REGISTERS
+         BR    R14
+*
+* OTHER DATA AREA
+*
+DESC     DC    X'0000',B'0100000000000000'     ROUT CODE 2
+BLANKS   DC    CL110' '
+HEXTAB   DC    C'0123456789ABCDEF'
+TRAN     DS    0XL256
+*                0123456789ABCDEF
+         DC    C'................'   0
+         DC    C'................'   1
+         DC    C'................'   2
+         DC    C'................'   3
+         DC    C' .........^.<(+|'   4
+         DC    C'&&.........!$*);~'  5
+         DC    C'-/........Ÿ,%_>?'   6
+         DC    C'..........:#@''="'  7
+         DC    C'.abcdefghi......'   8
+         DC    C'.jklmnopqr......'   9
+         DC    C'..stuvwxyz......'   A
+         DC    C'................'   B
+         DC    C'.ABCDEFGHI......'   C
+         DC    C'.JKLMNOPQR......'   D
+         DC    C'..STUVWXYZ......'   E
+         DC    C'0123456789......'   F
+         END   IGC0022B
+//LKED.SYSLMOD DD DSN=SYS2.XA.RESLIB(IGC0022B),
+//           DISP=OLD

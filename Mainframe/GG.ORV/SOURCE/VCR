@@ -1,0 +1,898 @@
+VCR      TITLE 'Orvyl''s Conversion Routines'
+********************************************************************
+*                                                                  *
+* Orvyl/370 - Release III - Class I - Stanford Proprietary         *
+*                                                                  *
+********************************************************************
+         SPACE 2
+
+         HIBAL ,                   Define HIBAL macro subsystem
+         REGS  ,,SR,TR,QR,RR,PR,BR,WAR,,,,,,RAR
+         SPACE 2
+VCR      CSECT ,
+         IDENT 03                  Year Y2K modifications
+         SPACE 2
+         COPY  ORVDEFN
+         SPACE 2
+         EJECT ,
+*box
+*
+*  Constants
+*
+         space 2
+         DATA  BEGIN
+MONTHS   DC    H'31,29,31,30,31,30,31,31,30,31,30,31,999'
+DAYFUDGE DC    FL1'00,03,02,05,00,03,05,01,04,06,02,04'
+*
+MONTEXT  DS    0H
+         DC    AL1(7),CL9'January'
+         DC    AL1(8),CL9'February'
+         DC    AL1(5),CL9'March'
+         DC    AL1(5),CL9'April'
+         DC    AL1(3),CL9'May'
+         DC    AL1(4),CL9'June'
+         DC    AL1(4),CL9'July'
+         DC    AL1(6),CL9'August'
+         DC    AL1(9),CL9'September'
+         DC    AL1(7),CL9'October'
+         DC    AL1(8),CL9'November'
+         DC    AL1(8),CL9'December'
+*
+DAYS     DS    0H
+         DC    AL1(6),CL9'Sunday'
+         DC    AL1(6),CL9'Monday'
+         DC    AL1(7),CL9'Tuesday'
+         DC    AL1(9),CL9'Wednesday'
+         DC    AL1(8),CL9'Thursday'
+         DC    AL1(6),CL9'Friday'
+         DC    AL1(8),CL9'Saturday'
+
+BLANKS   DC    CL32' '
+
+HEXTBL   DC    C'0123456789ABCDEF'
+
+EDMASK   DC    0CL15' ',4C' ',9X'20',X'2120'    STANDARD EDIT MASK
+
+EDMASKC  DC    0CL15' '                EDIT MASK WITH COMMAS
+         DC    X'402020',C',',3X'20',C',',3X'20',C',',X'202120'
+
+         DC    0S(L'EDMASK-L'EDMASKC,L'EDMASKC-L'EDMASK)
+
+BTREDMSK DC    0CL24' ',14X'20',X'2120',C'.',7X'20'
+         END   ,
+         EJECT ,
+*box
+*
+*        Stack dynamic work area
+*
+         space 2
+WA       RECORD BEGIN
+         XSA   0,8                 Reserve words for register save
+DEC      DS    D                   Double word work area
+HEXW     DS    F
+HEXS     DS    CL16
+EDITAREA EQU   HEXS,L'EDMASK       BTD, BTDC stack work area
+FLAGS2   FLAG  ,
+         FLAG  UNSIGNED
+         ORG   HEXW
+DAYSAVE  DS    3A
+FLAGS    FLAG  ,
+         FLAG  POINT
+         FLAG  TEXTDATE
+         FLAG  FLDAY
+REDITWA  DS    CL17
+         DC    0A(0)               Round out stack space to word bndry
+         ORG   ,                   Origin out to highest level
+         END   ,
+VCR      CSECT ,                   Resume VCR control section
+         EJECT ,
+         space 2
+*box
+*
+*  RTRIM -- Trim right-side (trailing) blanks.
+*
+*    On entry:
+*      R1,R0 - string location, length
+*
+*    On exit:
+*       CC = 0 - String was all blank
+*       CC = P - R0 & R1 updated
+*
+RTRIM    XENTER R2,R8              Enter and save calling registers
+         LR    R6,R1               Copy starting address of string
+         AR    R6,R0               Compute ending address+1
+         DECR  R6                  Point to last character in string
+         WHILE ((R0,POS),AND,(@R6,EQ,' ')),'DECR R6; DECR R0'
+         XEXIT R2,R8               Restore registers and return
+         DROP  BR                  Release routine addressability
+         SPACE 2
+*box
+*
+*  LRTRIM -- Trim left and right-side (leading/trailing) blanks.
+*
+*    On entry:
+*      R1,R0 - string loc, len
+*
+*    On exit:
+*       CC = 0 - String was all blank
+*       CC = P - R0 & R1 updated
+*
+LRTRIM   XENTER R2,R8
+         WHILE ((R0,POS),AND,(@R1,EQ,' ')),'LA R1,@R1+1; DECR R0'
+         LR    R6,R1               Update to first non-blank
+         AR    R6,R0               Compute ending address+1
+         DECR  R6                  Point to last character in string
+         WHILE ((R0,POS),AND,(@R6,EQ,' ')),'DECR R6; DECR R0'
+         XEXIT R2,R8               Restore registers and return
+         DROP  BR                  Release routine addressability
+         EJECT
+*box
+*
+*   DTB -- Routine to convert integer strings.
+*
+*     On entry:
+*       R1,R0 - text loc, len
+*
+*     On exit:
+*       CC = 0 - R15 = 32 bit integer value
+*
+*       CC =^0 - Invalid decimal string
+*          = 1 - Invalid decimal digit encountered
+*          = 2 - Invalid decimal digit encountered
+*          = 3 - Arithmetic overflow has occurred
+*
+         space 2
+DTB      XENTER R2,R8
+         CLEAR R15                 Clear accumulated result
+         WHILE (R0,P),BEGIN        Scan through all digits
+         IF    (@R1,LT,C'0'),EXIT  Terminate on invalid character
+         IF    (@R1,GT,C'9'),EXIT  Terminate on invalid character
+         LC    SR,@R1              Load next character
+         SL    SR,=A(C'0')         Convert from EBCDIC to binary
+         MHI   R15,10              Shift accumulation registers
+         AR    R15,SR              Add in current digit
+         IF    O,EXIT              Abort on arithmetic overflow
+         LA    R1,@R1+1            Bump to potential next digit
+         DECR  R0                  Decrement remaining length
+         END   ,                   Return for next digit in string
+         XEXIT R2,R8               Condition code has been set
+         DROP  BR                  Release routine addressability
+         EJECT ,
+*box
+*
+*   XTB -- Routine to convert hexadecimal strings.
+*
+*     On entry:
+*       R1,R0 - text loc, len
+*               (Digits 0-9 and Uppercase A-F)
+*
+*     On exit:
+*       CC = 0 - R15 = 32 bit binary value
+*
+*       CC =^0 - Invalid hexadecimal string
+*
+         space 2
+XTB      XENTER R2,R8
+         CLEAR R15
+         WHILE (R0,P),BEGIN        Scan through all hex digits
+         LC    SR,@R1              Pick up digit
+         IF    (@R1,LT,C'A'),EXIT  Exit on invalid hex digit
+         IF    (@R1,LE,C'F'),BEGIN Convert range A-F
+         SL    SR,=A(C'A'-10)      Leave value 10 through 15 (Bin)
+         END   ELSE,BEGIN
+         IF    (@R1,LT,C'0'),EXIT  Exit on invalid hex digit
+         IF    (@R1,GT,C'9'),EXIT  Exit on invalid hex digit
+         SL    SR,=A(C'0')         Leave vlaue 0 through 9 (Bin)
+         END   ,
+         SLL   R15,4               Shift over preceeding results
+         OR    R15,SR              Include current hex digit
+         LA    R1,@R1+1            Bump to next potential digit
+         DECR  R0                  Decrement remaining length
+         END   ,                   Loop back for next potential digit
+         XEXIT R2,R8
+         DROP  BR                  Release routine addressability
+         EJECT ,
+*
+**  BTD   -- Routine to format integer strings.
+**  BTDC  -- Routine to format integer strings with commas.
+**  BTDU  -- Routine to format integer strings (unsigned).
+**  BTDUC -- Routine to format integer strings with commas.
+**
+**    On entry:
+**      R15   - 32 bit integer value
+**      R1    - return area
+**      R0    - Maximum length of result    (Positive)
+**            - Number of leading blanks    (Negative)
+**            - Return actual string length (Zero)
+**
+**    On exit:
+**      R1,R0 - text loc, len
+*
+         USING WA,WAR              Addressability to stack work area
+BTDU     XENTER SR,WAR,L'WA
+         LA    RR,EDMASK           Convert with standard mask
+         SET   UNSIGNED
+         B     BTDMERGE
+         DROP  BR                  Release temporary base
+         SPACE ,
+BTDUC    XENTER SR,WAR,L'WA
+         LA    RR,EDMASKC          Convert with comma mask
+         SET   UNSIGNED
+         B     BTDMERGE
+         DROP  BR                  Release temporary base
+BTD      XENTER SR,WAR,L'WA
+         LA    RR,EDMASK           Convert with standard mask
+         CLEAR UNSIGNED
+         B     BTDMERGE
+         DROP  BR                  Release temporary base
+         SPACE ,
+BTDC     XENTER SR,WAR,L'WA
+         LA    RR,EDMASKC          Convert with comma mask
+         CLEAR UNSIGNED
+         DROP  BR                  Release temporary base
+         SPACE ,
+BTDMERGE BASE  ,                   Set common base to BTD,BTDC
+         IF    (UNSIGNED,AND,(R15,NEG)),BEGIN
+         N     R15,=X'7FFFFFFF'    Remove sign
+         CVD   R15,DEC             Convert to packed
+         AP    DEC,=P'2147483648'  Add back unsign
+         END   ,
+         ELSE  BEGIN
+         CVD   R15,DEC             Convert passed value to packed
+         END   ,
+         MVC   EDITAREA,@RR        Move in requested edit mask
+         LR    RR,R1               Save return area location
+         LA    R1,EDITAREA+L'EDITAREA-1  DEFAULT SIGNIFIGANCE
+         EDMK  EDITAREA,DEC+2      Can be at most 10 digits
+         IF     (R15,NEG),BEGIN    Insert minus sign if negative
+         DECR  R1                      BACK UP ONE
+         MVI   @R1,C'-'                SHOVE IT IN
+         END    ,
+         LA    TR,EDITAREA+L'EDITAREA  CALCULATE LENGTH OF RESULT
+         SR    TR,R1                   IN TR
+         LR    R1,RR                   RESTORE RETURN POINTER
+         IF     (R0,NP),BEGIN          NOT FIXED FIELD, CALCULATE
+         LCR   R0,R0                   DESIRED NUMBER OF LEADING
+         AR    R0,TR                   BLANKS
+         END    ,
+         LA    SR,EDITAREA+L'EDITAREA  GET FROM ADDRESS
+         SR    SR,R0
+         LR    TR,R0                   MOVE LENGTH FOR EXECUTE
+         DEX   TR,'MVC  @R1(0),@SR'    MOVE RESULT TO USER AREA
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT ,
+*
+**  BTX -- Routine to format hexadecimal strings.
+**
+**    On entry:
+**      R15   - 32 bit integer value
+**      R1    - return area
+**      R0    - Maximum length of result    (Positive)
+**            - Number of leading blanks    (Negative)
+**            - Return actual string length (Zero)
+**
+**    On exit:
+**      R1,R0 - text loc, len
+*
+BTX      XENTER R2,R8,L'WA
+         USING WA,WAR                  ##
+         ST    R15,HEXW                WORD TO BE CONVERTED
+         UNPK  HEXS(9),HEXW(5)         TO ZONED FORMAT
+         TR    HEXS(8),HEXTBL-C'0'     TO HEX FORMAT
+         LTR   TR,R0                   LENGTH
+         IF    Z,BEGIN                 NOT GIVEN CALCULATE IT
+         LA    SR,HEXS-1
+         LA    TR,7
+BTXCHK0  LA    SR,@SR+1
+         CLI   @SR,C'0'                START OF NON-ZERO STUFF?
+         BNE   BTXX                    YES, DONE
+         BCT   TR,BTXCHK0              KEEP LOOKING
+         LA    SR,@SR+1                POINT TO LAST DIGIT
+BTXX     LA    R0,@TR+1                GET REAL LENGTH IN R0
+         END   ELSE,BEGIN
+         LA    SR,HEXS+8               COMPUTE ADDR TO MOVE FROM
+         SR    SR,TR
+         DECR  TR
+         END   ,
+         EX    TR,'MVC  @R1(0),@SR'    MOVE TO USERS AREA
+         XEXIT R2,R8
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT ,
+*
+**  RTB -- Routine to convert decimal strings.
+**
+**    On entry:
+**      R1,R0 - text loc, len
+**      R15   - Number of decimal places
+**
+**    On exit:
+**      CC = 0 - R15 = 32 bit integer value
+**
+**      CC =^0 - Invalid decimal string
+*
+RTB      XENTER SR,WAR,L'WA
+         USING WA,WAR                  ##
+         CLEAR POINT                   NO DECIMAL POINT YET
+         CLEAR TR                      ZERO RESULT REG
+*
+RTBLOOP  IF    ('CLI  @R1,C"."',E),BEGIN   DECIMAL POINT?
+         IF    POINT,INVRVAL           IF ALREADY HAVE ONE, ERROR
+         SET   POINT                   GOT ONE NOW
+         END   ELSE,BEGIN
+         LC    SR,@R1                  GET CHARACTER
+         S     SR,=A(C'0')             GET BINARY VALUE FOR DIGIT
+         BM    INVRVAL                 NOT A DIGIT
+         IF    (SR,GE,=Y(10)),INVRVAL  SEE IF TOO LARGE
+         MH    TR,=Y(10)               SHIFT RESULT BY ONE DIGIT
+         AR    TR,SR                   ACCUMULATE RESULT
+         IF    POINT,BEGIN             CHECK FOR TOO MANY
+         DECR  R15                     DECIMAL PLACES
+         IF    (R15,M),INVRVAL         IF SO, BAD VALUE
+         END   ,
+         END   ,
+         LA    R1,@R1+1                BUMP POINTER
+         BCT   R0,RTBLOOP              IF MORE, GO TO NEXT
+         IF    (R15,P),BEGIN           IF NEED TO SHIFT IT MORE,
+         MH    TR,=Y(10)               SHIFT IT BY A DIGIT
+         BCT   R15,*-4                 LOOP UNTIL DONE
+         END   ,
+         LR    R15,TR                  RETURN VALUE IN R15
+RTBEXIT  XEXIT SR,WAR,LTR              RETURN TO CALLER
+         SPACE 2
+INVRVAL  CLEAR R15                     INVALID VALUE, RETURN
+         DECR  R15                     MINUS CONDITION CODE
+         B     RTBEXIT
+*
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT ,
+*
+**  BTR -- Routine to format decimal strings.
+**
+**    On entry:
+**      R15   - 32 bit integer value
+**      R1    - return area
+**      R0    - Bytes 0-2 Length of area
+**            - Byte 3    Number of decimal places (0-7)
+**
+**    On exit:
+**      R1,R0 - text loc, len
+*
+BTR      XENTER SR,WAR,L'WA
+         USING WA,WAR                  ##
+         LR    RR,R1                   SAVE OUTPUT POINTER
+         CVD   R15,DEC
+         LA    SR,X'07'                GET NUMBER
+         NR    SR,R0                    OF DIGITS
+         LA    TR,BTREDMSK(SR)         GET START OF MASK TO USE
+         LA    R1,REDITWA+15           DEFAULT STARTING POINT
+         SR    R1,SR                   MINUS OFFSET
+         MVC   REDITWA,@TR             GET MASK
+         MVI   REDITWA,C' '            FIRST BYTE IS PAD CHAR
+         EDMK  REDITWA,DEC             EDIT NUMBER
+         IF    (R15,NEG),'DECR R1; MVI @R1,C"-"'
+         SRA   R0,8                    GET NUMBER OF DIGITS TO PRODUCE
+         IF     Z,BEGIN                IF 0, USE AS MUCH AS NECESSARY
+         LA    R0,REDITWA+L'REDITWA    R1 POINTS TO START,
+         SR    R0,R1                   GET LENGTH IN R0
+         END
+         ELSE  BEGIN
+         LA    R1,REDITWA+L'REDITWA    R0 HAS LENGTH,
+         SR    R1,R0                   GET START IN R1
+         END
+         LR    SR,R0                   LENGTH IN SR FOR EXECUTE
+         DEX   SR,'MVC  @RR(0),@R1'    MOVE TO OUTPUT
+         LR    R1,RR                   SET R1 TO POINT TO OUTPUT
+         XEXIT SR,WAR                  DONE
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT
+*
+**  FMTELAPS -- routine to format elapsed time
+**
+**    On entry:
+**      R0-R1 - 64 bit elapsed time in TOD format
+**      R15   - return area (16 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc,len    returns: dddd hh:mm:ss.hh
+**                                 where dddd = number of days
+**                                   and hh:mm:ss.hh is the
+**                                     number of hours etc.
+**    Note: Days truncate to 4 digits which gives over 27 years
+*
+FMTELAPS XENTER SR,WAR,*
+         LR    R6,R15              get return area pointer
+         CLEAR (@R6,16)            clear workarea
+         LR    R4,R0               get input time
+         LR    R5,R1               get input time
+* BIT 51 is one milisecond
+         SRDL  R4,12+6             calc no of .000001*64 seconds
+         D     R4,=A(1000000/64*60*60*24) calc number of days
+         BTD   @R6,4,(R5)          convert days
+         LR    R5,R4               get .000001*64 secs remainder
+         CLEAR R4
+         D     R4,=A(1000000/64*60*60) calc number of hours
+         BTD   @R6+5,2,(R5)        convert hours
+         LR    R5,R4               get .000001*64 secs remainder
+         CLEAR R4
+         D     R4,=A(1000000/64*60) calc number of minutes
+         BTD   @R6+8,2,(R5)        convert minutes
+         LR    R5,R4               get .000001*64 secs remainder
+         CLEAR R4
+         D     R4,=A(1000000/64)   calc number of seconds
+         BTD   @R6+11,2,(R5)       convert seconds
+         LR    R5,R4               get .000001*64 secs remainder
+         CLEAR R4
+         D     R4,=A(10000/64)     calc number of .01 seconds
+         BTD   @R6+14,2,(R5)       convert .01 seconds
+         OC    @R6(16),=C'     00:00:00.00' leading zeros
+         SETMSG @R6,16              set output pointers
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  FMTCLCK -- Routine to format time/date from TOD clock.
+**
+**    On entry:
+**      R0-R1 - 64 bit clock (zero = current time/date)
+**      R15   - return area (26 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc, len    returns: hh:mm:ss mm/dd/yy (yy.ddd)
+*
+FMTCLCK  XENTER SR,WAR,*
+         LR    R6,R15
+         MVC   @R6(26),BLANKS
+*
+         LR    R4,R0
+         LR    R5,R1
+         LCALL FMTTIME             HH:MM:SS
+         MVI   @R6+8,C' '
+*
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,@R6+9
+         LCALL FMTDATE             MM/DD/YY
+*
+         MVI   @R6+18,C'('
+         LR    R0,R4
+         LR    R1,R5
+         LA    R15,@R6+19
+         LCALL FMTJUL              YY.DDD
+         MVI   @R6+25,C')'
+*
+         SETMSG @R6,26
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  FMTRCLCK -- Routine to format time/conditional-date from TOD clock.
+**
+**    On entry:
+**      R0-R1 - 64 bit clock
+**      R2-R3 - 64 bit comparison clock (zero = current)
+**
+**    On exit:
+**      R1,R0 - text loc,len    returns: hh:mm -or- hh:mm mm/dd
+*
+FMTRCLCK XENTER SR,WAR,*
+         LR    R6,R15
+         MVC   @R6(11),BLANKS
+*
+         LR    R4,R0
+         LR    R5,R1
+         VPUSH ,,11,PTR=R15
+         LCALL FMTTIME
+         MVC   @R6(5),@R1          HH:MM
+*
+         LR    R15,R1
+         LR    R0,R4
+         LR    R1,R5
+         LCALL FMTDATE
+         MVC   @R6+6(5),@R1        MM/DD
+         VPOP  ,,11
+*
+         LR    R0,R4
+         LA    R1,R5
+         LCALL TIMEDATE            GET DATE IN R1
+         LR    R5,R1
+*
+         LR    R0,R2
+         LR    R1,R3
+         LCALL TIMEDATE            GET "COMPARISON" DATE IN R1
+*
+         IF    (R1,EQ,R5),'SETMSG @R6,5'  SAME DAY
+         ELSE  'SETMSG @R6,11'
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  FMTTIME -- Routine to format time from TOD clock.
+**
+**    On entry:
+**      R0-R1 - 64 bit clock (zero = current time)
+**      R15   - return area (11 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc, len    returns: hh:mm:ss.hh
+*
+FMTTIME  XENTER SR,WAR,*
+         LR    R6,R15
+         MVC   @R6(11),=C'??:??:??.??'
+*
+         LCALL TIMEDATE            GET TIME IN R0
+         LR    R5,R0
+         CLEAR R4
+         D     R4,=A(60*100)
+         BTR   @R6+6,(5,2),(R4)    SEC.HSEC
+         CLEAR R4
+         D     R4,=A(60)           R4=MIN, R5=HOURS
+         BTD   @R6+3,2,(R4)        MIN
+         BTD   @R6,2,(R5)          HOURS
+         OC    @R6(11),=C'00 00 00 00'  LEADING ZEROS
+*
+         SETMSG @R6,11
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  FMTDATE -- Routine to format date from TOD clock.
+**
+**    On entry:
+**      R0-R1 - 64 bit clock (zero = current date)
+**      R15   - return area (8 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc,len    returns: mm/dd/yy
+*
+FMTDATE  XENTER SR,WAR,*
+         LR    R6,R15
+         MVC   @R6(8),=C'??/??/??'
+*
+         LCALL TIMEDATE            GET JULIAN DATE IN R1
+         CLEAR (@R13,4)
+         ST    R1,@R13+4
+         CVB   R5,@R13             GET "YYDDD" IN BINARY
+         CLEAR R4
+         D     R4,=A(1000)         R4=DAYS, R5=YEAR
+         BTD   @R6+6,2,(R5)
+         IF    ('N R5,=F"3"',NZ),BEGIN  NON-LEAP YEAR...
+         IF    (R4,GE,31+29),'LA R4,@R4+1'  SKIP FEB29TH
+         END
+*
+         LA    R5,1                MONTH
+         LA    R3,MONTHS
+         WHILE ('CH R4,@R3',GT),BEGIN  NOT THIS MONTH...
+         LA    R5,@R5+1
+         SH    R4,@R3
+         LA    R3,@R3+2
+         END
+         BTD   @R6,2,(R5)          MONTH
+         BTD   @R6+3,2,(R4)        DAY
+         OC    @R6(8),=C'00 00 00'
+*
+         SETMSG @R6,8
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  FMTJUL -- routine to format julian date from TOD clock.
+**
+**    On entry:
+**      R0-R1 - 64 bit clock (zero = current date)
+**      R15   - return area (6 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc,len    returns: yy.ddd
+*
+FMTJUL   XENTER SR,WAR,*
+         LR    R6,R15
+*
+         LCALL TIMEDATE            GET JULIAN DATE IN R1
+         CLEAR (@R13,4)
+         ST    R1,@R13+4
+         CVB   R15,@R13            GET "YYDDD" IN BINARY
+         BTR   @R6,(6,3),(R15)
+         OC    @R6(6),=C'00 000'
+*
+         SETMSG @R6,6
+         XEXIT SR,WAR
+         DROP  BR                  Release routine addressability
+         EJECT
+*
+**  ORVTIMDT -- Routine to calculate ORVYL time/date.
+**
+**    On exit:
+**      R1 - time (in 26 usec's past midnight)
+**      R15- date (in "yyyymmdd" packed decimal format)
+*
+ORVTIMDT XENTER R2,R8,L'WA
+         USING WA,WAR                  ##
+         CLEAR R0,R1
+         LCALL TIMEDATE
+         CLEAR DEC
+         ST    R1,DEC+4
+         LR    R1,R0                   RETURN TU TIME
+         MH    R1,=Y(384)
+         CVB   R5,DEC                  GET "YYDDD" IN BINARY
+         CLEAR R4
+         D     R4,=A(1000)             R4=DAYS, R5=YEAR
+         IF    ('N R5,=F"3"',NZ),BEGIN    NON-LEAP YEAR...
+         IF    (R4,GE,31+29),'LA R4,@R4+1'   SKIP FEB 29TH
+         END   ,
+*
+         LA    R5,1                MONTH
+         LA    R3,MONTHS
+         WHILE ('CH R4,@R3',GT),BEGIN  NOT THIS MONTH...
+         LA    R5,@R5+1
+         SH    R4,@R3
+         LA    R3,@R3+2
+         END
+         CLEAR R15
+         ICM   R15,4,DEC+5             RETRIEVE YEAR
+         ICM   R15,8,=X'19'            INSERT CENTURY
+         MH    R5,=Y(100)              MONTH TIMES 100
+         AR    R5,R4                   PLUS DAY
+         CVD   R5,DEC                  TO DECIMAL
+         L     R5,DEC+4                GET NUMBER
+         SRL   R5,4                    SHIFT SIGN OUT
+         OR    R15,R5
+         XEXIT R2,R8                   RETURN TO CALLER
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT
+*
+**  TIMEDATE -- Routine to calculate time/date from TOD clock.
+**    (Note the format returned is the same as the "TIME BIN" svc.)
+**
+**    On entry:
+**      R0-R1 - 64 bit clock (zero = current time/date)
+**
+**    On exit:
+**      R0 - time (in .01 sec's past midnight)
+**      R1 - date (in "yydddf" packed decimal format)
+*
+TIMEDATE XENTER R2,R8,*
+         IF    ((R0,Z),AND,(R1,Z)),BEGIN
+         STCK  @R13
+         LM    R0,R1,@R13
+*        L     R2,CVTPTR               OS CVT
+*        WITH  (CVT,R2),'AL  R0,CVTTZ'   GET LOCAL TIME
+         END   ,
+*
+         SRDL  R0,12+6             .000001*64 OF A SEC
+         D     R0,=A(1000000/64*60*60*24)  ONE DAY
+         LA    R3,@R1+1            NO. OF DAYS SINCE 1900
+         LR    R1,R0               .000001*64 SEC SINCE MIDNIGHT
+         CLEAR R0
+         SLDL  R0,6                .000001 SEC SINCE MIDNIGHT
+         D     R0,=A(10000)        .01 SEC SINCE MIDNIGHT
+         LR    R0,R1
+*
+         CLEAR R2
+         M     R2,=A(100)
+         D     R2,=A(36525)        DAYS/365.25 = YEARS
+         LR    R1,R3               YEAR
+         MH    R1,=H'1000'         YY*1000
+         LR    R3,R2
+         CLEAR R2
+         D     R2,=A(100)          R3 = DAYS IN THIS YEAR (REL ZERO)
+         LA    R1,@R3+1(R1)        FORM "YYDDD"
+         CVD   R1,@R13
+         OI    @R13+7,X'0F'        MAKE SIGN CORRECT
+         L     R1,@R13+4           DATE IN PACKED DECIMAL
+         XEXIT R2,R8
+         DROP  BR                  Release routine addressability
+         EJECT ,
+*
+**  Routines to format day and date:
+**
+**  DAY   -  Routine to format day of the week.
+**           returns: ddddddd  (i.e. Thursday)
+**
+**  DATE  -  Routine to format date.
+**           returns: mm/dd/yy
+**
+**  DAYF  -  Routine to format day of the week and text form date.
+**           returns: dddddddd, mmmmmmmm nn, yyyy
+**                    (i.e. Wednesday, September 13, 1981)
+**
+**  DATEF -- Routine to format text form date.
+**           returns: mmmmmmmm nn, yyyy (i.e. March 15, 1981)
+**
+**    On entry:
+**      R0 - (Positive) - date in "yydddf" format (VS TIME BIN)
+**           (Negative) - date in "yyyymmdd" format (ORVYL SENSE 3)
+**      R1 - return area (8-23 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc, len
+*
+         EJECT
+         USING WA,WAR                  ##
+*
+DAY      XENTER R2,R8,L'WA
+         SET   FLDAY                   INDICATE DAY WANTED
+         B     DODATE                  JOIN THE COMMON
+         SPACE 3
+DAYF     XENTER R2,R8,L'WA
+         SET   FLDAY+TEXTDATE          THE WORKS PLEASE
+         B     DODATE                  JOIN THE COMMON
+         SPACE 3
+DATEF    XENTER R2,R8,L'WA
+         SET   TEXTDATE                INDICATE TEXT STYLE
+         B     DODATE                  JOIN THE COMMON
+         SPACE 3
+DATE     XENTER R2,R8,L'WA
+         CLEAR FLAGS                   CLEAR
+         EJECT ,
+DODATE   BASE  ,
+         IF    (R0,NP),BEGIN           ORVYL FORM
+         LCR   R0,R0
+         ST    R0,DEC+4                PLANT DATE
+         UNPK  DEC(3),DEC+5(2)         CONVERT YEAR
+         MVC   @R1+6(2),DEC            PUT INTO AREA
+         PACK  DEC(8),@R1+6(2)         REPACK IT
+         CVB   QR,DEC                  CONVERT YEAR TO BINARY
+         ST    R0,DEC                  STORE ORIG VALUE AGAIN
+         MVO   DEC(8),DEC+3(1)         MOVE DAY
+         CVB   SR,DEC                  DAY OF THE MONTH
+         ST    R0,DEC                  AND ONCE MORE
+         MVO   DEC(8),DEC+2(1)         MOVE MONTH
+         CVB   TR,DEC                  MONTH
+         MH    TR,=H'10'
+         END   ELSE,BEGIN              OS STYLE DATE
+         ST    R0,DEC+4                PLANT DATE
+         UNPK  DEC(3),DEC+5(2)         CONVERT YEAR
+         MVC   @R1+6(2),DEC            PUT INTO AREA
+         PACK  DEC(8),@R1+6(2)         REPACK IT
+         CVB   QR,DEC                  CONVERT TO BINARY
+         ST    R0,DEC+4                STORE ORIG VALUE AGAIN
+         CLEAR (DEC,6)                 CLEAR FOR CVB
+         NI    DEC+7,X'F0'             SET SIGN
+         OI    DEC+7,X'0C'
+         CVB   SR,DEC                  DAY OF YEAR
+         CL    SR,=A(31+28)            BEFORE FEB 28?
+         IF    H,BEGIN                 NO
+         LA    RR,3                    MASK FOR LEAP YEARS
+         NR    RR,QR
+         IF    Z,EXIT
+         LA    SR,@SR+1                ALLOW FOR FEB 29
+         END  ,
+         LA    TR,10                   SET MONTH TO JAN
+         LA    RR,MONTHS
+         WHILE ('CH  SR,@RR',H),BEGIN
+         SH    SR,@RR                  TRY NEXT MONTH
+         LA    TR,@TR+10
+         LA    RR,@RR+2
+         END   ,
+         END   ,
+         EJECT
+*
+*      MONTH TIMES 10 IN TR, DAY IN SR AND YEAR IN QR
+*
+         IF    FLDAY,DODAY             WANTS DAY?
+         IF    TEXTDATE,DOTEXT         WANTS FANCY FORM?
+         CVD   TR,DEC                  CONVERT MONTH
+         UNPK  @R1(3),DEC+6(2)
+         MH    SR,=H'10'
+         CVD   SR,DEC                  CONVERT DAY
+         UNPK  @R1+3(3),DEC+6(2)
+         MVI   @R1+2,C'/'
+         MVI   @R1+5,C'/'
+DATEXIT  XEXIT R2,R8
+*
+DODAY    DS    0H
+         STM   SR,QR,DAYSAVE           SAVE FOR LATER
+         SR    SR,SR                   NEED MONTH AS INTEGER
+         D     SR,=A(10)
+         L     SR,DAYSAVE              REFRESH DAY VALUE
+         CH    TR,=H'2'                CHECK FOR M<=2
+         BH    *+6                     LEAVE ALONE IF HIGH
+         DECR  QR                      ELSE DECREMENT
+         SRDA  QR,2                    GET YY DIV 4
+         SRL   RR,30                   GET YY MOD 4
+*
+         SR    R0,R0                   CLEAR FOR IC
+         IC    R0,DAYFUDGE-1(TR)       GET FUDGE FACTOR
+         AR    SR,R0                   ADD TO D
+         LA    QR,@QR+3                GET (X2=3)+X3
+         MH    QR,=H'5'                MULT BY 5
+         AR    SR,QR                   ADD TO D+G(M)
+         AR    SR,RR                   ADD ON X4
+         SRDA  SR,32                   SMEAR FOR DIVIDE
+         D     SR,=F'7'                GET (THING) MOD 7
+         MH    SR,=H'10'               MAKE INTO INDEX
+         LC    R0,DAYS(SR)             RETURN LEN OF DAY NAME
+         LA    SR,DAYS+1(SR)           GET ADDRESS
+         MVC   @R1(9),@SR               AND MOVE IN
+         IF    ^TEXTDATE,DATEXIT       A BIG FINISH?
+         LR    RR,R1                   LOCATION
+         AR    RR,R0                   POINT AT END
+         MVC   @RR(2),=C', 19'         MAKE IT PRETTY
+         AH    R0,=Y(2)                RESET LENGTH
+         LA    RR,@RR+2                 POINTER
+         LM    SR,QR,DAYSAVE             AND BINARY DATE
+         B     DOTEXTD                 JUMP IN FEET FIRST
+         EJECT ,
+DOTEXT   DS    0H
+         SR    R0,R0                   CUMMULATIVE LENGTH
+         LR    RR,R1                    AND OUTPUT POINTER
+DOTEXTD  DS    0H
+         SH    TR,=H'10'               MAKE INTO INDEX
+         LA    TR,MONTEXT(TR)          POINT AT RIGHT ONE
+         MVC   @RR(9),@TR+1            MOVE IN MONTH NAME
+         CVD   SR,DEC                  CONVERT DAY
+         LC    SR,@TR                  GET PROPER LENGTH
+         AR    R0,SR                   FOR USER
+         LA    RR,@RR(SR)               AND OUTPUT
+         OI    DEC+7,X'0F'             SET SIGN
+         UNPK  @RR(3),DEC+6(2)         CONVERT DAY
+         MVI   @RR,C' '
+         LA    SR,3                    ASSUMED LENGTH
+         CLI   @RR+1,C'0'              LEADING?
+         BNE   DOTOK                   ALL SET IF NOT
+         MVC   @RR+1(1),@RR+2          MOVE UP ONE
+         DECR  SR                       AND DOWN ONE
+DOTOK    LA    RR,@RR(SR)              POINTER
+         MVC   @RR(4),=C', 19'         TIDY
+         LA    RR,@RR+4                RESET POINTER
+         LA    SR,@SR+6
+         AR    R0,SR                   TOTAL COUNT
+         CVD   QR,DEC                  CONVERT YEAR
+         OI    DEC+7,X'0F'             SET SIGN
+         UNPK  DEC(3),DEC+6(2)
+         MVC   @RR(2),DEC+1            AND ADD IT IN
+         B     DATEXIT
+         SPACE 4
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT ,
+*
+**  TIME -- Routine to format time
+**
+**    On entry:
+**      R0 - time (in .01 sec's past midnight)
+**      R1 - return area (8 bytes)
+**
+**    On exit:
+**      R1,R0 - text loc, len    returns: hh:mm:ss
+*
+TIME     XENTER R2,R8,L'WA
+         USING WA,WAR                  ##
+         LR    TR,R0
+         SR    SR,SR
+         D     SR,=F'100'              DISPOSE OF 100THS
+         SR    SR,SR
+         D     SR,=F'60'               GET SECONDS
+         MH    SR,=H'10'
+         CVD   SR,DEC
+         UNPK  DEC(3),DEC+6(2)
+         MVC   @R1+6(2),DEC
+         SR    SR,SR
+         D     SR,=F'60'               GET MINUTES
+         MH    SR,=H'10'
+         CVD   SR,DEC
+         UNPK  @R1+3(3),DEC+6(2)
+         MH    TR,=H'10'
+         CVD   TR,DEC                  HOURS
+         UNPK  @R1(3),DEC+6(2)
+         MVI   @R1+2,C':'
+         MVI   @R1+5,C':'
+         LA    R0,8                    SET LENGTH
+         XEXIT R2,R8
+         DROP  BR                  Release routine addressability
+         DROP  WAR                 Release stack work area
+         EJECT ,
+*box
+*
+*  Define final literal pool
+*
+         space 2
+         LTORG ,
+         SPACE 2
+         END   .

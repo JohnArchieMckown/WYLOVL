@@ -1,0 +1,791 @@
+;;**********************************************************************
+;;  FTP Emulator
+;;
+;;  FTP command shell by John Hascall, Iowa State
+;;  PROCS by Wayne Hauber, Iowa State
+;;
+;;  January 1990
+;;
+;;**********************************************************************
+;;  Comments about version 1.0 of this FTP User Interface...
+;;
+;;  WYLBUR can't do the traditional FTP user interface.  This XPROC is an
+;;  emulation of the traditional FTP user interface.  It was written primarily
+;;  to provide MGET and MPUT capability to WYLBUR.
+;;
+;;  WYLBUR integrates FTP functions into the WYLBUR command language.
+;;  Commands like:  "USE file ON nethost" or "SAVE file ON nethost".
+;;  This exec uses these commands to emulate FTP.
+;;
+;;  This has a MAJOR disadvantage.  FTP has two connections:  The control
+;;  connection and the data connection.  The control connection is left open
+;;  so directories can be changed and so other control information can be
+;;  passed.  The DATA connection can open and close as necessary.  WYLBUR
+;;  closes both the CONTROL and DATA connection after EVERY command.  So,
+;;  directories cannot be CDed and a true OPEN cannot happen.  We've
+;;  implemented a CP (change prefix) command instead of the CD command and
+;;  require the setting of a prefix before a directory can be scanned.  Our
+;;  OPEN happens locally.  So it is kind of a pseudo-open.
+;;
+;;  Version 2 of this emulator should be written using WYLBUR's "net"
+;;  syscalls.  I for one didn't completely understand them at the date of this
+;;  writing.  But one should be able to maintain a control connection and data
+;;  connection using these syscalls.  It seemed counterproductive write the
+;;  emulator using the syscalls until  we knew more...  Wayne
+;;*************************************************************************
+xproc () begin
+   x.pgm = 'FTP'                      ; program name
+   x.maint = '(netexec-maint)'               ; maintenance people
+
+;
+; ftp command shell
+;
+   x.attncmd = 'pcall out'
+   on attn command='&(x.attncmd)'
+   on error command="pcall messages('GEN_ERROR')"
+   declare boolean \
+      FTP_bell \
+      FTP_prompt \
+      FTP_transparent \
+      exit
+   declare string \
+      cmdline \
+      cmdname \
+      cmdtype \
+      remote_password \
+      the_library \
+      parm_host \
+      the_stem
+   declare string \
+      FTP_host \
+      FTP_account \
+      FTP_username \
+      FTP_password \
+      FTP_prefix \
+      FTP_WYLBUR_fmt
+
+   FTP_prompt=true
+   FTP_password = '<suppressed>'
+   comm WYLBUR FTP program (Version 1.0, Iowa State version).
+   parm_host=strip(parm_string)
+;  get hostname from command line
+   pcall open_function (parm_host,FTP_host,FTP_username)
+
+the_top:
+   repeat begin
+      cmdline = input('<.b+>ftp><.b-> ', 'clean')
+;;    Reset TRY variables and do a scan...
+      try syscall scan(cmdname, cmdline, cmdtype, ' ', ' ')
+      cmdname = lower(cmdname)
+      cmdline = strip(cmdline)
+      cases begin
+         case (abbrev('account',     cmdname, 3)) \
+            pcall acct_function (cmdline,FTP_host,FTP_account)
+         case (abbrev('bell',        cmdname, 3)) pcall onoff('bell', FTP_bell, cmdline)
+         case (abbrev('bye',         cmdname, 3)) exit = true
+         case (abbrev('card',        cmdname, 3)) pcall set_format('card',FTP_WYLBUR_fmt)
+         case (abbrev('cp',          cmdname, 2)) pcall cp_function(cmdline,FTP_prefix)
+         case (abbrev('cd',          cmdname, 2)) pcall messages('NO_CD')
+         case (abbrev('close',       cmdname, 3)) \
+            pcall close_function(FTP_host,FTP_username,FTP_account,FTP_prefix)
+         case (abbrev('delete',      cmdname, 3)) pcall delete_function(cmdline,FTP_host,FTP_prefix)
+         case (abbrev('dir',         cmdname, 3)) pcall dir_function('LIST',cmdline,FTP_host,FTP_prefix)
+         case (abbrev('disconnect',  cmdname, 3)) \
+            pcall close_function(FTP_host,FTP_username,FTP_account,FTP_prefix)
+         case (abbrev('edit',        cmdname, 3)) pcall set_format('edit',FTP_WYLBUR_fmt)
+         case (abbrev('fixed',       cmdname, 3)) pcall set_format('fixed',FTP_WYLBUR_fmt)
+         case (abbrev('get',         cmdname, 3)) pcall get_function(cmdline,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt,FTP_WYLBUR_fmt,FTP_bell)
+         case (abbrev('help',        cmdname, 3)) pcall show_help(cmdline)
+         case (abbrev('lcd',         cmdname, 3)) set prefix &(cmdline)
+         case (abbrev('ls',          cmdname, 2)) pcall dir_function('NLST',cmdline,FTP_host,FTP_prefix)
+         case (abbrev('mdelete',     cmdname, 3)) pcall mdelete_function(cmdline,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt)
+         case (abbrev('mget',        cmdname, 3)) pcall mget_function(cmdline,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt,FTP_WYLBUR_fmt,FTP_bell)
+         case (abbrev('mput',        cmdname, 3)) begin
+            pcall WYLBUR_stem_prep (cmdline,the_library,the_stem)
+            pcall mput_function(the_library,the_stem,FTP_host,FTP_prefix,FTP_transparent, FTP_prompt,FTP_bell)
+         end
+         case (abbrev('open',        cmdname, 2)) \
+            pcall open_function (cmdline,FTP_host,FTP_username)
+         case (abbrev('pass',        cmdname, 3)) pcall pass_function(cmdline,FTP_host)
+         case (abbrev('prompt',      cmdname, 3)) pcall onoff('prompt', FTP_prompt, cmdline)
+         case (abbrev('put',        cmdname, 3)) begin
+            pcall WYLBUR_stem_prep (cmdline,the_library,the_stem)
+            pcall put_function(the_stem,FTP_host,the_library,FTP_prefix,FTP_transparent,FTP_prompt,FTP_bell)
+         end
+         case (abbrev('pwd',         cmdname, 3)) pcall pwd_function(FTP_prefix,FTP_host)
+         case (abbrev('exit',        cmdname, 3)) exit = true
+         case (abbrev('quit',        cmdname, 3)) exit = true
+         case (abbrev('rename',      cmdname, 3)) comment Network RENAME command not yet supported
+         case (abbrev('status',      cmdname, 3)) pcall status_function(FTP_bell,FTP_prompt,FTP_transparent,FTP_WYLBUR_fmt,FTP_prefix,FTP_host)
+         case (abbrev('transparent', cmdname, 3)) pcall onoff('transparent', FTP_transparent, cmdline)
+         case (abbrev('user',        cmdname, 2)) pcall user_function(cmdline,FTP_host,FTP_username)
+         case (abbrev('WYLBUR',      cmdname, 3)) begin
+            if (cmdline ne '') &(cmdline)
+            else xpause msg='FTP session paused, enter <.b+>XGO<.b-> to continue'
+         end
+         case (cmdname eq '') ;do nothing
+         case (true) comment &(cmdname) unknown, try <.b+>HELP<.b->
+      end
+   end
+   until (exit)
+end
+
+proc acct_function (the_acct,FTP_host,FTP_account) begin
+   declare string default
+
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   default = HOST_INFO('ACCT')
+   while (the_acct eq '') begin
+      the_acct = input('&(FTP_host) account (&(default)): ')
+      if (the_acct eq '') the_acct = default
+   end
+   FTP_account = the_acct
+   try set host &(FTP_host) account=&(FTP_account)
+   if (tryerror) pcall messages('FUNCFAIL')
+   else return(FTP_account)
+end
+
+proc close_function(FTP_host,FTP_username,FTP_account,FTP_prefix) begin
+   FTP_host = ''
+   FTP_username=''
+   FTP_account=''
+   FTP_prefix=''
+   clear host
+end
+
+proc cp_function(a_prefix,FTP_prefix) begin
+   FTP_prefix = strip(a_prefix)
+   if ((FTP_prefix ne '') and \
+      (find(reverse(FTP_prefix),'>/\]') ne 1)) pcall messages('PUNCTUATION')
+   return (FTP_prefix)
+end
+
+proc delete_function (the_file,FTP_host,FTP_prefix) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   try scratch '&(FTP_prefix)&(the_file)' on &(FTP_host)
+   if (tryerror) pcall messages('DELETE_FAIL')
+end
+
+proc dir_function (dir_type,a_dir,FTP_host,FTP_prefix) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare string dir_parms
+   if ((FTP_prefix ne '') or (a_dir ne '')) dir_parms='in "'||FTP_prefix||a_dir||'"'
+   if (dir_type eq 'LIST') dir_parms=dir_parms||' ALL '
+   try show directory &(dir_parms) on &(FTP_host)
+   if (tryerror) pcall messages('NO_DIR')
+end
+
+proc get_function (the_files,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt,FTP_WYLBUR_fmt,FTP_bell) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare string \
+      a_return \
+      format_option \
+      replace_option \
+      target_name \
+      the_file \
+      trans_save \
+      trans_use
+   if (FTP_transparent) begin
+      trans_use='transparent'
+      trans_save='dtransparent'
+   end
+   if (not FTP_prompt) replace_option='replace'
+   syscall scan_parm(the_file,the_files,a_return,' ,',' ')
+   syscall scan_parm(target_name,the_files,a_return,' ,',' ')
+   if (size(FTP_prefix||the_file) gt 44) begin
+      comment Drat!  The name of this file:
+      comment
+      comment     &(the_file)
+      comment
+      comment is too long for WYLBUR.  WYLBUR can only access network files whose combined
+      comment prefix and file name are no longer than 44 characters long.  You'll need to
+      comment shorten the name of this file or place it in a shorter directory path.
+      comment
+      comment No action taken...
+      return
+   end
+   pcall get_target_name(the_file,target_name)
+   keep_attn=x.attncmd
+   on attn command= 'goto get_exit '
+   open
+   comment Getting '&(the_file)' on &(FTP_host) &(trans_use)
+   try use '&(FTP_prefix)&(the_file)' on &(FTP_host) &(trans_use)
+   if (tryerror) pcall messages('GET_FAIL')
+   else begin
+      if (FTP_WYLBUR_fmt eq 'FIXED') pcall lrecl_to_use(format_option)
+      else format_option=FTP_WYLBUR_fmt
+      comment Saving $&(target_name) &(replace_option) &(format_option) &(trans_save)
+      try save $&(target_name) &(replace_option) &(format_option) &(trans_save)
+      if (FTP_bell) write shex('2F') nonl
+      if (tryerror) comment No action taken...
+   end
+get_exit:
+   close
+   on attn cmd='&(keep_attn)' reenable
+end
+
+proc get_a_list (got_list,the_file,FTP_host,FTP_prefix) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare string \
+      dir_parms
+   if ((FTP_prefix ne '') or (the_file ne '')) \
+      dir_parms='in "'||FTP_prefix||the_file||'"'
+   try dump directory on &(FTP_host) &(dir_parms)
+   if (tryerror) pcall messages('NO_LIST')
+   comment
+   if ((tryerror) or (sys.lines eq 0)) \
+      comment No files matched your selection:  &(FTP_prefix)&(the_file)
+   else got_list=true
+   if (FTP_prefix ne '') change '&(FTP_prefix)'1 to '' nolist
+   return(got_list)
+end
+
+proc get_target_name (the_file,a_name) begin
+;;  Here's where the file name is converted to a dataset name
+;;  Lots of translation can happen...  Read the following comments
+
+   declare number \
+      a_number
+   declare string \
+      a_return \
+      a_token  \
+      a_target
+
+;Step -1: If someone has already specified a target name, we'll use it instead
+;         of the name we normally use
+   if (a_name ne '') the_file=a_name
+
+;Step 0:  If the name is okay return it; else start translating
+
+   a_name=dsnformat(the_file)
+   if (a_name ne 'BAD DSN') return(a_name)
+
+;Step 1:  Make name uppercase
+
+   a_name=upper(the_file)
+
+;Step 2:  Remove trailing ;number since is is probably a VMS version number
+
+   a_name=reverse(a_name)
+
+   a_number=find(a_name,';')
+   if (a_number ne 0) a_name=substr(a_name,a_number+1)
+   a_name=reverse(a_name)
+
+;Step 3:  Translate characters '-,_,/,\' to '.'
+
+   a_name=translate(a_name,'....','-_/\')
+
+;Step 4:  Translate characters ~'A-Z or 0-9 or @ or .' to '@'
+
+   a_name=translate(a_name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890.@','ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890.@','@')
+
+;Step 5:  Divide into index levels that are as long as 8 characters
+;Step 6:  Make sure each index begins with an alphabetic or @
+   repeat begin
+      syscall scan(a_token,a_name,a_return,'@.','@.')
+      if (a_return eq 'NUMBER') a_token='@'||a_token
+      if (size(a_token) gt 8) begin
+         a_name=substr(a_token,9)||a_name
+         a_target=a_target||'.'||substr(a_token,1,8)
+      end
+      elseif (size(a_token) gt 0) a_target=a_target||'.'||a_token
+   end
+   until (a_name eq '')
+   a_name=a_target
+
+;Step 7:  Append the prefix to the front of the name
+   if (prefix eq '') a_name=group||'$'||user||a_name
+   else a_name=prefix||a_name
+
+;Step 8:  If the size of the name is greater than 44, truncate on the right
+
+   if (size(a_name) gt 44) a_name=substr(a_name,1,44)
+
+;Return the name
+
+   return(a_name)
+end
+
+proc host_function (host,FTP_host) begin
+   declare string default
+
+   default = HOST_INFO('HOST')
+   if (default eq 'ELF1') default = ''          ; kludge: who wants elf1???
+   while (host eq '') begin
+      host = input('host (&(default)): ')
+      if (host eq '') host = default
+   end
+   FTP_host = host
+   try set host &(FTP_host)
+   if (tryerror) pcall messages('FUNCFAIL')
+   else return(FTP_host)
+end
+
+proc lrecl_to_use (a_size) begin
+   declare string \
+      a_line
+   dump size over 235
+   a_line=reverse(line(last))
+   delete last nolist
+   syscall scan(a_size,a_line)
+   a_size='lrecl='||reverse(a_size)
+   return(a_size)
+end
+
+proc mdelete_function (the_file,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare boolean \
+      got_list \
+      ok_to_delete
+   declare string \
+      target_name
+   set current 0
+   ok_to_delete=true
+   keep_attn=x.attncmd
+   on attn command='goto mdelete_exit '
+   open
+   pcall get_a_list(got_list,the_file,FTP_host,FTP_prefix)
+   set current 0
+   if (got_list) begin
+      repeat begin
+         set current next
+         the_file=line(current)
+         pcall win_tcp_patch(the_file)
+         comment
+         if (FTP_prompt) ok_to_delete=\
+            (yesno("Should '&(the_file)' be deleted") eq 'YES')
+         if (ok_to_delete) begin
+;           if (find(the_file,FTP_prefix) eq 1) FTP_prefix=''
+            pcall delete_function(the_file,FTP_host,FTP_prefix)
+         end
+      end
+      until (next lt 0)
+   end
+mdelete_exit:
+   close
+   on attn cmd='&(keep_attn)' reenable
+end
+
+proc messages (message_code) begin
+   comment
+   cases begin
+;**** ERROR Messages
+      case (message_code eq 'GET_FAIL') begin
+         comment Couldn't get this file...
+      end
+      case (message_code eq 'HARD_WILDCARD') begin
+         comment This MPUT parser can't handle imbedded wildcards.  You can place an asterisk
+         comment at the beginning or end of a wildcard specification.  For example:
+         comment
+         comment     MPUT *.FOR
+         comment     MPUT MYDATA.*
+      end
+      case (message_code eq 'NO_HOST') begin
+         comment You can't perform this function without first connecting to a host with the
+         comment OPEN function.
+         xexit the_top
+      end
+      case (message_code eq 'NO_DIR') begin
+         comment You failed to find the directory you were seeking.  Probable cause:
+         comment
+         comment o  Incorrect user-id or password
+         comment o  Incorrect prefix syntax
+      end
+      case (message_code eq 'NO_FILES') begin
+         comment You failed to find the files you were seeking.  Probable cause:
+         comment
+         comment o  Incorrect user-id or password
+         comment o  Incorrect prefix syntax
+      end
+      case (message_code eq 'NO_LIST') begin
+         comment Failed to find files requested.  Probable cause
+         comment
+         comment o  Incorrect user-id or password
+         comment o  Incorrect prefix syntax
+      end
+      case (message_code eq 'FUNCFAIL') begin
+         comment Your command failed....  Please note the following reason and message.
+         comment [&(tryid)] &(trymsg)
+         xexit the_top
+      end
+      case (message_code eq 'GEN_ERROR') begin
+         comment Your command failed....  Please note the following reason and message.
+         comment [&(errid)] &(errmsg)
+         xexit the_top
+      end
+;**** Informational Messages
+      case (message_code eq 'PUNCTUATION') begin
+         comment Warning:  Prefixes normally end with punctuation and you have supplied none.
+         comment For example:
+         comment
+         comment     Unix prefix:  dir1/dir2/
+         comment     VMS prefix:  [.dir.dir2]
+      end
+      case (message_code eq 'DELETE_FAIL') \
+         comment Couldn't delete this file...
+      case (message_code eq 'NO_CD') begin
+         comment CD is not supported by WYLBUR's FTP.  Instead you must specify the directory
+         comment structure with the CP (change prefix) command.  For example, if the file you
+         comment wish to GET is specified by:
+         comment
+         comment      DIR1/DIR2/DIR3/YOURFILE
+         comment
+         comment you must issue the command:
+         comment
+         comment     CP DIR1/DIR2/DIR3/
+         comment
+         comment prior to GETting the file.
+      end
+      case (true) comment You have just received the unknown message...
+   end
+end
+
+proc mget_function (the_file,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt,FTP_WYLBUR_fmt,FTP_bell) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare boolean \
+      got_list \
+      ok_to_get
+   declare string \
+      target_name
+   set current 0
+   ok_to_get=true
+   keep_attn=x.attncmd
+   on attn command='goto mget_exit '
+   open
+   pcall get_a_list(got_list,the_file,FTP_host,FTP_prefix)
+   set current 0
+   if (got_list) begin
+      repeat begin
+         set current next
+         the_file=line(current)
+         pcall win_tcp_patch(the_file)
+         comment
+         if (FTP_prompt) ok_to_get=\
+            (yesno("Should '&(the_file)' be transferred") eq 'YES')
+         if (ok_to_get) begin
+;           if (index(the_file,FTP_prefix) eq 1) FTP_prefix=''
+            pcall get_function(the_file,FTP_host,FTP_prefix,FTP_transparent,FTP_prompt,FTP_WYLBUR_fmt,FTP_bell)
+         end
+      end
+      until (next lt 0)
+   end
+mget_exit:
+   close
+   on attn cmd='&(keep_attn)' reenable
+end
+
+proc mput_function \
+      (the_library,the_file,FTP_host,FTP_prefix,FTP_transparent, FTP_prompt,FTP_bell) begin
+   declare boolean \
+      got_list \
+      ok_to_get
+   declare string \
+      target_name
+   set current 0
+   ok_to_get=true
+   keep_attn=x.attncmd
+   on attn command='goto mput_exit '
+   open
+   pcall mput_list(got_list,the_library,the_file)
+   if (got_list) begin
+      set current 0
+      repeat begin
+         set current next
+         the_file=line(current)
+;        pcall win_tcp_patch(the_file)
+         comment
+         if (FTP_prompt) ok_to_get=\
+            (yesno("Should '&(the_file)' be transferred") eq 'YES')
+         if (ok_to_get) begin
+            pcall put_function(the_file,FTP_host,the_library,FTP_prefix,FTP_transparent,FTP_prompt,FTP_bell)
+         end
+      end
+      until (next lt 0)
+   end
+   else begin
+      comment
+      comment So, no files matching &(the_file) were found
+   end
+mput_exit:
+   close
+   on attn cmd='&(keep_attn)' reenable
+end
+
+proc mput_list (got_list,the_library,the_stem) begin
+   declare string \
+      column_one
+   declare number \
+      index_to_star
+   the_stem=upper(the_stem)
+   cases begin
+      case (the_library eq '') \
+         try dump catalog
+      case (the_library ne '') begin
+         try dump directory in &(the_library)
+         delete first(3) nolist
+         change 10/235 to '' nolist
+      end
+   end
+   if (tryerror) begin
+      pcall messages('NO_FILES')
+      return
+   end
+;; Transform wildcards into the appropriate delete commands
+;; if there is a trailing *, strip it
+   if (substr(the_stem,size(the_stem),1) eq '*') \
+      the_stem=strip(the_stem,'T',"*")
+   else the_stem=the_stem||' '
+;;If there is no leading asterisk, we delete file entries using column one
+   if (substr(the_stem,1,1) eq '*') \
+      the_stem=strip(the_stem,'L',"*")
+   else column_one='1'
+;; change any imbedded asterisks to generic pattern identifier '<*X>'
+   if (find(the_stem,"*") ne 0) begin
+      pcall messages('HARD_WILDCARD')
+      return
+;;    putend &(the_stem)
+;;    change '*' in last to '<*X>' nolist
+;;    the_stem=strip(line(last))
+;;    delete last nolist
+   end
+;; delete ~p'&(the_stem)'&(column_one)
+   delete ~'&(the_stem)'&(column_one)
+   if (sys.lines eq 0) got_list=false
+   else got_list=true
+   return(got_list)
+end
+
+proc onoff (name, flag, cmdline) begin
+;
+; Toggle a flag or turn it on or off
+;
+   declare string choice
+   declare string toktyp
+
+   syscall scan(choice, cmdline, toktyp, ' ', ' ')
+   choice = lower(choice)
+   cases begin
+      case (abbrev('on',  choice, 2)) flag = true
+      case (abbrev('off', choice, 3)) flag = false
+      case (true) flag = (not flag)
+   end
+   if (flag) comm &(name) on
+   else      comm &(name) off
+   return(flag)
+end
+
+proc open_function (host,FTP_host,FTP_username) begin
+   pcall host_function(host,FTP_host)
+   pcall user_function('',FTP_host,FTP_username)
+   pcall pass_function('',FTP_host)
+   return (FTP_host,FTP_username)
+end
+
+proc out () begin
+   comment FTP quitting...
+   xreturn
+end
+
+proc pass_function (password,FTP_host) begin
+   declare string default
+
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   default = HOST_INFO('PASS')
+   while (password eq '') begin
+      password = input('&(FTP_host) password (&(default)): ', 'NOECHO')
+      if ((password eq '') and (default ne '')) return
+   end
+   try set host &(FTP_host) pass &(password)
+   if (tryerror) pcall messages('FUNCFAIL')
+end
+
+proc put_function (the_files,FTP_host,the_library,FTP_prefix,FTP_transparent,FTP_prompt,FTP_bell) begin
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   declare string \
+      target_name \
+      the_file \
+      trans_save \
+      replace_option
+   if (FTP_transparent) trans_save='dtransparent'
+   if (not FTP_prompt) replace_option='replace'
+   syscall scan_parm(the_file,the_files)
+   syscall scan_parm(target_name,the_files)
+   keep_attn=x.attncmd
+   on attn command='goto put_exit '
+   open
+   comment Getting '&(the_file)'
+   cases begin
+      case (the_library eq '') begin
+         try use $&(dsnformat(the_file))
+         if (target_name eq '') target_name=the_file
+      end
+      case (the_library ne '') begin
+         try use $&(dsnformat(the_library||'#'||the_file))
+         if (target_name eq '') target_name=the_library||'.'||the_file
+      end
+   end
+   if (tryerror) begin
+      comment
+      comment &(the_file) NOT transferred
+   end
+   else begin
+      comment
+      comment Saving '&(target_name)' on &(FTP_host) &(replace_option) &(trans_save)
+      try save &(target_name) on &(FTP_host) &(replace_option) &(trans_save)
+      if (FTP_bell) write shex('2F') nonl
+      if (tryerror) begin
+         comment
+         comment No action taken...
+      end
+   end
+put_exit:
+   close
+   on attn cmd='&(keep_attn)' reenable
+end
+
+proc pwd_function(FTP_prefix,FTP_host) begin
+   if (prefix eq '') comm No local (WYLBUR) prefix set
+   else comm Local (WYLBUR) prefix is &(prefix)
+   if (FTP_prefix eq '') comm No remote (&(FTP_host)) prefix set
+   else comm Remote (&(FTP_host)) prefix is &(FTP_prefix)
+end
+
+proc status_function(FTP_bell,FTP_prompt,FTP_transparent,FTP_WYLBUR_fmt,FTP_prefix,FTP_host) begin
+
+   comm
+   if (FTP_bell)        comm Ring bell at end of file transfers
+   else                 comm Do not ring bell at end of file transfers
+   if (FTP_prompt)      comm Prompt for permission for each file on MGET, MPUT & MDELETE
+   else                 comm Do not prompt for permission for each file on MGET, MPUT & MDELETE
+   if (FTP_transparent) comm Use transparent mode for file transfers
+   else                 comm Do not use transparent mode for file transfers
+   pcall pwd_function(FTP_prefix, FTP_host)
+   if (FTP_WYLBUR_fmt eq 'card')      comm Save local files in card format
+   elseif (FTP_WYLBUR_fmt eq 'fixed') comm Save local files in fixed format
+   else                               comm Save local files in standard WYLBUR edit format
+   comm
+   comm    <.u+>Remote Hostname                 <.u-> <.u+>Information                               <.u->
+   show hosts
+   comm
+end
+
+proc user_function (user_id,FTP_host,FTP_username) begin
+   declare string default
+
+   if (FTP_host eq '') pcall messages('NO_HOST')
+   default = HOST_INFO('USER')
+   while (user_id eq '') begin
+      user_id = input('&(FTP_host) username (&(default)): ')
+      if (user_id eq '') user_id = default
+   end
+   FTP_username = user_id
+   if (user_id ne default) begin
+      try set host &(FTP_host) user &(user_id)
+      if (tryerror) pcall messages('FUNCFAIL')
+   end
+   return(FTP_username)
+end
+
+proc set_format(the_format,FTP_WYLBUR_fmt) begin
+   write ''
+   cases begin
+      case (the_format eq 'card') \
+         comment Files with FIXED length (80 byte) records will be created with GET and MGET.
+      case (the_format eq 'fixed') begin
+         comment Files with FIXED length records will be created with GET and MGET.  Note:
+         comment
+         comment o  WYLBUR will use the length of the longest record as the LRECL
+         comment o  Records longer than 235 are not allowed
+      end
+      case (the_format eq 'edit') \
+         comment Files in WYLBUR EDIT format will be created with GET and MGET.
+   end
+   FTP_WYLBUR_fmt=the_format
+   return(FTP_WYLBUR_fmt)
+end
+
+proc show_help (command) begin
+   declare string topic
+
+   topic = lower(strip(command))
+   if (topic ne '') begin
+      cases begin
+         case (abbrev('account',     topic, 2)) comm <.b+>account<.b-> <.u+>account<.u->   Specify <.u+>account<.u->, required by some systems
+         case (abbrev('bell',        topic, 2)) comm <.b+>bell<.b-> <.u+>on<.u->|<.u+>off<.u->  Ring bell when file transfer is finished
+         case (abbrev('bye',         topic, 2)) comm <.b+>bye<.b->   Exit FTP
+         case (abbrev('card',        topic, 2)) comm <.b+>card<.b->   Save files you <.b+>GET<.b-> with fixed length 80 byte records (see edit & fixed)
+         case (abbrev('cd',          topic, 2)) comm <.b+>cd<.b-> <.u+>path<.u->   Change directory on remote system (not yet supported)
+         case (abbrev('close',       topic, 2)) comm <.b+>close<.b->   Close connection to remote system
+         case (abbrev('cp',          topic, 2)) comm <.b+>cp<.b-> <.u+>prefix<.u->   Prepend <.u+>prefix<.u-> to remote filenames
+         case (abbrev('delete',      topic, 2)) comm <.b+>delete<.b-> <.u+>file<.u->   Delete <.u+>file<.u-> from the remote system
+         case (abbrev('dir',         topic, 3)) comm <.b+>dir<.b->    List files on remote system (long form)
+         case (abbrev('disconnect',  topic, 3)) comm <.b+>disconnect<.b->   Close connection to remote system
+         case (abbrev('edit',        topic, 1)) comm <.b+>edit<.b->   Save files you <.b+>GET<.b-> in standard WYLBUR format (see card & fixed)
+         case (abbrev('exit',        topic, 1)) comm <.b+>exit<.b->   Exit FTP
+         case (abbrev('fixed',       topic, 1)) comm <.b+>fixed<.b->   Save files you <.b+>GET<.b-> with fixed length records (see card & edit)
+         case (abbrev('get',         topic, 1)) comm <.b+>get<.b-> <.u+>file<.u->   Get <.u+>file<.u-> from the remote system
+         case (abbrev('help',        topic, 1)) comm <.b+>help<.b-> <.u+>command<.u->   See useful information (on <.u+>command<.u->)
+         case (abbrev('lcd',         topic, 2)) comm <.b+>lcd<.b-> <.u+>prefix<.u->   Set local filename <.u+>prefix<.u->
+         case (abbrev('ls',          topic, 2)) comm <.b+>ls<.b->   List files on remote system (short form)
+         case (abbrev('mdelete',     topic, 2)) comm <.b+>mdelete<.b-> <.u+>files<.u->   Delete multiple <.u+>files<.u-> from the remote system
+         case (abbrev('mget',        topic, 2)) comm <.b+>mget<.b-> <.u+>files<.u->   Get multiple <.u+>files<.u-> from the remote system
+         case (abbrev('mput',        topic, 2)) comm <.b+>mput<.b-> <.u+>files<.u->   Put multiple <.u+>files<.u-> onto the remote system
+         case (abbrev('open',        topic, 2)) comm <.b+>open<.b-> <.u+>system<.u->   Open a connection to a remote <.u+>system<.u->
+         case (abbrev('pass',        topic, 2)) comm <.b+>pass<.b-> <.u+>password<.u->   Specify <.u+>password<.u-> for remote system
+         case (abbrev('prompt',      topic, 2)) comm <.b+>prompt<.b-> <.u+>on<.u->|<.u+>off<.u->   Ask permission for each file when using <.b+>MGET<.b->, <.b+>MPUT<.b-> or <.b+>MDELETE<.b->
+         case (abbrev('put',         topic, 2)) comm <.b+>put<.b-> <.u+>file<.u->   Put <.u+>file<.u-> onto the remote system
+         case (abbrev('pwd',         topic, 2)) comm <.b+>pwd<.b->   Show remote and local filename prefixes (see cp & lcd)
+         case (abbrev('quit',        topic, 1)) comm <.b+>quit<.b->   Exit FTP
+         case (abbrev('rename',      topic, 1)) comm <.b+>rename<.b->  (not yet supported)
+         case (abbrev('status',      topic, 1)) comm <.b+>status<.b->   Show status of FTP session
+         case (abbrev('transparent', topic, 1)) comm <.b+>transparent<.b-> <.u+>on<.u->|<.u+>off<.u->   Transfer files in WYLBUR's interchange format
+         case (abbrev('user',        topic, 1)) comm <.b+>user<.b-> <.u+>username<.u->   Specify <.u+>username<.u-> for remote system
+         case (abbrev('WYLBUR',      topic, 1)) comm <.b+>WYLBUR<.b-> <.u+>command<.u->   Execute a WYLBUR <.u+>command<.u->
+         case (true) comm No help available for &(command)
+      end
+      comm
+   end
+   else begin
+      comm
+      comm <.u+>Commonly used commands<.u->
+      comm    <.b+>open<.b->             open a connection to a remote system
+      comm    <.b+>cp<.b-> prefix        change filename prefix on remote system
+      comm    <.b+>get/mget<.b-> file    get one/multiple file(s) from remote system
+      comm    <.b+>put/mput<.b-> file    put one/multiple file(s) onto remote system
+      comm    <.b+>ls/dir<.b->           see short/long directory info on remote system
+      comm    <.b+>WYLBUR<.b-> command   execute a WYLBUR command
+      comm    <.b+>bye<.b->              exit FTP
+      comm
+      comm <.u+>Other commands<.u->
+      comm    account   bell      card      cd        close     delete    disconnect
+      comm    edit      exit      fixed     lcd       mdelete   pass      prompt
+      comm    pwd       quit      rename    status    transparent         user
+      comm
+      comm For more information, use: <.b+>help command<.b->
+      comm
+   end
+end
+
+proc win_tcp_patch(the_file) begin
+;Wollongong's WIN/TCP returns directory names in an FTP NLST when
+;subdirectories are specified, thoroughly messing up this command.  I now scan
+;each file name for square brackets and assume that any text before a right
+;square bracket doesn't belong in the file name.
+   an_index=find(the_file,']')
+   if (an_index ne 0) the_file=substr(the_file,an_index+1)
+   return(the_file)
+end
+
+proc WYLBUR_stem_prep (in_string,the_library,the_stem) begin
+   declare number \
+      lib_marker
+   lib_marker=find(in_string,'(#')
+   if (lib_marker ne 0) begin
+      if (substr(in_string,lib_marker,1) eq '(') in_string=strip(in_string,'T',')')
+      the_library=substr(in_string,1,lib_marker-1)
+      the_stem=substr(in_string,lib_marker+1)
+   end
+   else the_stem=in_string
+   return(the_library,the_stem)
+end

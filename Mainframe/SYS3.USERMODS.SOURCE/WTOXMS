@@ -1,0 +1,217 @@
+WTOXMS   TITLE '-----  Edit Scratch Tape Mount Messages -----'          00010000
+*---------------------------------------------------------------------* 00020000
+*                                                                     * 00030000
+*   Program name:  WTOXMS                                             * 00040000
+*                                                                     * 00050000
+*   Purpose:       MCS WTO Exit to edit scratch tape mount messages   * 00060000
+*                                                                     * 00070000
+*   Author:        Leonard D. Woren                                   * 00080000
+*                                                                     * 00090000
+*   Attributes:    RENT                                               * 00100000
+*                                                                     * 00110000
+*   Note:          This exit must be specified in MPFLSTxx for the    * 00120000
+*                  following message ids:                             * 00130000
+*                                                                     * 00140000
+*                     IEC101A M ddd,ser                               * 00150000
+*                     IEC400A M ddd,ser                               * 00160000
+*                     IEC403A M ddd,ser  DASD                         * 00170000
+*                     IEC501A M ddd,ser                               * 00180000
+*                     IEC501E M ddd,ser                               * 00190000
+*         NO......... IEC701D M ddd,vol to be lbl DON'T MODIFY THIS ml* 00200000
+*                     IEF233A M dev,ser                               * 00210000
+*                     IEF233D M dev,ser                               * 00220000
+*                                                                     * 00230000
+*   Installation:  Stanford University                                * 00240000
+*                                                                     * 00250000
+*   Updates:                                                          * 00260000
+*   1998/10/05  U006 MCL - turn off debugging code                    * 00265000
+*   1998/05/07  U005 MCL - Use TLMS dynamic tape name table           * 00270000
+*      12Nov97  U004 SLP - Remove unit name shift temporary mod       * 00280000
+*      01Jul97  U003 LDW - Support native 3590 (remove SYSB kludge)   * 00290000
+*                        - Change temp code to keep HLA 1.2 happy     * 00300000
+*      05Apr97  U002 LDW - *TEMPORARILY* shift message text left to   * 00310000
+*                             make unit names 3 characters to keep    * 00320000
+*                             TAMM happy until SYSB is OS/390         * 00330000
+*      27Mar97  U001 LDW - Fix old bug which prevented full           * 00340000
+*                             implementation of this exit             * 00350000
+*                        - Handle 4 character device names (OS/390)   * 00360000
+*      09Oct96  U000 LDW - Written, using existing code in HASPSSSX   * 00370000
+*                             as a base.                              * 00380000
+*                                                                     * 00390000
+*---------------------------------------------------------------------* 00400000
+         EJECT                                                          00410000
+WTOXMS   OSENTER  EXIT=LEAVE,RC=0,AMODE=31,RMODE=ANY,LPARM=(R10,CTXT), $00420000
+               GETMAIN=(WORKLEN,WORKD),GETMLOC=(BELOW,ANY),SP=229       00430000
+         ICM   R7,B'1111',CTXTTXPJ      assume major               U002 00440000
+         BZ    LEAVE                                                    00450000
+         USING CTXTATTR,R7                                         U002 00460000
+         LA    R9,CTXTTMSG              -> message text                 00470000
+*U002    DROP  R7                       CTXTATTR                        00480000
+         USING MESSAGE,R9                                               00490000
+*                                                                       00500000
+*                                                                       00510000
+         L     R1,CVTPTR                -> CVT                          00520000
+         L     R2,CVTSMCA-CVT(,R1)      -> SMCA                         00530000
+         USING SMCABASE,R2                                              00540000
+         MVC   MACHINE,SMCASID+3        sysA, B, etc. (one-byte ID)     00550000
+         CLI   MACHINE,C'D'             SYSD                            00560000
+         BNE   *+8                      anything else is normal         00570000
+         MVI   MACHINE,C'A'             but there are no "sysd" tapes.. 00580000
+         DROP  R2                                                       00590000
+                                                                        00600000
+         MVC   DEVNAME(4),MSGUNIT       copy unit name (assume 4 chars) 00640000
+         MVC   TLTYP,MSGLTYP            Label Type S or A               00650000
+         CLC   TLTYP,C'A'               don't want comma or blank       00660000
+         BNL   *+8                      if OK                           00670000
+         MVI   TLTYP,C'S'               else assume SL                  00680000
+         B     NDBUG1              NO DEBUG                             00690000
+*--- Debugging code                                                     00700000
+         MVC   WTOAREA(WTOLEN),WTOMODEL                                 00710000
+         MVC   WTOAREA+18(4),DEVNAME                                    00720000
+         MVC   WTOAREA+29(6),MSGVOL                                     00730000
+         WTO   MF=(E,WTOAREA)                                           00760000
+*--- End debugging code                                                 00770000
+NDBUG1   EQU   *                   to skip debug code                   00780000
+                                                                        00781000
+         UCBLOOK  DEVNCHAR=DEVNAME,UCBPTR=UPLUCB,NOPIN,                $00790000
+               DYNAMIC=YES,RANGE=ALL,MF=(E,UPLMFL,COMPLETE)             00800000
+                                                                        00810000
+         LTR   R15,R15                  find it?                        00820000
+         BZ    GOTUCB                   OK                              00830000
+         QSNAP (R15)                                                    00840000
+         QSNAP 'UCB lookup failed'                                      00850000
+         QSNAP DEVNAME,4                                                00860000
+         B     LEAVE                                                    00870000
+GOTUCB   EQU   *                                                        00880000
+                                                                        00890000
+         L     R8,UPLUCB                -> UCB                          00900000
+         USING UCBOB,R8                                                 00910000
+                                                                        00920000
+         CLC   =C'SCRTCH',MSGVOL        scratch?                        00930000
+         BE    PROCESS                  yes - alter message             00940000
+         CLC   =C'PRIVAT',MSGVOL        scratch?                        00950000
+         BE    PROCESS                  yes - alter message             00960000
+*%% The following code will be deleted when it's determined that        00970000
+*%% JES2 is getting control after we are, or when the JES2 code         00980000
+*%% to do this message editing is removed.                              00990000
+         CLI   MSGVOL+5,C'*'     *TEST* already changed?                01000000
+         BNE   *+12              *TEST* no - don't touch                01010000
+         MVI   MSGVOL+5,C'+'     *TEST* yes - show we've been here      01020000
+         OI    CTXTRFB1,CTXTRCMT *TEST* indicate we changed msg text    01030000
+         QSNAP 'already changed'                                        01040000
+*%% End of code to be deleted.                                          01050000
+         B     LEAVE                    finished                        01060000
+                                                                        01070000
+PROCESS  EQU   *                                                        01080000
+         LOAD  EP=TAPETYPE              get TLMS tape type table        01090000
+         LR    R2,R0                    ->Table                         01100000
+         USING TTYPETAB,R2                                              01110000
+                                                                        01120000
+         MVI   TDTYP,C'8'               3480 tentative                  01130000
+         CLI   UCBTBYT4,UCB3480         3480?                           01140000
+         BE    GOTDTYPE                 OK                              01150000
+         MVI   TDTYP,C'9'               3490(E)                         01160000
+         CLI   UCBTBYT4,UCB3490         3490?                           01170000
+         BE    GOTDTYPE                 OK                              01180000
+         MVI   TDTYP,C'5'               3590                            01190000
+         CLI   UCBTBYT4,UCB3591         3590 (Magstar)?            U003 01200000
+         BE    GOTDTYPE                 ok                              01210000
+         MVI   TDTYP,C'2'               3420                            01220000
+         CLI   UCBTBYT4,UCB3400         3420?                           01230000
+         BE    GOTDTYPE                 OK                              01240000
+         MVI   TDTYP,C'8'               no match, assume 3480           01250000
+GOTDTYPE EQU   *                                                        01260000
+                                                                        01270000
+                                                                        01280000
+*********************************************************************   01290000
+*                                                                   *   01300000
+*  OK, now we have:                                                 *   01310000
+*  MACHINE     A or B or H or whatever (one-byte machine name)      *   01320000
+*  TLTYP       A or S (label type) (RLG has some AL scratch pools)  *   01330000
+*  TDTYP       2, 8, 9, or 5 (one-char unit type)                   *   01340000
+*  ...which correspond to the entries in the TLMS tape-type table.  *   01350000
+*                                                                   *   01360000
+*  Now, find a corresponding entry in the table.                    *   01370000
+*                                                                   *   01380000
+*********************************************************************   01390000
+                                                                        01400000
+         LA    R14,TABSTART        ->first entry                        01410000
+         L     R15,#TAPTABL        number of entries                    01420000
+         USING TTYPEREC,R14        map an entry                         01430000
+                                                                        01440000
+TTLOOP   CLC   MACHINE,TTYMACH     for this machine?                    01450000
+         BNE   NEXTT               if not                               01460000
+         CLI   TTYTYPE,C'S'        scratch-type tape entry              01470000
+         BNE   NEXTT               if not                               01480000
+         CLC   TDTYP,TTYDEVT       right kind of drive?                 01490000
+         BNE   NEXTT               if not                               01500000
+         CLC   TLTYP,TTYLTYP       right label type STD/ANSI            01510000
+         BE    GOTENT              if so, EUREKA!                       01520000
+NEXTT    LA    R14,TTYTNEXT        this ain't it, try next entry        01530000
+         BCT   R15,TTLOOP          do next if any                       01540000
+         QSNAP 'WTOXMS failed, no matching entry'                       01550000
+         QSNAP TTYPETAB,32                                              01560000
+         QSNAP MACHINE,3                                                01570000
+         B     LEAVE               fell thru, we lose                   01580000
+                                                                        01590000
+GOTENT   MVC   MSGVOL,=C'******'   reformat volser in msg               01600000
+         OI    CTXTRFB1,CTXTRCMT        indicate we changed msg text    01610000
+         MVC   MSGVOL(2),TTYPREF   vol prefix                           01620000
+         CLI   MSGVOL+1,C' '       ended up with "S ****" or such       01630000
+         BNE   *+8                 OK if not                            01640000
+         MVI   MSGVOL+1,C'*'       fix if so                            01650000
+         DROP  R14                                                      01660000
+         DROP  R2                                                       01670000
+         B     LEAVE                                                    01680000
+         LTORG ,                                                        01690000
+                                                                        01700000
+                                                                        01710000
+MESSAGE  DSECT                                                          01720000
+MSGID    DS    C'IEF233A',C' '                                          01730000
+MSGACT   DS    C'M',C' '                                                01740000
+MSGUNIT  DS    C'uuuu'                                                  01750000
+*MSGUNIT DS    C'uuu'                                              U004 01760000
+         DS    C','                                                     01770000
+MSGVOL   DS    CL6'vvvvvv'                                              01780000
+         DS    C','                                                     01790000
+MSGLTYP  DS    C'SL'                                                    01800000
+                                                                        01810000
+*  Typical messages...                                                  01820000
+* ....v....1....v....2....v....3....v....4....v....5                    01830000
+* IEF233A M 0A45,S*****,SL,PCHOVN01,GO                                  01840000
+* IEC501A M 0A08,F*****,SL,COMP,FISDUMP,MNT                             01850000
+* IEF233A M 0A88,D*****,SL,RLG#ICF,BTLMS                                01860000
+* IEC501A M 0553,RS****,AL,6250 BPI,RPL8869B,GO.TAPER                   01870000
+WTOXMS   CSECT ,                        resume                          01880000
+         EJECT ,                                                        01890000
+                                                                        01900000
+WTOMODEL WTO   'WTOXMS - Dev="xxxx" Vol="xxxxxx"',ROUTCDE=(2,11),MF=L   01910000
+WTOLEN   EQU   *-WTOMODEL                                               01930000
+                                                                        01940000
+WORKD    DSECT                          RESUME                          01950000
+UPLUCB   DS    A                        returned address of UCB         01960000
+DEVNAME  DS    CL4                      C'uuuu' or C'0uuu'              01970000
+MACHINE  DS    C                        A, B, etc.                      02000000
+TLTYP    DS    C                        S or A                          02010000
+TDTYP    DS    C                        Device type 2=3420 8=3480       02020000
+*                                       9=3490 5=3590                   02030000
+                                                                        02040000
+         UCBLOOK  MF=(L,UPLMFL)                                         02070000
+                                                                        02080000
+WTOAREA  WTO   'wtoxms - dev="xxxx" vol="xxxxxx"',ROUTCDE=(2,11),MF=L   02090000
+                                                                        02110000
+WORKLEN  EQU   *-WORKD                                                  02120000
+         SPACE 2                                                        02130000
+         PRINT NOGEN                                                    02140000
+         IEZVX100                                                       02150000
+         CVT   DSECT=YES                                                02160000
+         IEESMCA  ,                                                     02170000
+TTYPETAB DSECT                                                          02180000
+         COPY  TTYPETAB            TLMS tape-type table area            02190000
+N#TABLE  EQU   0                                                        02200000
+TTYPEREC DSECT                                                          02210000
+         TTYPEFMT ,                TLMS tape-type table entry           02220000
+UCB      DSECT ,                                                   U002 02230000
+         IEFUCBOB   ,                                                   02240000
+         SPACE 2                                                        02250000
+         END                                                            02260000

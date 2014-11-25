@@ -1,0 +1,500 @@
+SYSTEM   TITLE 'System Address Space'
+         COPY  HEADER
+         EJECT
+SYSTEM   MODULE TRCNUM=5
+         EJECT
+         COPY  PZERO
+         USING (PZERO,R0)
+         EJECT
+         COPY  MAT
+         EJECT
+         COPY  SIGPARM
+         EJECT
+         COPY  DISPPARM
+         EJECT
+         COPY  LOCKPARM
+         EJECT
+         COPY  IOSIPARM
+         EJECT
+         COPY  TIMEPARM
+         EJECT
+         COPY  VMPARM
+         EJECT
+         COPY  PAGEPARM
+         EJECT
+         COPY  XITPARM
+         EJECT
+         COPY  SEXIPARM
+         EJECT
+         COPY  PARMPARM
+         EJECT
+SYSCB    RECORD BEGIN
+SYSCBID  DC    CL8'SYSCB'
+SYSSMFI  DS    D                       SMF interval - TOD fmt
+SYSGWSI  DS    D                       Global WS interval - TOD fmt
+SYSFRAI  DS    D                       Real frame interval - TOD fmt
+SYSFRACT DS    A                       Number of intervals
+SYSFRAN  DS    A                       Intervals remaining
+         END   ,
+         SPACE 4
+SYSPARM  RECORD BEGIN
+SYSPIFLG DS    XL(L'PARMIN)
+SYSPKEY1 DS    CL8                     1st keyword
+SYSPKEY2 DS    CL8                     2nd keyword
+SYSPIN   EQU   SYSPIFLG,*-SYSPIFLG,C'R'
+SYSPOUT  DS    A                       Output area
+         DS    A                       - Available -
+FLTWRK   DS    D                       Floating point work area
+FPR0     DS    D                       Floating point save area
+FPR2     DS    D                       |
+FPR4     DS    D                       |
+FPR6     DS    D                       |
+         END   ,                       OF SYSPARM record
+         EJECT
+*****************************************************************
+*                                                               *
+*  SYSTASK --  This is the initial code for the system address  *
+*              space.  It completes the initialization steps    *
+*              that must be done under and address space.       *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+SYSTASK  PROC  SCOPE=GLOBAL
+*
+*  Set address space as non swappable
+*
+         PSET  @DISPSWP
+         VCALL DISPSHLD
+*
+         VCALL VMINIT3                 Finish the virtual memory init
+         VCALL INITDIS3                Finish dispatcher init
+         VCALL PAGINIT2                Finish real memory init
+         VCALL ENQINIT                 Initialize the Enq Manager
+         VCALL GRINIT                  Init General Resource Manager
+         VCALL M1SVINIT                Initialize Mode 1 services
+         VCALL JESINIT                 Initialize JES services
+*
+*  Init file systems
+*
+         VCALL FILEINIT
+*
+*  Initialize terminals
+*
+         VCALL TERMINIT                Initialize terminal operations
+*
+*  Initialize network services
+*
+         VCALL NETINIT
+*
+*  Initialize accounting services
+*
+         VCALL ACCTINIT                Initialize accounting services
+*
+*  Page out as many global frames as we can
+*
+         PSET  @PAGWSMA
+         MVC   @WSINT,=A(1)            One interval
+         SET   @WSFGLOB                Mark it for global
+         VCALL PAGWSMAN
+         PSET  @PAGWSMA
+         MVC   @WSINT,=A(18)           Enough to push it all out
+         SET   @WSFGLOB                Mark it for global
+         VCALL PAGWSMAN                Then do the pushing
+*
+*  Set up global control block
+*
+         VMGET L'SYSCB,LOC=GLOBHI,FIX=YES
+         LR    RM,RVR
+         L     RA,MATPTR
+         WITH  (MAT,RA),'ST RM,MATSYSCB'        Save our roots
+         WITH  (SYSCB,RM),BEGIN        SYSCB addr
+         CLEAR SYSCB
+         MVC   SYSCBID,=CL8'SYSCB'
+         MVC   SYSSMFI,SMFINT
+         MVC   SYSGWSI,GWSINT
+         MVC   SYSFRAI,FRAMINT
+*
+*  Look for parameters
+*
+         VMGET L'SYSPARM,LOC=GLOBHI
+         LR    RN,RVR
+         WITH  (SYSPARM,RN)
+         WITH  (PARMIN,SYSPIN)
+         CLEAR PARMIN
+         STD   R0,FPR0                 Save floating point regs
+         STD   R2,FPR2                 |
+         STD   R4,FPR4                 |
+         STD   R6,FPR6                 |
+*
+*  Get SMF interval - in seconds
+*
+         GETPARM2 KEY=(SYSTEM,SMFINT),REGS=(RA,RJ)
+         IF    ZERO,BEGIN              SMF Parameter OK
+         MVC   FLTWRK,FLTZERO
+         ST    RA,FLTWRK+4
+         LD    R0,FLTWRK
+         MD    R0,=D'4096E6'           Convert seconds to TOD fmt
+         AW    R0,FLTZERO              |
+         STD   R0,SYSSMFI              |
+         MVI   SYSSMFI,0               | no exponent
+         END   ,                       OF SMF Parameter OK
+*
+*  Get global working set interval - mS
+*
+         GETPARM2 KEY=(,GBLWSINT),REGS=(RA,RJ)
+         IF    ZERO,BEGIN              GWS Parameter OK
+         MVC   FLTWRK,FLTZERO
+         ST    RA,FLTWRK+4
+         LD    R0,FLTWRK
+         MD    R0,=D'4096E3'           Convert mS to TOD fmt
+         AW    R0,FLTZERO              |
+         STD   R0,SYSGWSI              |
+         MVI   SYSGWSI,0               | no exponent
+         END   ,                       OF GWS Parameter OK
+*
+*  Get real frame management interval - seconds
+*
+         GETPARM2 KEY=(,FRAMEINT),REGS=(RA,RJ)
+         IF    ZERO,BEGIN              Frame interval Parameter OK
+         MVC   FLTWRK,FLTZERO
+         ST    RA,FLTWRK+4
+         LD    R0,FLTWRK
+         MD    R0,=D'4096E6'           Convert seconds to TOD fmt
+         AW    R0,FLTZERO              |
+         STD   R0,SYSFRAI              |
+         MVI   SYSFRAI,0               | no exponent
+         END   ,                       OF Frame interval Parameter OK
+*
+*  Get real frame managemenr interval loop count
+*    this many loop counts before action is taken on measured stats
+*
+         GETPARM2 KEY=(,FRAMEINO),REGS=(RA,RJ)
+         LA    RB,10                   Default
+         IF    ZERO,BEGIN              Frame interval count OK
+         LR    RB,RA                   Get parameter
+         END   ,                       OF Frame interval count OK
+         ST    RB,SYSFRACT             Init counters
+         ST    RB,SYSFRAN              |
+*
+*  Restore floating point regs
+*
+         LD    R0,FPR0                 Restore floating point regs
+         LD    R2,FPR2                 |
+         LD    R4,FPR4                 |
+         LD    R6,FPR6                 |
+*
+*  Free memory for parameters
+*
+         VMFREE A=LA:SYSPARM,L'SYSPARM,LOC=GLOBHI
+         END   ,                       OF SYSCB addr
+*
+*  Set up real-time timers
+*
+         LCALL TIMEINIT
+*
+*  Tell the operator we're here
+*
+         LS    RA,RB,'***          *** Ready'
+         VMGET (RB),LOC=GLOBHI
+         LR    R14,RVR                 Message area
+         LR    R15,RB                   and length
+         LR    RS,RB                   Length for move
+         MVCL  RVR,RA                  Move message in
+         L     RA,MATPTR
+         WITH  (MAT,RA),'MVC  @R14+4(L"MATSNAME),MATSNAME'
+         ORVWTO (R14),(R15)
+         VMFREE (R15),A=(R14),LOC=GLOBHI
+*
+*  Create an address space for termination processing
+*
+         PSET  @ACREATE
+         MVC   @ACRPSW(4),=X'070C0000' Default location
+         WITH  (MAT,RA),'OC @ACRPSW+1(1),MATSKEY' System Key
+         MVC   @ACRPSW+4(4),=A(X'80000000'+SYSTERM)
+         VCALL ACREATE                 Create the address space
+
+         PSET  @SUSPEND
+         VCALL SUSPEND
+         VCALL DISPRD                  Go to sleep
+         ABORT SYSTASK                 If we ever wake up
+
+         PEND  CODE=NO
+         EJECT
+*****************************************************************
+*                                                               *
+*  SYSTERM --  Go to sleep until termination time. Then call    *
+*              global termination routines.                     *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+SYSTERM  PROC  SCOPE=GLOBAL
+*
+*  Wait until termination time (may be days or weeks)
+*
+         L     RA,MATPTR
+         WITH  (MAT,RA),BEGIN
+         AWAIT MATTECB,TYPE=AS,LEN=LONG
+         END   ,
+*
+*  Make calls to termination routines
+*
+         VCALL FMANTERM                Terminate file processing
+
+         SYSCTL TYPE=DTERMCOM          Signal host that we are done
+
+         PSET  @SUSPEND
+         VCALL SUSPEND
+         VCALL DISPRD                  Go to sleep
+         ABORT SYSTERM                 If we ever wake up
+
+         PEND  CODE=NO
+         EJECT
+*****************************************************************
+*                                                               *
+*  TIMEINIT --  This routine initializes global timers for      *
+*               global routines                                 *
+*                                                               *
+*   Input  --  @TIMES                                           *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+TIMEINIT PROC  ,
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATSYSCB'
+         WITH  (SYSCB,RM)
+*
+*  First establish an exit routine
+*
+         PSET  @EXRADD
+         WITH  (XITMSKD,@EXRTYPE)
+         SET   XITMRTC                 Real time clock only
+         MVC   @EXRPSW(4),=X'070C0000'
+         MVC   @EXRPSW+4(4),=A(X'80000000'+TIMEDRIV)
+         SET   @EXRAFS                 Enter it with a Stack
+         VCALL EXRADD                  Add the Exit routine
+*
+*  Enable the Exit
+*
+         PSET  @XITMASK
+         WITH  (XITMSKD,@XITMSK)
+         SET   XITMRTC                 Real time-timer
+         SET   @XITMSO                 Or it in
+         VCALL XITMASK                 Set the mask
+*
+*  Get a new XIT ID
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         LR    RA,RVR                  Copy the ID
+*
+*  Start up the global working set timer
+*
+         PSET  @RTSET
+         ST    RA,@RTSXIT              Tell him the exit ID
+         SET   @RTSFINT                Interval timer
+         MVC   @RTSCLK,SYSGWSI         Interval
+         MVC   @RTSPARM(4),=A(GWSMAN)
+         VCALL RTSET                   Set the time
+*
+*  Get a new XIT ID
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         LR    RA,RVR                  Copy the ID
+*
+*  Set up to call statistics routines on a real-time interval
+*
+         PSET  @RTSET
+         ST    RA,@RTSXIT              Tell him the exit ID
+         SET   @RTSFINT                Interval timer
+         MVC   @RTSCLK,SYSSMFI         Interval
+         MVC   @RTSPARM(4),=A(SMFCALL)
+         VCALL RTSET                   Set the time
+*
+*  Get a new XIT ID
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         LR    RA,RVR                  Copy the ID
+*
+*  Set up to call real frame management
+*
+         PSET  @RTSET
+         ST    RA,@RTSXIT              Tell him the exit ID
+         SET   @RTSFINT                Interval timer
+         MVC   @RTSCLK,SYSFRAI         Interval
+         MVC   @RTSPARM(4),=A(FRAMCALL)
+         VCALL RTSET                   Set the time
+         PEND  ,
+         EJECT
+*****************************************************************
+*                                                               *
+*   TIMEDRIV - This routine is the driver for timer based       *
+*              routines.  It is entered when a real time timer  *
+*              expires.  It assumes that the first parameter    *
+*              is the address of the routine to be called for   *
+*              this parameter, and calls that routine.          *
+*              The called routine should return the next        *
+*              interval to set, if there is one.                *
+*                                                               *
+*   Input  --  @XITDATA                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+@TIMERTN RECORD BEGIN
+* -- Return parameters --
+@TIMEINT DS    D                       Interval to set next time
+         END   ,
+         SPACE
+TIMEDRIV PROC  @XITDATA
+*
+*  Find out the info we need
+*
+         L     RX,@XITDSA              Address of the status area
+         WITH  (XITSAREA,RX)
+         WITH  (RTEXIT,XITSXPRM)       Map the exit parms
+*
+*  Get the XIT id
+*
+         L     RA,RTXXID               Get the exit ID
+         L     RB,RTXPARM              Address of routine to call
+         PSET  @TIMERTN
+         ACALL (RB)
+         LM    RJ,RK,@TIMEINT
+*
+*  Re-start the timer
+*
+         IF    ((RJ,NZ),OR,(RK,NZ)),BEGIN       Set timer if spec
+         PSET  @RTSET
+         ST    RA,@RTSXIT              Tell him the exit ID
+         SET   @RTSFINT                Interval timer
+         STM   RJ,RK,@RTSCLK           Interval
+         ST    RB,@RTSPARM             Specify the routine as parm
+         VCALL RTSET                   Set the time
+         END   ,                       OF Set timer if spec
+*
+*  Finish up the exit
+*
+         PSET  @EXRDONE
+         VCALL EXRDONE                 All done here
+         PEND
+         EJECT
+*****************************************************************
+*                                                               *
+*   GWSMAN --  This routine does the global working set         *
+*              management.  It is timer based, and called when  *
+*              the timer expires.  It does the management and   *
+*              specifies the interval to do it all over again   *
+*                                                               *
+*   Input  --  @TIMERTN                                         *
+*                                                               *
+*  Output  --  @TIMERTN                                         *
+*                                                               *
+*****************************************************************
+         SPACE 2
+GWSMAN   PROC  @TIMERTN
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATSYSCB'
+         WITH  (SYSCB,RM)
+*
+*  Do the Working set management
+*
+         PSET  @PAGWSMA
+         MVC   @WSINT,=A(1)            One interval
+         SET   @WSFGLOB                Mark it for global
+         VCALL PAGWSMAN
+*
+*  Specify the next timer interval
+*
+         MVC   @TIMEINT,SYSGWSI
+         PEND  ,
+         EJECT
+*****************************************************************
+*                                                               *
+*   SMFCALL --  This routine calls the various SMF-record       *
+*               writing routines when a real-time timer expires *
+*               After doing the work it specifies the next      *
+*               timer interval to do it all over again.         *
+*                                                               *
+*   Input  --  @TIMERTN                                         *
+*                                                               *
+*  Output  --  @TIMERTN                                         *
+*                                                               *
+*****************************************************************
+         SPACE 2
+SMFCALL  PROC  @TIMERTN
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATSYSCB'
+         WITH  (SYSCB,RM)
+*
+*  Do the SMF work
+*
+         VCALL PAGSMF                  Paging system
+         VCALL FILSMF                  File system
+*
+*  Specify the next interval
+*
+         MVC   @TIMEINT,SYSSMFI
+         PEND  ,
+         EJECT
+*****************************************************************
+*                                                               *
+*   FRAMCALL    This routine calls the real-frame interval      *
+*               management routine.                             *
+*               After doing the work it specifies the next      *
+*               timer interval to do it all over again.         *
+*                                                               *
+*   Input  --  @TIMERTN                                         *
+*                                                               *
+*  Output  --  @TIMERTN                                         *
+*                                                               *
+*****************************************************************
+         SPACE 2
+FRAMCALL PROC  @TIMERTN
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATSYSCB'
+         WITH  (SYSCB,RM)
+*
+*  Real frame interval management
+*
+         L     RA,SYSFRAN              Number of intervals to action
+         DECR  RA                      |
+         PSET  @PAGINTV                Paging system
+         PMOV  @PAGINT,(RA)            | Intervals remaining
+         VCALL PAGINTV                 |
+*
+         IF    (RA,NPOS),'L RA,SYSFRACT'
+         ST    RA,SYSFRAN
+*
+*  Specify the next interval
+*
+         MVC   @TIMEINT,SYSFRAI
+         PEND  ,
+         EJECT
+         DS    0D
+FLTZERO  DC    XL8'4E00000000000000'   Floating point zero
+*
+*  Working set interval for the global address space
+*
+GWSINT   DC    FL8S12E6'1'             1 Second
+*
+*  SMF interval
+*
+SMFINT   DC    FL8S12E6'900'           15 minutes = 900 seconds
+*
+*  Interval for real frame management
+*
+FRAMINT  DC    FL8S12E6'60'            1 minute
+         END   .

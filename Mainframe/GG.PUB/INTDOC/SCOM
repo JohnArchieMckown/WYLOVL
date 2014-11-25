@@ -1,0 +1,434 @@
+OPTIONS:  UNN INDENT=5 DEST=SYSL CHARS=CU11
+April 1986                                         ITS Systems Group
+Created 04/11/86 by AHJ                            Technical Note
+Last updated 11/23/90, Niz
+
+(This is saved as WYL.GG.PUB.INTDOC#SCOM.)
+
+                        <.b+>SCOM Version 2<.b->
+
+<.b+>Introduction and Overview<.b->
+
+This document describes Version 2 of SCOM.  SCOM, SUZAN and SVCCOM
+are different names for the same program, a SuperVisor Call
+Communication program.  SCOM is a means of sending and receiving
+information between programs in different address spaces through
+shared memory.
+
+SCOM Version 2 is completely compatible with Version 1; it does not
+matter which version your partner is using in any communication.
+Version 2 is also much easier to use than Version 1, and for that
+reason is documented exclusively here.
+
+Both authorized and unauthorized programs can use SCOM
+(authorization being a factor of program privilege level).
+Unauthorized programs are restricted to smaller buffer sizes,
+however.
+
+
+<.b+>Overview<.b->
+
+This document describes data as being sent and received over paths
+between programs.  The term path really refers to those control
+blocks and buffers maintained by SCOM which allow two callers to
+communicate.
+
+Before using SCOM to communicate with other programs, a program
+must first define a Path Control Block, which contains the
+information that SCOM will need for sending and receiving data.
+An assembler PATH macro described in this document helps you
+establish the Path Control Block, and Appendix B contains a
+description of the block.
+
+Before any communication can take place, both callers must open the
+path by telling SCOM the location of the Path Control Block.  The
+SCOM calls to open and close paths and to send and receive data can
+be made through an assembler macro SCOM, that is described in this
+document.  The return codes for the SCOM macro are listed in
+Appendix A.
+
+SCOM notifies programs of path activity by posting a program's ECB
+and setting flags in a path flag byte that describe the reason for
+the post.  The path flag byte is described in the section "Checking
+for Posting".
+
+<.page>
+<.b+>Defining a Path Control Block<.b->
+
+Before you can open a path, you must define a Path Control Block.
+SCOM references this block in future requests. The Path Block
+itself is described in Appendix B.
+
+The PATH macro defines the Path block.  (LBL is an optional label):
+
+LBL  PATH      MYTAG=tag,YOURTAG=tag,BUFSIZE=SIZE,ECB=adr,      *
+               FLAG=adr,PASS=password,PFX=prefix,VERSION=2
+
+
+<.u+>Operand<.u->            <.u+>Function<.u->
+
+MYTAG              the path name identifier (for example, WYLBUR
+                   or ORVYL).  This is required.
+
+YOURTAG            the path name identifier of the program to which
+                   to open a path.  If not specified, the path may
+                   be opened with any program that uses the correct
+                   password and specifies your path name identifier.
+
+BUFSIZE            the size of the path buffer, which is the
+                   maximum amount of data that can be outstanding.
+                   This defaults to 0, which means it must be
+                   specified.  The limit for unauthorized programs
+                   is 64K.  Authorized programs may have larger
+                   buffers.
+
+ECB                the address of the path's ECB (Event Control
+                   Block).  This is required.
+
+FLAG               the address of the path post flag byte, an area
+                   where SCOM puts information about why a program
+                   was posted.  This is required.
+
+PASS               the password.  The passwords of both partners
+                   must match for a path to be established.
+
+PFX                a prefix up to four characters for the mnemonics
+                   associated with different fields.  This
+                   defaults to PATH.  This document always uses
+                   PATH as a prefix when describing fields.
+
+VERSION=2          the version of SCOM being used. This
+                   document only describes version 2.
+
+Note that users must establish their own naming conventions for
+MYTAG, YOURTAG, and PASS.  SCOM itself only checks to see that the
+tags or passwords match each other.
+
+A sample PATH macro might look like:
+
+PATH           MYTAG=MILTEN,BUFSIZE=64,ECB=MILECB,FLAG=MILFLAG,   *
+               PASS=PRODMIL,VERSION=2
+
+In the above example, there is no YOURTAG specified, which means
+that MILTEN will communicate with any program that knows the correct
+password and specifies MILTEN in its Path Block.  Because MILTEN is
+an authorized program, it could specify a buffer larger than 64K.
+<.page>
+<.b+>Opening a Path<.b->
+Once you have defined your Path Block,  you must also specifically
+OPEN the path.  You can OPEN one or several paths at one time:
+
+    SCOM OPEN,parm
+
+The parameter "parm" is a pointer to a list of path block addresses.
+Each entry is four bytes long and the high-order bit of the last
+address must be on, to indicate the end of the list.
+
+The OPEN function gives SCOM the location of the path block for each
+path and requests that the path be opened.  SCOM puts a specific
+32-bit path-identifier for each path at the beginning of each path
+block.
+
+Both partners must OPEN a path before any communication can take
+place.  The partner who OPENS a path first is posted when the second
+partner OPENS and the PATHFOPN flag (x'08') is set in the post flag
+byte.
+
+
+<.b+>Sending Information Over the Path<.b->
+
+The SEND function requests that information be sent to the partner
+on the path:
+
+    SCOM SEND,pointer,path-mgc-address
+
+The parameter is a pointer to a list of buffer addresses and
+lengths for the data to be sent.  Each entry must be eight bytes
+long (four bytes for the length and four bytes for the address).
+The high-order bit of the last entry must be on to indicate the end
+of the list.  You must also include the path mgc address on this
+instruction, this is typically "L:PATHMGC".  Note that this is not
+your PATH address but rather the "path magic word (PATHMGC)" that
+Suzan returns in the path block.
+
+If the length field for any buffer is zero, SCOM assumes that the
+buffer starts with an RDW (which contains the length of the buffer
+plus the length of the RDW).
+
+If you try to send a single buffer that is larger than your
+partner's receive buffer, SCOM puts a return code (PATHRBOM) in
+Register 15 after the SEND. If your partner's receive buffer is full
+when you try to SEND information, SCOM puts a return code (PATHRBAF)
+in Register 15.  When the partner's receive buffer empties, your
+program is posted and a flag (PATHFFQE) is set in the post flag
+byte.
+
+<.page>
+<.b+>Receiving Information Over the Path<.b->
+
+There are two ways to receive information from SCOM; RECEIVE-GET or
+RECEIVE-LOCATE.
+
+RECEIVE-GET
+When using the GET function, SCOM moves the data sent by your
+partner to the buffer or buffers specified with the GET function.
+
+    SCOM GET,pointer,path-mgc-address
+
+The parameter "pointer" is a pointer to a list of buffer addresses
+and lengths.  Each entry must be eight bytes long (four for the
+length and four for the address) and the high-order bit of the last
+entry must be on, to indicate the end of the list.  SCOM moves the
+data sent to these buffers.  You must also include the path mgc
+address on this instruction, this is typically "L:PATHMGC".  Note
+that this is not your PATH address but rather the "path magic word
+(PATHMGC)" that Suzan returns in the path block.
+
+
+SCOM returns the total length of the data received in Register 1.
+If the buffers specified are not large enough, SCOM moves all that
+will fit into the buffers and then puts a return code (PATHRIBS) in
+Register 15.  In Register 0 it returns the amount of data not moved.
+It also posts your program and sets a new information flag (PATHFNI)
+in the post flag byte.  On the next GET function, SCOM moves same
+data in its entirety (or as much as fits).
+
+RECEIVE-LOCATE
+When using the LOCATE function, SCOM gives your program the length
+and address of the received data, which is in a shared region of
+memory.  Your program can then move the data itself.
+
+    SCOM LOCATE,pointer,path-mgc-address
+
+The parameter "pointer" is a pointer to an 8-byte area where SCOM
+will put the address and length of the received buffer.  If this
+parameter is zero, SCOM returns this information in Register 1.
+
+Any buffer LOCATE'd must be explicitly freed.  The FREE function
+does just that:
+
+    SCOM FREE,pointer,path-mgc-address
+
+The parameter "pointer" is the pointer to the LOCATE'd buffer, as
+returned by the LOCATE function.  If this is zero, then all LOCATE'd
+buffers are FREE'd
+
+If your program will be receiving several buffers using the LOCATE
+mechanism, the FREELOC function can save time.  FREELOC frees the
+buffer from the last LOCATE and then does a LOCATE:
+
+    SCOM FREELOC,pointer,path-mgc-address
+
+You must also include the path mgc address on this instruction, this
+is typically "L:PATHMGC".  Note that this is not your PATH address
+but rather the "path magic word (PATHMGC)" that Suzan returns in the
+path block.
+<.page>
+<.b+>Checking for Posting<.b->
+The post flag byte contains a series of flag bits that describe why your
+program was posted.  They are are follows:
+
+    <.U+>SYMBOL<.U->   <.U+>VALUE<.U->    <.U+>MEANING<.U->
+
+    PATHFCLS (x'80')  I am posted because partner closed.
+    PATHFFQE (x'40')  I am posted because partner's full queue
+                      emptied.
+    PATHFNI  (x'20')  I am posted because there is new information
+                      in my queue.
+    PATHFDP  (x'10')  I am posted at partner's discretion
+                      (see SCOM POST)
+    PATHFOPN (x'08')  I am posted because the partner opened.
+
+1.  After being posted, your program should clear both the ECB POST
+bit and the related flag.  For example, if you receive new
+information, you should clear the ECB and the PATHFNI flag after
+checking them.
+
+2.  You must be careful about when you clear the ECB and flags, as
+it is possible to receive information between the last check and the
+time the flag is cleared, in which case your program will be unaware
+of new information.  The way to avoid this problem is to clear the
+ECB and the flags immediately before the action the program is going
+to wait for.  For example, after receiving a buffer and before
+waiting for a new buffer, you should clear the ECB and flags before
+you try a RECEIVE.
+
+3.  Because this is a multiple CPU system, you should use an
+interlocked update to reset any flags.  If you use the AND IMMEDIATE
+(NI) instruction, it is possible that your partner could put new
+information in the flags as you are clearing them.  Using the
+COMPARE AND SWAP (CS) instruction avoids this problem.
+
+
+<.b+>Posting The Partner<.b->
+Many SCOM functions automatically POST the partner and set the
+appropriate flag in the post flag byte.  You can also choose to post
+your partner at your own discretion (there is a post flag byte that
+indicates this as well).
+
+The POST function posts the partner and sets a flag (PATHFDP) in the
+partner's post flag byte.
+
+    POST,path-mgc-address
+
+<.page>
+<.b+>Getting Information About the Partner<.b->
+The INFO function returns information on the partner's ASCB Address,
+buffer size, path name, and the input transaction chain pointer.
+
+    SCOM INFO,pointer,path-mgc-address
+
+The parameter "pointer" is a pointer to a list of buffer addresses
+and lengths, with each entry being 8 bytes long.  Turning on the
+high-order bit signals the end of the list.
+
+The INFO function puts into the specified buffers as much of the
+following information as will fit:
+
+     Partner's ASCB Address (4 bytes)
+     Partner's Buffer Size (4 bytes)
+     Partner's Path Name (8 bytes)
+     Input Transaction Chain Pointer (4 bytes)
+
+You must also include the path mgc address on this instruction, this
+is typically "L:PATHMGC".  Note that this is not your PATH address
+but rather the "path magic word (PATHMGC)" that Suzan returns in the
+path block.
+
+<.b+>Closing a Path<.b->
+When you have completed your communication over the path, the CLOSE
+function closes the path.
+
+    SCOM CLOSE,path-mgc-address
+
+A path is closed as soon as one of the partners closes it.  The
+CLOSE function posts the partner of the path and sets a flag bit in
+the post flag byte.
+
+You must also include the path mgc address on this instruction, this
+is typically "L:PATHMGC".  Note that this is not your PATH address
+but rather the "path magic word (PATHMGC)" that Suzan returns in the
+path block.
+<.page>
+<.b+>Appendix A:  SCOM Return Codes<.b->
+SCOM Version 2 puts the following return codes in Register 15.
+
+    <.U+>SYMBOL<.u->         <.u+>VALUE<.u->     <.u+>MEANING<.u->
+
+    PATHROK        0         complete, OK
+    PATHRIFC       4         invalid function code
+    PATHRPMW       8         invalid path identifier
+    PATHRBAF       12        partner's buffer area full
+    PATHRNOP       16        partner not there
+    PATHRBOM       20        buffer over partner's maximum
+    PATHRIBS       24        receive buffer too small
+    PATHRBPI       28        invalid buffer pointer
+    PATHRIAD       32        invalid address
+    PATHRES1       36        reserved
+    PATHRES2       40        reserved
+    PATHRES3       44        reserved
+    PATHRES4       48        reserved
+
+<.b+>Appendix B: Path Control Block Description<.b->
+The PATH block is 56 bytes, with the following format.  Addresses in
+parentheses are the hex value of the address.
+
+<.u+>Offsets  Name       Length  Description                 <.u->
+
+0   (0)   PATHMGC   4       Magic Word, or path identifier,
+                            returned from OPEN.
+4   (4)   PATHDJNM  4       reserved
+8   (8)   PATHMY    8       MYTAG
+16 (10)   PATHYOU   8       YOURTAG
+24 (18)   PATHMFL   1       Path mode flags.  Bits not listed are
+                            reserved
+
+                        PATHVER2 (x'80')  Caller is using Version 2
+                        PATHMNAM (x'20')  Caller provides callee name
+
+25 (19)  PATHOECB   3       Reserved
+28 (1C)  PATHBUF    4       Buffer size (as specified)
+32 (20)  PATHECBF   4       Address of post flag byte
+                            See section "Checking For Posting"
+36 (24)  PATHPASS   4       Password for initialization
+40 (28)  PATHECB    4       ECB address
+44 (2C)  PATHEXIT   4       reserved
+48 (30)  PATHRES    8       reserved
+
+<.page>
+January, 1988
+New SUZAN SVC "SETINFO" and extended "INFO" calls
+
+
+A privileged program (e.g. WYLBUR) can now set "path information"
+which can be sensed by the path partner.  WYLBUR uses this
+capability to provide account information when a Wylbur user opens a
+path.  (The partner will want to know which Wylbur user opened the
+path, not just that the program "WYLBUR" opened a path.)
+
+There is a new SCOM call as follows:
+
+       SCOM  SETINFO,area,path-address
+
+where "area" is:
+         4 bytes     length of information which follows.
+         x bytes     path information (if over 96 bytes, only
+                       the first 96 bytes will be saved).
+
+The "path information" is binary zeros if not explicitly set.  If
+less than 96 bytes is set, then the area is padded with binary
+zeros.
+
+In addition the existing "INFO" call has been extended to provide
+more information.  The INFO SCOM call is as follows:
+
+   INFO              Pointer to list of buffer addresses and
+                     lengths, each entry is 8 bytes long.  The end
+                     of the list is signified by turning on the
+                     high-order bit.  As much of the following
+                     information as will fit is placed into the
+                     buffer area(s):
+
+                         Partner's ASCB Address (4 Bytes)
+                         Partner's Buffer Size (4 Bytes)
+                         Partner's Path Name (8 Bytes)
+                         Input Transaction Chain Pointer (4 Bytes)
+                n -->    Zeros/reserved (16 bytes)
+                e -->    Partner's path info (96 bytes)
+                w -->    Your path info (96 bytes)
+
+--------------------------------
+
+The Suzan SVC treats the "path information" as user data--it can be
+anything.
+
+The format Wylbur uses for this user data is described in the DSECT
+called "PINFO" in SYS3.IS.MACLIB#PINFO.  The following is a copy of
+the PINFO DSECT.
+
+*box
+*
+*  USER PATH INFORMATION
+*
+*
+*  Subsystems provides this information whenever they open user
+*  paths.  The information is set with the Suzan SVC
+*  "SETINFO" call (a 1/88 Suzan SVC extension).
+*
+*  Once a path is opened, a program can sense this information
+*  for the partner's side of the path.
+*
+PINFO    RECORD BEGIN
+         DC    CL4'PINF'           Self identification
+         DC    F'0'                Reserved
+PINFOSYS DC    CL8' '              Subsystem name ("WYLBUR", etc.)
+PINFOACC DC    CL8' '              User account ("gg.uuu")
+PINFOPRJ DC    CL8' '              Project (subgroup)
+         DC    CL8' '              Reserved
+         DC    2F'0'               Reserved
+PINFOFL1 FLAG
+PINFOFL2 FLAG
+PINFOLNO DC    H'-1'               Milten line-number (or -1)
+PINFOID  DC    F'0'                Milten session id
+PINFONAM DC    CL20' '             User name
+         END

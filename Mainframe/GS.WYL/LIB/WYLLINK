@@ -1,0 +1,935 @@
+;  wyllink - link a wylbur module
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLLINK as  "xcall wyl.gs.wyl.lib#wyllink /" rep
+;
+;  command syntax:
+;      wyllink <subsys> <NOPROMPT|PROMPT>
+;
+;  <subsys>:
+;      name of subsystem; the default is WYLBUR; allowed are
+;      TESTWYL, MILTEN, TESTMIL, uuuWYL and uuuMIL
+;  <NOPROMPT|PROMPT>:
+;      determines whether to verify actions about to be taken;
+;      default is NOPROMPT for non-destructive actions, PROMPT for
+;      destructive actions
+;  <DEBUG>:
+;      sets debug mode for this invocation; it will not run, but
+;      will report what it would have run
+;
+;  Updated:
+;
+;  04/05/95  slp  Add //MILTEN DD in link_user_milten
+;  09/29/94  slp  Remove DSECTS from list of modules to link
+;  07/22/94  slp  Clean up documentation.
+;  04/05/96  mpd  Add SAS C link steps for WYLBUR, TESTWYL
+;                 and user WYLBURs
+;  01/28/97  mpd  Change get_cat_like routine to use SHOW CAT
+;                 INTERNAL.
+;  11/20/97  mpd  Eliminated obsolete front end driver modules
+;                 from link_prod_milten
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl boolean x.debug
+  dcl string x.program, x.stem
+  dcl string subsys, prompt
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; initialize variables
+  subsys = 'WYLBUR'
+  prompt = 'NO'
+  x.program = 'WYLBUR'
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wyllink tit 'wyllink temporary active' temp
+  x.temp = actno                   ; save temp active file number
+  pick &(x.act)                    ; but go back to original
+
+  ; scan command
+  pcall scan_command (parm_count, parm_string, subsys, prompt);
+  if (x.program eq 'WYLBUR') x.stem = 'WYL'
+  else x.stem = 'MIL'
+
+; get list of modules to include
+  pick &(x.temp)                   ;switch to temp active
+  pcall get_module_lists (subsys)
+  pick &(x.act)                    ;switch back to user active
+
+; go link module
+  if (x.program eq 'WYLBUR') \
+    begin
+    pcall order_wylbur             ; get list of modules to order
+    if (subsys eq 'WYLBUR') \
+      pcall link_prod_wylbur(subsys,prompt)
+    elseif (subsys eq 'TESTWYL') \
+      pcall link_test_wylbur(subsys,prompt)
+    else \
+      pcall link_user_wylbur(subsys,prompt)
+    end
+  else \
+    begin
+    if (subsys eq 'MILTEN') \
+      pcall link_prod_milten(subsys,prompt)
+    elseif (subsys eq 'TESTMIL') \
+      pcall link_test_milten(subsys,prompt)
+    else \
+      pcall link_user_milten(subsys,prompt)
+    end
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+;<.page>
+;
+;  scan parameters passed on invoking command
+;
+proc scan_command (pc,ps,subsys,prompt) \
+  begin
+  dcl string token,remain,type
+  dcl string delims
+  delims = ' ,;=''"'               ; define parm delimiters
+
+  ;  check for at least one parameter
+  remain = ps
+  if (ps eq '') \
+    begin
+    comm At least one parameter is required.
+    ps = '?'
+    end
+  if (strip(ps) eq '?') pcall error_msg( \
+    'Command syntax: wyllink <subsys> <NOPROMPT|PROMPT>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan:  <subsys> <NOPROMPT|PROMPT>
+  while (remain ne '') \
+    begin
+    syscall scan_parm(token,remain,type,' ,',delims)
+;   comm token=&(token) remain=&(remain)
+    cases \
+      begin
+      case (upper(token) eq 'WYLBUR') \
+        begin
+        subsys = 'WYLBUR'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'TESTWYL') \
+        begin
+        subsys = 'TESTWYL'
+        x.program = 'WYLBUR'
+        end
+      case ((substr(upper(token),1,3) eq user) and \
+            (substr(upper(token),4,6) eq 'WYL')) \
+        begin
+        subsys = upper(token)
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'MILTEN') \
+        begin
+        subsys = 'MILTEN'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'TESTMIL') \
+        begin
+        subsys = 'TESTMIL'
+        x.program = 'MILTEN'
+        end
+      case ((substr(upper(token),1,3) eq user) and \
+            (substr(upper(token),4,6) eq 'MIL')) \
+        begin
+        subsys = upper(token)
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'NOPROMPT') prompt = 'NO'
+      case (upper(token) eq 'PROMPT') prompt = 'YES'
+      case (upper(token) eq 'DEBUG') x.debug = TRUE
+      case (TRUE) \
+        begin
+        pcall error_msg('Unexpected parameter &(token); link aborted')
+        end
+      end
+;   comm subsys=&(subsys) prompt=&(prompt)
+    end
+  return(subsys,prompt)
+  end
+
+;<.page>
+;
+;  build list of modules in production subsystem, in test subsystem,
+;  and under user account
+;
+proc get_module_lists (subsys) \
+  begin
+
+  pcall get_directory('wyl.gs.&(x.stem).&(x.program).object', 'x.prod')
+  if ((subsys eq 'WYLBUR') or (subsys eq 'MILTEN')) \
+    return                         ; if doing production, done
+
+  pcall get_directory('wyl.gs.&(x.stem).test&(x.stem).object', 'x.test')
+  pcall get_directory('wyl.gs.&(x.stem).test&(x.stem).c.obj', 'x.ctest')
+  if (subsys eq 'TEST&(x.stem)') \
+    return                         ; if doing test system, done
+
+  pcall get_cat_like('WYL.&(group).&(user).OBJECT.&(x.stem)', 'x.user')
+  pcall get_directory('wyl.&(group).&(user).&(x.program).c.obj', 'x.cuser')
+  end
+
+;<.page>
+;
+;  Get catalog entries matching the stem into array.
+;
+;
+proc get_cat_like(s, arrayname) \
+  begin
+     try quietly dump cat like &(s) internal
+     if (tryattn) pcall attn
+
+     if (~ tryerr) \
+       begin
+          try quietly change 47/235 to '' in all nolist
+          try quietly change 1/2 to '' in all nolist
+          try quietly change '&(s)' to '&(x.stem)' in all nol
+          try quietly del ~ ' '27      ; modules
+
+          if (last gt 0) \
+            begin
+              dcl string &(arrayname)[&(lines)]  ; allocate array to hold names
+              dcl string text
+
+              i = 1
+              lno = 0
+              syscall line_next(lno,text)
+
+              while (lno gt 0) \
+                 begin
+                   &(arrayname)[i] = text
+                   syscall line_next(lno,text)
+                   i = i+1
+                 end
+            end
+          try quietly delete first/last  ; clear out working active file
+       end
+  end
+
+;<.page>
+;
+;  Get directory members into array except for
+;  any member named 'DSECT'.
+;
+;
+proc get_directory(s, arrayname) \
+  begin
+     try quietly dump dir for &(s)
+     if (tryattn) pcall attn
+
+     if (~ tryerr) \
+        begin
+          try quietly delete f (3)       ; delete headings
+          try quietly delete 'DSECT'     ; don't try to link in DSECTS
+          try quietly ch 9/235 to '' nol ; remove comments
+
+          if (last gt 0) \
+             begin
+               dcl string &(arrayname)[&(lines)]  ; allocate array to hold names
+               dcl string text
+
+               i = 1
+               lno = 0
+               syscall line_next(lno,text)
+
+               while (lno gt 0) \
+                  begin
+                    &(arrayname)[i] = text
+                    syscall line_next(lno,text)
+                    i = i+1
+                  end
+             end
+          try quietly delete first/last  ; clear out working active file
+        end
+    else  \
+        begin
+          try quietly delete first/last  ; clear out working active file
+        end
+  end
+
+;<.page>
+;
+;  link production wylbur load module
+;
+
+proc link_prod_wylbur (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //WYL$LINK JOB ,'NEW WYL LINK',TIME=2,CLASS=E,REGION=4096K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link WYLBUR.
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  putend //LINK    EXEC  PGM=HEWL,PARM='DCBS,NCAL,LET,MAP'
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  UNIT=VIO,SPACE=(1024,(100,100))
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.WYL.WYLBUR.SYSB.LINKLIB
+  putend //OBJECT   DD  DSN=WYL.GS.WYL.WYLBUR.OBJECT,DISP=SHR
+  putend //SYSLIN   DD  *
+
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.order')) \
+    begin
+    if (substr(x.order[i],1,3) eq 'WYL') \
+      putend   INCLUDE OBJECT(&(strip(x.order[i])))
+    i = i + 1
+    end
+
+  i = 1                            ; now add the ORDER statements
+  while (i le bounds('x.order')) \
+    begin
+    putend   ORDER &(x.order[i])
+    i = i + 1
+    end
+
+  putend  ENTRY WYLBUR
+  putend  SETCODE AC(1)
+  putend  NAME WYLBUR(R)
+  putend //*
+  putend //COPY    EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.GS.WYL.WYLBUR.TEST.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  link testwyl load module
+;
+proc link_test_wylbur (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //TWYLLINK JOB ,'NEW TESTWYL LINK',TIME=2,CLASS=E,REGION=4096K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link WYLBUR.
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  if (BOUNDS('x.ctest') gt 0) \
+     begin
+        putend //CLINK    EXEC PGM=CLINK,REGION=1536K
+        putend //STEPLIB  DD DSN=SYS4.SASC.C550.LOAD,
+        putend //            DISP=SHR C COMPILER LIBRARY
+        putend //         DD DSN=SYS4.SASC.C550.LINKLIB,
+        putend //            DISP=SHR C RUNTIME LIBRARY
+        putend //SYSPRINT DD SYSOUT=A
+        putend //SYSTERM  DD SYSOUT=T
+        putend //SYSLIN   DD UNIT=SYSDA,DSN=&&LKEDIN,SPACE=(CYL,(5,5)),
+        putend //            DCB=(RECFM=FB,LRECL=80,BLKSIZE=3200),
+        putend //            DISP=(NEW,PASS)
+        putend //SYSLIB   DD DSN=SYS4.SASC.C550.SPEOBJ,DISP=SHR
+        putend //         DD DSN=SYS4.SASC.C550.BASEOBJ,DISP=SHR
+        putend //COBJECT DD DISP=SHR,DSN=WYL.GS.WYL.TESTWYL.C.OBJ
+        putend //SYSIN  DD  *
+
+        i = 1                            ; add the INCLUDE statements
+        while (i le BOUNDS('x.ctest')) \
+          begin
+            putend   INCLUDE COBJECT(&(strip(x.ctest[i])))
+            i = i + 1
+          end
+        putend   INCLUDE SYSLIB(L$UMAIN)
+     end
+
+  putend //LINK    EXEC  PGM=HEWL,PARM='DCBS,NCAL,LET,MAP'
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  UNIT=VIO,SPACE=(1024,(100,100))
+
+  if (BOUNDS('x.ctest') gt 0) \
+     begin
+       putend //SYSLIB   DD  DSN=SYS4.SASC.C550.SPEOBJ,DISP=SHR
+       putend //         DD  DSN=SYS4.SASC.C550.BASEOBJ,DISP=SHR
+     end
+
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.WYL.WYLBUR.SYSB.LINKLIB
+  putend //OBJECT   DD  DSN=WYL.GS.WYL.TESTWYL.OBJECT,DISP=SHR
+  putend //WYLBUR   DD  DSN=WYL.GS.WYL.WYLBUR.SYSB.LINKLIB,DISP=SHR
+
+  if (BOUNDS('x.ctest') gt 0) \
+     begin
+       putend //SYSLIN   DD  DSN=&&LKEDIN,DISP=(OLD,DELETE)
+       putend //       DD  *
+     end
+
+  else \
+     putend //SYSLIN   DD  *
+
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.test')) \
+    begin
+    if (substr(x.test[i],1,3) eq 'WYL') \
+      putend   INCLUDE OBJECT(&(strip(x.test[i])))
+    i = i + 1
+    end
+
+  putend   INCLUDE WYLBUR(WYLBUR)
+
+  i = 1                            ; now add the ORDER statements
+  while (i le bounds('x.order')) \
+    begin
+    putend   ORDER &(x.order[i])
+    i = i + 1
+    end
+
+  putend  ENTRY WYLBUR
+  putend  SETCODE AC(1)
+  putend  NAME WYLBUR(R)
+  putend //*
+  putend //COPY    EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.GS.WYL.TESTWYL.TEST.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  link user wylbur load module
+;
+proc link_user_wylbur (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //&(user)$LINK JOB ,'NEW &(user)WYL LINK',TIME=2,CLASS=E,REGION=4096K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link WYLBUR.
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  if (BOUNDS('x.cuser') gt 0) \
+     begin
+        putend //CLINK    EXEC PGM=CLINK,REGION=1536K
+        putend //STEPLIB  DD DSN=SYS4.SASC.C550.LOAD,
+        putend //            DISP=SHR C COMPILER LIBRARY
+        putend //         DD DSN=SYS4.SASC.C550.LINKLIB,
+        putend //            DISP=SHR C RUNTIME LIBRARY
+        putend //SYSPRINT DD SYSOUT=A
+        putend //SYSTERM  DD SYSOUT=T
+        putend //SYSLIN   DD UNIT=SYSDA,DSN=&&LKEDIN,SPACE=(CYL,(5,5)),
+        putend //            DCB=(RECFM=FB,LRECL=80,BLKSIZE=3200),
+        putend //            DISP=(NEW,PASS)
+        putend //SYSLIB   DD DSN=SYS4.SASC.C550.SPEOBJ,DISP=SHR
+        putend //         DD DSN=SYS4.SASC.C550.BASEOBJ,DISP=SHR
+        putend //COBJECT DD DISP=SHR,DSN=wyl.&(group).&(user).&(x.program).c.obj
+        putend //SYSIN  DD  *
+
+        i = 1                            ; add the INCLUDE statements
+        while (i le BOUNDS('x.cuser')) \
+          begin
+            putend   INCLUDE COBJECT(&(strip(x.cuser[i])))
+            i = i + 1
+          end
+        putend   INCLUDE SYSLIB(L$UMAIN)
+     end
+
+  putend //LINK    EXEC  PGM=HEWL,PARM='DCBS,NCAL,LET,MAP'
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  UNIT=VIO,SPACE=(1024,(100,100))
+
+  if (BOUNDS('x.cuser') gt 0) \
+     begin
+       putend //SYSLIB   DD  DSN=SYS4.SASC.C550.SPEOBJ,DISP=SHR
+       putend //         DD  DSN=SYS4.SASC.C550.BASEOBJ,DISP=SHR
+     end
+
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.WYL.WYLBUR.SYSB.LINKLIB
+  putend //TESTWYL  DD  DSN=WYL.GS.WYL.TESTWYL.SYSB.LINKLIB,DISP=SHR
+
+  i = 1                            ; add the object DD statements
+  while (i le bounds('x.user')) \
+    begin
+    if (substr(x.user[i],1,3) eq 'WYL') \
+      putend //&(x.user[i])  DD  DISP=SHR,DSN=WYL.&(group).&(user).OBJECT.&(x.user[i])
+    i = i + 1
+    end
+
+  if (BOUNDS('x.cuser') gt 0) \
+     begin
+       putend //SYSLIN   DD  DSN=&&LKEDIN,DISP=(OLD,DELETE)
+       putend //       DD  *
+     end
+
+  else \
+     putend //SYSLIN   DD  *
+
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.user')) \
+    begin
+    if (substr(x.user[i],1,3) eq 'WYL') \
+      putend   INCLUDE &(strip(x.user[i]))
+    i = i + 1
+    end
+
+  putend   INCLUDE TESTWYL(WYLBUR)
+
+  i = 1                            ; now add the ORDER statements
+  while (i le bounds('x.order')) \
+    begin
+    putend   ORDER &(x.order[i])
+    i = i + 1
+    end
+
+  putend  ENTRY WYLBUR
+  putend  SETCODE AC(1)
+  putend  NAME WYLBUR(R)
+  putend //*
+  putend //COPY    EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.&(group).&(user).LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  define wylbur order statements
+;
+proc order_wylbur () \
+  begin
+     dcl string x.order[70]
+
+     x.order[1] = 'CVPFX(P)'
+     x.order[2] = 'WYLINIT '
+     x.order[3] = 'WYLTERM '
+     x.order[4] = 'WYLKWWR '
+     x.order[5] = 'WYLGLOB '
+     x.order[6] = 'WYLVERS '
+     x.order[7] = 'WYLCR   '
+     x.order[8] = 'WYLORV  '
+     x.order[9] = 'WYLACCT '
+     x.order[10] = 'WYLACMD '
+     x.order[11] = 'WYLDIR  '
+     x.order[12] = 'WYLFILE '
+     x.order[13] = 'WYLEXT  '
+     x.order[14] = 'WYLSAM  '
+     x.order[15] = 'WYLMICRO'
+     x.order[16] = 'WYLDISP '
+     x.order[17] = 'WYLDISK '
+     x.order[18] = 'WYLACT  '
+     x.order[19] = 'WYLUTIL '
+     x.order[20] = 'WYLMODE '
+     x.order[21] = 'WYLHELP '
+     x.order[22] = 'WYLNEWS '
+     x.order[23] = 'WYLMAIL '
+     x.order[24] = 'WYLSIGN '
+     x.order[25] = 'WYLQUERY'
+     x.order[26] = 'WYLCOMM '
+     x.order[27] = 'WYLEDIT '
+     x.order[28] = 'WYLLINE '
+     x.order[29] = 'WYLTEXT '
+     x.order[30] = 'WYLSPELL'
+     x.order[31] = 'WYLTINT '
+     x.order[32] = 'WYLTOPS '
+     x.order[33] = 'WYLPAGE '
+     x.order[34] = 'WYLVIEW '
+     x.order[35] = 'WYLJES  '
+     x.order[36] = 'WYLRJE  '
+     x.order[37] = 'WYLOPT  '
+     x.order[38] = 'WYLDOPT '
+     x.order[39] = 'WYLPROT '
+     x.order[40] = 'WYLTAPE '
+     x.order[41] = 'WYLSCAN '
+     x.order[42] = 'WYLOSCN '
+     x.order[43] = 'WYLXCALL'
+     x.order[44] = 'WYLNET  '
+     x.order[45] = 'WYLNPAT '
+     x.order[46] = 'WYLEXEC '
+     x.order[47] = 'WYLEVAL '
+     x.order[48] = 'WYLVARS '
+     x.order[49] = 'WYLFLOW '
+     x.order[50] = 'WYLFUNC '
+     x.order[51] = 'WYLPROC '
+     x.order[52] = 'WYLPATH '
+     x.order[53] = 'WYLDYNA '
+     x.order[54] = 'WYLFAIL '
+     x.order[55] = 'WYLWBUG '
+     x.order[56] = 'WYLDBUG '
+     x.order[57] = 'WYLRECS '
+     x.order[58] = 'WYLITEST'
+     x.order[59] = 'WYLCRYPT'
+     x.order[60] = 'WYLTEST '
+     x.order[61] = 'WYLVETS '
+     x.order[62] = 'WYLVPO  '
+     x.order[63] = 'WYLKEYS '
+     x.order[64] = 'WYLLOCAL'
+     x.order[65] = 'WYLWGS  '
+     x.order[66] = 'WYLUFS  '
+     x.order[67] = 'WYLNFILE'
+     x.order[68] = 'WYLCHAZ '
+     x.order[69] = 'WYLSYSV '
+     x.order[70] = 'WYLSTAT '         ; must be the last ORDER statement
+  end
+
+;<.page>
+;
+; link production milten module
+;
+proc link_prod_milten (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //MIL$LINK JOB ,'MILTEN LINK',TIME=2,CLASS=E,REGION=512K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link MILTEN
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  putend //LINK    EXEC PGM=HEWL,PARM='NCAL,LIST,MAP,SIZE=(300K,100K)',
+  putend //        REGION=512K
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  DSN=&SYSUT1,UNIT=SYSDA,
+  putend //             SPACE=(3120,(120,10),,,ROUND)
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.MIL.MILTEN.SYSB.LINKLIB
+  putend //OBJECT   DD  DSN=WYL.GS.MIL.MILTEN.OBJECT,DISP=SHR
+  putend //SYSLIN DD *
+  putend  INCLUDE OBJECT(MILMAIN,MILMUD,MILSIFT,MILMSVC,MILMORT)
+  putend  INCLUDE OBJECT(MILCONS,MILVIRT,MILMALT,MILELF)
+  putend  INCLUDE OBJECT(MILMCOM)
+  putend  INCLUDE OBJECT(MILMISC)
+  putend  INCLUDE OBJECT(MILVERS)
+  putend  ORDER MILMAIN(P)
+  putend  ENTRY MILTEN
+  putend  SETCODE AC(1)
+  putend  NAME MILTEN(R)
+  putend //*
+  putend //COPY   EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.GS.MIL.MILTEN.TEST.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+; link test milten module
+;
+proc link_test_milten (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //TMILLINK JOB ,'TESTMIL LINK',TIME=2,CLASS=E,REGION=512K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link MILTEN
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  putend //LINK    EXEC PGM=HEWL,PARM='NCAL,LIST,MAP,SIZE=(300K,100K)',
+  putend //        REGION=512K
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  DSN=&SYSUT1,UNIT=SYSDA,
+  putend //             SPACE=(3120,(120,10),,,ROUND)
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.MIL.MILTEN.SYSB.LINKLIB
+  putend //MILTEN   DD  DSN=WYL.GS.MIL.MILTEN.SYSB.LINKLIB,DISP=SHR
+  putend //OBJECT   DD  DSN=WYL.GS.MIL.TESTMIL.OBJECT,DISP=SHR
+  putend //SYSLIN DD *
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.test')) \
+    begin
+    if (substr(x.test[i],1,3) eq 'MIL') \
+      putend   INCLUDE OBJECT(&(strip(x.test[i])))
+    i = i + 1
+    end
+  putend   INCLUDE MILTEN(MILTEN)
+  putend   ORDER MILMAIN(P)
+  putend   ENTRY MILTEN
+  putend   SETCODE AC(1)
+  putend   NAME MILTEN(R)
+  putend //*
+  putend //COPY   EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.GS.MIL.TESTMIL.SYSB.LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+; link user milten module
+;
+proc link_user_milten (subsys,prompt) \
+  begin
+  dcl number i
+  dcl boolean found
+  dcl string jobname
+  dcl string objectname
+  pick &(x.temp)                   ; switch to temp active
+
+  putend //&(user)$LINK JOB ,'&(user)MIL LINK',TIME=2,CLASS=E,REGION=512K
+  putend /*JOBPARM HOLD=OUTPUT
+  putend //*
+  putend //*  Job to re-link MILTEN
+  putend //*
+  putend //$$QUIET EXEC PGM=HCMDX,PARM='PURGE * Q=OUTPUT MULTIPLE'
+  putend //SYSUDUMP DD  SYSOUT=C
+  putend //*
+  putend //LINK    EXEC PGM=HEWL,PARM='LIST,MAP,SIZE=(300K,100K)',
+  putend //        REGION=512K
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //SYSUT1   DD  UNIT=VIO,SPACE=(1024,(100,100))
+  putend //SYSLMOD  DD  UNIT=SYSDA,DISP=(,PASS),SPACE=(CYL,(5,5,10)),
+  putend //             DCB=WYL.GS.MIL.MILTEN.SYSB.LINKLIB
+  putend //MILTEN   DD  DSN=WYL.GS.MIL.MILTEN.SYSB.LINKLIB,DISP=SHR
+
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.user')) \
+    begin
+    if (substr(x.user[i],1,3) eq 'MIL') \
+      putend //&(x.user[i])  DD  DISP=SHR,DSN=WYL.&(group).&(user).OBJECT.&(x.user[i])
+    i = i + 1
+    end
+
+  putend //SYSLIN DD *
+  i = 1                            ; add the INCLUDE statements
+  while (i le bounds('x.user')) \
+    begin
+    if (substr(x.user[i],1,3) eq 'MIL') \
+      putend   INCLUDE &(strip(x.user[i]))
+    i = i + 1
+    end
+
+  putend   INCLUDE MILTEN(MILTEN)
+  putend   ORDER MILMAIN(P)
+  putend   ENTRY MILTEN
+  putend   SETCODE AC(1)
+  putend   NAME MILTEN(R)
+  putend //*
+  putend //COPY   EXEC  PGM=IEBCOPY,COND=(4,LT,LINK)
+  putend //SYSPRINT DD  SYSOUT=A
+  putend //IN       DD  DSN=*.LINK.SYSLMOD,DISP=(OLD,DELETE)
+  putend //OUT      DD  DSN=WYL.&(group).&(user).LINKLIB,DISP=SHR
+  putend //SYSIN    DD  *
+  putend  C I=((IN,R)),O=OUT
+  putend  C I=OUT,O=OUT
+
+  if (prompt eq 'YES') \
+    begin
+    if (yesno('Okay to run?') ne 'NO') run unn hold
+    else pcall error_msg(subsys||' '||' link aborted')
+    end
+  else \
+    begin
+    if (not x.debug) run unn hold
+    else \
+      begin
+      l f unn
+      xpau
+      comm run unn hold
+      end
+    end
+
+  try quietly delete first/last    ; clear out working active file
+  pick &(x.act)                    ; restore user's active
+  end
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Exec wyllink failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WLNKERR errmsg='&(msg)'
+  end
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=WLNKERR errmsg="wyllink failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

@@ -1,0 +1,112 @@
+;;  WYL.GS.WYL.NET#LPQ - Wylbur lpq command
+;;
+;;  LPQ - Display print queue on remote network host using the
+;;         BSD lpd protocol
+;;
+;;  On entry, parm string can contain either
+;;
+;;       - JES2 dest name (must be in wyl.gs.net.netprint.printers)
+;;       - Remote host name and name of printer on remote host
+;;
+;;  Changes
+;;     5/21/98  jws  Filter LPRng 'Status:' messages
+;;    12/29/98  jws  Modify Filter status check
+;;    03/16/99  jws  Better filtering of LPRng 'Status' messages
+;;    09/22/00  jws  Filter long lines from LPRng status
+
+xproc  () begin
+
+   dcl str host rpname rc
+   dcl num netp ntemp
+   set exec auth
+
+   on attn cmd='goto done'
+
+; Write info if null parm or 'help'
+
+   if (parm_string eq '' or \
+         low(parm_string) eq 'help' or \
+         parm_string eq '?') begin
+      comm Usage is:
+      comm  lpq <dest>
+      comm  lpq <host> <rpname>
+      xreturn
+   end
+
+   asave = actno
+   open lpq
+
+   if (user ne 'JWS') on error cmd='goto done'
+
+; Scan calling parms
+
+   stemp = parm_string
+   if (low(sub(stemp,1,2)) eq '-p') \
+      stemp = sub(stemp,3)
+   syscall scan (host,stemp)
+   syscall scan (rpname,stemp)
+
+   if (host eq '' or stemp ne '') begin
+      comm Missing or invalid parm
+      goto done
+   end
+
+; If only one parm, have dest name; lookup the remote host
+;  and rpname from printers file
+
+   if (rpname eq '') begin
+      dest = host
+      cop c'&(dest) '1 from wyl.gs.net.netprint.printers
+      if (lines ne 1) begin
+         comm &(dest) is not a SUNet printer (not in wyl.gs.net.netprint.printers)
+         goto done
+      end
+      stemp = sub(line(f),size(dest)+1)
+      syscall scan (host,stemp)
+      syscall scan (rpname,stemp)
+      comm Dest=&(dest) goes to the printer called '&(rpname)' on the '&(host)' system.
+      del all
+   end
+
+; Open connection to remote host
+
+   comm Connecting to &(host)
+
+   syscall net_open \
+      (netp, 'host=&(host) port=515 priv wait=5',rc)
+
+   if (rc ne 'OK') begin
+      comm Connection failed, RC=&(rc)
+      goto done
+   end
+
+; Send queue display query to remote host and read response
+; Command byte   03 short display,  04 long display (x'37' in EBCDIC)
+
+   syscall net_write \
+      (netp, 'wait=10', s'37'||rpname||s'25', rc)
+
+   syscall net_readfile \
+      (netp, 'wait=10', ntemp, rc)
+
+; List response lines, filtering out LPRng 'Status' lines
+
+   if (lines eq 0) \
+      comm No response, RC=&(rc)
+   else begin
+      quiet try del 'Status:'1/8  or c'Filter_status'2
+      quiet try del ~'          '80
+      list unn mix
+   end
+
+; Cleanup and exit
+
+done:
+   close
+   pick &(asave)
+   if (netp ne 0) begin
+      if (rc ne 'OK') \
+         try syscall net_control (netp,'abort',rc)
+      syscall net_close (netp)
+   end
+end

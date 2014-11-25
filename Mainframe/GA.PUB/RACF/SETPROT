@@ -1,0 +1,1485 @@
+;EXEC ID:  WYL.GA.PUB.RACF#SETPROT
+;
+;AUTHOR:   BILL BAURIEDEL
+;
+;DATE:     04/03/87
+;
+;VERSION:  1.0
+;
+;REMARKS:  This EXEC receives control from Wylbur and processes all
+;          RACF ADDSD, ALTDSD, DELDSD and PERMIT commands.  This EXEC
+;          program parses and processes all Wylbur SET PROTECT commands
+;          that imply some RACF action.
+;
+;          This EXEC program is organzied into three main functions;
+;          edit, process and output.
+;
+;          In order to accomplish its job, it needs to run from two
+;          to four batch jobs (unless there are errors).  The purposes
+;          of the jobs and the order in which they are run is as follows:
+;
+;            LISTRP (via DUMP PROTECT) to test for existence of specified
+;               profile.
+;            LISTRP (via DUMP PROTECT) run optionally if APPEND specified.
+;            LISTRP (via SHOW PROTECT) run optionally if LIST specified.
+;            IKJEFT01 - performs the request RACF functions.
+;
+;          The program only processes one SET PROTECT command at a time.
+;          The full syntax for the command is detailed in the HELP SET
+;          PROTECT command.
+;
+;          A new ACTIVE file is opened to build and run the JCL.
+;          RACF commands are added at the end of the JCL for each
+;          SET PROTECT command that is issued.  The JCL is built
+;          every time ses.racf_jcl is undefined (i.e. either the
+;          first execution or the next execution after a SET PROTECT
+;          command without the HOLD option on.
+;
+;          Other ACTIVE areas are opened temporarily to fetch RACF
+;          output and to process notify recipients.
+;
+;          The uplow convention used in this program is to use upper
+;          case for all Wylbur, JCL and RACF command syntax and lower
+;          case for everything else (labels, variables, proc names, etc.)
+;
+;          For further details on RACF commands please refer to the
+;          IBM document SC28-0733-5 MVS Resource Access Control Facility
+;          (RACF) Command Language Reference Version 1 Release 7.
+;
+;          This program uses several session variables defined as
+;          follows:
+;
+;              ses.racf_break     = TRUE if attention hit in DUMP PROTECT
+;              ses.racf_debug     = TRUE to enable debugging info.
+;
+;              ses.racf_fromset   = TRUE whenever DUMP PROTECT is
+;                                   invoked and then set to FALSE
+;                                   upon return.  This variable makes
+;                                   the SHOW/DUMP PROTECT logic
+;                                   much simplified.
+;
+;              ses.racf_hold      = TRUE if JCL to be held.  This is
+;                                   set to TRUE/FALSE by racf#racf pub.
+;                                   When set to FALSE, ses.racf_jcl
+;                                   is also set to -1 so new JCL
+;                                   will be built the next time a
+;                                   SET PROTECT command is issued.
+;
+;              ses.racf_jcl       = the active number for the JCL.
+;                                   This session variable is either
+;                                   -1 which indicates there is no
+;                                   pending JCL to be run or it is
+;                                   the active number where RACF
+;                                   commands are being collected.
+;                                   The JCL will be run whenever
+;                                   x.hold is FALSE.  After running
+;                                   the JCL this variable is set to
+;                                   -1 to start the process over.
+;              ses.racf_profname  = profile name to pass to DUMP PROTECT
+;
+;              ses.racf_test      = TRUE if WYLBUR = 'TESTWYL'.  This
+;                                   variable should be used to execute
+;                                   new code within the TESTWYL
+;                                   environment, but not in production
+;                                   WYLBUR.
+;
+;              ses.racf_withdsn   = TRUE if DUMP PROTECT being called
+;                                   with the WITH DSN option.
+;
+;          The global variables are defined as:
+;
+;              x.access           = profile access (e.g. READ, ALTER)
+;              x.append           = append specified permit to permits
+;                                   of current protecting profile
+;              x.begin_racf       = line number of first RACF command
+;              x.defmsg           = TRUE if default notify msg to appear
+;              x.delete           = delete a profile and associated
+;                                   access rules.
+;              x.dsnspec          = various forms of profile formats
+;              x.exist            = TRUE if specified profile exists
+;              x.for              = gets set to TRUE when 'FOR' found
+;              x.hold             = TRUE if JCL not to be run.
+;                                 = FALSE to run the JCL.
+;              x.garbage          = unrecognized SET PROTECT options
+;              x.grp              = either group code specified as
+;                                   part of the dataset or profile
+;                                   name or the logged on user's group
+;              x.list             = display complete access status
+;                                   as if a SHOW PROTECT command had
+;                                   been issued.
+;              x.log              = TRUE if LOG option requested
+;              x.log_opt          = log option if requested or null
+;              x.maint            = the list of maintainers.
+;                                   Errors are mailed to these
+;                                   accounts.
+;              x.newprof          = TRUE if new profile and no append
+;              x.noprompt         = TRUE if user wants to suppress questions
+;              x.notify           = TRUE if NOTIFY specified
+;              x.notify_act       = log notification account
+;              x.notify_active    = ACTIVE number for notify
+;              x.onvol            = ON volume flag (so can ignore)
+;              x.origact          = original ACTIVE number
+;              x.origparm         = parm string for error messages
+;              x.output_act       = ACTIVE number for output
+;                                   passed to this program by Wylbur
+;              x.parm             = the full unedited parm string
+;              x.pgm              = the name of this program.
+;                                   (used in error messages).
+;              x.priv             = privileged accounts
+;              x.profname         = RACF profile name or full
+;                                   OS dsname of target
+;              x.racf_jcl         = ACTNO for jcl active number.
+;                                   Almost the same as ses.racf_jcl
+;                                   except that ses.racf_jcl is set
+;                                   to -1 until right before last
+;                                   instruction.  In case break hit,
+;                                   then ses.racf_jcl will be -1 and
+;                                   will not cause 'Active nnn cleared
+;                                   Do you want to pick it anyway '
+;                                   message when a fresh SET PROTECT
+;                                   is issued.
+;              x.remove           = remove the specified access
+;                                   and/or whole profile.
+;              x.reset            = reset profile to default first
+;              x.retain           = retains profile upon WYLBUR SCRATCH
+;              x.ship             = determines whether to ship SET
+;                                   PROTECT commands or not.
+;              x.smflog           = ON, OFF, NULL. Activates/deactivates
+;                                   shipment of log records.
+;              x.tapeopt          = TRUE if TAPE specified
+;              x.target           = target account or RACF group name
+;              x.user             = indicates whether USER option on
+;              x.usr              = either the user id specified as
+;                                   part of the dataset or profile
+;                                   name or the logged on user id
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          04/03/87  WJB    Initial Installation.
+;
+;          12/01/87  WJB    Improve logging logic, add new error
+;                           messages, improve interface with DUMP
+;                           PROTECT, eliminate need to XCALL INIT.
+;                           Fix append logic to pick up PERMITS from
+;                           next most definitive protecting profile.
+;                           Add logic to check for existence of profile.
+;
+;          01/22/88  WJB    Add log notification logic
+;
+;          04/02/88  Niz    Remove check that disables this exec
+;                           from working in production Wylbur.
+;
+;          06/06/88  Niz    Add check for Stanford security
+;                           protected files.
+;          08/24/95  WJB    Add logic for tape volume protection
+;
+;          11/22/95  WJB    Handle ACC = ACCT = ACCOUNT
+;
+;          10/13/98  MCL    correct JOBPARM statement, handle job
+;                           failures
+;
+;<.page>
+;*******************************************************************
+;                                                                  *
+; The mainline driver first executes 'edit' which parses the SET   *
+; PROTECT command and does a syntax check.  Then it executes       *
+; 'process' which builds the appropriate RACF commands and runs    *
+; them.  Finally, the results are displayed at the terminal in the *
+; 'output' PROC.                                                   *
+;                                                                  *
+;*******************************************************************
+XPROC () BEGIN
+;********** Activate error and attention routines
+   IF (VARTYPE('ses.racf_debug') EQ 'UNDEFINED') \
+      ses.racf_debug = FALSE
+   ses.racf_break = FALSE ; TRUE if attention hit in DUMP PROTECT
+   IF (NOT ses.racf_debug) BEGIN
+      ON ERROR CMD 'PCALL errorexit'
+      ON ATTN  CMD 'PCALL attnexit'
+   END
+   IF (STRIP(UPPER(SUB(PARM_STRING,1,9))) EQ 'RACFCONV ') BEGIN
+      PARM_STRING = SUB(PARM_STRING,10)
+      GOTO bypass_scipprot
+   END
+;**********  Set up test environment.  New features testable from TESTWYL
+bypass_scipprot:
+   ses.racf_test = TRUE
+   IF (WYLBUR EQ 'WYLBUR') BEGIN
+      ses.racf_test = FALSE
+   END
+;********** Set Global Variables
+   DECLARE BOOLEAN x.for x.hold x.list x.log x.remove x.reset x.user
+   DECLARE BOOLEAN x.append x.retain x.priv x.delete x.notify x.onvol
+   DECLARE BOOLEAN x.ship x.newprof x.defmsg x.noprompt x.exist
+   DECLARE BOOLEAN x.tapeopt
+   DECLARE STRING x.access x.dsnspec x.garbage x.log_opt x.profname
+   DECLARE STRING x.grp x.target x.usr x.limit
+   DECLARE NUMBER x.notify_active x.output_act x.racf_jcl
+   x.logon_act  = SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3); default is logged on account
+   x.maint      = 'gb.sec@forsythe.stanford.edu'    ; one or more accounts
+   IF (MACHINE EQ 'RLG') x.maint = 'bp.acc@rlg'     ; one or more accounts
+   x.notify_act = ''                ; default will be set to logged on account later
+;                                     must be NULL til after edit tests
+   x.notify_active = 0              ; used in ATTN routine to see if
+;                                     NOTIFY active is open or not
+   x.origact    = ACTNO             ; original active number
+   x.origparm   = PARM_STRING
+   x.output_act = 0
+   x.parm       = PARM_STRING
+   x.pgm        = 'SET PROTECT'     ; program name to be displayed in
+;                                     error messages.
+   x.smflog     = 'NULL'            ; Default for shipment of log records
+;********** Dump EXEC limit, set to NOLIMIT and restore upon exit
+   IF (LAST GT 99900) BEGIN
+      WRITE 'Last line of ACTIVE file too large.  Clear active and repeat command'
+      XRETURN
+   END
+   DUMP EXEC
+   READ STR x.limit USING LAST DELETE ; e.g. LOG LIMIT=1000 - EXEC Options
+   x.limit = SUB(x.limit,IND(x.limit,' ')+1,IND(x.limit,'-')-IND(x.limit,' ')-2)
+   SET EXEC LIMIT 10000
+;********** Privileged accounts are those with RACF SPECIAL.  They
+;********** can delete a default profile and set protects for accounts
+;********** other than their own.
+   IF (IND('ACC$BP,SEC$GB,ACC$GB,PJG$GG,AOS$GG,ORV$GG,SLP$GG,WYL$GS,MPD$GG',ACCOUNT) GT 0) \
+      x.priv = TRUE
+;********** Set the x.hold variable based on session variable
+   IF (VARTYPE('ses.racf_hold') EQ 'UNDEFINED') ses.racf_hold = FALSE
+   IF (NOT ses.racf_hold) x.hold = FALSE
+   IF (    ses.racf_hold) x.hold = TRUE
+;********** Write SMF log record
+;---------- SMF record also written after edit.  This record is as
+;---------- originally entered by the user with all forms of dsn.
+;---------- Other is in "standard" format with dsn in long form.
+;---------- This SMF command can eventually go away when satisfied
+;---------- that logs are equivalent.  10/8/87 WJB
+;++++++++++ Deactivated 12/29/87
+;  SMF RACF "SET PROT BEFORE &(x.origparm)"
+;********** Parse & Edit Parm
+   PCALL edit
+;********** If JCL active not currently open, then open it.
+   IF (VARTYPE('ses.racf_jcl') EQ 'UNDEFINED') ses.racf_jcl = -1
+   IF (ses.racf_jcl LE 0) BEGIN
+      OPEN setprot ; alias jcl (setprot is name for SHOW ACTIVES)
+      ses.racf_jcl = ACTNO
+   END
+;********** Build and Process RACF commands
+   x.racf_jcl = ses.racf_jcl ; set same as ses variable for later use
+   PICK &(ses.racf_jcl)
+   ses.racf_jcl = -1 ; reset in case break hit
+   PCALL process
+;********** Write SMF records for logging purposes in #COMMANAL
+   IF (SIZE(x.notify_act) NE 6) BEGIN
+      x.notify_act = SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3)
+   END
+   PUTEND SMF RACF "SET PROT  TAPE &(x.profname) DELETE RESET FOR &(x.target) &(x.access) NEWPROFILE APPEND LOG &(x.log_opt) NOTIFY &(x.notify_act) NOSHIP"
+   IF (NOT x.delete)  CH ' DELETE '                TO ' ' IN LAST NOL
+   IF (NOT x.reset)   CH ' RESET '                 TO ' ' IN LAST NOL
+   IF (NOT x.append)  CH ' APPEND '                TO ' ' IN LAST NOL
+   IF (NOT x.newprof) CH ' NEWPROFILE '             TO ' ' IN LAST NOL
+   IF (NOT x.log)     CH ' LOG &(x.log_opt) '      TO ' ' IN LAST NOL
+   IF (NOT x.log)     CH ' LOG '                   TO ' ' IN LAST NOL
+   IF (NOT x.for)     CH ' FOR '                   TO ' ' IN LAST NOL
+   IF (NOT x.notify)  CH ' NOTIFY &(x.notify_act)' TO ' ' IN LAST NOL
+   IF (NOT x.tapeopt) CH ' TAPE '                   TO ' ' IN LAST NOL
+   IF (x.ship)        CH ' NOSHIP'                 TO ' ' IN LAST NOL
+   CH 'LOG READ' to 'LOG ALL' IN LAST NOL
+   READ LAST DELETE; execute the SMF instruction
+;********** Write a second SMF record if there is a potential change
+;           in the table (COMM.LOGTBLE) which distributes log records.
+;           Basically four things can happen as follows:
+;           PROT ON         - create a new table entry if one doesn't
+;                             already exist AND if table entry is
+;                             non-default.  Currently, there are two
+;                             defaults.  See documentation at front of
+;                             WYL.GB.SEC.COMM.LOGTBLE for details.
+;           PROT OFF        - take an existing entry out of the log
+;                             table.
+;           PROT NOL        - indicate in COMM.LOGTBLE that no matching
+;                             log records should be shipped.  This can
+;                             happen when the user specifies LOG NONE
+;                             which translates to RACF's AUDIT(NONE),
+;                             but since all SET PROTECT commands are
+;                             automatically logged, this option ensures
+;                             that the SET PROTECT log records won't
+;                             be shipped.
+;           PROT LOG        - reverses the effect of the above.  Allows
+;                             SET PROTECT (and other access logs) to
+;                             be shipped once again.
+;
+   IF ((x.smflog EQ 'ON') AND (NOT x.tapeopt)) BEGIN
+      SMF RACF "PROT ON &(x.profname) NOTIFY &(x.notify_act) BY &(GROUP).&(USER)"
+      IF (MACHINE NE 'RLG') BEGIN
+         x.notify_active = 1
+         a = SUB(x.profname,1,49)||x.notify_act
+;        racfsave puts a record into wyl.gb.sec.comm.notifytb
+         XCALL wyl.gs.wyl.auth#racfsave('&(a)')
+         x.notify_active = 0
+      END
+   END
+   IF ((x.defmsg) AND (NOT x.notify)) BEGIN
+      COMM By default, log records will be sent to account &(x.notify_act).
+      COMM To direct log records to another account specify NOTIFY on SET PROTECT command.
+   END
+   IF ((x.smflog EQ 'OFF') AND (NOT x.tapeopt)) BEGIN
+      SMF RACF "PROT OFF &(x.profname)"
+   END
+   IF ((x.smflog EQ 'NONE') AND (NOT x.tapeopt)) BEGIN
+      SMF RACF "PROT NOL &(x.profname)"
+   END
+;********** Is there anything to display   (I.e. any lines after JCL)
+   IF (LAST EQ x.begin_racf) BEGIN  ; could happen with SET PROT LOG PROTECT
+      PCALL cleanup('')
+   END
+   IF (NOT x.hold) BEGIN
+      CLOSE ; jcl
+      x.racf_jcl = -1 ; avoid closing ACTIVE:jcl twice
+      OPEN output TEMP
+      x.output_act = ACTNO
+      PCALL output
+      x.output_act = 0
+      CLOSE ; output
+   END
+;********** List the protections
+   IF (x.list) BEGIN
+      ses.racf_fromset = TRUE
+      ses.racf_withdsn = FALSE
+      ses.racf_profname = x.profname
+   ses.racf_tapeopt = x.tapeopt
+      IF (x.tapeopt) SHOW PROTECT TAPE &(x.profname)
+      ELSE BEGIN
+         IF (FIND(x.profname,'*%') EQ 0) SHOW PROTECT &(x.profname)
+         ELSE BEGIN
+            ses.racf_withdsn = TRUE
+            SHOW PROTECT &(x.profname) WITH DSN
+         END
+      END
+      ses.racf_profname = ''
+   ses.racf_tapeopt = FALSE
+      ses.racf_withdsn = FALSE
+      ses.racf_fromset = FALSE
+   END
+;********** Wrapup and return
+   PCALL cleanup('')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; edit -- This PROC processes the unedited SET PROTECT command.    *
+;     The SCAN function parses the command one word at a time      *
+;     starting from the left.  x.parm is used up by the SCAN       *
+;     function.  x.origparm remains intact and may be used         *
+;     anywhere to display or further process the original parm.    *
+;                                                                  *
+;     After the scanning is completed, the individual parts are    *
+;     edited.  If errors are found, the &(errid) and &(errmsg)     *
+;     variables are passed as parameters in the error PCALL's.     *
+;                                                                  *
+;     This PROC scans for and returns the following variables:     *
+;                                                                  *
+;          x.profname    = RACF profile name or full OS dsname of  *
+;                          target                                  *
+;          x.target      = target account or RACF group name       *
+;          x.access      = new desired access                      *
+;          x.append      = append the permits from the current     *
+;                          profile before adding the specified     *
+;                          permit.                                 *
+;          x.newprof     = don't append for new profiles           *
+;          x.delete      = delete the profile and all access rules *
+;          x.exist       = TRUE if x.profname is an existing profile
+;          x.hold        = hold the JCL from execution             *
+;          x.reset       = reset profile to default first          *
+;          x.retain      = retain profile upon WYLBUR SCRATCH      *
+;          x.list        = display complete access status as if a  *
+;                          SHOW PROTECT command had been issued.   *
+;          x.log_opt     = log option if requested or null         *
+;          x.remove      = remove the specified access and/or      *
+;                          whole profile.                          *
+;          x.notify_act  = log notification account                *
+;          x.tapeopt     = TRUE if TAPE specified                  *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+PROC edit () BEGIN
+   token      = ''                ; local scan variable
+   IF (x.parm EQ '') BEGIN
+      PCALL error('RACFNULL', 'Type HELP SET PROTECT for a list of \
+         arguments for this command.')
+   END
+   WHILE (TRUE) BEGIN
+scan_loop:
+;********** General syntax is:
+;********** SET PROTECT [%|DEFAULT|profilename|TAPE tapeno|@TAPE]
+;**********             [account-options]
+;**********             [DELETE] [RESET]
+;**********             [FOR [access-rule [APPEND]] [LOG log-options]]
+;**********             [LIST [collect-options]]
+;**********
+;********** The SET PROTECT and the collect-options are handled by
+;********** Wylbur external to RACF#SETPROT PUB
+;********** First get rid of extraneous quote marks which will cause
+;           problems later on (in error routines).  Quietly eliminate
+;           both single and double quote marks.
+;
+;           Also change all '?' wildcards (microcomputer def) to '%' (RACF)
+try_again:
+      IF ((IND(x.parm,'"') GT 0) OR (IND(x.parm,"'") GT 0) OR \
+            (IND(x.parm,'?') GT 0)) BEGIN
+         IF (IND(x.parm,'"') GT 0) BEGIN
+            x.parm=SUB(x.parm,1,IND(x.parm,'"')-1)||SUB(x.parm,IND(x.parm,'"')+1)
+            x.origparm=x.parm
+            GOTO try_again
+         END
+         IF (IND(x.parm,"'") GT 0) BEGIN
+            x.parm=SUB(x.parm,1,IND(x.parm,"'")-1)||SUB(x.parm,IND(x.parm,"'")+1)
+            x.origparm=x.parm
+            GOTO try_again
+         END
+         IF (IND(x.parm,"?") GT 0) BEGIN
+            x.parm=SUB(x.parm,1,IND(x.parm,"?")-1)||'%'||SUB(x.parm,IND(x.parm,"?")+1)
+            x.origparm=x.parm
+            GOTO try_again
+         END
+      END
+      SYSCALL SCAN(token, x.parm)
+      IF (token EQ '' OR token EQ ';') GOTO scan_done
+      token = UPPER(token)
+;**********  Everything up to the "FOR" is a data set name option
+;**********  (or DELETE, RESET, RETAIN, LIST, HOLD or TAPE), and everything
+;**********  after the "FOR" is an access rule, log option or list option.
+;**********  Ignore certain words in command syntax
+      IF (token EQ 'PROFILE') BEGIN
+         WRITE "Word 'PROFILE' only allowed on SHOW PROTECT command.  Ignored in SET PROTECT"
+         GOTO scan_loop
+      END
+      IF (token EQ 'ON') BEGIN
+         x.onvol = TRUE
+         GOTO scan_loop
+      END
+      IF (x.onvol) BEGIN
+         WRITE 'ON &(token) unnecessary in RACF and ignored here.'
+         x.onvol = FALSE
+         GOTO scan_loop
+      END
+      IF (token EQ 'SET') BEGIN
+         IF (FIND(x.dsnspec,'#%*') EQ 0) SET PREFIX &(x.dsnspec)
+         IF (FIND(x.dsnspec,'%*') NE 0) BEGIN
+            WRITE 'SET option ignored.'
+         END
+         GOTO scan_loop
+      END
+      IF (ABBREV('FILEMASK',token,8)) BEGIN
+         WRITE 'FILEMASK option not supported in RACF, \
+            option ignored.'
+         GOTO scan_loop
+      END
+      IF (ABBREV('EXTEND',token,6)) BEGIN
+         WRITE 'EXTEND option not supported in RACF, \
+            option ignored.'
+         GOTO scan_loop
+      END
+      IF (token EQ 'TAPE') BEGIN
+         x.tapeopt = TRUE
+         GOTO scan_loop
+      END
+
+      IF (token EQ 'ACC')   token = 'ACCOUNT'
+      IF (token EQ 'ACCT')  token = 'ACCOUNT'
+
+;********** Reformat USER=gg.uuu or NOTIFY=gg.uuu to USER gg.uuu or NOTIFY gg.uuu
+      IF (SUB(token,1,1) EQ '=') token = SUB(token,2) ; strip off leading '='
+      IF ((SIZE(token) EQ 6) AND (SUB(token,3,1) EQ '$')) BEGIN
+         token = SUB(token,1,2)||'.'||SUB(token,4)
+      END
+      IF (NOT x.for) BEGIN
+         x.for = (token EQ 'FOR')
+         IF (NOT x.delete) x.delete = ABBREV('DELETE',token,3)
+         IF (NOT x.delete) x.delete = ABBREV('REMOVE',token,3)
+         IF (NOT x.reset)  x.reset  = ABBREV('RESET',token,3)
+         IF ((NOT x.list) AND (x.dsnspec NE ''))  x.list   = ABBREV('LIST',token,3)
+         IF ((NOT x.hold) AND (x.dsnspec NE ''))   x.hold   = ABBREV('HOLD',token,3)
+         IF ((NOT x.retain) AND (x.dsnspec NE '')) x.retain = ABBREV('RETAIN',token,3)
+         IF ((NOT x.for) AND (NOT x.list) AND (NOT x.hold) \
+            AND (NOT x.delete) AND (NOT x.reset) AND (NOT x.retain)) \
+            x.dsnspec = x.dsnspec || token || ' '
+         GOTO scan_loop
+      END
+;**********  Next subparameter after 'FOR' should be either group
+;**********  name, account-id or words 'LOG' or 'NOTIFY'
+      IF ((ABBREV('GROUP',token,3) OR (token EQ 'GRP'))) GOTO scan_loop
+      IF ((ABBREV('USER',token,3) OR (token EQ 'USR'))) BEGIN
+         x.user = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('ACCOUNT',token,3)) GOTO scan_loop
+      IF (ABBREV('ACCT',token,4))    GOTO scan_loop
+      IF (token EQ 'LOG') BEGIN
+         x.log = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('NOTIFY',token,3)) BEGIN
+         IF (MACHINE EQ 'RLG') BEGIN
+            PCALL error('RACFRLGN','NOTIFY not allowed for RLG users')
+         END
+         x.notify = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('LIST',token,3)) BEGIN
+         x.list = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('APPEND',token,3)) BEGIN
+         x.append = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('NOPROMPT',token,3)) BEGIN
+         x.noprompt = TRUE
+         GOTO scan_loop
+      END
+      IF ((ABBREV('NEWPROFILE',token,3)) OR (ABBREV('NOAPPEND',token,5))) BEGIN
+         x.newprof = TRUE
+         GOTO scan_loop
+      END
+      IF (ABBREV('HOLD',token,3)) BEGIN
+         x.hold = TRUE
+         GOTO scan_loop
+      END
+      IF ((x.log_opt EQ '') AND (x.log) AND (NOT x.notify)) BEGIN
+         x.log_opt = token
+         GOTO scan_loop
+      END
+      IF ((x.log_opt EQ '') AND (x.log) AND (x.notify) AND (x.notify_act NE '')) BEGIN
+         x.log_opt = token
+         GOTO scan_loop
+      END
+      IF ((x.notify_act EQ '') AND (x.notify)) BEGIN
+         x.notify_act = token
+         GOTO scan_loop
+      END
+      IF (x.target EQ '') BEGIN
+         x.target = token
+         GOTO scan_loop
+      END
+      IF (x.access EQ '') BEGIN
+         x.access = token
+         GOTO scan_loop
+      END
+      x.garbage = x.garbage || token || ' '
+      GOTO scan_loop
+   END
+scan_done:
+;**********  Finished scanning command, now check for inconsistencies.
+;*********** Check for errors of omission or garbage input
+
+   IF ((x.tapeopt) AND (x.dsnspec EQ '')) BEGIN
+      x.dsnspec = 'TAPE'
+      x.tapeopt = FALSE
+   END
+
+   IF (x.dsnspec EQ '') BEGIN
+      PCALL error('RACFNDS', 'The syntax requires that the dataset \
+         name must come before the word QuOtEforQuOtE.')
+   END
+   x.dsnspec=STRIP(x.dsnspec)
+   IF (SUB(x.dsnspec,SIZE(x.dsnspec),1) EQ '.') BEGIN
+      PCALL error('RACFPEND', 'The profile/dataset name may not end in \
+         a period.')
+   END
+   IF ((x.log_opt EQ '') AND (x.log)) BEGIN
+      PCALL error('RACFNLG', 'Missing LOG or NOTIFY option.')
+   END
+   IF ((x.notify_act EQ '') AND (x.notify)) BEGIN
+      PCALL error('RACFNNTF', 'Missing NOTIFY account on ' \
+         || x.pgm || ' command.')
+   END
+   IF ((NOT x.for) AND (NOT x.delete) AND (NOT x.retain) \
+         AND (NOT x.reset) AND (x.list)) BEGIN
+      PCALL error('RACFLIST', 'Please use SHOW PROTECT command.')
+   END
+   IF ((NOT x.for) AND (NOT x.delete) AND (NOT x.retain) AND (NOT x.reset)) BEGIN
+      PCALL error('RACFMFOR', 'Syntax requires the word FOR' \
+         ||' after profile-name.')
+   END
+   IF ((x.target EQ '') AND (NOT x.log) AND (NOT x.notify) AND (NOT x.list)  \
+         AND (NOT x.reset) AND (NOT x.delete)) BEGIN
+      PCALL error('RACFNTAR', 'Missing group or account-id option.')
+   END
+   IF ((x.access EQ '') AND (x.target NE '')) BEGIN
+      IF ((ABBREV('READ',x.target,3)) OR (ABBREV('WRITE',x.target,3)) \
+            OR (ABBREV('ALTER',x.target,3)) OR (ABBREV('UPDATE',x.target,3))\
+            OR (ABBREV('NONE',x.target,3)) OR (ABBREV('REMOVE',x.target,3))) BEGIN
+         PCALL error('RACFMGRP', 'Invalid access rule.  Missing \
+            account or group name.')
+      END
+      IF ((ABBREV('CONTROL',x.target,3)) OR (ABBREV('DELETE',x.target,3)) \
+            OR (ABBREV('PASSWORD',x.target,3))) BEGIN
+         PCALL error('RACFMGRP', 'Invalid access rule.  Missing \
+            account or group name.')
+      END
+      PCALL error('RACFNACC', 'Missing new access level (e.g. \
+         READ, WRITE) for group/account ID = &(x.target).')
+   END
+   IF ((x.reset) AND (x.append)) BEGIN
+      PCALL error('RACFRSAP', 'Reset and Append not allowed in same \
+         command.')
+   END
+   IF ((x.delete) AND (x.append)) BEGIN
+      PCALL error('RACFDEAP', 'Delete and Append not allowed in same \
+         command.')
+   END
+   IF (( x.delete) AND (x.reset)) BEGIN
+      PCALL error('RACFDESR' , 'Delete and Reset not allowed in same \
+         command.')
+   END
+   IF ((x.reset) AND (x.remove)) BEGIN
+      PCALL error('RACFRSRM', 'Reset and Remove not allowed in same \
+         command.')
+   END
+   IF ((x.delete) AND (x.remove)) BEGIN
+      PCALL error('RACFDERM', 'Delete and Remove not allowed in same \
+         command.')
+   END
+   IF (( x.append) AND (x.remove)) BEGIN
+      PCALL error('RACFAPRM' , 'Append and Remove not allowed in same \
+         command.')
+   END
+   IF ((x.retain) AND (FIND(x.dsnspec,'%*') GT 0)) BEGIN
+      PCALL error('RACFNRET', 'RETAIN option invalid except on \
+         fully qualified dataset profiles (no wildcards)')
+   END
+   IF ((x.list) AND (x.hold)) BEGIN
+      PCALL error('RACFHOLD', 'CanQuOtEt use LIST option when HOLD in \
+         effect')
+   END
+   IF ((x.target EQ 'PUBLIC') AND (x.access EQ 'REMOVE')) BEGIN
+      x.access = 'NONE' ;  This is what the user really wants
+;     PCALL error('RACFPUBR', 'CanQuOtEt remove access for public. \
+;        Use PUBLIC NONE or &(x.dsnspec) RESET.')
+   END
+   IF ((IND(x.dsnspec,'**') GT 0) OR (IND(x.dsnspec,'*%')  GT 0) OR \
+         (IND(x.dsnspec,'%*') GT 0)) BEGIN
+      PCALL error('RACFWILD','CanQuOtEt have two adjacent wildcards \
+         in dataset name.')
+   END
+;*********** No omission errors found.  Now check for valid syntax.
+   IF (NOT x.tapeopt) BEGIN
+      TRY XCALL racf#editprof (x.dsnspec,x.profname,x.usr,x.grp) PUB
+   END
+   IF (x.tapeopt) BEGIN
+      TRY XCALL racf#edittape (x.dsnspec,x.profname,x.usr,x.grp) PUB
+   END
+   IF (TRYERROR) BEGIN
+      SMF RACF "PROT ERR Set Protect &(x.origparm)//&(TRYMSG)"
+;     SMF RACF "PROT ERR Set Protect &(x.origparm)//ERRMSG=&(TRYMSG)"
+      PCALL cleanup('')
+   END
+   IF (TRYATTN) PCALL attnexit
+;********** Test to see if the account exists:
+   QUIET TRY SHOW NAME &(x.grp).&(x.usr)
+   IF (TRYID NE 'OK') PCALL error ('&(TRYID)','&(TRYMSG)')
+   IF (NOT x.priv) BEGIN
+      IF ((x.usr NE USER) OR (x.grp NE GROUP)) BEGIN
+         PCALL error('RACFACCT', '&(x.grp).&(x.usr) invalid in \
+            profile name.  Only account &(GROUP).&(USER) may be used.')
+      END
+   END
+;********** Test to see if relative GDG or library member name.
+;********** Error if user has specified library member name.
+   IF (FIND(x.profname,'(') GT 0) BEGIN
+      IF ((IND(x.profname,'(0') EQ 0) AND \
+            (IND(x.profname,'(-') EQ 0) AND \
+            (IND(x.profname,'(+') EQ 0)) BEGIN
+         PCALL error('RACFMEMB', 'You canQuOtEt protect individual \
+            library members. You must protect the whole library.')
+      END
+;         not a library member name, therefore must be a GDG
+      x.profname = SUB(x.profname,1,FIND(x.profname,'(')-1)
+   END
+;********** Error if user is trying to delete the default profile
+   IF ((x.profname EQ '&(x.grp)$&(x.usr).*') AND (x.delete)      \
+         AND (NOT x.priv)) BEGIN
+      PCALL error('RACFDELD', 'You canQuOtEt delete your default \
+         profile.  Type HELP SET PROTECT DELETE for further information.')
+   END
+;********** Now edit the target (RACF id or group), the access level
+;********** and the logging option (if any).
+   IF (x.target NE '') PCALL edittarget
+   IF (x.access NE '') PCALL editaccess
+   IF (x.log) PCALL editlog
+   IF ((x.notify_act NE '') AND (x.notify_act NE 'ONCALL')) BEGIN
+;     QUIET TRY SHOW NAME &(x.notify_act)
+;     IF (TRYID NE 'OK') PCALL error ('&(TRYID)','&(TRYMSG)')
+      IF (GET_ACCOUNT(x.notify_act) EQ '') BEGIN
+         PCALL error ('&(TRYID)','&(TRYMSG)')
+      END
+      x.notify_act = GET_ACCOUNT(x.notify_act)
+      IF (x.log_opt NE 'NONE') BEGIN
+         IF (DSNINFO('WYL.&(x.notify_act).MAIL') EQ '') BEGIN
+            x.notify_act = SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3) ;no MAIL box
+         END
+      END
+   END
+;********** Anything left over is garbage.
+;********** This test must come after edittarget/editaccess/editlog tests
+   IF (x.garbage NE '') BEGIN
+      PCALL error('RACFUNKN', '&(x.garbage) unrecognized ' \
+         || x.pgm || ' option.')
+   END
+;********** Now see if profile already exists or not.  Set x.exist
+;********** to TRUE if a profile exists, otherwise FALSE.
+;********** Also, set x.ship to TRUE if profile exists and log level
+;********** not equal to NONE.
+   PCALL profexist
+   IF ((NOT x.exist) AND (x.delete)) BEGIN
+      PCALL error('RACFNEXD', 'CanQuOtEt delete &(x.profname) because \
+         profile doesnQuOtEt exist.')
+   END
+   IF ((NOT x.exist) AND (x.reset)) BEGIN
+      PCALL error('RACFNEXR', 'CanQuOtEt reset &(x.profname) because \
+         profile doesnQuOtEt exist.')
+   END
+   IF ((NOT x.exist) AND (x.remove)) BEGIN
+      PCALL error('RACFNEXM', 'CanQuOtEt remove access rule because \
+         &(x.profname) profile doesnQuOtEt exist.')
+   END
+   IF ((x.exist) AND (x.append)) BEGIN
+      PCALL error('RACFEXAP', 'CanQuOtEt use append option when profile \
+         exists.  Append used only for new profiles.')
+   END
+   IF ((NOT x.exist) AND (NOT x.newprof) AND \
+         (x.profname NE '&(x.grp)$&(x.usr).*')) BEGIN
+      x.append = TRUE
+   END
+   IF ((NOT x.exist) AND (x.log) AND (x.target EQ '')) BEGIN
+      PCALL error('RACFNTWL', 'CanQuOtEt set logging for a nonexistent \
+         profile.  Must include an access rule to create profile.')
+   END
+;********** Issue warning and opportunity to stop if default profile
+   IF ((x.exist) AND (x.profname EQ '&(x.grp)$&(x.usr).*')) BEGIN
+      WRITE 'Please Note: All datasets currently protected by your account default profile'
+      WRITE '         may change the way they are protected after completion of this'
+      WRITE '         command.  Issue SHOW PROTECT DEFAULT to see results.'
+      IF (FETYPE NE 'VIRTUAL') BEGIN
+         IF (NOT x.noprompt) BEGIN
+            answer = YESNO('Continue','YES,NO,ATTN')
+            IF (answer EQ 'ATTN') PCALL attnexit
+            IF (answer NE 'YES')  PCALL cleanup('')
+         END
+      END
+   END
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; process -- Build RACF JCL, run it, wait for completion and then  *
+;     fetch it.                                                    *
+;                                                                  *
+;*******************************************************************
+PROC process() BEGIN
+   IF (ses.racf_debug) BEGIN
+      WRITE 'PROCESS   profname : '||x.profname
+      WRITE '          target   : '||x.target
+      WRITE '          access   : '||x.access
+      WRITE '          append   : '||x.append
+      WRITE '          log      : '||x.log_opt
+      WRITE '          notify   : '||x.notify_act
+      WRITE '          reset    : '||x.reset
+      WRITE '          retain   : '||x.retain
+      WRITE '          list     : '||x.list
+      WRITE '          hold     : '||x.hold
+      WRITE '          remove   : '||x.remove
+      WRITE '          tapeopt  : '||x.tapeopt
+   END
+;********** Build job and run it.
+   IF (LAST LE 0) BEGIN
+      PUTLINE 1 //&RACF JOB ,'SETPROT',CLASS=F
+      PUTLINE 2 /*JOBPARM  DEST=LOCAL
+      PUTLINE 3 //RACF     EXEC PGM=IKJEFT01
+      PUTLINE 4 //SYSTSPRT DD  SYSOUT=A
+      PUTLINE 5 //SYSPRINT DD  SYSOUT=A
+      PUTLINE 6 //PRINTER  DD  SYSOUT=A
+      PUTLINE 7 //SYSUT1   DD  UNIT=VIO,SPACE=(CYL,(10,05))
+      PUTLINE 8 //SYSTSIN    DD  *
+   END
+;********** Build RACF profiles and permits
+   POINT 'SYSTSIN' NOL
+   x.begin_racf = *
+   IF (x.delete) BEGIN
+      IF (x.tapeopt) PUTEND  RDEL TAPEVOL &(x.profname)
+      ELSE PUTEND  DELDSD '&(x.profname)' GENERIC
+      x.smflog = 'OFF' ; Stop shipping log records
+   END
+;********** If trying to reset the default profile then first delete it
+;********** and then set it to private with FAILURES(READ) logging.
+;********** If non-default then first delete profile, set to private
+;********** then append from default.
+   IF (x.reset) BEGIN
+      IF (x.tapeopt) BEGIN
+         PUTEND  RDEL TAPEVOL &(x.profname)
+         PUTEND  RDEF TAPEVOL &(x.profname) OWNER(&(x.grp)$&(x.usr)) UACC(NONE)
+      END
+      ELSE BEGIN
+         PUTEND  DELDSD '&(x.profname)' GENERIC
+         PUTEND  ADDSD  '&(x.profname)' ^ OWNER(&(x.grp)$&(x.usr)) UACC(NONE) GENERIC
+      END
+   END
+;********** Reset default profile to NONE or FAILURES(READ) logging
+   IF ((x.reset) AND (x.profname EQ '&(x.grp)$&(x.usr).*')) BEGIN
+      PUTEND  ALTDSD '&(x.profname)' AUDIT(NONE) GENERIC
+      IF (MACHINE NE 'RLG') BEGIN
+         COUNT '&(x.grp).&(x.usr)'2 FROM WYL.GB.SEC.AUTH.DISTLIST QUIET ; test if 'sensitive'
+         IF (COUNT GE 1) BEGIN
+            CH 'AUDIT(NONE)' TO 'AUDIT(FAILURES)' IN LAST NOL
+            x.ship = TRUE
+            x.smflog = 'ON' ; Begin shipping log records
+            SMF RACF "PROT LOG &(x.profname)"
+         END
+      END
+   END
+;********** Now reset a non-default profile to the default protection and log notification.
+   IF ((x.reset) AND (x.profname NE '&(x.grp)$&(x.usr).*')) BEGIN
+      PCALL append('&(x.grp)$&(x.usr).*')
+   END
+;********** Handle case of removing single access rule
+   IF (x.remove) BEGIN
+      IF (x.tapeopt) PUTEND  PERMIT &(x.profname) CLASS(TAPEVOL) ID(&(x.target)) DELETE
+      ELSE PUTEND  PERMIT '&(x.profname)' ^ ID(&(x.target)) GENERIC DELETE
+   END
+;********** Create profile if one doesn't already exist.
+   IF ((NOT x.reset) AND (NOT x.remove) AND (x.target NE '') \
+         AND (NOT x.exist)) BEGIN
+      IF (x.tapeopt) PUTEND  RDEF TAPEVOL &(x.profname) OWNER(&(x.grp)$&(x.usr)) UACC(NONE)
+      ELSE PUTEND  ADDSD  '&(x.profname)' ^ OWNER(&(x.grp)$&(x.usr)) UACC(NONE) GENERIC
+      IF ((NOT x.append) AND (NOT x.log)) BEGIN
+         IF (x.tapeopt) PUTEND  RALT TAPEVOL &(x.profname) AUDIT(NONE)
+         ELSE PUTEND  ALTDSD '&(x.profname)' AUDIT(NONE) GENERIC
+         IF (MACHINE NE 'RLG') BEGIN
+            COUNT '&(x.grp).&(x.usr)'2 FROM WYL.GB.SEC.AUTH.DISTLIST QUIET ; test if 'sensitive'
+            IF (COUNT GE 1) BEGIN
+               CH 'AUDIT(NONE)' TO 'AUDIT(FAILURES)' IN LAST NOL
+               x.ship = TRUE ; ship this SET PROTECT command
+               x.smflog = 'ON' ; Begin shipping log records
+            END
+         END
+         IF (SUB(x.profname,1,3) EQ 'SYS') BEGIN
+            CH 'AUDIT(NONE)' TO 'AUDIT(FAILURES)' IN LAST NOL
+            x.ship = TRUE ; ship this SET PROTECT command
+            x.smflog = 'ON' ; Begin shipping log records
+         END
+      END
+   END
+;********** If permit being appended, then copy all permits from
+;********** profile which currently protects 'x.profname' (including
+;********** logging and notification info) and then append current
+;********** permit.
+   IF (x.append) BEGIN
+      profile = x.profname
+      PCALL append(profile)
+   END
+;********** Now add the PERMIT for both cases: a) profile previously
+;********** existed, and b) new profile.
+   IF ((NOT x.remove) AND (x.target NE 'PUBLIC') AND (x.target NE '')) BEGIN
+      IF (x.tapeopt) PUTEND  PERMIT &(x.profname) CLASS(TAPEVOL) ID(&(x.target)) ACCESS(&(x.access))
+      ELSE PUTEND  PERMIT '&(x.profname)' ^ ID(&(x.target)) ACCESS(&(x.access)) GENERIC
+   END
+   IF (x.target EQ 'PUBLIC') BEGIN
+      IF (x.tapeopt) PUTEND  RALT TAPEVOL &(x.profname) UACC(&(x.access))
+      ELSE PUTEND  ALTDSD '&(x.profname)' ^ UACC(&(x.access)) GENERIC
+   END
+;********** Handle RETAIN option.  Never implemented (2/1/88)
+;********** Function handled by SCRATCH command
+   IF (x.retain) BEGIN
+;     PUTEND  ALTDSD '&(x.profname)' DATA('RETAIN') GENERIC
+      COMM RETAIN option on SET PROTECT not fully implemented. Call 3-9797.
+;     Note: RETAIN has been supersceded by the SCRATCH ... RETAIN
+;           option.
+   END
+;********** Handle LOG information
+   IF (x.log)  BEGIN
+      IF (x.tapeopt) PUTEND  RALT TAPEVOL &(x.profname) AUDIT(ALL(&(x.log_opt)))
+      ELSE PUTEND  ALTDSD '&(x.profname)' ^ AUDIT(ALL(&(x.log_opt))) GENERIC
+      CHANGE 'AUDIT(ALL(NONE))' TO 'AUDIT(NONE)' IN LAST NOL
+      CHANGE 'AUDIT(ALL(FAILURES))' TO 'AUDIT(FAILURES)' IN LAST NOL
+      CHANGE 'AUDIT(ALL(UPDATE))' TO 'AUDIT(FAILURES(READ) SUCCESS(UPDATE))' IN LAST NOL
+      COUNT 'AUDIT(NONE)' IN LAST QUIET
+      IF (COUNT GT 0) x.smflog = 'NONE' ; Stop shipping log records
+      IF ((COUNT EQ 0) AND (NOT x.tapeopt)) BEGIN
+         x.ship = TRUE ; ship this SET PROTECT command
+         x.smflog = 'ON' ; Begin shipping log records
+         SMF RACF "PROT LOG &(x.profname)"
+      END
+      COUNT 'AUDIT(ALL(PROTECT))' IN LAST QUIET
+      IF (COUNT GT 0) BEGIN
+         CHANGE 'AUDIT(ALL(PROTECT))' TO 'AUDIT(NONE)' IN LAST NOL
+         IF (x.tapeopt) PUTEND  PERMIT &(x.profname) CLASS(TAPEVOL) ID(LOGPROT) ACCESS(NONE)
+         ELSE PUTEND  PERMIT '&(x.profname)' ^ ID(LOGPROT) ACCESS(NONE) GENERIC
+      END
+      ELSE BEGIN
+         IF (x.tapeopt) PUTEND  PERMIT &(x.profname) CLASS(TAPEVOL) ID(LOGPROT) DELETE
+         ELSE PUTEND  PERMIT '&(x.profname)' ^ ID(LOGPROT) GENERIC DELETE
+      END
+   END
+;********** Handle NOTIFY information
+   IF (MACHINE EQ 'RLG') x.notify_act = 'bp.acc' ; RLG default
+   IF (x.notify_act EQ '') BEGIN
+      IF (x.exist_notify EQ '') BEGIN
+         XCALL racf#notify(x.pgm,x.profname,x.grp,x.usr,x.exist_notify) PUB
+      END
+      x.notify_act = x.exist_notify ; set the notification account
+;                                           to the one that already exists.
+   END
+   IF (x.notify) BEGIN
+;     PUTEND  ALTDSD '&(x.profname)' DATA('&(x.notify_act)') GENERIC
+      x.smflog = 'ON' ; Begin shipping log records
+   END
+   IF ((NOT x.exist) AND (NOT x.notify) AND (x.smflog EQ 'ON')) BEGIN
+      x.defmsg = TRUE ; force comment: "By default, log records ..."
+   END
+;********** Run JCL if there are any RACF commands (e.g. LOG PROTECT
+;********** doesn't require any JCL.)
+   IF (LAST GT x.begin_racf) BEGIN
+;********** Make sure all lines are no longer than 72 characters with 44 char max. dsn
+      firstpart=''
+      secondpart=''
+align_commands:
+      POINT '^' (1) NOL
+      linefirst=*
+      IF (* LE 0) GOTO align_end
+      READ STRING firstpart USING * DELETE
+      secondpart = SUB(firstpart,IND(firstpart,'^')+1)
+      firstpart  = SUB(firstpart,1,IND(firstpart,'^'))
+      &(linefirst)  &(firstpart)
+      &(linefirst)+.001  &(secondpart)
+      CH '^' TO '+' IN &(linefirst) NOL
+      GOTO align_commands
+align_end:
+      IF (ses.racf_debug) BEGIN
+         LIST &(x.begin_racf)/L NON
+      END
+      stop=FALSE
+      IF (NOT x.hold) BEGIN
+         XCALL racf#runwait (x.pgm,'&(USER)RACF','RUN HOLD QUIET NONOTIFY',stop,x.usr,x.grp) PUB
+      END
+      IF (stop) BEGIN
+         IF (NOT x.hold) BEGIN
+            CLOSE ; jcl
+            x.racf_jcl = -1 ; avoid closing ACTIVE:jcl twice
+         END
+         PCALL cleanup('')
+      END
+   END
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; output -- Format and display results of RACF job.                *
+;                                                                  *
+;*******************************************************************
+PROC output () BEGIN
+;********** Job finished.  Now get it.
+   DECLARE NUM FETLL
+   FETLL=LAST
+   TRY FETCH * NOM APPEND
+   IF (TRYERR OR (FETLL EQ LAST)) BEGIN               ; FETCH failed MCL 1998/10/13
+      WRI 'RACF job failed.'
+      TRY FETCH * APPEND ; maybe jcl error?
+      GOTO ERROR_ROUTINE
+      END                          ; (fetch fail)
+   ELSE PURGE * QUIET
+;********* Eliminate redundant and non-essential lines
+   DEL 'READY '1 OR 'END '1
+   DEL 'NO VALID TSO USERID, DEFAULT USER ATTRIBUTES USED'
+   DEL '&(x.profname)' AND 'NOT PROCESSED' ;Trying to add a profile that already exists
+   DEL 'LOGPROT  NOT AUTHORIZED, DELETE IGNORED' ; LOGPROT not there to delete
+   CH 'DELETE IGNORED' to 'REMOVE IGNORED' NOL ;Trying to remove a permit that doesn't exist
+   CH 'NOT AUTHORIZED TO DEFINE' TO 'Insufficient authority to define profile for' NOL
+   CH 'NOT AUTHORIZED TO' TO 'Insufficient authority to SET PROTECT for' NOL
+   CH 'RACF PROTECT ' TO '' NOL
+;********** NOTE: The next few instructions assume that the SET PROTECT
+;**********       command is issued with x.hold=FALSE.  If x.hold=TRUE
+;**********       then x.reset and x.for will be set to the most recent
+;**********       SET PROTECT command and the errors may be for some
+;**********       previous SET PROTECT command.  The worst that will
+;**********       happen is that some messages that ought not come out
+;**********       will be displayed.  Should not cause any harm.
+   IF ((x.reset) AND (x.for)) DEL '&(x.profname)' and 'NOT DEFINED TO RACF'
+   IF ((x.reset) AND (NOT x.for)) BEGIN
+      CH ' NOT DEFINED TO RACF' to ': No matching profile to reset.' NOL
+   END
+;********* See if there are any errors from the RACF job
+error_routine:
+   IF (LAST GT 0) COUNT ~' '1 AND ~'' QUIET ;Test to see if any errors
+   IF (COUNT LE 0) RETURN ; Command successful
+;********** We have a RACF error.  Some are fatal some are not.  Eliminate
+;           the non-fatal ones.  In particular, the case where a permit
+;           is being set for an undefined userid.  This can happen when
+;           a DEFAULT profile hasn't been maintained when a userid was
+;           removed and the current SET PROTECT command is appending
+;           from the default profile.
+   COUNT 'ICH06007I'1 AND '$'13 AND 'NOT DEFINED TO RACF'20 QUIET
+   IF (COUNT GT 0) BEGIN
+      MAIL 'ICH06007I' TO (&(x.maint)) TIT 'DEFAULT profile cleanup needed (or other error) - See RACF#SETPROT PUB'
+      DEL 'ICH06007I' AND '$'13 AND 'NOT DEFINED TO RACF'20
+      GOTO error_routine
+   END
+;********** Error in RACF job.  Warn user and send error info to x.maint
+   PUTLINE .1    SET PROTECT &(x.origparm)
+   TRY MAIL TO (&(x.maint)) TITLE '&(x.pgm) error.  RACF job failure.' QUIET
+   DEL '' OR ' '1
+   COUNT QUIET; Will always be greater than zero.  See previous logic.
+   IF (COUNT GT 1) BEGIN
+      CH 1/10 to '' in 'ICH'1 NOL ; remove error msg code
+      CH 1/10 to '' in 'IKJ'1 NOL ; remove error msg code
+      LIST UNN
+      errid='RACFMULT'
+      errmsg=''
+      x.output_act = 0
+      CLOSE ; output
+      SMF RACF "PROT ERR Set Protect &(x.origparm)//RACF job failed. (e.g. insufficient authority)"
+      PCALL cleanup('errid=&(errid), errmsg="&(errmsg)"')
+   END
+   errid=''
+   errmsg=""
+   CH "'" TO "" IN F/L NOL
+   READ STR errid USING LAST COL 1/8
+   READ STR errmsg USING LAST
+   IF ((SUB(errid,1,3) EQ 'ICH') OR (SUB(errid,1,3) EQ 'IKJ')) BEGIN
+      errmsg=SUB(errmsg,11) ;strip off errid
+   END
+   x.output_act = 0
+   CLOSE ; output
+   PCALL error('&(errid)','&(errmsg)')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; editaccess -- Validate the access level and convert from old     *
+;     terminology to RACF terminology.  If not a recognized access *
+;     then issue message and terminate processing.                 *
+;                                                                  *
+;     Upon entry to this routine, x.access is unedited.  Upon exit *
+;     this variable has been expanded to the full access word      *
+;     needed by RACF.                                              *
+;                                                                  *
+;*******************************************************************
+PROC editaccess () BEGIN
+   CASES BEGIN
+      CASE (ABBREV('READ',x.access,3)) BEGIN
+         x.access = 'READ'
+      END
+      CASE (ABBREV('WRITE',x.access,3)) BEGIN
+         x.access = 'ALTER'
+      END
+      CASE (ABBREV('ALTER',x.access,3)) BEGIN
+         x.access = 'ALTER'
+      END
+      CASE (ABBREV('UPDATE',x.access,3)) BEGIN
+         x.access = 'UPDATE'
+      END
+      CASE (ABBREV('NONE',x.access,3)) BEGIN
+         x.access = 'NONE'
+      END
+      CASE (ABBREV('REMOVE',x.access,3)) BEGIN
+         x.access = 'REMOVE'
+         x.remove = TRUE
+      END
+      CASE (ABBREV('DELETE',x.access,3)) BEGIN
+         x.access = 'REMOVE'
+         x.remove = TRUE
+      END
+      CASE (ABBREV('RESET',x.access,3)) BEGIN
+         x.access = 'REMOVE'
+         x.remove = TRUE
+      END
+      CASE (ABBREV('CONTROL',x.access,3)) BEGIN
+         x.access = 'CONTROL'
+      END
+      CASE (ABBREV('PASSWORD',x.access,3)) BEGIN
+         x.access = 'READ'
+      END
+      CASE (TRUE) BEGIN
+         PCALL error('BADSYN', x.access||' is an unrecognized ' \
+            || x.pgm || ' access level option.')
+      END
+   END
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; editlog  -- This routine edits and expands the various values    *
+;     associated with the LOG subparameter.                        *
+;                                                                  *
+;     x.log_opt contains the unedited word immediately after the   *
+;     LOG in the SET PROTECT command.  If it is not a valid word   *
+;     then an error message is issued and the command is not       *
+;     processed.                                                   *
+;                                                                  *
+;*******************************************************************
+PROC editlog () BEGIN
+   CASES BEGIN
+      CASE (ABBREV('LOG',x.log_opt,3)) BEGIN
+         PCALL error('BADSYN', 'LOG duplicately specified.')
+      END
+      CASE (ABBREV('WRITE',x.log_opt,3)) BEGIN
+         x.log_opt='UPDATE'
+      END
+      CASE (ABBREV('PROTECT',x.log_opt,3)) BEGIN
+         x.log_opt = 'PROTECT'
+      END
+      CASE (ABBREV('ALL',x.log_opt,3)) BEGIN
+         x.log_opt = 'READ'
+      END
+      CASE (ABBREV('NONE',x.log_opt,3)) BEGIN
+         x.log_opt = 'NONE'
+      END
+      CASE (ABBREV('FAILURES',x.log_opt,3)) BEGIN
+         x.log_opt = 'FAILURES'
+      END
+      CASE (TRUE) BEGIN
+         PCALL error('BADSYN', x.log_opt||' is an unrecognized ' \
+            || x.pgm || ' log option.')
+      END
+   END
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; edittarget -- This routine edits the various forms of the target *
+;     of the SET PROTECT command.  These forms consist of account  *
+;     ids, group names, COMMUNITY or PUBLIC.  No editing is done to*
+;     ensure that the appropriate RACF profile actually exists.    *
+;     That work will be done by the RACF job later.  Thus, any     *
+;     target in the form gg.uuu or gg$uuu will be accepted as a    *
+;     valid account id whether or not the account actually exists. *
+;                                                                  *
+;*******************************************************************
+PROC edittarget () BEGIN
+
+;********** Test for userid
+   IF (GET_ACCOUNT(x.target) NE '') BEGIN
+      x.target = GET_ACCOUNT(x.target)
+      x.target = SUB(x.target,1,2)||'$'||SUB(x.target,4)
+   END
+
+;********** Test for account (gg.uuu or gg$uuu or uuu$gg)
+   IF ((SIZE(x.target) GE 6) AND ((SUB(x.target,3,1) EQ '.')) \
+         OR (SUB(x.target,3,1) EQ '$')) BEGIN
+      x.target = SUB(x.target,1,2)||'$'||SUB(x.target,4)
+      name = SUB(x.target,1,2)||'.'||SUB(x.target,4,3)
+      QUIET TRY SHO NAME &(name)
+      IF (TRYID EQ 'OK') RETURN
+      IF (x.access EQ 'REMOVE') RETURN
+      PCALL error('&(TRYID)', '&(TRYMSG)')
+      RETURN
+   END
+   IF ((SIZE(x.target) EQ 6) AND (SUB(x.target,4,1) EQ '$')) BEGIN
+      x.target = SUB(x.target,5,2)||'$'||SUB(x.target,1,3)
+      name = SUB(x.target,1,2)||'.'||SUB(x.target,4)
+      QUIET TRY SHO NAME &(name)
+      IF (TRYID EQ 'OK') RETURN
+      IF (x.access EQ 'REMOVE') RETURN
+      IF (x.access EQ 'DELETE') RETURN
+      IF (x.access EQ 'RESET') RETURN
+      PCALL error('&(TRYID)', '&(TRYMSG)')
+      RETURN
+   END
+;********** Test for 'gg' groups
+   IF (SIZE(x.target) EQ 2) BEGIN
+      IF (FIND(SUB(x.target,1,1),'ABCDEFGHIJKLMNOPQRSTUVWXYZ') EQ 1) RETURN
+   END
+;********** Test for PUBLIC
+   IF ((ABBREV('PUBLIC',x.target,3)) OR (ABBREV('UACC',x.target,4))) BEGIN
+      x.target = 'PUBLIC'
+      RETURN
+   END
+;********** Test for user uuu
+   IF ((x.user) AND (SIZE(x.target) EQ 3)) BEGIN
+      x.target = GROUP||'$'||x.target
+      RETURN
+   END
+;********** Test for special RACF groups (must begin with @ char.
+   IF (SUB(x.target,1,1) EQ '@') RETURN
+;********** Test for WEB, ADMIN, INTRNL or RLIN and other reserved groups
+;
+;++++++++++ Accept target without further editing if this is an RLG user
+   IF (MACHINE EQ 'RLG') BEGIN
+      IF (ABBREV('COMMUNITY ',x.target,4)) BEGIN
+         x.target = 'RLIN'
+      END
+      RETURN
+   END
+   COUNT '&(x.target) '1 FROM WYL.GB.SEC.RACF.GROUPS QUIET
+   IF (COUNT GE 1) BEGIN
+      IF (x.target EQ 'INTERNAL') x.target = 'INTRNL'
+      RETURN
+   END
+;********** Test for COMMUNITY and change to ADMIN, INTRNL or RLIN
+   IF (ABBREV('COMMUNITY ',x.target,4)) BEGIN
+      XCALL racf#getcomm('&(x.grp).&(x.usr)',x.target) PUB
+      RETURN
+   END
+   PCALL error('BADTAR', x.target|| ' is an unrecognized ' \
+      || 'group or account access target.')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; append -- Append the permits from specified profile to current   *
+;     profile.  Also append log and notify info if not otherwise   *
+;     specified in the command.                                    *
+;                                                                  *
+;     Upon entry to this routine, 'profile' has the profile name   *
+;     of the profile from which the permits are taken.  x.profname *
+;     is the profile to which these permits will be appended.      *
+;                                                                  *
+;*******************************************************************
+PROC append (profile) BEGIN
+   showprot=END
+;********** Modify 'profile' to replace wildcards so can find RACF
+;********** profile which protects modified dataset name.
+   IF (FIND(profile,'%*') GT 1) BEGIN
+      PUTEND &(profile)
+      CH '%' TO 'X' IN LAST NOL
+      CH '* ' TO '.X ' IN LAST NOL
+      CH '*'  TO 'X'   IN LAST NOL
+      CH '..' TO '.' NOL IN LAST NOL
+      READ STR profile USING LAST DEL
+   END
+;********** Get access rules from matching profile (if any)
+   ses.racf_fromset = TRUE
+   ses.racf_withdsn = FALSE
+   ses.racf_profname = profile
+   ses.racf_tapeopt = x.tapeopt
+   temp_debug = ses.racf_debug
+   ses.racf_debug = FALSE
+   IF ((x.tapeopt) AND (x.append)) DUMP PROTECT TAPE &(profile)
+   ELSE DUMP PROTECT PROFILE &(profile)
+   IF (ses.racf_break) PCALL attnexit
+   ses.racf_debug = temp_debug
+   ses.racf_profname = ''
+   ses.racf_tapeopt = FALSE
+   ses.racf_fromset = FALSE
+   DEL '' IN &(showprot)/L; in case there are any blank lines from DUMP PROTECT
+   IF (LAST LE 0) RETURN
+   COUNT 'Profile does not exist' in &(showprot)/L QUIET
+   IF (COUNT GE 1) BEGIN
+      DEL &(showprot)/L
+      RETURN
+   END
+   COUNT c'Profile access not permitted' in &(showprot)/L QUIET
+   IF (COUNT GE 1) BEGIN
+      DEL &(showprot)/L
+      RETURN
+   END
+   COUNT c'No TAPEVOL profile for' in &(showprot)/L QUIET
+   IF (COUNT GE 1) BEGIN
+      DEL &(showprot)/L
+      RETURN
+   END
+   DEL &(showprot) ; get rid of Profile: line
+   loginfo = ''
+   notifyinfo = ''
+   COUNT 'Log   :' IN &(showprot)/L QUIET
+   IF (COUNT GT 0) BEGIN
+      x.ship = TRUE ; ship this SET PROTECT command
+      READ STR loginfo USING &(showprot)+1 DEL
+      loginfo = SUB(loginfo,10)
+      IF (loginfo EQ 'WRITE')    loginfo = 'SUCCESS(UPDATE) FAILURES(READ)'
+      IF (loginfo EQ 'FAILURE')  loginfo = 'FAILURES(READ)'
+      IF (loginfo EQ 'ALL')      loginfo = 'ALL(READ)'
+      READ STR notifyinfo USING &(showprot)+2 DEL
+      notifyinfo = SUB(notifyinfo,10)
+   END
+   IF (loginfo EQ '') loginfo = 'NONE'
+   CH 'No non-owner accesses allowed' to 'PUBLIC    NONE' NOL
+   IF (END NE showprot) BEGIN
+      CH '.'12 TO '$' NOL ; change gg.uuu to gg$uuu
+      CH 27 TO ') GENERIC' in &(showprot)/LAST NOL
+      CH 20 TO ') ACCESS(' IN &(showprot)/LAST NOL
+      CH 18/19 TO '' IN &(showprot)/LAST NOL
+      ch 2/9 to "PERMIT '&(x.profname)' ^ ID(" in &(showprot)/LAST NOL
+      CH 1/1 TO ' ' IN &(showprot)/LAST NOL
+      CH 'ID(PUBLIC  ) ACCESS(' to 'UACC(' NOL
+      CH 'PERMIT' to 'ALTDSD' in ' UACC(' NOL
+   END
+   IF (NOT x.log) BEGIN
+      PUTEND  ALTDSD '&(x.profname)' ^ AUDIT(&(loginfo)) GENERIC
+      IF (loginfo EQ 'PROTECT') BEGIN
+         CH 'PROTECT' TO 'NONE' IN LAST NOL
+         PUTEND  PERMIT '&(x.profname)' ^ ID(LOGPROT) ACCESS(NONE) GENERIC
+;            NOTE: Giving the group named LOGPROT an access of NONE
+;            is a trick to identify those profiles that have specified
+;            LOG PROTECT.  The group LOGPROT is used in the SHOW
+;            PROTECT command to display Log   : PROTECT in the output
+;            listing.
+      END
+   END
+   IF (NOT x.notify) BEGIN
+      x.notify_act = notifyinfo
+   END
+;********** Modify disk protect commands to tape protect commands
+   IF (x.tapeopt) BEGIN
+      CH 'ALTDSD'2 TO 'RALT TAPEVOL' NOL
+      CH 'GENERIC' TO 'CLASS(TAPEVOL)' IN 'PERMIT'2 NOL
+      CH "'" TO "" NOL
+   END
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+; profexist -- Test to see if a RACF profile already exists with   *
+;     the exact name of x.profname.                                *
+;                                                                  *
+;     If the profile exists, then set x.exist to TRUE, else FALSE  *
+;                                                                  *
+;*******************************************************************
+PROC profexist () BEGIN
+   work=END
+   ses.racf_fromset = TRUE
+   ses.racf_withdsn = FALSE
+   ses.racf_profname = x.profname
+   ses.racf_tapeopt = x.tapeopt
+   temp_debug = ses.racf_debug
+   ses.racf_debug = FALSE
+   IF (x.tapeopt) DUMP PROTECT TAPE &(x.profname)
+   ELSE DUMP PROTECT PROFILE &(x.profname)
+   IF (ses.racf_break) PCALL attnexit
+   ses.racf_debug = temp_debug
+   ses.racf_profname = ''
+   ses.racf_tapeopt = FALSE
+   ses.racf_fromset = FALSE
+   DEL '' IN &(work)/L; in case there are any blank lines from DUMP PROTECT
+   IF (LAST GE work) BEGIN
+      COUNT '&(x.profname) ' AND ~'No TAPEVOL profile' IN &(work)/L QUIET
+      IF (COUNT GT 0) x.exist = TRUE
+      ELSE        x.exist = FALSE
+      IF (x.profname EQ '&(x.grp)$&(x.usr).*') BEGIN
+         COUNT 'Profile: DEFAULT' IN &(work) QUIET
+         IF (COUNT GT 0) x.exist = TRUE
+         ELSE            x.exist = FALSE
+      END
+   END
+   x.exist_notify = ''
+   IF (x.exist) BEGIN
+      P 'Notify:' IN &(work)/L NOL ; get account to be notified for log records
+      IF (* GT 0) BEGIN
+         READ STR x.exist_notify USING *
+         x.exist_notify = SUB(x.exist_notify,10)
+      END
+      P 'Log   :' IN &(work)/L NOL ; see if log level is NONE
+      IF (* GT 0) x.ship = TRUE ; ship this SET PROTECT command
+   END
+   IF (work LE LAST) DEL &(work)/L
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  attnexit -- Attention exit.  This routine gets control if the   *
+;      user presses ATTN.   Actives are closed until the original  *
+;      active has been restored.                                   *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+PROC attnexit() BEGIN
+   ON ATTN REENABLE
+   ON ATTN  CMD 'PCALL attnexit' NOINTERRUPT
+;********** Close any ACTIVE which is still open.
+;********** Don't close the original or the JCL if x.hold = TRUE
+   IF (x.notify_active GT 0) BEGIN
+      CLOSE ; notify
+   END
+   IF (x.output_act GT 0) BEGIN
+      PICK &(x.output_act)
+      CLOSE ; output
+   END
+   IF ((NOT x.hold) AND (x.racf_jcl GT 0)) BEGIN
+      PICK &(x.racf_jcl)
+      CLOSE ; jcl
+      x.racf_jcl = -1 ; avoid closing ACTIVE:jcl twice
+   END
+   ON ATTN  CMD 'PCALL attnexit' INTERRUPT
+   PCALL cleanup('')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  errorexit -- Error exit.  This routine gets control if a command*
+;     fails unexpectedly.  Not much we can do but complain.        *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+PROC errorexit() BEGIN
+   WRITE 'An error has occurred in the ' || x.pgm || ' command.'
+   IF (ses.racf_debug) BEGIN
+      WRITE ''
+      WRITE 'Debugging information:'
+      WRITE '   errmsg: '||errmsg
+      WRITE '  errinfo: '||errinfo
+   END
+;**********  Mail debugging information to maintenance people.
+   PUTEND An error occurred in the &(x.pgm) command.
+   PUTEND
+   PUTEND Debugging information:
+   PUTEND
+   PUTEND command = &(x.origparm)
+   PUTEND errmsg = &(errmsg)
+   PUTEND errinfo = &(errinfo)
+   PUTEND
+   PUTEND ---
+   PUTEND
+   DUMP DATE
+   DUMP ACCOUNT
+   DUMP VAL MACHINE
+   PUTEND
+   PUTEND >>> show vars type ses
+   dump vars type ses
+   PUTEND
+   PUTEND >>> show vars type x
+   dump vars type x
+   PUTEND
+   PUTEND >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   PUTEND
+   PUTEND End of dump.
+   TRY MAIL TO (&(x.maint)) TITLE '&(x.pgm) error' QUIET
+   POINT 'An error occurred in the SET PROTECT command.' 1 (1)  NOL
+   DEL */L
+;**********  Call it quits.
+   PCALL error('RACFEXER','The systems programming staff has been \
+      notified.')
+END
+;<.page>
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  error -- Routine to quit command because of an error.           *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+PROC error(errid, errmsg) BEGIN
+;  SMF RACF "PROT ERR Set Protect &(x.origparm)//ERRMSG=&(errmsg)"
+   SMF RACF "PROT ERR Set Protect &(x.origparm)//&(errmsg)"
+   PCALL cleanup('errid=&(errid), errmsg="&(errmsg)"')
+END
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  cleanup -- Routine to do final command cleanup.                 *
+;      There is no return from this routine.                       *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+PROC cleanup(opt) BEGIN
+   PICK &(x.origact)
+quote_loop:
+   IF (INDEX(opt,'QuOtE') GT 0) BEGIN
+      opt = SUB(opt,1,IND(opt,'QuOtE')-1)||"'"||SUB(opt,IND(opt,'QuOtE')+5)
+      GOTO quote_loop
+   END
+   SET EXEC &(x.limit)
+   IF (x.hold) ses.racf_jcl = x.racf_jcl ;set session var. for next cmd.
+   XRETURN &(opt)
+END

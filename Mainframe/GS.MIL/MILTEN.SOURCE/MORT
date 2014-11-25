@@ -1,0 +1,716 @@
+MORT     TITLE 'MILTEN''s Local Subsystem'                                      
+*******************************************************************             
+*                                                                 *             
+*     MILTEN/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+MILMORT  CSECT                                                                  
+MORT     IDENT 2047                10:16:24 02/16/02  (SLP)                     
+         REGS  ,,FSR,,,,,,BR,MCBR,PDBR,(BRR,LSR),CVR,SPR,RAR                    
+*                                                                               
+         PUSH  DSECTS                                                           
+         TITLE 'DSECTS'                                                         
+CVDSECT  DSECT                                                                  
+         COPY  CV                                                               
+         EJECT                                                                  
+         COPY  SUB                                                              
+         EJECT                                                                  
+         RECORD 'SIB'                                                           
+         EJECT                                                                  
+PDB      RECORD 'PDB'                                                           
+         EJECT                                                                  
+PIB      RECORD BEGIN                                                           
+         COPY  PIB                                                              
+         END                                                                    
+         EJECT                                                                  
+PATHD    RECORD BEGIN                                                           
+         PATH  VERSION=2                                                        
+         END                                                                    
+         EJECT                                                                  
+SEGCB    RECORD 'SEGCB'                                                         
+         EJECT                                                                  
+SCANCB   RECORD 'SCANCB'                                                        
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  Mort (Session) Control Block                                                 
+*                                                                               
+MCB      RECORD BEGIN                                                           
+         DS    CL4'MCB'                                                         
+MCBLINK  DS    A                   Ptr to next MCB (or zero)                    
+MCBFLAG  FLAG                                                                   
+         FLAG  MCBFIO              - Terminal I/O in progress                   
+         FLAG  MCBFREAD            - Doing terminal read                        
+         FLAG  MCBFIDLE            - Waiting for default subsys                 
+         FLAG  MCBFNBRK            - Don't halt read                            
+         FLAG  MCBFPRIV            - User is priv'd                             
+         FLAG  MCBFQRET            - Re-enter w/o any msgs                      
+         FLAG  MCBFRENT            - Do re-enter prompt                         
+*                                                                               
+MCBTYPE  FLAG                                                                   
+         FLAG  (MCBTCONS,1,EQ)     - Console                                    
+         FLAG  (MCBTASYN,2,EQ)     - Async                                      
+         FLAG  (MCBTPDP,3,EQ)      - Pdp                                        
+         FLAG  (MCBTVTAM,4,EQ)     - Vtam                                       
+         FLAG  (MCBTVIRT,5,EQ)     - Virtual                                    
+*                                                                               
+MCBNO    DS    H                   Session number                               
+MCBSYSNM DS    CL8                 Subsystem name that died                     
+MCBREGS  DS    16A                 Registers                                    
+MCBSTK   DS    XL256               Stack save area                              
+MCBBUFR  DS    CL64                Read buffer                                  
+         END                                                                    
+         TITLE 'Local Subsystem'                                                
+MORTBRR  DS    0F                                                               
+MORTSATP DC    A(0)                Mort session address table ptr               
+MORTMCBQ DC    A(0)                Ptr to first MCB (or zero)                   
+MORTSTKP DC    A(0)                Stack ptr                                    
+MORTSTKL DC    A(0)                Stack save point ptr                         
+*                                                                               
+MORTPATH PATH  VERSION=2,PFX=MRTP,YOURTAG=MILTEN,MYTAG=MORT,PASS=PSUB, *        
+               BUFSIZE=4096,ECB=*-*,FLAG=MORTSFLG                               
+*                                                                               
+MORTSFLG DC    F'0'                Suzan needs a full word                      
+*                                                                               
+MORTPDB  DS    XL512                                                            
+*                                                                               
+         SCANCB PFX=MRTSN                                                       
+*                                                                               
+MRTSG    SEGCB MORTPDB+(PDBTEXT-PDB),L'MORTPDB-L'PDBHDR-1,RTN=MORTSEG           
+         EJECT                                                                  
+**                                                                              
+**  MORT -- This runs as a subtask.  It is a subsystem which gets               
+**    control when a "user" subsystem dies.  It also handles the                
+**    case when the default subsystem is not yet up.  The only                  
+**    difference between MORT and a user subsystem is that MORT                 
+**    gets posted when the default subsystem becomes available.                 
+**                                                                              
+         ENTRY MORT                                                             
+MORT     BASE  BRR                                                              
+         BASE  MORTBRR,BRR                                                      
+*                                                                               
+         L     CVR,=V(CV)                                                       
+         GETMAIN R,LV=4096         Stack page                                   
+         ST    R1,MORTSTKP                                                      
+         LA    R15,@R1+4096-L'MCBSTK                                            
+         ST    R15,MORTSTKL        Stack save point ptr                         
+         STKINIT (R1),4096         Set up stack                                 
+*                                                                               
+         VCALL AMODE31                                                          
+*                                                                               
+         IF    CVFTEST,'MVI MRTPPASS,C"T"'                                      
+         LA    R1,CVMRTECB                                                      
+         ST    R1,MRTPECB                                                       
+         LA    R1,MORTPATH                                                      
+         ST    R1,@R13                                                          
+         SET   @R13.X'80'                                                       
+         SCOM  OPEN,(R13)          Open subsystem path                          
+         FAIL  (R15,NZ),'Mort path error'                                       
+MORTIW   WAIT  ECB=CVMRTECB                                                     
+         CLEAR CVMRTECB                                                         
+         IF    ^MORTSFLG.PATHFOPN,MORTIW                                        
+         CLEAR MORTSFLG.PATHFOPN,MODE=LOCKED,REF=MORTSFLG                       
+         LA    R1,MORTPDB                                                       
+         WITH  (PDB,R1),BEGIN                                                   
+         CLEAR PDBHDR                                                           
+         MVI   PDBCMD,TMILINIT         Set to init call                         
+         MVC   PDBSYSNM,=CL8'MILTEN'   Set subsystem name                       
+         MVC   PDBLENG,=AL2(L'PDBHDR)  Set PDB length                           
+         END                                                                    
+         ST    R1,@R13                                                          
+         SET   @R13.X'80'                                                       
+         CLEAR (@R13+4,4)                                                       
+         SCOM  SEND,(R13),MRTPMGC  Send TMILINT                                 
+         FAIL  (R15,NZ),'Mort TMILINIT failed'                                  
+         MVI   CVMRTECB,X'40'                                                   
+*-                                                                              
+*-       Build Mort's session address table.                                    
+*-                                                                              
+         LH    R0,CVMAXSES         Max no. of sessions                          
+         SLL   R0,2                Times 4                                      
+         VCALL GETCORE                                                          
+         ST    R1,MORTSATP                                                      
+         ZOT   (R1),(R0)           Zero MSAT                                    
+         EJECT                                                                  
+MORTWAIT WAIT  ECB=CVMRTECB        Wait for work                                
+MORTLOOP CLEAR CVMRTECB                                                         
+*                                                                               
+         STKINIT L:MORTSTKP,4096   Reset stack                                  
+*                                                                               
+         IF    (MORTSFLG.PATHFNI),BEGIN Path stuff...                           
+         CLEAR MORTSFLG.PATHFNI,MODE=LOCKED,REF=MORTSFLG                        
+         LA    R1,MORTPDB+4                                                     
+         ST    R1,@R13                                                          
+         SET   @R13.X'80'                                                       
+         LA    R1,L'MORTPDB-4                                                   
+         ST    R1,@R13+4                                                        
+         SCOM  GET,(R13),MRTPMGC   Read                                         
+         FAIL  (R15,NZ),'Bad Mort path read'                                    
+         LA    PDBR,MORTPDB                                                     
+         WITH  PDB                                                              
+         STH   R1,PDBLENG          For compatibility                            
+         LTR   R1,R1                                                            
+         IF    Z,MORTLOOP          Nothing                                      
+         CLEAR (PDBHDR+2,2)        Reset rdw flags                              
+*                                                                               
+*  Go through loop one more time                                                
+*                                                                               
+         SET   MORTSFLG.PATHFNI,MODE=LOCKED,REF=MORTSFLG                        
+*                                                                               
+         IF    (PDBCMD,EQ,FMILINIT),MORTLOOP                                    
+         IF    (PDBCMD,LT,FMILSOS),MORTLOOP  (Bad CMD???)                       
+*                                                                               
+         LH    R2,PDBLIN#                                                       
+         IF    (R2,LGE,CVMAXSES),MORTLOOP  (Bad LIN#???)                        
+         SLL   R2,2                                                             
+         A     R2,MORTSATP                                                      
+         LT    MCBR,@R2                                                         
+         WITH  MCB                                                              
+*-                                                                              
+*-       A new user is logging on to Mort.                                      
+*-                                                                              
+         IF    Z,BEGIN             New session...                               
+         IF    (PDBCMD,NE,FMILSOS),MORTLOOP  Must be start of sess              
+*                                                                               
+         LA    R0,L'MCB                                                         
+         VCALL GETCORE             Get user control block                       
+         LR    MCBR,R1                                                          
+         CLEAR MCB                                                              
+*                                                                               
+         ST    MCBR,@R2            Save addr in msat                            
+         MVC   MCBLINK,MORTMCBQ    Add MCB...                                   
+         ST    MCBR,MORTMCBQ       ... to queue                                 
+*                                                                               
+         MVC   MCB(4),=CL4'MCB'                                                 
+         MVC   MCBNO,PDBLIN#                                                    
+         ST    CVR,MCBREGS+CVR*4                                                
+         ST    SPR,MCBREGS+SPR*4                                                
+         ST    BRR,MCBREGS+BRR*4                                                
+         ST    MCBR,MCBREGS+R1*4                                                
+         ST    PDBR,MCBREGS+R15*4                                               
+         MVC   MCBREGS+RAR*4(4),=A(LOGON)                                       
+         END                                                                    
+*-                                                                              
+*-       Only look at asynchronous PDBs if we are idling.                       
+*-                                                                              
+         IF    (PDBCMD,EQ,FMILASYN),BEGIN  Something asynchronous...            
+         IF    ^MCBFIDLE,MORTLOOP  Not idling, loop back                        
+         END                                                                    
+*-                                                                              
+*-       A user's I/O has just completed.                                       
+*-                                                                              
+         L     R15,MORTSTKL                                                     
+         MVC   @R15(L'MCBSTK),MCBSTK  Restore saved piece of stack              
+         LA    R15,MCB                                                          
+         LM    R0,R14,MCBREGS                                                   
+         WITH  (MCB,R15),'CLEAR (MCBREGS+RAR*4,4); L R15,MCBREGS+R15*4'         
+         BR    RAR                                                              
+         END                                                                    
+*-                                                                              
+*-       Default subsystem (WYLBUR) is now available.                           
+*-                                                                              
+         IF    CVFDFSYS,BEGIN      Default subsys available...                  
+         LA    MCBR,MORTMCBQ-(MCBLINK-MCB)                                      
+         WITH  MCB                                                              
+         WHILE ('LT MCBR,MCBLINK',NZ),BEGIN                                     
+         IF    MCBFREAD,BEGIN                                                   
+         IF    MCBFNBRK,EXIT       Can't halt read                              
+         SET   MCBFNBRK            Only halt the read once                      
+         LA    PDBR,MORTPDB                                                     
+         WITH  PDB                                                              
+         CLEAR PDBHDR                                                           
+         MVC   PDBLENG,=Y(L'PDBHDR)                                             
+         MVC   PDBLIN#,MCBNO                                                    
+         MVI   PDBCMD,TMILBRK      Halt read                                    
+         LA    R1,MORTPATH                                                      
+         LA    R15,PDB                                                          
+         ACALL PATHSEND                                                         
+         END                                                                    
+*                                                                               
+         IF    MCBFIDLE,BEGIN                                                   
+         CLEAR MCBFIDLE                                                         
+         ST    SPR,MCBREGS+SPR*4                                                
+         MVC   MCBREGS+RAR*4(4),=A(REENTER)                                     
+         LM    R0,R15,MCBREGS                                                   
+         BR    RAR                                                              
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         B     MORTWAIT                                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  LOGON -- Routine to process Mort user logon.                                 
+*                                                                               
+*    On entry:                                                                  
+*      R1 - MCB ptr                                                             
+*      R15- PDB ptr                                                             
+*                                                                               
+LOGON    LR    MCBR,R1                                                          
+         USING MCB                                                              
+         LR    PDBR,R15                                                         
+         USING PDB                                                              
+*                                                                               
+         FAIL  (MCB,NE,'MCB'),'Mort MCB error'                                  
+*                                                                               
+         MVC   MCBSYSNM,PDBSYSNM   Save subsys name                             
+*                                                                               
+         SEGCLR                                                                 
+         LA    R0,CTLSNSI          Sense session info                           
+         ACALL CNTL                                                             
+         BM    LOGOFF              Hung-up                                      
+         IF    Z,BEGIN             Ok...                                        
+         LA    R15,PDBTEXT                                                      
+         WITH  (SIB,R15)                                                        
+         MVC   MCBTYPE,SIBTYPE     Front-end type                               
+         IF    SIBFSPR+SIBFOPR,'SET MCBFPRIV'  Priv'd                           
+         IF    (MCBTCONS,OR,(SIBACCT,Z)),'SET MCBFQRET'  Quietly                
+         IF    (SIBACCT,NZ),BEGIN                                               
+         IF    MCBTVIRT,EXIT       Don't ever prompt virtual                    
+         IF    (^CVFDFSYS,OR,(MCBSYSNM,EQ,CVDEFSYS)),'SET MCBFRENT'             
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGCLR                                                                 
+*                                                                               
+         IF    MCBTCONS,IDLE       don't write anything if console              
+*                                                                               
+         IF    ^MCBTVIRT,'SEG X"2F"'  bell                                      
+         IF    ((MCBSYSNM,Z),OR,(MCBSYSNM,EQ,'MILTEN  ')),BEGIN                 
+DOWN     ACALL TIMESTMP            Time-stamp                                   
+         IF    CVFTEST,'SEGB "**TEST**"'                                        
+         SEGB  'System unavailable.  Waiting for'                               
+         SEGT  CVDEFSYS                                                         
+         SEG   '.'                                                              
+         IF    MCBTVIRT,'SEGWR; BM LOGOFF; B IDLE'                              
+         B     WR                                                               
+         END                                                                    
+*                                                                               
+         ACALL TIMESTMP            Time-stamp                                   
+         IF    CVFTEST,'SEGB "**TEST**"'                                        
+         IF    (MCBSYSNM,EQ,CVDEFSYS),BEGIN                                     
+         SEGB  'System interruption. '                                          
+         SEGTB MCBSYSNM                                                         
+         SEG   'failed'                                                         
+         IF    MCBTVIRT,'SEGWR "."; B LOGOFF'                                   
+         SETMSG ', waiting for reload.'                                         
+         B     WRMSG                                                            
+         END                                                                    
+*                                                                               
+         SEGTB MCBSYSNM                                                         
+         SETMSG 'failed.'                                                       
+*                                                                               
+WRMSG    SEG   (R1),(R0)                                                        
+WR       SEGWR                                                                  
+         BM    LOGOFF              Hung-up                                      
+REPROMPT IF    CVFDFSYS,REENTER    Re-enter the default system                  
+         ACALL TIMESTMP                                                         
+         IF    CVFTEST,'SEGB "**TEST**"'                                        
+         SEGB  'Please standby, or type LOGOFF...'                              
+         ACALL READ                                                             
+         BM    LOGOFF              Hung-up                                      
+         BP    REPROMPT            Attn or read broken                          
+*                                                                               
+         SCINIT (R1),(R0),MRTSNCB                                               
+         SCAN  PRT,MRTSNCB                                                      
+         BZ    NOSYS                                                            
+         B     REPROMPT                                                         
+*                                                                               
+IDLE     SET   MCBFIDLE                                                         
+         L     R15,MORTSTKL                                                     
+         FAIL  (SPR,LT,R15),'Mort stack error'                                  
+         MVC   MCBSTK,@R15         Save stack across dispatch                   
+         LA    RAR,IDLEATTN                                                     
+         STM   R0,R15,MCBREGS                                                   
+         B     MORTLOOP                                                         
+*                                                                               
+IDLEATTN CLEAR MCBFIDLE                                                         
+         IF    PDBCPLB.CPLBLGF,LOGOFF                                           
+         B     DOWN                                                             
+         EJECT                                                                  
+***                                                                             
+***  Mort commands.                                                             
+***                                                                             
+PRT      SCKW  WAIT,NOSYS,A                                                     
+         SCKW  MILTEN,NOSYS                                                     
+         SCKW  HELP,HELP,A                                                      
+         SCKW  ?,HELP                                                           
+         SCKW  BOOT,BOOT                                                        
+         SCKW  OS,OS                                                            
+         SCKW  SUBSYS,SUBSYS,(A,P)                                              
+         SCKW  SYSTEM,SUBSYS,(A,P)                                              
+         SCKW  WYLBUR,SUBSYS                                                    
+         SCKW  OLDWYL,SUBSYS                                                    
+         SCKW  TESTWYL,SUBSYS                                                   
+         SCKW  DEVWYL,SUBSYS                                                    
+         SCKW  CONSOLES,SUBSYS                                                  
+         SCKW  LOGOFF,LOGOFF                                                    
+         SCKW  ,UNREC                                                           
+         SPACE 2                                                                
+NOSYS    SEGTB CVDEFSYS                                                         
+         SETMSG 'is not up yet.  Please standby.'                               
+         B     WRMSG                                                            
+*                                                                               
+UNREC    SEG   (R1),(R0)                                                        
+         SETMSG ': invalid -- type "?" for info.'                               
+         B     WRMSG                                                            
+         EJECT                                                                  
+REENTER  IF    MCBFQRET,REENTERQ                                                
+         IF    ^MCBTVIRT,'SEG X"2F"'  bell                                      
+         ACALL TIMESTMP            Time-stamp                                   
+         IF    CVFTEST,'SEGB "**TEST**"'                                        
+*                                                                               
+         IF    MCBFRENT,BEGIN      Give re-enter prompt...                      
+         SET   MCBFNBRK            Don't halt this one                          
+         SEGB  'Press RETURN to continue...'                                    
+         ACALL READ                                                             
+         BM    LOGOFF              Hung-up                                      
+         END                                                                    
+*                                                                               
+REENTERQ LA    R15,=CL8'#DEFAULT'  WYLBUR, usually                              
+         B     EOS                                                              
+*                                                                               
+LOGOFF   SEGWR 'End of session.'                                                
+         CLEAR R15                                                              
+         B     EOS                                                              
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HELP -- MORT HELP command.                                                   
+*                                                                               
+HELP     SEGTB CVDEFSYS                                                         
+         SEGB  'is not up yet.  You will automatically enter'                   
+         SEGTB CVDEFSYS                                                         
+         SEG   X'15'                                                            
+         SEGB  'as soon as it is available.  If you don''t want to'             
+         SEG   'wait you'                                                       
+         SEG   X'15'                                                            
+         SEG   'can type LOGOFF to terminate your session now.'                 
+         SETMSG X'15'                                                           
+         B     WRMSG                                                            
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  BOOT -- MORT BOOT command  (not priv'd, but secret).                         
+*                                                                               
+BOOT     SEG   'S TESTWYL'                                                      
+         SCTELL MRTSNCB                                                         
+         WHILE ((R0,POS),AND,(@R1,EQ,' ')),'LA R1,@R1+1; DECR R0'               
+         IF    (R0,POS),BEGIN                                                   
+         PUSH  (R0,R1)                                                          
+         IF    (@R1,NE,','),'SEG ","'                                           
+         POP   (R0,R1)                                                          
+         SEG   (R1),(R0)                                                        
+         END                                                                    
+         LCALL OSCMD                                                            
+         B     REPROMPT                                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  OS -- MORT OS command  (priv'd).                                             
+*                                                                               
+OS       IF    ^MCBFPRIV,'SETMSG "Privileged."; B WRMSG'                        
+         SCTELL MRTSNCB                                                         
+         WHILE ((R0,POS),AND,(@R1,EQ,' ')),'LA R1,@R1+1; DECR R0'               
+         SEG   (R1),(R0)                                                        
+         LCALL OSCMD                                                            
+         B     REPROMPT                                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  OSCMD -- Local routine to send command in SEG buffer to OS.                  
+*                                                                               
+OSCMD    LPROC                                                                  
+         PUSH  105,PTR=R6                                                       
+         L     R2,MRTSGLENF                                                     
+         CEIL  R2,100              Not too much                                 
+         LA    R15,@R2+4+1         Len includes mcs hdr & blank                 
+         STH   R15,@R6                                                          
+         CLEAR (@R6+2,2)           Mcs flags                                    
+         LA    R15,@R6+4(R2)       Last byte                                    
+         MVI   @R15,C' '           Make it a blank                              
+         L     R15,MRTSGLOC                                                     
+         MOVE  R2,@R6+4,@R15       Text                                         
+         MODESET KEY=ZERO          ********                                     
+         LR    R1,R6               Parm ptr                                     
+         CLEAR R0                  Ucmid=0  (master console)                    
+         SVC   34                  Send command to os                           
+         MODESET KEY=NZERO         ********                                     
+         SEGCLR                                                                 
+         POP   105                                                              
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SUBSYS -- MORT SUBSYS command.                                               
+*                                                                               
+SUBSYS   WITH  (SCANCB,R15),'LA R15,SCNKW'                                      
+         BNZ   EOS                 System name specified                        
+*                                                                               
+         SETMSG 'NONE'                                                          
+         LA    R7,CVSUBQH-(SUBLINK-SUB)  dummy first entry                      
+         LOOP  BEGIN                                                            
+         WITH  (SUB,R7)                                                         
+         WHILE ('LT R7,SUBLINK',NZ)                                             
+         IF    (SUBNAME,EQ,'MILTEN  '),NEXT                                     
+         IF    (SUBNAME,Z),NEXT                                                 
+         SEGTB SUBNAME                                                          
+         CLEAR R0                                                               
+         END                                                                    
+         IF    (R0,NZ),'SEGB (R1),(R0)'                                         
+         SETMSG '- subsystems'                                                  
+         B     WRMSG                                                            
+         EJECT                                                                  
+EOS      CLEAR PDBHDR                                                           
+         MVC   PDBLENG,=Y(L'PDBHDR)                                             
+         MVC   PDBLIN#,MCBNO                                                    
+         MVI   PDBCMD,TMILEOS                                                   
+         IF    (R15,NZ),BEGIN                                                   
+         SET   PDBCMDFL.EOSXCTL                                                 
+         MVC   PDBSYSNM,@R15       Name of subsys to go to                      
+         IF    (PDBSYSNM,EQ,'MILTEN'),'MVC PDBSYSNM,CVDEFSYS'                   
+         END                                                                    
+*                                                                               
+         LA    R1,MORTPATH                                                      
+         LA    R15,PDB                                                          
+         ACALL PATHSEND                                                         
+*-                                                                              
+*-       Dequeue our MCB, then free the control block.                          
+*-                                                                              
+         LA    R7,MORTMCBQ-(MCBLINK-MCB)  Dummy first link                      
+         LOOP  BEGIN                                                            
+         WITH  (MCB,R7)                                                         
+         WHILE ('LT R6,MCBLINK',NZ)                                             
+         IF    (R6,EQ,MCBR),DQMCB                                               
+         LR    R7,R6                                                            
+         FAIL  (MCB,NE,'MCB'),'Bad Mort MCB'                                    
+         END                                                                    
+         FAIL  'Bad Mort MCB Queue'                                             
+*                                                                               
+DQMCB    MVC   MCBLINK-MCB(4,R7),MCBLINK  Dequeue                               
+         MVC   MCBLINK,=F'-1'      Safety                                       
+*                                                                               
+         LH    R15,MCBNO                                                        
+         SLL   R15,2                                                            
+         A     R15,MORTSATP                                                     
+         CLEAR (@R15,4)            Free MSAT entry                              
+         MVC   MCB(4),=C'OMCB'                                                  
+         LA    R1,MCB                                                           
+         VCALL FREECORE                                                         
+         B     MORTLOOP                                                         
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  TIMESTMP -- Routine to seg time-stamp.                                       
+*                                                                               
+TIMESTMP PROC                                                                   
+         VCALL LOCALTOD            Current time                                 
+         PUSH  11,PTR=R15                                                       
+         VCALL FMTTIME                                                          
+         SEGB  (R1),5              Hh:mm                                        
+         POP   11                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MORTSEG -- Seg routine to format and send terminal write.                    
+*                                                                               
+*    On entry:                                                                  
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      -4 - logoff (hung-up phone)                                              
+*       0 - normal completion                                                   
+*       4 - attn                                                                
+*                                                                               
+MORTSEG  PROC                                                                   
+         WITH  MCB                 (Entry assumption)                           
+         LR    R7,R15                                                           
+         WITH  (SEGCB,R7)                                                       
+*                                                                               
+         CLEAR R15                 Preset good return code                      
+         IF    ^SEGCBWR,EXIT       Not segwr, ignore                            
+         IF    (R0,NP),EXIT        No text, ignore                              
+*                                                                               
+         L     PDBR,=A(MORTPDB)                                                 
+         WITH  PDB                                                              
+         CLEAR PDBHDR                                                           
+         MVC   PDBLIN#,MCBNO                                                    
+         MVI   PDBCMD,TMILWRIT                                                  
+         L     R15,SEGCBLENF                                                    
+         LA    R1,PDBTEXT(R15)                                                  
+         MVI   @R1,X'15'           Ending cr                                    
+         LA    R15,@R15+1                                                       
+         STH   R15,PDBWC                                                        
+         LA    R15,L'PDBHDR+@R15                                                
+         STH   R15,PDBLENG                                                      
+         L     R1,=A(MORTPATH)                                                  
+         LA    R15,PDB                                                          
+         LCALL PATHSEND                                                         
+*                                                                               
+         SEGCLR (R7)               Reset seg buffer                             
+*                                                                               
+MORTWR   L     R15,MORTSTKL                                                     
+         FAIL  (SPR,LT,R15),'Mort stack too deep'                               
+         MVC   MCBSTK,@R15         Save stack across dispatch                   
+         LA    RAR,MORTWC          Go here when write completes                 
+         STM   R0,R15,MCBREGS                                                   
+         L     RAR,=A(MORTLOOP)                                                 
+         BR    RAR                                                              
+*                                                                               
+MORTWC   CLEAR R15                                                              
+         IF    PDBCPLA.CPLAATTN,'LA R15,4'                                      
+         IF    PDBCPLB.CPLBLGF,'LH R15,=H"-4"'                                  
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  READ -- Routine to do terminal read (prompt is in SEG buffer).               
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*     -4 - logoff (hung-up phone)                                               
+*      0 - normal completion (R1,R0 - response loc, len)                        
+*      4 - attn                                                                 
+*      8 - reverse break                                                        
+*                                                                               
+READ     PROC                                                                   
+         WITH  MCB                 (Entry assumption)                           
+         L     R7,=A(MRTSG)                                                     
+         WITH  (SEGCB,R7)                                                       
+         L     PDBR,=A(MORTPDB)                                                 
+         WITH  PDB                                                              
+         CLEAR PDBHDR                                                           
+         MVC   PDBLIN#,MCBNO                                                    
+         MVI   PDBCMD,TMILREAD                                                  
+         SET   PDBMODB.MODBUPPR                                                 
+         MVC   PDBINCT,=Y(L'MCBBUFR)  max input len                             
+         L     R15,SEGCBLENF                                                    
+         STH   R15,PDBPC                                                        
+         LA    R15,L'PDBHDR+@R15                                                
+         STH   R15,PDBLENG                                                      
+         L     R1,=A(MORTPATH)                                                  
+         LA    R15,PDB                                                          
+         LCALL PATHSEND                                                         
+         SET   MCBFREAD                                                         
+*                                                                               
+         SEGCLR (R7)               Reset seg buffer                             
+*                                                                               
+MORTRD   L     R15,MORTSTKL                                                     
+         FAIL  (SPR,LT,R15),'Mort stack too deep'                               
+         MVC   MCBSTK,@R15         Save stack across dispatch                   
+         LA    RAR,MORTRC          Go here when read completes                  
+         STM   R0,R15,MCBREGS                                                   
+         L     RAR,=A(MORTLOOP)                                                 
+         BR    RAR                                                              
+*                                                                               
+MORTRC   CLEAR MCBFREAD                                                         
+         LH    R0,PDBRC                                                         
+         LH    R1,PDBPC                                                         
+         SR    R0,R1               Amount read                                  
+         LA    R15,PDBTEXT(R1)                                                  
+         MVC   MCBBUFR,@R15        Save read text                               
+         SETMSG MCBBUFR,(R0)        Loc, len                                    
+         CLEAR R15                 Rc                                           
+         IF    PDBCPLA.CPLAATTN,'LA R15,4'                                      
+         IF    PDBCPLA.CPLABRK,'LA R15,8'                                       
+         IF    PDBCPLB.CPLBLGF,'LH R15,=H"-4"'                                  
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CNTL -- Routine to do terminal control (parm is in SEG buffer).              
+*                                                                               
+*    On entry:                                                                  
+*      R0 - control number                                                      
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*      -4 - logoff (hung-up phone)                                              
+*       0 - normal completion                                                   
+*       4 - error                                                               
+*                                                                               
+CNTL     PROC                                                                   
+         WITH  MCB                 (Entry assumption)                           
+         L     R7,=A(MRTSG)                                                     
+         WITH  (SEGCB,R7)                                                       
+         L     PDBR,=A(MORTPDB)                                                 
+         WITH  PDB                                                              
+         CLEAR PDBHDR                                                           
+         MVC   PDBLIN#,MCBNO                                                    
+         MVI   PDBCMD,MILCNTL                                                   
+         STC   R0,PDBCNO           Control number                               
+         L     R15,SEGCBLENF                                                    
+         STH   R15,PDBWC                                                        
+         LA    R15,L'PDBHDR+@R15                                                
+         STH   R15,PDBLENG                                                      
+         L     R1,=A(MORTPATH)                                                  
+         LA    R15,PDB                                                          
+         LCALL PATHSEND                                                         
+*                                                                               
+         SEGCLR (R7)               Reset seg buffer                             
+*                                                                               
+MORTCT   L     R15,MORTSTKL                                                     
+         FAIL  (SPR,LT,R15),'Mort stack too deep'                               
+         MVC   MCBSTK,@R15         Save stack across dispatch                   
+         LA    RAR,MORTCC          Go here when control completes               
+         STM   R0,R15,MCBREGS                                                   
+         L     RAR,=A(MORTLOOP)                                                 
+         BR    RAR                                                              
+*                                                                               
+MORTCC   CLEAR R15                                                              
+         IF    ((PDBCRET,NZ),OR,(PDBCMOD,NZ)),'LA R15,4'                        
+         IF    PDBCPLB.CPLBLGF,'LH R15,=H"-4"'                                  
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  PATHSEND -- Routine to send request accoss a SUZAN path.                     
+*                                                                               
+*    On entry:                                                                  
+*      R1 - PATH ptr                                                            
+*      R15- PDB ptr                                                             
+*                                                                               
+*    On exit, R15 (and CC):                                                     
+*       -4 - died                                                               
+*        0 - sent                                                               
+*                                                                               
+PATHSEND PROC                                                                   
+         LR    R6,R1                                                            
+         LR    R2,R15              Save PDB pointer                             
+         CLEAR (@R2+2,2)           Clear rdw flags                              
+         WITH  (PATHD,R6)                                                       
+         L     R5,PATHECBF                                                      
+PATHLOOP ST    R2,@R13                                                          
+         CLEAR (@R13+4,4)                                                       
+         SET   @R13.X'80'                                                       
+         CLEAR @R5.PATHFFQE                                                     
+         SCOM  SEND,(R13),PATHMGC                                               
+         IF    (R15,Z),EXIT                                                     
+         IF    (R15,EQ,PATHRBAF),BEGIN  overflow...                             
+         IF    @R5.PATHFCLS,PATHDOWN  closing, scram                            
+* if full queues happened more often, the following code would have             
+* to be smarter...                                                              
+PATHWAIT CLEAR CVMRTECB                                                         
+         IF    (@R5.PATHFCLS+PATHFFQE,Z),BEGIN                                  
+         WAIT  ECB=CVMRTECB                                                     
+         END                                                                    
+         MVI   CVMRTECB,X'40'      Must keep ecb posted for others              
+         IF    @R5.PATHFCLS,PATHDOWN  closing                                   
+         IF    @R5.PATHFFQE,PATHLOOP  retry                                     
+         B     PATHWAIT            Posted because of something else             
+         END                                                                    
+         IF    (R15,EQ,PATHRNOP),PATHDOWN                                       
+         FAIL  'Bad Mort Suzan call'                                            
+*                                                                               
+PATHDOWN LH    R15,=H'-4'                                                       
+         PEND                                                                   
+         QLTORG                                                                 
+         END   .                                                                

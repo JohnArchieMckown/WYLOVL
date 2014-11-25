@@ -1,0 +1,1901 @@
+FILECAT  TITLE 'ORVYL''S File Catalog Manager'
+         COPY  HEADER
+FILECAT  MODULE TRCNUM=9,ID=CA
+         EJECT ,
+         COPY  PZERO
+         EJECT ,
+         COPY  MAT
+         EJECT ,
+         COPY  FILEPARM
+         EJECT ,
+         COPY  FILCONST
+         EJECT ,
+         COPY  SLISTMAC
+         EJECT ,
+         COPY  VMPARM
+         EJECT ,
+         COPY  FBHDR
+         EJECT ,
+         COPY  FSMB
+         EJECT ,
+         COPY  GRPARM
+         EJECT ,
+         COPY  FSB
+         EJECT ,
+         COPY  FPC
+         EJECT ,
+         COPY  CATRQBL             VCAT api
+         EJECT ,
+         COPY  NTRY
+         EJECT ,
+         COPY  FCATPARM
+         EJECT ,
+         COPY  CHKPNT
+         EJECT ,
+@LOCMEME RECORD BEGIN              Locate member entry
+@LOCMEMN DS    A
+@LOCMEMP DS    A                   Return permits pointer
+@LOCMEMA DS    CL6
+@LOCMEMF FLAG  ,
+         FLAG  @LOCMFF             File entry
+         FLAG  @LOCMFA             Account entry
+         END   ,
+
+@LOCPERM RECORD BEGIN              Locate permits
+@LOCNTRY DS    A
+@LOCACC  DS    CL6
+@LOCFLG  FLAG  ,
+         FLAG  @LOCFF              File entry
+         FLAG  @LOCFA              Account entry
+         END   ,
+
+         MACRO ,
+&L       LOCAP &NAME
+&L       PSET  @LOCPERM
+         PMOV  @LOCNTRY,LA:NTRY
+         PMOV  @LOCACC,&NAME
+         SET   @LOCFA              Account entry
+         ACALL LOCPERM             Get permits
+         MEND  ,
+
+         MACRO ,
+&L       LOCFP &NAME
+&L       PSET  @LOCPERM
+         PMOV  @LOCNTRY,LA:NTRY
+         PMOV  @LOCACC,&NAME
+         SET   @LOCFF              File entry
+         ACALL LOCPERM             Get permits
+         MEND  ,
+
+         MACRO ,
+&L       CATCALL &TYPE             Interface to VCAT
+&L       ST    SPR,RQBLWR2         Save our stack pointer
+         IF    (RQBLWR3,Z),'LA SPR,RQBLSAV' Point to VCAT stack
+         ELSE  'L SPR,RQBLWR3'     Reset VCAT stack pointer
+         LA    RA,KAT&TYPE         Set function code
+         LA    RK,RQBL             Set VCAT RQBL pointer
+         L     RN,=V(VCATENT)      VCAT entry point
+         LR    BRR,BR              Save our base reg
+         LR    BR,RB               Set VCAT FSB pointer
+         BASR  RN,RN               Go to VCAT
+         LR    RB,BR               Reset FSB pointer
+         LR    BR,BRR              restore base
+         ST    SPR,RQBLWR3         Save VCAT stack pointer
+         L     SPR,RQBLWR2         Reset our stack pointer
+         LTR   RVR,R15
+         MEND  ,
+         GENCAT CONST
+FILECAT  CSECT ,
+*---------------------------------------------------------------------*
+*  FILECAT - File system catalog manager
+*
+*   This module handles all catalog processing requests. It is part
+*   of the file system rewrite. The actual catalog access is still
+*   done in VCAT which is a module from the old file system. VCAT is
+*   not being rewritten at this time. The interface to VCAT is done
+*   with many registers and a dummy RQBL which is the file request
+*   block from the old file system. VCAT is also used in the offline
+*   catalog rebuild process. It is not being rewritten because of the
+*   size of the task, especially verifying it still works the same both
+*   online and offline.
+*
+*---------------------------------------------------------------------*
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATNPRM - Attach processing for a new file
+*
+*   Inputs - @FCPERM
+*
+*   Output - RVR eq 0, @ACCPERM set to the permits for user
+*            Otherwise RVR contains the user return code
+*---------------------------------------------------------------------*
+#FCPERM  RECORD BEGIN
+#FCPRQBL DS    CL(L'RQBL)
+#FCPTOD  DS    D
+         END   ,
+
+FCATNPRM PROC  @FCPERM,#FCPERM,SCOPE=GLOBAL
+
+         L     RB,@FCPFSB          Address FSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCPRQBL)
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCPNAME
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCPFMAG,'LA R14,1' Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+
+         IF    NZ,BEGIN            Account not there
+         LA    RVR,4               Set access not permitted
+         IF    ^@FCPFMAG,FCATNPRX  Not owner or magic account
+         LA    R0,ACCMODE          Indicate account insert
+         CATCALL INS               Insert
+         IF    NZ,BEGIN
+         LA    RVR,8               No more space
+         B     FCATNPRX
+         END   ,
+         MVC   NTGMXSP(3),FSBDBLK+1 Set max space
+         CLEAR NTGUSSP             Set space used
+         MVI   NTGFLG,0            Set no public privs
+         LA    R0,L'NTRYGR         Len of insert
+         CATCALL CONT              Continue insert
+         MVI   @FCPPERM,FPALL      Set to all permits
+         END   ,                   Account not there
+         ELSEIF (@FCPFMAG),'MVI @FCPPERM,FPALL'
+         ELSE  BEGIN
+         LOCAP @FCPACC             Find permits for account
+         STC   RVR,@FCPPERM        Set permits
+         LA    RVR,4               No access
+         IF    (@FCPPERM.FPW,Z),FCATNPRX Can't create a file
+         END   ,
+
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate the file
+         IF    Z,BEGIN             File located
+         LA    RVR,20              Set to already exists
+         B     FCATNPRX            If new then not old (or vice versa)
+         END   ,
+         LA    RVR,12              Set no catalog room
+         IF    FSBCATNIN+FSBCATNLM,FCATNPRX
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    RVR,8               Set max space already used
+         IF    (NTGUSSP,GT,NTGMXSP),FCATNPRX
+         INCR  RS,NTGUSSP          Increment blocks used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+
+         MVI   @FCPFLGO,FPALL      Set file mask
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         PSET  @FMIXRAD
+         PMOV  @FMIXFSB,LA:FSB
+         MVC   @FMIXNAM,RQBLNAME
+         VCALL FMIXRADD            Build an IXR for the new file
+         IF    (RVR,NZ),'EXIT FCATNPRM' Error adding IXR block
+         MVC   @FCPBLK,@FMIXBLK    Set first block number
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account again
+
+         LA    R0,FILEMODE         Indicate file insert
+         CATCALL INS               Insert
+         IF    NZ,FCATNPRX         Error
+
+         WITH  (NTRYFL,RJ)
+         CLEAR NTFCNT              No records yet
+         CLEAR NTFCODE             No flags yet
+         CLEAR NTFUINFO            No user info yet
+         STCK  #FCPTOD             Got time for this?
+         MVC   NTFCRDT,#FCPTOD     Set creation date
+         MVC   NTFLSDT,#FCPTOD     Set last reference date
+         MVC   NTFLOC,@FCPBLK+1    Set IXR block number
+         CLEAR NTFFLGP             No public priv
+         MVI   NTFFLGO,FPALL       All owner priv
+         LA    R14,RQBLNAME+8      Point past GG.UUU.x
+         LA    R15,1               At least one (x in above)
+         LA    R0,L'RQBLNAME-8     Len to search
+         LOOP  BEGIN
+         IF    ('CLI @R14,C" "',EQ),EXIT That's the end
+         LA    R14,@R14+1          Increment name pointer
+         LA    R15,@R15+1          Increment search length
+         UNTIL (BCT,R0),END
+         LA    R0,@R15+L'NTRYFL    Set entry length
+         CATCALL CONT              Continue insert
+FCATNPRX LABEL ,
+         LR    RS,RVR
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATOPRM - Attach processing for an existing file
+*
+*   Inputs - @FCPERM
+*
+*   Output - RVR eq 0, @ACCPERM set to the permits for user
+*            Otherwise RVR contains the user return code
+*---------------------------------------------------------------------*
+FCATOPRM PROC  @FCPERM,#FCPERM,SCOPE=GLOBAL
+
+         L     RB,@FCPFSB          Address FSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCPRQBL)
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCPNAME
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCPFMAG,'LA R14,1' Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    RVR,16              Set to not there
+         IF    NZ,FCATOPRX         Account not found
+
+         IF    ^@FCPFMAG,BEGIN
+         LOCAP @FCPACC             Find permits for account
+         STC   RVR,@FCPPERM        Set permits
+         END   ,
+
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCPFMAG,'LA R14,1' Permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate the file
+         LA    RVR,16              Set to not there
+         IF    NZ,FCATOPRX         File not found
+
+         MVC   @FCPCODE,NTFCODE    Set return flags
+         MVC   @FCPBLK+1(3),NTFLOC Set first block number
+         MVC   @FCPFLGO,NTFFLGO    Set file mask
+         IF    NTFNIXR,BEGIN
+         MVC   @FCPBLKC+1(L'NTFCNT),NTFCNT non-IXR blk count
+         END   ,
+
+         IF    @FCPFMAG,'MVI @FCPPERM,FPALL'
+         ELSE  BEGIN               Not very magic account
+         LOCFP @FCPACC             Get file permits
+         IC    R14,@FCPPERM
+         OR    R14,RVR             Add to permits
+         STC   R14,@FCPPERM        Set permits
+         END   ,
+
+         IF    (^FSBARO,AND,^@FCPFNAX),BEGIN Update last access date?
+         STCK  #FCPTOD             Got time for this?
+         IF    (NTFLSDT,NE,#FCPTOD),BEGIN Many attaches per second?
+         MVC   NTFLSDT,#FCPTOD     Set last reference date
+         LA    R15,4               Set to update, no length change
+         CATCALL CONT              File the entry
+         END   ,
+         END   ,
+
+         CLEAR RVR
+
+FCATOPRX LABEL ,
+         LR    RS,RVR
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         LTORG ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATNIXR - Define a non-IXR file to the system
+*
+*   Inputs - @FCNIXR
+*
+*   Output - RVR eq 0, @ACCPERM set to the permits for user
+*            Otherwise RVR contains the user return code
+*---------------------------------------------------------------------*
+#FCNIXR  RECORD BEGIN
+#FCNRQBL DS    CL(L'RQBL)
+#FCNTOD  DS    D
+#FCNFBLK DS    F
+#FCNFEXT DS    F
+#FCNPERM FLAG  ,
+#FCNFLAG FLAG  ,
+         FLAG  #FCNFHYB            Hybrid file
+         END   ,
+
+FCATNIXR PROC  @FCNIXR,#FCNIXR,SCOPE=GLOBAL
+         L     RB,@FCNFSB          Address FSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCNRQBL)
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCNNAME
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCNFMAG,'LA R14,1' Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+
+         IF    NZ,BEGIN            Account not there
+         LA    RVR,16              Set access not permitted
+         IF    ^@FCNFMAG,FCATNIXX
+         LA    R0,ACCMODE          Indicate account insert
+         CATCALL INS               Insert
+         IF    NZ,BEGIN
+         LA    RVR,8               No more space
+         B     FCATNIXX
+         END   ,
+         MVC   NTGMXSP(3),FSBDBLK+1 Set max space
+         CLEAR NTGUSSP             Set space used
+         MVI   NTGFLG,0            Set no public privs
+         LA    R0,L'NTRYGR         Len of insert
+         CATCALL CONT              Continue insert
+         END   ,                   Account not there
+         ELSEIF (^@FCNFMAG),BEGIN
+         LOCAP @FCNACC             Find permits for account
+         STC   RVR,#FCNPERM        Set permits
+         LA    RVR,16              No access
+         IF    (#FCNPERM.FPW,Z),FCATNIXX Can't create a file
+         END   ,
+
+* Check if file already exists
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate the file
+         IF    Z,BEGIN             File located
+         LA    RVR,20              Set to already exists
+         B     FCATNIXX            If new then not old (or vice versa)
+         END   ,
+         LA    RVR,12              Set no catalog room
+         IF    FSBCATNIN+FSBCATNLM,FCATNIXX
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         L3    R14,NTGUSSP         Get space used
+         L3    R15,NTGMXSP         Get space allowed
+         A     R14,@FCNBLKC        Add count of blocks requested
+         LA    RVR,8
+         IF    (R14,GT,R15),FCATNIXX Not enough file space
+         ST3   R14,NTGUSSP         Increment blocks used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         L     RVR,@FCNBLKC        Get block count
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         VCALL FBITGCON            Get this many contiguous
+         ST    RVR,#FCNFBLK
+         IF    (@FCNFHYB,AND,(RVR,NZ)),BEGIN Initialize hybrid file?
+         PSET  @FMIXRAD
+         PMOV  @FMIXFSB,LA:FSB
+         MVC   @FMIXNAM,RQBLNAME
+         ST    RVR,@FMIXBLK        Set first block number
+         MVC   @FMIXCNT,@FCNBLKC   Set count of blocks to init
+         VCALL FMHYINIT            Initialize
+         END   ,                   Initialize hybrid file?
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+
+         IF    (#FCNFBLK,Z),BEGIN  Contiguous blocks not available
+         L3    R14,NTGUSSP         Get space used
+         S     R14,@FCNBLKC        Subtract count of blocks requested
+         IF    NEG,'CLEAR R14'
+         ST3   R14,NTGUSSP         Increment blocks used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         LA    RVR,24              No more file space
+         B     FCATNIXX            Exit
+         END   ,                   Contiguous blocks not available
+
+         LA    R0,FILEMODE         Indicate file insert
+         CATCALL INS               Insert
+         IF    NZ,FCATNIXX         Error
+
+         WITH  (NTRYFL,RJ)
+         MVC   NTFLOC,#FCNFBLK+1   Set first block number
+         MVC   NTFCNT,@FCNBLKC+1   Set count of records
+         CLEAR NTFCODE             No flags yet
+         CLEAR NTFUINFO            No user info yet
+         STCK  #FCNTOD             Got time for this?
+         MVC   NTFCRDT,#FCNTOD     Set creation date
+         MVC   NTFLSDT,#FCNTOD     Set last reference date
+         CLEAR NTFFLGP             No public priv
+         MVI   NTFFLGO,FPALL       All owner priv
+         SET   NTFNIXR             Non-IXR file
+         IF    @FCNFHYB,'SET NTFHYBR' Hybrid file type
+         LA    R14,RQBLNAME+8      Point past GG.UUU.x
+         LA    R15,1               At least one (x in above)
+         LA    R0,L'RQBLNAME-8     Len to search
+         LOOP  BEGIN
+         IF    ('CLI @R14,C" "',EQ),EXIT That's the end
+         LA    R14,@R14+1          Increment name pointer
+         LA    R15,@R15+1          Increment search length
+         UNTIL (BCT,R0),END
+         LA    R0,@R15+L'NTRYFL    Set entry length
+         CATCALL CONT              Continue insert
+
+FCATNIXX LABEL ,
+         LR    RS,RVR
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATNIXE - Extend a non-IXR file on the end if possible
+*
+*   Inputs - @FCNIXR
+*            Note: if the number of blocks to extend is zero, return
+*            the maximum count that would be possible. These blocks
+*            are not reserved and can be gone by the time the extend
+*            is attempted. Usually this is being done when there are
+*            no users on Orvyl and it is not a problem.
+*
+*   Output - RVR eq 0, was possible and was done
+*            Otherwise RVR contains the user return code
+*---------------------------------------------------------------------*
+FCATNIXE PROC  @FCNIXR,#FCNIXR,SCOPE=GLOBAL
+         L     RB,@FCNFSB          Address FSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCNRQBL)
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCNNAME
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCNFMAG,'LA R14,1' Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+
+         IF    NZ,BEGIN            Account not there
+         LA    RVR,20
+         B     FCATNIEX
+         END   ,                   Account not there
+
+         IF    (^@FCNFMAG),BEGIN   Not magic account
+         LOCAP @FCNACC             Find permits for account
+         STC   RVR,#FCNPERM        Set permits
+         END   ,
+
+* Check if file already exists
+         CLEAR R15                 No length modify
+         CLEAR R14                 No permits
+         IF    ^@FCNFMAG,'LA R14,1' Permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate the file
+         IF    NZ,BEGIN            File not found
+         LA    RVR,20
+         B     FCATNIEX
+         END   ,
+
+         IF    (^@FCNFMAG),BEGIN   Not magic account
+         LOCFP @FCNACC             Find permits for account
+         IC    R14,#FCNPERM        Get global permits
+         OR    R14,RVR             Add file permits
+         STC   R14,#FCNPERM        Set permits
+         LA    RVR,16              No access
+         IF    (#FCNPERM.FPW,Z),FCATNIEX Can't extend a file
+         END   ,
+
+         LA    RVR,24
+         IF    ^NTFNIXR,FCATNIEX   Must be non-IXR
+         CLEAR #FCNFHYB
+         IF    NTFHYBR,'SET #FCNFHYB' Indicate hybrid file
+
+         L3    RN,NTFLOC           Get first block
+         ST    RN,#FCNFBLK         Save
+         L3    R15,NTFCNT          Count of blocks
+         AR    RN,R15              Calc first block of extention
+         ST    RN,#FCNFEXT         Save first block of extention
+
+         LA    RVR,12              Set no catalog room
+         IF    FSBCATNIN+FSBCATNLM,FCATNIEX
+         IF    (@FCNBLKC,NZ),BEGIN If not a determine max possible
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         L3    R14,NTGUSSP         Get space used
+         L3    R15,NTGMXSP         Get space allowed
+         A     R14,@FCNBLKC        Add count of blocks requested
+         LA    RVR,8
+         IF    (R14,GT,R15),FCATNIEX Not enough file space
+         ST3   R14,NTGUSSP         Increment blocks used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         END   ,                   If not a determine max possible
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         L     RVR,@FCNBLKC        Get block count
+         L     RS,#FCNFEXT         Get first block of extention
+         PSET  @FMFSB
+         PMOV  @FMFSBP,LA:FSB
+         VCALL FBITEXTN            Get this many contiguous
+
+         IF    (@FCNBLKC,Z),BEGIN  If determine max possible
+         ST    RVR,@FCNBLKC        Save count possible
+         LA    RVR,4               Not able to do it
+         EXIT  FCATNIXE            Done
+         END   ,                   If determine max possible
+
+         LR    RN,RVR              Save return code
+         IF    (#FCNFHYB,AND,(RN,Z)),BEGIN Initialize new recs
+         PSET  @FMIXRAD
+         PMOV  @FMIXFSB,LA:FSB
+         MVC   @FMIXNAM,RQBLNAME
+         ST    RVR,@FMIXBLK        Set first block number
+         MVC   @FMIXCNT,@FCNBLKC   Set count of blocks to init
+         MVC   @FMIXBLK,#FCNFBLK
+         MVC   @FMIXEXT,#FCNFEXT   First block of extention
+         VCALL FMHYINIT            Initialize
+         END   ,                   Initialize new recs
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         IF    (RN,NZ),BEGIN       Requested blocks not available
+         ST    RN,@FCNBLKC         Save count possible
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         L3    R14,NTGUSSP         Get space used
+         S     R14,@FCNBLKC        Subtract count of blocks requested
+         IF    NEG,'CLEAR R14'
+         ST3   R14,NTGUSSP         Increment blocks used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         LA    RVR,4               Not able to do it
+         B     FCATNIEX            Exit
+         END   ,                   Contiguous blocks not available
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account again
+
+         CLEAR R14                 No permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate file
+
+         IF    NZ,BEGIN
+         LA    RVR,20              Deleted that fast?
+         B     FCATNIEX
+         END   ,
+
+         L3    R15,NTFCNT          Count of blocks
+         A     R15,@FCNBLKC        Add count of blocks requested
+         ST3   R15,NTFCNT          Count of blocks
+         STCK  #FCNTOD             Got time for this?
+         MVC   NTFLSDT,#FCNTOD     Set last reference date
+
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of file entry
+
+FCATNIEX LABEL ,
+         LR    RS,RVR
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         LTORG ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATGSPA - Get account file space (increment blocks used)
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATGSPA PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         L     RB,@FCACFSB         Get FSB pointer
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT Set account
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         IF    NZ,'ABORT FCATGSPA_NOTFND'
+         L3    R14,NTGUSSP         Get blocks already used
+         L3    R15,NTGMXSP         Get max allowed
+         SR    R15,R14             Calc number left
+         IF    NP,'LA RS,16'       Can't have any!
+         ELSE  BEGIN               Some left
+         IF    (R15,GT,@FCACSPA),'L R15,@FCACSPA' Get desired amount
+         ELSE  'ST R15,@FCACSPA'   Can only have this much
+         AR    R15,R14             Calc new total
+         ST3   R15,NTGUSSP         Set new amount used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RS                  Good return
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATPSPA -  Put account file space (decrement blocks used)
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATPSPA PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         L     RB,@FCACFSB         Get FSB pointer
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT Set account
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         IF    NZ,'ABORT FCATPSPA_NOTFND'
+         L3    R14,NTGUSSP         Get blocks already used
+         S     R14,@FCACSPA        Subtract those given back
+         IF    NEG,'CLEAR R14'     Can't be too little
+         ST3   R14,NTGUSSP         Set new amount used
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RS
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATUSPA -  Set used account space
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATUSPA PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         L     RB,@FCACFSB         Get FSB pointer
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT Set account
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         IF    NZ,'LA RS,4'        Account does not exist
+         ELSE  BEGIN
+         MVC   NTGUSSP,@FCACSPA+1  Set new used space
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RS
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATMSPA -  Set maximum account space
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATMSPA PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         L     RB,@FCACFSB         Get FSB pointer
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT Set account
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         IF    NZ,'LA RS,4'        Account does not exist
+         ELSE  BEGIN
+         MVC   NTGMXSP,@FCACSPA+1   Set new max space
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RS
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATFLIS -  List file names
+*
+*   Inputs - @FCFLIS
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+#FCFLIS  RECORD BEGIN
+#FCFLRQB DS    CL(L'RQBL)
+#FCFLLOC DS    A                   Location
+#FCFLMAX DS    F                   Max possible
+#FCFLCNT DS    F                   Count left
+         END   ,
+FCATFLIS PROC  @FCFLIS,#FCFLIS,SCOPE=GLOBAL
+         L     RB,@FCFLFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCFLRQB)
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         IF    @FCFLCLP,'SET RQFCLP' Indicate CLP
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' ' Set file name
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCFLNAM
+
+         CLEAR R15                 No length modify
+         LA    R14,1               Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    RS,4                Set not there
+         IF    (RVR,NZ),FCATFLIX   Account not found
+         IF    (@FCFLUSE,NZ),BEGIN Non-owner, check'm out
+         LOCAP @FCFLUSE            Get user permits
+         LA    RS,12               Init to not allowed
+         IF    (RVR,Z),FCATFLIX    Not allowed
+         END   ,                   Non-owner, check'm out
+
+         MVC   #FCFLLOC,@FCFLLOC   Get output address
+         CLEAR R14
+         L     R15,@FCFLLEN        Get length of output area
+         D     R14,=F'56'          Calc max number
+         ST    R15,#FCFLCNT        Set count
+         ST    R15,#FCFLMAX        Set max
+
+         LA    R0,FILEMODE         Indicate file mode
+         CATCALL LIS
+         LR    RS,RVR
+         IF    NZ,FCATFLIX         Error return
+
+         LOOP  BEGIN
+         L     R14,#FCFLLOC        Point to output area
+         MVC   @R14(56),RQBLNAME   Get data
+         LA    R14,@R14+56         Point to next area
+         ST    R14,#FCFLLOC        Save
+         DECR  R14,#FCFLCNT        Decrement count
+         IF    (#FCFLCNT,Z),EXIT   No more room
+         CATCALL CONT              Get another one
+         UNTIL NZ,END
+
+         L     R14,#FCFLMAX        Get max
+         S     R14,#FCFLCNT        Count left
+         ST    R14,@FCFLCNT        Set return count of items
+
+
+         CLEAR RS                  Set return code
+
+FCATFLIX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATALIS -  List account names
+*
+*   Inputs - @FCALIS
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+#FCALIS  RECORD BEGIN
+#FCALRQB DS    CL(L'RQBL)
+#FCALLOC DS    A                   Location
+#FCALMAX DS    F                   Max possible
+#FCALCNT DS    F                   Count left
+         END   ,
+FCATALIS PROC  @FCALIS,#FCALIS,SCOPE=GLOBAL
+         L     RB,@FCALFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         WITH  (RQBL,#FCALRQB)
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCALNAM),@FCALNAM Set account
+
+         MVC   #FCALLOC,@FCALLOC   Get output address
+         CLEAR R14
+         L     R15,@FCALLEN        Get length of output area
+         D     R14,=F'14'          Calc max number
+         ST    R15,#FCALCNT        Set count
+         ST    R15,#FCALMAX        Set max
+
+         LA    R0,ACCMODE          Indicate account mode
+         CATCALL LIS
+         LR    RS,RVR
+         IF    NZ,FCATALIX         Error return
+
+         LOOP  BEGIN
+         L     R14,#FCALLOC        Point to output area
+         MVC   @R14(14),RQBLNAME   Get data
+         LA    R14,@R14+14         Point to next area
+         ST    R14,#FCALLOC        Save
+         DECR  R14,#FCALCNT        Decrement count
+         IF    (#FCALCNT,Z),EXIT   No more room
+         CATCALL CONT              Get another one
+         UNTIL NZ,END
+
+         L     R14,#FCALMAX        Get max
+         S     R14,#FCALCNT        Count left
+         ST    R14,@FCALCNT        Set return count of items
+
+         CLEAR RS                  Set return code
+
+FCATALIX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         LTORG ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATS111 -  Get account or file entry (STATUS 111)
+*
+*   Inputs - @FCS111
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATS111 PROC  @FCS111,RQBL,SCOPE=GLOBAL
+         L     RB,@FCS1FSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' ' Set file name
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCS1NAM
+
+         CLEAR R15                 No length modify
+         LA    R14,1               Permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    RS,4                Set not there
+         IF    (RVR,NZ),FCATS11X   Account not found
+
+         IF    ('CLI RQBLNAME+6,C" "',NE),BEGIN File request
+         CLEAR R15                 No length modify
+         LA    R14,1               Permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate file
+         LA    RS,4                Set not there
+         IF    (RVR,NZ),FCATS11X   File not found
+         END   ,                   File request
+         L2    R15,NTRYLEN         Get entry length
+         IF    (R15,GT,@FCS1LEN),'L R15,@FCS1LEN'
+         L     R14,@FCS1LOC        Get output location
+         LR    RK,R15              Get length
+         MVCL  R14,RJ              Move the entry to the output area
+
+         CLEAR RS                  Set return code
+
+FCATS11X LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATAADD - Add a new account
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATAADD PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         L     RB,@FCACFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVI   RQBLNAME,C' '
+         MVC   RQBLNAME+1(L'RQBLNAME-1),RQBLNAME
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT
+         LA    R0,ACCMODE
+         CATCALL INS               Add the new account
+         IF    NZ,BEGIN
+         IF    (RVR,EQ,DIRDUPER),'LA RS,4' Already exists
+         ELSE  'LA RS,8'           No more room
+         END   ,
+         ELSE  BEGIN
+         MVC   NTGMXSP,@FCACSPA+1  Max space
+         CLEAR NTGUSSP             Clear space used
+         MVI   NTGFLG,0            No public privileges
+         LA    R0,L'NTRYGR         Insert length
+         CATCALL CONT              Continue update
+         CLEAR RS
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATADEL - Delete an account
+*
+*   Inputs - @FCACMOD
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATADEL PROC  @FCACMOD,RQBL,SCOPE=GLOBAL
+         L     RB,@FCACFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVI   RQBLNAME,C' '
+         MVC   RQBLNAME+1(L'RQBLNAME-1),RQBLNAME
+         MVC   RQBLNAME(L'@FCACCNT),@FCACCNT
+         LA    R0,ACCMODE
+         CATCALL DEL               Add the new account
+         IF    NZ,BEGIN
+         IF    (RVR,EQ,DIRNFER),'LA RS,4' Not found
+         ELSEIF (RVR,EQ,DIRDELAC),'LA RS,8' Can't del acc with files
+         ELSE  'LA RS,16'          No more room
+         END   ,
+         ELSE  'CLEAR RS'
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATRNAM -  Rename file
+*
+*   Inputs - @FCRNAME
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATRNAM PROC  @FCRNAME,RQBL,SCOPE=GLOBAL
+         L     RB,@FCRNFSB
+         WITH  (FSB,RB)
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCRNAM1 File name
+         MVC   RQBLRNAM,RQBLNAME   First part the same
+         MVC   RQBLRNAM+7(L'@FCRNAM2),@FCRNAM2 New file name
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL RENAM
+         IF    ('LTR RS,RVR',NZ),BEGIN Error return
+         IF    (RVR,EQ,DIRNMR),'LA RS,16' No space left in catalog
+         ELSE  'LA RS,12'          Can't rename to existing file name
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATDLET -  Delete file from catalog
+*
+*   Inputs - @FCDLETE
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATDLET PROC  @FCDLETE,RQBL,SCOPE=GLOBAL
+         L     RB,@FCDLFSB
+         WITH  (FSB,RB)
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCDLNAM File name
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL DEL
+         IF    ('LTR RS,RVR',NZ),'LA RS,16' No space left in catalog
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATUINF -  Update file info
+*
+*   Inputs - @FCUINFO
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATUINF PROC  @FCUINFO,RQBL,SCOPE=GLOBAL
+         L     RB,@FCUIFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCUINAM
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         IF    Z,BEGIN             Account found
+         CLEAR R14                 No permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate file
+         END   ,                   Account found
+
+         IF    Z,BEGIN
+         IF    @FCUIUIN,BEGIN      Set user info
+         MVC   NTFUINFO,@FCUINF
+         IF    @FCUIFRM,'SET NTFSFORM'
+         ELSE  'CLEAR NTFSFORM'
+         END   ,
+         ELSEIF @FCUIOWN,BEGIN     Update owner privileges
+         NI    @FCUINF,FPALL
+         MVC   NTFFLGO,@FCUINF
+         END   ,
+         ELSEIF @FCUIPUB,BEGIN     Update public privileges
+         NI    @FCUINF,FPALL
+         MVC   NTFFLGP,@FCUINF
+         END   ,
+         ELSEIF @FCUISHR,BEGIN     Update share mode
+         IF    @FCUISHO,'SET NTFPSHR' Set to share only
+         ELSE  'CLEAR NTFPSHR'     Set to not share only
+         END   ,
+         ELSEIF @FCUINCL,BEGIN     Update NOCLP mode
+         IF    @FCUINCO,'SET NTFNOCLP' Set to NOCLP
+         ELSE  'CLEAR NTFNOCLP'     Set to not NOCLP
+         END   ,
+         ELSEIF @FCUICLP,BEGIN     Update CLP mode
+         IF    @FCUICLO,'SET NTFCLP' Set to CLP only
+         ELSE  'CLEAR NTFCLP'     Set to not CLP only
+         END   ,
+         ELSEIF @FCUISPI,BEGIN     Update spires mode
+         IF    @FCUISPO,'SET NTFSPI' Set to spires only
+         ELSE  'CLEAR NTFSPI'      Set to not spires only
+         END   ,
+         ELSEIF @FCUIHYB,BEGIN     Convert to hybrid
+         SET   NTFNIXR             Non-IXR
+         SET   NTFHYBR             Hybrid
+         MVC   NTFLOC,@FCUIBLK+1   Set first block
+         MVC   NTFCNT,@FCUICNT+1   Set block count
+         END   ,
+         ELSEIF @FCUINEW,BEGIN     New first block
+         MVC   NTFLOC,@FCUIBLK+1   Set first block
+         END   ,
+         ELSE  'ABORT DOUG_BUG'
+
+         LA    R15,4               Entry changed but no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RVR
+         END   ,
+
+         LR    RN,RVR
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RN
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATFINF -  Get file information
+*
+*   Inputs - @FCFINFO
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATFINF PROC  @FCFINFO,RQBL,SCOPE=GLOBAL
+         L     RB,@FCFFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCFNAM
+
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         CLEAR R14                 No permits
+         LA    R0,FILEMODE         Indicate file locate
+         CATCALL LOOK              Locate file
+         IF    NZ,'ABORT FCATFINF_NO_FILE'
+
+         MVC   @FCFINF,NTFLOC      Return file information
+         GRREL RID=FSBCGRI         Release catalog hold
+         CLEAR RVR
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATAINF -  Get account information
+*
+*   Inputs - @FCAINFO
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATAINF PROC  @FCAINFO,RQBL,SCOPE=GLOBAL
+         L     RB,@FCAIFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCAIACC),@FCAIACC
+         LA    R0,ACCMODE
+         LA    R14,1               Permits
+         CLEAR R15                 No length modify
+         CATCALL LOOK              Locate the entry
+         LA    RS,4                Set not there
+         IF    (RVR,NZ),FCATAINX   Account not found
+         IF    (@FCAIUSE,NZ),BEGIN
+         LOCAP @FCAIUSE            Get user permits
+         LA    RS,8                Init to not allowed
+         IF    (RVR,Z),FCATAINX    Not allowed
+         END   ,
+
+         MVC   @FCAIABK+1(3),NTGMXSP Set max space
+         MVC   @FCAIUBK+1(3),NTGUSSP Set used space
+
+         CLEAR RS
+
+
+FCATAINX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS              Set return code
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATGPRM -  Get permit entries
+*
+*   Inputs - @FCGPERM
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATGPRM PROC  @FCGPERM,RQBL,SCOPE=GLOBAL
+         L     RB,@FCGPFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         IF    @FCGPFF,BEGIN       File permits
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCGPNAM
+         CLEAR R14                 No permits
+         LA    R0,ACCMODE          Indicate account locate
+         CATCALL LOOK              Locate account
+         LA    R0,FILEMODE
+         END   ,
+         ELSE  BEGIN
+         MVC   RQBLNAME(L'@FCGPACC),@FCGPACC
+         LA    R0,ACCMODE
+         END   ,
+         LA    R14,1               Permits
+         CLEAR R15                 No length modify
+         CATCALL LOOK              Locate the entry
+         IF    @FCGPFA,BEGIN
+         LA    RS,4                Set not there
+         IF    (RVR,NZ),FCATGPRX   Account not found
+         IF    ^@FCGPFM,BEGIN
+         LOCAP @FCGPUSE            Get user permits
+         LA    RS,8                Init to not allowed
+         IF    (RVR,Z),FCATGPRX    Not allowed
+         END   ,
+         MVC   @FCGPPP,NTGFLG      Get public permits
+         LA    RM,NTGMEMBR         Point to member permits
+         END   ,
+         ELSE  BEGIN
+* Note: Files are already attached so they must exist and the
+*       user must be authorized.
+         MVC   @FCGPPP,NTFFLGP     Get public permits
+         MVC   @FCGPMS,NTFFLGO     Get file mask
+         CLEAR RS                  Set to OK
+         IF    (@FCGPLEN,Z),FCATGPRX
+         LC    R14,NTFLNMSZ        Get filename size
+         LA    RM,NTFLNAME(R14)    Point to member permits
+         END   ,
+         L2    R15,NTRYLEN         Get length of entry
+         LA    R15,NTRY(R15)       Point to end of entry
+         SR    R15,RM              Calc member permits length
+         CLEAR RS                  Set to OK
+         IF    (R15,Z),FCATGPRX    If none, done
+         IF    (R15,GT,@FCGPLEN),'L R15,@FCGPLEN' Only this much
+         CLEAR R14
+         D     R14,=A(L'NTRYPR)    Calc number of entries
+         ST    R15,@FCGPCNT        Set entry count
+         MH    R15,=Y(L'NTRYPR)    Calc length to move
+         L     R14,@FCGPLOC        Point to buffer
+         LR    RN,R15              Get length to move
+         MVCL  R14,RM              Move the entries
+
+         L     RM,@FCGPLOC         Point to buffer
+         L     RN,@FCGPCNT         Get count of entries
+         WITH  (NTRYPR,RM)
+         LOOP  BEGIN
+         CLI   NTPNAME+3,C'p'
+         IF    EQ,'MVI NTPNAME+3,C"P"' Get those little p's
+         LA    RM,NTRYPR+L'NTRYPR  Next
+         UNTIL (BCT,RN),END
+
+         CLEAR RS                  Set return code
+
+FCATGPRX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS              Set return code
+
+         PEND  ,
+         LTORG ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATEPUB -  Extend public global file access privileges
+*
+*   Inputs - @FCEPUB
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+FCATEPUB PROC  @FCEPUB,RQBL,SCOPE=GLOBAL
+         L     RB,@FCEPFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCEPACC),@FCEPACC
+         CLEAR R14                 No permits
+         CLEAR R15                 No length modify
+         LA    R0,ACCMODE          Account record
+         CATCALL LOOK              Get the record
+         IF    NZ,'LA RS,4'        Set to not found
+         ELSE  BEGIN
+         MVC   NTGFLG,@FCEPPUB     Set permits
+         NI    NTGFLG,FPFWRITE     Clear extraneous
+         LA    R15,4               Set to update, no length change
+         CATCALL CONT              Continue update of account entry
+         CLEAR RS                  Set return code
+         END   ,
+
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS              Set return code
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATXTND -  Extend global file access privileges
+*
+*   Inputs - @FCXTND
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+#FCXTND  RECORD BEGIN
+#FCXRQBL DS    CL(L'RQBL)
+#FCXFLG  FLAG  ,                   Work flag
+         END   ,
+
+FCATXTND PROC  @FCXTND,#FCXTND,SCOPE=GLOBAL
+         WITH  (RQBL,#FCXRQBL)
+         L     RB,@FCXFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         NI    @FCXPRI,X'0F'       Clear high order nibble in case
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME(L'@FCXUSO),@FCXUSO Set file owner
+         LA    R14,1               Permits
+         LA    R15,1               Modify length
+         LA    R0,ACCMODE          Account record
+         CATCALL LOOK              Get the record
+         IF    NZ,BEGIN
+         IF    (RVR,EQ,DIRNFER),'LA RS,12' Entry not found
+         ELSE  'LA RS,16'                  Not enough room
+         B     FCATXTNX
+         END   ,
+
+         IF    (^@FCXFM,AND,(@FCXUSE,NE,@FCXUSO)),BEGIN
+         LOCAP @FCXUSE             Find permits for account
+         STC   RVR,#FCXFLG         Set work flag
+         LA    RS,4                Init can't extend priv
+         IF    ^#FCXFLG.NTPFAC,FCATXTNX
+         LC    R14,@FCXPRI         Get privileges to extend
+         EX    R14,'TM #FCXFLG,0'  Does extender have them to extend?
+         IF    NO,FCATXTNX         No
+         END   ,                   Extender not the owner
+
+         PSET  @LOCMEME
+         PMOV  @LOCMEMN,LA:NTRY
+         PMOV  @LOCMEMA,@FCXUSR
+         IF    (@FCXUSR+3,EQ,=C'PUB'),'MVI @LOCMEMA+3,C"p"' Little p
+         SET   @LOCMFA             Account entry
+         ACALL LOCMEME             Locate member entry
+         WITH  (NTRYPR,RM)
+         WITH  (NTRYPR,RN),LABEL=N Next member entry
+         L     RM,@LOCMEMP         Get permits pointer
+         IF    (RVR,NZ),BEGIN      Member entry does not exist
+         CLEAR RS                  Init to done
+         IF    (@FCXPRI.FRW,Z),FCATXTNX No privileges to nobody
+         L2    R15,NTRYLEN         Get length of entry
+         LA    RN,NTRY(R15)        Point to end
+         LA    RVR,@R15+L'NTRYPR   Calc new length
+         LA    RS,16               Init to no more room
+         IF    (RVR,GT,CFSBMXNT),FCATXTNX
+         LR    R15,RM              Save insert point
+         LR    RM,RN               Point to new entry
+         CLEAR NTRYPR              Clear new entry
+         SH    RN,=Y(L'NTRYPR)     Point back one slot
+         WHILE (RM,GT,R15),BEGIN   Shuffle new one into place
+         XC    NTRYPR,N.NTRYPR     Swap
+         XC    N.NTRYPR,NTRYPR     Swap
+         XC    NTRYPR,N.NTRYPR     Swap
+         SH    RM,=Y(L'NTRYPR)     Point back one slot
+         SH    RN,=Y(L'NTRYPR)     Point back one slot
+         END   ,                   Shuffle new one into place
+         MVC   NTPNAME,@FCXUSR     Set member name
+         IF    (@FCXUSR+3,EQ,=C'PUB'),'MVI NTPNAME+3,C"p"' Little p
+         MVC   NTPFLG,@FCXPRI      Set new privileges
+         LH    R15,=H'-4'          Set length change
+         END   ,                   Member entry does not exist
+         ELSE  BEGIN               Member entry does exist
+         CLEAR RS                  Init to done
+         IF    (NTPFLG,EQ,@FCXPRI),FCATXTNX Already the same
+         IF    (@FCXPRI.FRW,Z),BEGIN Removing all privileges
+         L2    R15,NTRYLEN         Get total length
+         LA    R14,NTRY(R15)       Point to the end
+         SH    R15,=Y(L'NTRYPR)    Calc new length
+         LR    RVR,R15             Set for catalog call
+         LA    RN,NTRYPR+L'NTRYPR  Point to next member entry
+         CLEAR NTRYPR              Clear the deleted member entry
+         WHILE (RN,LT,R14),BEGIN   Shuffle the following up a bit
+         XC    NTRYPR,N.NTRYPR     Swap
+         XC    N.NTRYPR,NTRYPR     Swap
+         XC    NTRYPR,N.NTRYPR     Swap
+         LA    RM,NTRYPR+L'NTRYPR
+         LA    RN,N.NTRYPR+L'NTRYPR
+         END   ,                   Shuffle the following up a bit
+         LH    R15,=H'-4'          Set length change
+         END   ,                   Removing all privileges
+         ELSE  BEGIN               Set new privileges
+         MVC   NTPFLG,@FCXPRI      Set new privileges
+         LA    R15,4               Entry changed but no length change
+         END   ,                   Set new privileges
+         END   ,                   Member entry does exist
+
+         CATCALL CONT              Continue update of account entry
+         IF    (RVR,NZ),'LA RS,16' No more room
+         ELSE  'CLEAR RS'          Done
+
+FCATXTNX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS              Set return code
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  FCATASAC -  Assign account level file access privileges
+*
+*   Inputs - @FCASACC
+*
+*   Output -
+*
+*---------------------------------------------------------------------*
+#FCASACC RECORD BEGIN
+#FCASRQB DS    CL(L'RQBL)
+#FCASFLG FLAG  ,                   Work flag
+         END   ,
+
+FCATASAC PROC  @FCASACC,#FCASACC,SCOPE=GLOBAL
+         WITH  (RQBL,#FCASRQB)
+         L     RB,@FCASFSB
+         WITH  (FSB,RB)
+         WITH  (NTRYGR,RJ)         Entry pointer returned by VCAT
+         NI    @FCASPRI,FPALL      Clear unnecessary
+
+         GRGET RID=FSBCGRI,EXCL=YES Get catalog hold
+
+         CLEAR RQBL                Set up old block for VCAT
+         MVC   RQBLRQBL,=CL4'RQBL'
+         MVC   RQBLNAME+L'RQBLNAME-4(4),=CL4' '
+         MVC   RQBLNAME(L'RQBLNAME-4),@FCASNAM
+
+         LA    R14,1               Permits
+         CLEAR R15                 No length modify
+         LA    R0,ACCMODE          Account record
+         CATCALL LOOK              Get the record
+         IF    NZ,BEGIN
+         LA    RS,16               Not enough room
+         B     FCATASAX
+         END   ,
+
+         IF    (^@FCASFM,AND,(@FCASUSO,NE,@FCASUSE)),BEGIN
+         LOCAP @FCASUSE            Find permits for account
+         STC   RVR,#FCASFLG        Set work flag
+         END   ,                   Extender not the owner
+
+         LA    R14,1               Permits
+         LA    R15,1               Modify length
+         LA    R0,FILEMODE         File record
+         CATCALL LOOK              Get the record
+         IF    NZ,BEGIN
+         LA    RS,16               Not enough room
+         B     FCATASAX
+         END   ,
+
+         IF    (^@FCASFM,AND,(@FCASUSO,NE,@FCASUSE)),BEGIN
+         LOCFP @FCASUSE            Find permits for account
+         IC    R14,#FCASFLG        Get global permits
+         OR    RVR,R14             Add to file permits
+         STC   RVR,#FCASFLG        Set work flag
+         LA    RS,8                Init can't extend priv
+         IF    ^#FCASFLG.NTPFAC,FCATASAX
+         LC    R14,@FCASPRI        Get privileges to extend
+         EX    R14,'TM #FCASFLG,0' Does extender have them to extend?
+         IF    NO,FCATASAX         No
+         END   ,                   Extender not the owner
+
+         PSET  @LOCMEME
+         PMOV  @LOCMEMN,LA:NTRY
+         PMOV  @LOCMEMA,@FCASUSR
+         IF    (@FCASUSR+3,EQ,=C'PUB'),'MVI @LOCMEMA+3,C"p"' Little p
+         SET   @LOCMFF             File entry
+         ACALL LOCMEME             Locate member entry
+         WITH  (NTRYPR,RM)
+         WITH  (NTRYPR,RN),LABEL=N Next member entry
+         L     RM,@LOCMEMP         Get permits pointer
+         IF    (RVR,NZ),BEGIN      Member entry does not exist
+         CLEAR RS                  Init to done
+         IF    (@FCASPRI.FRW,Z),FCATASAX No privileges to nobody
+         L2    R15,NTRYLEN         Get length of entry
+         LA    RN,NTRY(R15)        Point to end
+         LA    RVR,@R15+L'NTRYPR   Calc new length
+         LA    RS,16               Init to no more room
+         IF    (RVR,GT,CFSBMXNT),FCATASAX
+         LR    R15,RM              Save insert point
+         LR    RM,RN               Point to new entry
+         CLEAR NTRYPR              Clear new entry
+         SH    RN,=Y(L'NTRYPR)     Point back one slot
+         WHILE (RM,GT,R15),BEGIN   Shuffle new one into place
+         XC    NTRYPR,N.NTRYPR     Swap
+         XC    N.NTRYPR,NTRYPR     Swap
+         XC    NTRYPR,N.NTRYPR     Swap
+         SH    RM,=Y(L'NTRYPR)     Point back one slot
+         SH    RN,=Y(L'NTRYPR)     Point back one slot
+         END   ,                   Shuffle new one into place
+         MVC   NTPNAME,@FCASUSR     Set member name
+         IF    (@FCASUSR+3,EQ,=C'PUB'),'MVI NTPNAME+3,C"p"' Little p
+         MVC   NTPFLG,@FCASPRI      Set new privileges
+         LH    R15,=H'-4'          Set length change
+         END   ,                   Member entry does not exist
+         ELSE  BEGIN               Member entry does exist
+         CLEAR RS                  Init to done
+         IF    (NTPFLG,EQ,@FCASPRI),FCATASAX Already the same
+         IF    (@FCASPRI.FRW,Z),BEGIN Removing all privileges
+         L2    R15,NTRYLEN         Get total length
+         LA    R14,NTRY(R15)       Point to the end
+         SH    R15,=Y(L'NTRYPR)    Calc new length
+         LR    RVR,R15             Set for catalog call
+         LA    RN,NTRYPR+L'NTRYPR  Point to next member entry
+         CLEAR NTRYPR              Clear the deleted member entry
+         WHILE (RN,LT,R14),BEGIN   Shuffle the following up a bit
+         XC    NTRYPR,N.NTRYPR     Swap
+         XC    N.NTRYPR,NTRYPR     Swap
+         XC    NTRYPR,N.NTRYPR     Swap
+         LA    RM,NTRYPR+L'NTRYPR
+         LA    RN,N.NTRYPR+L'NTRYPR
+         END   ,                   Shuffle the following up a bit
+         LH    R15,=H'-4'          Set length change
+         END   ,                   Removing all privileges
+         ELSE  BEGIN               Set new privileges
+         MVC   NTPFLG,@FCASPRI     Set new privileges
+         LA    R15,4               Entry changed but no length change
+         END   ,                   Set new privileges
+         END   ,                   Member entry does exist
+
+         CATCALL CONT              Continue update of account entry
+         IF    (RVR,NZ),'LA RS,16' No more room
+         ELSE  'CLEAR RS'          Done
+
+FCATASAX LABEL ,
+         GRREL RID=FSBCGRI         Release catalog hold
+         LR    RVR,RS              Set return code
+
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  LOCMEME - Locate account permits for entry
+*
+*   Inputs - @LOCMEME
+*
+*   Output - If RVR = 0, @LOCMEMP points to member entry
+*            If RVR = 1, @LOCMEMP points to insert point
+*---------------------------------------------------------------------*
+LOCMEME  PROC  @LOCMEME
+         L     RN,@LOCMEMN
+         WITH  (NTRY,RN)
+         IF    @LOCMFF,BEGIN       File entry
+         LC    R14,NTFLNMSZ
+         LA    R14,NTFLNAME(R14)   Point to member area
+         END   ,                   File entry
+         ELSE  'LA R14,NTGMEMBR'   Point to member area
+         L2    R15,NTRYLEN
+         LA    R15,NTRYSTRT(R15)   Point to end of entry
+         WITH  (NTRYPR,R14)
+         LA    RVR,1               Init to not found
+LOCMEMEL WHILE (R14,LT,R15),BEGIN  While more members
+         IF    (@LOCMEMA,LE,NTPNAME),BEGIN
+         IF    (@LOCMEMA,EQ,NTPNAME),'CLEAR RVR' Found
+         EXIT  LOCMEMEL            Exit loop
+         END   ,
+         LA    R14,L'NTRYPR(R14)
+         END   ,                   While more members
+         ST    R14,@LOCMEMP        Set return pointer
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*  LOCPERM - Locate account permits for entry
+*
+*   Inputs - @LOCPERM
+*
+*   Output - Permits in RVR (low order byte)
+*---------------------------------------------------------------------*
+#LOCPERM RECORD BEGIN
+#LOCPPRM DS    X
+#LOCGMEM DS    CL6
+         END   ,
+
+LOCPERM  PROC  @LOCPERM,#LOCPERM
+         L     RN,@LOCNTRY
+         WITH  (NTRY,RN)
+         IF    @LOCFF,BEGIN        File entry
+         MVC   #LOCPPRM,NTFFLGP    Get public permits
+         LC    R14,NTFLNMSZ
+         LA    R14,NTFLNAME(R14)   Point to member area
+         END   ,                   File entry
+         ELSE  BEGIN               Account entry
+         MVC   #LOCPPRM,NTGFLG     Public permits
+         LA    R14,NTGMEMBR        Point to member area
+         END   ,                   Account entry
+         L2    R15,NTRYLEN
+         LA    R15,NTRYSTRT(R15)   Point to end of entry
+         MVC   #LOCGMEM(3),@LOCACC Build group level member
+         MVC   #LOCGMEM+3(3),=C'pUB'
+         WITH  (NTRYPR,R14)
+         WHILE (R14,LT,R15),BEGIN  While more members
+         IF    (@LOCACC,EQ,NTPNAME),'OC #LOCPPRM,NTPFLG'
+         IF    (#LOCGMEM,EQ,NTPNAME),'OC #LOCPPRM,NTPFLG'
+         LA    R14,L'NTRYPR(R14)
+         END   ,                   While more members
+         LC    RVR,#LOCPPRM
+         PEND  ,
+         EJECT
+*---------------------------------------------------------------------*
+*  FCATINIT - Catalog initialization
+*
+*   Inputs - RVR set to FSB address
+*
+*   Output -
+*---------------------------------------------------------------------*
+&MSG1    SETC  ' Catalog needs rebuilding.   '
+&MSG2    SETC  ' File System Updates Frozen!!'
+
+#FCATINI RECORD BEGIN
+ORVNAME  DS    CL8                     Orvyl name
+SPACE    DS    CL1
+FSNAME   DS    CL8                     File System name
+MSG      DS    C'&MSG1'
+MSGLEN   EQU   *-ORVNAME
+
+         DS    0D
+#FCIRQBL DS    CL(L'RQBL)
+         END   ,
+
+FCATINIT PROC  @FMFSB,#FCATINI,SCOPE=GLOBAL
+         L     RB,@FMFSBP
+         WITH  (FSB,RB)
+         WITH  (RQBL,#FCIRQBL)
+         CLEAR RQBL
+
+*  Get core for catalog buffers
+
+         L     RK,FSBBLKTOP            Get core for Catalog buffers
+         LA    RK,@RK+2                | + checkpoint + root
+         MH    RK,FSBDSZ               |
+         VMGET (RK),LOC=GLOBHI,FIX=YES,PAGE=YES
+         IF    (RVR,ZERO),'ABORT NOCATBUFFS'
+         ST    RVR,FSBCHKA             | save start in Checkpnt ptr
+         LR    RJ,RVR                  | clear buffers
+         CLEAR RN                      |
+         MVCL  RJ,RM                   |
+
+* If hyperspace cache is being used, a 4K page is needed for IO.
+
+         IF    (FSBHCACHE,AND,(FSBDSZ,EQ,2048)),BEGIN
+         L     RK,=A(4096)
+         VMGET (RK),LOC=GLOBHI,FIX=YES,PAGE=YES
+         IF    (RVR,ZERO),'ABORT NOCAT4KBUFFS'
+         ST    RVR,FSBCAT4K        Save buffer address
+         LR    RJ,RVR                  | clear buffer
+         CLEAR RN                      |
+         MVCL  RJ,RM                   |
+         END   ,
+
+* Get resource id
+
+         GRCRE CID=(RB)            Create a general resource
+         ST    RVR,FSBCGRI         Set id for catalog
+
+* Read FSMB (using CHECKPOINT block's buffer)
+
+         IF    ('LT RVR,FSBCAT4K',Z),BEGIN No IO buffer
+         L     RVR,FSBCHKA         Use this one
+         END   ,
+
+         PSET  @FDOIODO
+         PMOV  @FDOFSB,LA:FSB      FSB ptr
+         CLEAR @FDOBLK             Block number zero
+         PMOV  @FDODATA,(RVR)      Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         SET   @FDOFR              Indicate read
+         VCALL FDOIODO             Read file system master block
+         IF    ('CLI @FDOTYPE,FBHTFSMB',NE),'ABORT BADMASTERSON'
+
+         IF    ('LT RVR,FSBCAT4K',NZ),BEGIN IO buffer
+         LH    RS,FSBDSZ
+         L     R14,FSBCHKA
+         LR    R15,RS
+         MVCL  R14,RVR             Move to cat buffer
+         END   ,
+
+         L     R14,FSBCHKA
+         WITH  (FSMB,R14),BEGIN
+         IF    (FSBDSZ,NE,FSMDSZ),'ABORT BADMASTERLEN'
+         MVC   FSBCATSB,FSMCATSB   Set first block of the catalog
+         MVC   FSBCATBC,FSMCATBC   Set catalog block count
+         MVC   FSBBITSB,FSMBITSB   Set first block of bit map
+         MVC   FSBBITBC,FSMBITBC   Set bitmap block count
+         MVC   FSBBALST(FSBBALLN),FSMBALST Catalog balancing parms
+         END   ,
+
+* Initialize buffer pointers
+
+         L     RS,FSBCHKA              CHECK POINT BUFFER
+         LA    RX,CFSBPL               FILL BUFFER SLOTS (INCR)
+         L     RY,FSBBLKTOP            | UPPER LIMIT
+         DECR  RY                      |
+         MH    RY,=Y(CFSBPL)           |
+         LA    RY,FSBBLK1(RY)          |
+         ST    RY,FSBBLKTOP            |
+         LA    RN,FSBROOTB             | STARTING ADDR
+INILOOP  AH    RS,FSBDSZ               | BUFFER LEN
+         MVC   @RN(CFSBBL),=&L.AL1(NIL)         | EMPTY
+         ST    RS,@RN+CFSBBL           | BUFFER ADDR
+         NC    @RN+CFSBBL(4),=A(BITAVAIL)       | BUFFER N AVAILABLE
+         BXLE  RN,RX,INILOOP           DO ALL SLOTS
+
+*  EXAMINE CHECKPOINT BLOCK
+
+         IF    ('LT RVR,FSBCAT4K',Z),BEGIN No IO buffer
+         L     RVR,FSBCHKA         Use this one
+         END   ,
+
+         PSET  @FDOIODO
+         PMOV  @FDOFSB,LA:FSB      FSB ptr
+         PMOV  @FDOBLK,FSBCATSB    First catalog block
+         PMOV  @FDODATA,(RVR)      Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         SET   @FDOFR              Indicate read
+         VCALL FDOIODO             Read checkpoint block
+
+         IF    ('LT RVR,FSBCAT4K',NZ),BEGIN IO buffer
+         LH    RS,FSBDSZ
+         L     R14,FSBCHKA
+         LR    R15,RS
+         MVCL  R14,RVR             Move to cat buffer
+         END   ,
+
+         L     R14,FSBCHKA
+         WITH  (CHKPNT,R14),BEGIN      ## CHKPNT ADDR
+         LH    R15,FSBDTAGX            CHECK FIRST/LAST BYTES
+         LA    R15,CHKPNT(R15)
+         IF    ('CLC CHKTIME,@R15',NE),'ABORT CHKPNTINCOMPLETE'
+         LH    RS,CHKROOTB             ROOT BLOCK NUMBER
+         END   ,                       ## OF CHKPNT ADDR
+
+         ST    RS,FSBROOTB             RELATIVE BLOCK NUMBER
+         AL    RS,FSBCATSB             ABSOLUTE ORVYL BLOCK NUMBER
+
+         IF    ('LT RVR,FSBCAT4K',Z),BEGIN No IO buffer
+         L     RVR,FSBROOTA        Use this one
+         END   ,
+
+         PSET  @FDOIODO
+         PMOV  @FDOFSB,LA:FSB      FSB ptr
+         PMOV  @FDOBLK,(RS)        Root block number
+         PMOV  @FDODATA,(RVR)      Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         SET   @FDOFR              Indicate read catalog
+         VCALL FDOIODO             Read file system master block
+
+         IF    ('LT RVR,FSBCAT4K',NZ),BEGIN IO buffer
+         LH    RS,FSBDSZ
+         L     R14,FSBROOTA
+         LR    R15,RS
+         MVCL  R14,RVR             Move to cat buffer
+         END   ,
+
+         L     R14,FSBCHKA             CHKPNT ADDR
+         WITH  (CHKPNT,R14),BEGIN      |
+         IF ((CHKITYPE,NZ),OR,(CHKI2TYP,NZ),OR,(CHKI3TYP,NZ)),BEGIN
+         CATCALL REC                   Recover Routines
+         END   ,
+
+         IF    ^FSBSTEMP,BEGIN         Don't need space for temp
+         L     R1,FSBCATBC             MIN WARNING BLOCK COUNT
+         MH    R1,=Y(CCAT0PCT)         |
+         CLEAR R0                      |
+         D     R0,=A(100)              | PERCENTAGE
+         FLOOR R1,=Y(CCAT1MIN)         | ABSOLUTE MINIMUM
+         L     R14,FSBCHKA             CHECKPOINT ADDRESS
+         IF    (CHKFBNO,LE,R1),BEGIN   WARN ON LOW BLOCK COUNT
+         MVC   FSNAME,FSBNAME      Set file name
+         MVI   SPACE,C' '
+         L     R15,MATPTR
+         WITH  (MAT,R15),'MVC ORVNAME,MATSNAME' Set system name
+         MVC   MSG,=C'&MSG1'       Set message
+         ORVWTO ORVNAME,MSGLEN,DELETE=NO
+         END   ,                       OF WARN ON LOW BLOCK COUNT
+         END   ,                       Don't need space for temp
+
+         L     R14,FSBCHKA             CHECKPOINT ADDR
+         IF    (CHKFBNO,LE,FSBLOGFR),BEGIN      UNDER LOGICAL LIMIT
+         SET   FSBCATNIN               NO INSERTS
+         L     R14,FSBCHKA             CHECKPOINT ADDR
+         IF    (CHKFBNO,LE,FSBMNFRE),BEGIN      UNDER MINIMUM
+         SET   FSBCATNLM               NoLengthModify MODE
+         IF    ^FSBSTEMP,BEGIN         Don't need space for temp
+         MVC   FSNAME,FSBNAME      Set file name
+         MVC   MSG,=C'&MSG2'       Set message
+         MVI   SPACE,C' '
+         L     R15,MATPTR
+         WITH  (MAT,R15),'MVC ORVNAME,MATSNAME' Set system name
+         ORVWTO ORVNAME,MSGLEN,DELETE=NO
+         END   ,                       Don't need space for temp
+         END   ,                       OF UNDER MINIMUM
+         ELSE  'CLEAR FSBCATNLM'       CLEAR NoLenMod
+         END   ,                       OF UNDER LOGICAL LIMIT
+         ELSE  'CLEAR FSBCATNLM*FSBCATNIN'
+         END   ,                       OF CHKPNT ADDR
+         PEND  ,
+         EJECT ,
+*---------------------------------------------------------------------*
+*
+*  VCAT I/O Routines - simulate the old stuff with the new stuff
+*
+*---------------------------------------------------------------------*
+         ENTRY SETREAD1            VCAT entry point
+SETREAD1 LABEL ,
+         BASE  R7
+         USING RQB,R5
+         USING FSB,R10
+
+         ST    SPR,RQBLWR3         Save VCAT stack pointer
+         L     SPR,RQBLWR2         Get ours back
+
+         IF    ('LT RVR,FSBCAT4K',Z),BEGIN No IO buffer
+         L     RVR,RQBLR14         Use this one
+         END   ,
+
+         PSET  @FDOIODO
+         PMOV  @FDOFSB,LA:FSB      FSB ptr
+         PMOV  @FDOBLK,RQBLR1      Block number
+         PMOV  @FDODATA,(RVR)      Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         SET   @FDOFR              Indicate read catalog
+         VCALL FDOIODO             Read catalog record
+
+         IF    ('LT RVR,FSBCAT4K',NZ),BEGIN IO buffer
+         LH    RS,FSBDSZ
+         L     R14,RQBLR14
+         LR    R15,RS
+         MVCL  R14,RVR             Move to cat buffer
+         END   ,
+
+         L     SPR,RQBLWR3         Get VCAT stack pointer back
+
+         BR    R9
+         DROP  R5,R7,R10
+
+         ENTRY SETWRIT1            VCAT entry point
+SETWRIT1 LABEL ,
+         BASE  R7
+         USING RQB,R5
+         USING FSB,R10
+
+         ST    SPR,RQBLWR3         Save VCAT stack pointer
+         L     SPR,RQBLWR2         Get ours back
+
+         IF    ('LT RVR,FSBCAT4K',NZ),BEGIN IO buffer
+         LH    RS,FSBDSZ
+         L     R14,RQBLR14
+         LR    R15,RS
+         MVCL  RVR,R14             Move to cat 4K IO buffer
+         L     RVR,FSBCAT4K
+         END   ,
+         ELSE  'L RVR,RQBLR14'
+
+         PSET  @FDOIODO
+         PMOV  @FDOFSB,LA:FSB      FSB ptr
+         PMOV  @FDOBLK,RQBLR1      Block number
+         PMOV  @FDODATA,(RVR)      Use our buffer
+         PMOV  @FDODATL,FSBDSZ
+         SET   @FDOFW              Indicate write catalog
+         MVI   @FDOTYPE,FBHTCAT
+         VCALL FDOIODO             Write catalog record
+
+         L     SPR,RQBLWR3         Get VCAT stack pointer back
+
+         BR    R9
+         DROP  R5,R7,R10
+         EJECT ,
+         LTORG ,
+         END   .
+

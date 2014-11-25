@@ -1,0 +1,145 @@
+;
+;  Format SUZAN path control blocks
+;
+;        Scan SUZAN PCB chain anchored off of the SCIP-CVT.  This
+;        chain is dynamic and may change invalidating this EXEC.
+;
+
+xproc () begin
+
+   declare number x.cvt, x.scipcvt, x.scvt, x.svctable
+   declare number x.scomaddr
+   declare number pcbptr, numpcbs, part_pcb
+   declare number sys_off, wrk
+   declare number pcb_xfl, pcb_fl
+   declare number lock_fl, fullq_fl
+   declare number asid, ascb_ptr
+   declare number cur_bufsz, max_bufsz, tot_bufsz
+   declare string jobname
+   declare string path_me, path_you, path_path
+   declare string path_part
+   declare string msg, alert, scom_id
+
+   ; Locate SCIP CVT pointer
+   x.cvt       = ndump(16,4)           ;CVT address
+   x.scvt      = ndump(x.cvt+n'c8')    ;SCVT address
+   x.svctable  = ndump(x.scvt+n'84')   ;SVC table address
+   x.scipcvt   = ndump(x.cvt+n'cc',4)  ;SCIP-CVT address
+
+   if (sdump(x.scipcvt,4) ne 'SCIP') begin
+      write 'Unable to locate SCIP CVT'
+      xreturn
+   end
+
+   x.suztabl   = ndump(x.scipcvt+n'30',4)  ;Suzan SVC table address
+
+   if (sdump(x.suztabl,4) ne 'SUZY') begin
+      write 'Unable to locate SUZAN Table'
+      xreturn
+   end
+
+   ; Run chain of PCB's (Hopefully they won't move!)
+   pcbptr = ndump(x.suztabl+n'04',4)
+   numpcbs = 0
+
+   x.scomaddr  = ndump( x.svctable + (251*8), 4)
+      wrk = x.scomaddr + n'04'
+      scom_id = sdump(wrk+1, n'14')
+      sys_off = 0
+
+   open pcbwork  title='Suzan work' temporary
+   tot_bufsz = 0
+   putend Suzan PCB chain anchor at &(display(x.suztabl+n'04'))
+   putend       SCOM module id=&(scom_id)
+   msg =        'Alert  '
+   msg = msg || 'ASID Jobname  Address   Next    ___Me___ __You___ '
+   msg = msg || 'Pass Flags'
+   msg = msg || ' Max Buff'
+   msg = msg || ' Act Buff'
+   msg = msg || ' __Part__ __Path__'
+   putend &(msg)
+
+   while (pcbptr ne 0) begin
+      pcb_next = ndump(pcbptr+n'54')
+      path_me = sdump(pcbptr+n'08',8)
+      path_you = sdump(pcbptr+n'10',8)
+      path_pass = sdump(pcbptr+n'04',4)
+      if (path_you eq s'ffffffffffffffff') path_you = '<FFFFFF>'
+      pcb_xfl = ndump(pcbptr+n'43',1)
+      pcb_fl  = ndump(pcbptr+n'5B',1)
+      pcb_mfl = ndump(pcbptr+n'45',1)
+      max_bufsz = ndump(pcbptr+n'50',4)
+      cur_bufsz = ndump(pcbptr+n'4C',4)
+        cur_bufsz = bitand(cur_bufsz,n'7fffffff')
+      part_pcb = ndump(pcbptr+n'48',4)
+        part_pcb = bitand(part_pcb,n'7fffffff')
+      lock_fl  = ndump(pcbptr+n'48',1)
+      fullq_fl = ndump(pcbptr+n'4C',1)
+
+      ascb_ptr = ndump(pcbptr+n'70')
+      if (sdump(ascb_ptr,4) ne 'ASCB') begin
+         write 'ASCB pointer invalid'
+         xreturn
+      end
+      asid = ndump(ascb_ptr+n'24',2)
+      if (ndump(ascb_ptr+n'ac') eq 0) begin
+         wrk = ndump(ascb_ptr+n'b0')
+         if (wrk ne 0)  jobname = sdump(wrk,8)
+         else jobname = 'xxxxxxxxx'
+      end
+      else begin
+         wrk = ndump(ascb_ptr+n'ac')
+         if (wrk ne 0) jobname = sdump(wrk,8)
+         else jobname = 'yyyyyyyy'
+      end
+
+      alert = ''
+      ; APF-caller
+      if (bittest(pcb_xfl, n'80')) alert = alert || 'P'
+      else                         alert = alert || ' '
+;     ; Controller path
+;     if (bittest(pcb_fl,  n'40')) alert = alert || 'C'
+;     else                         alert = alert || ' '
+      ; Version 2 path
+      if (bittest(pcb_mfl, n'80')) alert = alert || '2'
+      else                         alert = alert || ' '
+      ;  Partners buffers in high memory
+      if (bittest(pcb_fl,  n'80')) alert = alert || 'H'
+      else                         alert = alert || ' '
+      ;  SRB routine to free PCB
+      if (bittest(pcb_xfl, n'40')) alert = alert || 'S'
+      else                         alert = alert || ' '
+      ;  Full-queue prevented send request
+      if (bittest(fullq_fl,n'80')) alert = alert || 'Q'
+      else                         alert = alert || ' '
+      ; Path is waiting for a connection
+      if (bittest(pcb_fl,  n'40')) alert = alert || 'W'
+      else                         alert = alert || ' '
+      ;  Partner's PCB is locked
+      if (bittest(lock_fl ,n'80')) alert = alert || 'L'
+      else                         alert = alert || ' '
+
+      msg = alert || '&(format(asid,4,0)) &(sub(jobname,1,8)) '
+      msg = msg || '&(dis(pcbptr)) &(dis(pcb_next)) '
+      msg = msg || '&(sub(path_me,1,8)) '
+      msg = msg || '&(sub(path_you,1,8)) '
+      msg = msg || '&(path_pass) '
+      msg = msg || '&(sub(dis(pcb_xfl),7,2)) '
+      msg = msg || '&(sub(dis(pcb_fl),7,2)) '
+      msg = msg || '&(format(max_bufsz,8,0)) '
+
+      if (part_pcb ne 0) begin
+         path_part = sdump(part_pcb+n'08',8)
+         tot_bufsz = tot_bufsz + cur_bufsz
+         msg = msg || '&(format(cur_bufsz,8,0)) '
+         msg = msg || '&(display(part_pcb)) &(sub(path_part,1,8))'
+      end
+      putend &(msg)
+      numpcbs = numpcbs + 1
+      pcbptr = pcb_next
+   end
+;  close
+   write '&(numpcbs) PCB''s located and saved'
+
+   xreturn   ;debug abort
+end

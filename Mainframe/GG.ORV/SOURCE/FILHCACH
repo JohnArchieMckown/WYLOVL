@@ -1,0 +1,464 @@
+FILHCACH TITLE 'ORVYL''S Hiperspace Caching Routines'
+         COPY  HEADER
+*
+FILHCACH MODULE TRCNUM=52
+*
+         COPY  PZERO
+         USING PZERO,R0
+*
+         COPY  IOSPARM
+*
+         COPY  VMPARM              Virtual memory
+*
+         COPY  GRPARM              General resources
+*
+         COPY  HSPCPARM
+*
+         COPY  CACHPARM            Caching api
+*
+         COPY  CACHCBH             Cache control block
+*
+*        CHHASH -- Macro to form number between 0 and CITNHASH-1
+*          based on a 64-bit key. It also set addressability
+*          to the control area and hash queue based on an index
+*          derived by using the last nibble of the 64-bit key.
+*
+         MACRO
+&L       CHHASH &KEY
+&L       LM    RA,RB,&KEY          Get Key
+         SLL   RA,16
+         ALR   RB,RA               Form 32 bit hash
+         N     RB,=A(X'7FFFFFFF')  Force positive number
+         CLEAR RA
+         LH    RS,CITHASH
+         DR    RA,RS               RA = num between 0 and CITHASH-1
+         SLL   RA,3                Times len of queue (8)
+         L     RB,&KEY+4           Get block number
+         N     RB,=A(15)           Get hash index, last nibble
+         LR    RS,RB               Get it again
+         MH    RB,CITHASH          Calc disp to correct hash group
+         SLL   RB,3                Times len of queue (8)
+         AR    RB,RA               Calc disp to correct hash slot
+         LA    RA,CITHQUE(RB)      Point to hash queue list
+         MH    RS,=Y(L'CITHCTL)    Calc displacement to control area
+         LA    RB,CITHCTL(RS)      Point to the correct control area
+         WITH  (CITHCTL,RB)
+         WITH  (CITHQUE,RA)
+         MEND
+*
+         MACRO
+&L       LQUE  &HEAD,&ITEM         Put on end of list
+&L       L     R14,&HEAD.BP        Point to old last
+         LA    R15,&ITEM.FP        Point to new last
+         ST    R15,&HEAD.BP        New last
+         ST    R14,&ITEM.BP        Point back to old last
+         ST    R15,0(R14)          Old last points to new last
+         LA    R14,&HEAD.FP        Point to queue head
+         ST    R14,&ITEM.FP        New points to head
+         MEND
+*
+         MACRO
+&L       LPUSH &HEAD,&ITEM         Put at start of list
+&L       L     R14,&HEAD.FP        Point to old first
+         LA    R15,&ITEM.FP        Point to new first
+         ST    R15,&HEAD.FP        New first
+         ST    R14,&ITEM.FP        Point to old first
+         ST    R15,4(R14)          Old first points to new first
+         LA    R14,&HEAD.FP        Point to queue head
+         ST    R14,&ITEM.BP        New points to head
+         MEND
+*
+         MACRO
+&L       LREM  &ITEM               Remove from list
+&L       L     R14,&ITEM.BP        Point back
+         L     R15,&ITEM.FP        Point forward
+         ST    R14,4(R15)          Reset the chain
+         ST    R15,0(R14)          Reset the chain
+         XC    &ITEM.FP(8),&ITEM.FP Keep things tiddy
+         MEND
+         EJECT
+*
+*  CHOPEN -- Routine to establish a cache area.
+*
+*    On entry:
+*      @CAONBUF - number of buffers to allocate
+*
+*    On exit, RVR:
+*      0 - cache not available
+*      nz- CIT ptr
+*
+CHOPEN   PROC  @CAOPEN,SCOPE=GLOBAL
+*-
+*-       Allocate CITH.
+*-
+         WITH  (CABH,RN)
+         WITH  (CITH,RM)
+         L     RA,@CAONBUF         Count of buffers
+* We need 16 groups each
+         LA    RA,@RA+15           Round up
+         N     RA,=X'FFFFFFF0'     Even multiple of 16
+         LR    RN,RA               Save count
+         LR    RK,RA               Get count
+         MH    RA,=Y(L'CABH)       Calc length of CABH's
+         A     RK,=A(4096)         Round up
+         SRL   RK,14               Divide by 16384 for index
+         SLL   RK,1                Calc offset
+         IF    (RK,GT,=Y(HASHTMAX)),'LH RK,=Y(HASHTMAX)'
+         LH    RK,HASHTAB(RK)      Get hash number
+         LR    RS,RK               Get hash number
+         SLL   RS,4                Times 16
+         MH    RS,=Y(L'CITHQUE)    Calc length of queues
+         AH    RS,=Y(L'CITH-L'CITHQUE) Basic CITH length
+         LR    RB,RS               Save CITH size
+         AR    RS,RA               Calc total
+         LR    RA,RS               Save total
+         VMGET (RS),LOC=GLOBHI,FIX=YES,PAGE=YES Allocate
+         IF    (RVR,Z),EXIT        No memory, forget it
+         LR    RM,RVR              Set pointer
+         CLEAR R15
+         MVCL  RVR,R14             Clear area
+         MVC   CITHBID,=C'CITH'    Set tag
+         ST    RN,CITHNBUF         Count of buffers
+         STH   RK,CITHASH          Hash number
+         ST    RB,CITHSIZE         Size of CITH
+         ST    RA,CITHTSIZ         Save total size
+* Include cache in dump?
+         IF    @CAOFNOT,BEGIN
+         SYSCTL RM,RA,TYPE=DUMPNOT
+         END   ,
+* This option causes a checksum to be calculated on each write. Then
+* on each read, it is calculated again and compared to the write value.
+* A dump occurs if the values don't match. Some day this could be
+* removed for performance considerations.
+         SET   CITHFCHK            Set checksum option
+*
+         LH    RA,CITHASH          Hash number
+         SLL   RA,4                Times 16
+         LA    RB,CITHQUE          First one
+         WITH  (CITHQUE,RB),BEGIN
+         LOOP  BEGIN
+         ST    RB,CITHQFP          Init queue head
+         ST    RB,CITHQBP
+         LA    RB,CITHQUE+L'CITHQUE Increment pointer
+         UNTIL (BCT,RA),END
+         END   ,
+*
+         CLEAR CITHESO             Set up open API
+         LA    RY,CITHESO          Open the device
+         WITH  (#HSPOPEN,RY),BEGIN
+         LA    R15,#HSOPEN
+         ST    R15,#HSPOCMD
+         L     RX,CITHNBUF         Count of buffers
+         SRL   RX,4                Divide by 16
+         ST    RX,#HSPSIZE
+         END   ,
+*
+         LA    RA,16               Count of control areas
+         LA    RB,CITHCTL          First one
+         WITH  (CITHCTL,RB),BEGIN
+         LOOP  BEGIN
+         MVC   CITHCBID,=C'CIT0'
+         LA    R15,16
+         SR    R15,RA
+         LA    R15,=C'0123456789ABCDEF'(R15)
+         MVC   CITHCBID+L'CITHCBID-1(1),@R15
+         GRCRE CID=CITHCBID        Get GRES id
+         ST    RVR,CITHGRES        Set id
+         PSET  @IOSIDGET           Get IORB
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         ST    RVR,CITHIORB
+         LA    RS,CITHAFP
+         ST    RS,CITHAFP          Init aging queue head
+         ST    RS,CITHABP
+         LA    RX,#IOUESO          Hiperspace type (extended storage)
+         SYSCTL (RX),TYPE=ALLOC
+         IF    (RX,ZERO),'ABORT NO_HCACHE_SPACE'
+         ST    RX,CITHTOKN         Save our identifier
+         PSET  @IOSDOIO            Call IO Supervisor
+         PMOV  @IOSCHID,CITHTOKN   Hiperspace cache identifier
+         PMOV  @IOSID,CITHIORB     I/O supervisor ID
+         PMOV  @IOSPID,PZCURPID
+         PMOV  @IOSCP,(RY)         Open API
+         SET   @IOSFSYNC           Wait for I/O to complete
+         VCALL IOSDOIO
+         IF    (RVR,NZ),'ABORT CHOPEN_NOT!'
+         LA    RB,CITHCTL+L'CITHCTL Increment pointer
+         UNTIL (BCT,RA),END
+         END   ,
+*
+         LA    RA,16               Count of control areas
+         LA    RB,CITHCTL          First one
+         WITH  (CITHCTL,RB),BEGIN
+         L     RN,CITHSIZE         Get size of CITH
+         LA    RN,CITH(RN)         Point to CABHs
+         LOOP  BEGIN
+         L     RX,CITHNBUF         Count of buffers
+         SRL   RX,4                Divide by 16
+         CLEAR RY                  Buffer number
+         LOOP  BEGIN
+         MVC   CABHBID,=C'CABH'    Set id
+         ST    RY,CABHBLKN         Set buffer number
+         INCR  RY                  Next buffer number
+         LQUE  CITHA,CABHA         Queue it up
+         LA    RN,CABH+L'CABH      Point to next one
+         UNTIL (BCT,RX),END
+         LA    RB,CITHCTL+L'CITHCTL Increment pointer
+         UNTIL (BCT,RA),END
+         END   ,
+*
+         LA    RVR,CITH            Return CIT ptr to caller
+         PEND  ,
+*
+* The offset to the prime number used as a hash number for the table
+* is caculated by dividing the number of records defined for the cache
+* by 16384. These hash numbers are the nearest prime number to the
+* next successive multiple of 82. This will give an average queue
+* depth of around 13 or 14. This table accomodates cache sizes of
+* up to 500,000 blocks or so. Add some more prime numbers to the
+* end of this table if cache sizes go above this amount some day.
+*
+HASHTAB  DC    Y(83,163,263,331,409,491,571,653,739,821,907,983)
+         DC    Y(1063,1151,1231,1307,1399,1471,1559,1637,1721,1801)
+         DC    Y(1889,1973,2053,2131,2213,2297,2377,2459,2543)
+HASHTMAX EQU   *-HASHTAB-L'HASHTAB Max index
+         EJECT ,
+*
+*  CHCLOSE -- Routine to close the hiperspace cache
+* Currently not used. See MASTER for how the host closes all
+* hiperspaces.
+*
+*HCLOSE  PROC  @CACLOSE,SCOPE=GLOBAL
+*        L     RM,@CACLCIT
+*        WITH  (CITH,RM)
+*        IF    (CITHBID,NE,'CITH'),'ABORT CHCLOSE_BADCIT'
+*        MVI   CITHBID,C'c'        Invalidate the block
+*
+*        CLEAR CITHESO             Set up close API
+*        LA    RY,CITHESO
+*        WITH  (#HSPCLOS,RY),BEGIN
+*        LA    R15,#HSCLOS
+*        ST    R15,#HSPCLMD
+*        END   ,
+*
+*        PSET  @IOSDOIO            Call IO Supervisor
+*        PMOV  @IOSID,CITHIORB     I/O supervisor ID
+*        PMOV  @IOSPID,PZCURPID
+*        PMOV  @IOSCP,(RY)
+*        SET   @IOSFSYNC           Wait for I/O to complete
+*
+*        LA    RX,16
+*        LA    RB,CITHCTL          Point to the control area
+*        WITH  (CITHCTL,RB)
+*        LOOP  BEGIN
+*        PMOV  @IOSCHID,CITHTOKN
+*        VCALL IOSDOIO
+*        LA    RB,CITHCTL+L'CITHCTL
+*        UNTIL (BCT,RX),END
+*        PEND  ,
+         EJECT ,
+*
+*  CHREAD -- Routine to read a buffer from the cache if possible.
+*
+*    On entry:
+*      @CAIO - key and data/header ptrs
+*
+*    On exit, RVR:
+*      0 - OK (data moved)
+*      4 - not found
+*      8 - data block stolen from hiperspace cache
+*
+CHREAD   PROC  @CAIO,SCOPE=GLOBAL
+         L     RM,@CAIOCIT
+         WITH  (CITH,RM)
+         WITH  (CABH,RN)
+         IF    (CITHBID,NE,'CITH'),'ABORT CHREAD_BADCIT'
+*
+         INCRS CITH#RD             Count no of read requests
+*
+         CHHASH @CAIOKEY           Calc hash and displacement
+         GRGET RID=CITHGRES,EXCL=YES Get resource hold
+*
+         L     RX,CITHQFP          Get forward pointer
+         LA    RY,CITHQUE          Point to list head
+         WHILE (RX,NE,RY),BEGIN
+         LR    RN,RX               Point to item
+         SH    RN,=Y(CABHQUE-CABH) Adjust to start of block
+         IF    (CABHKEY,EQ,@CAIOKEY),EXIT Found!
+         L     RX,CABHQFP          Point to next in line
+         END   ,
+         LA    RVR,4               Init to not found
+         IF    (RX,EQ,RY),CHREADX  Not found
+         LREM  CABHA               Remove from aging queue
+*
+         L     RS,@CAIODP          Get data pointer
+         LA    R15,4095
+         IF    ('NR R15,RS',NZ),BEGIN
+         ABORT CHREA_NOT_PAGE_B
+         END
+         LRA   RS,@RS              Guest real (MVS virtual)
+         CLEAR CITHESO
+         LA    RY,CITHESO          Point to parm area
+         WITH  (#HSPDO,RY),BEGIN
+         WITH  (#HSPL,#HSPEND),BEGIN
+         ST    RS,#HSPLPGE         Set data pointer
+         OI    #HSPLPGE,X'80'      Indicate last page in list
+         LA    R15,#HSREAD         Set to read command
+         ST    R15,#HSPDCMD
+         LA    R15,#HSPL           Point to page list
+         LRA   R15,@R15            Guest real (MVS virtual)
+         ST    R15,#HSPLIST        Set page list
+         MVC   #HSPCNT,=H'1'       One page
+         MVC   #HSPLBLK,CABHBLKN   Hiperspace cache block number
+*
+         PSET  @IOSDOIO            Call IO Supervisor
+         PMOV  @IOSCHID,CITHTOKN
+         PMOV  @IOSID,CITHIORB     I/O supervisor ID
+         PMOV  @IOSPID,PZCURPID
+         PMOV  @IOSCP,(RY)
+         SET   @IOSFSYNC           Wait for I/O to complete
+         VCALL IOSDOIO
+         CLEAR RVR
+         IC    RVR,#HSPLBLK        Get return code
+         END   ,                   #HSPDO addressing
+         END   ,                   #HSPL addressing
+*
+         IF    (RVR,Z),BEGIN       Successfull
+         IF    CITHFCHK,BEGIN      Checksum option
+         L     R14,@CAIODP         Get data pointer
+         L     R15,=A(4096)        Length
+         CKSM  RK,R14              Calculate check sum
+         IF    (RK,NE,CABHCHK),'ABORT CHREAD_CHECKSUM'
+         END   ,                   Checksum option
+         L     R14,@CAIOHP         Move header
+         L     R15,@CAIOHL
+         DEX   R15,'MVC @R14(1),CABHHDR'
+         LQUE  CITHA,CABHA         Put on end of aging queue
+         INCRS CITH#RDF            Count no of successful reads
+         PSET  @IOSTIME
+         PMOV  @IOSTID,CITHIORB
+         VCALL IOSTIME
+         LM    R14,R15,CITH#RDT    Get total read IO time
+         LOOP  BEGIN
+         LR    R0,R14
+         LR    R1,R15
+         ADL   R0,@IOSIOTIME       Calc new total
+         CDS   R14,R0,CITH#RDT     Save
+         UNTIL Z,END
+         CLEAR RVR                 Indicate found
+         END   ,                   Successfull
+         ELSE  BEGIN               Not successfull
+         LREM  CABHQ               Remove from hash queue
+         XC    CABHCLR,CABHCLR     Clear record data
+         LPUSH CITHA,CABHA         Put on begining of aging queue
+         INCRS CITH#RDS            Count no of reads stollen from ESO
+         LA    RVR,8               Indicate ESO cache block stollen
+         END   ,
+*
+CHREADX  LABEL ,
+         LR    RS,RVR
+         GRREL RID=CITHGRES        Release resource
+         LR    RVR,RS
+         PEND  ,
+         TITLE 'Cache Write Routine'
+*
+*  CHWRITE -- Routine to copy the buffer passed to us into the
+*    cache.
+*
+*    On entry:
+*      @CAIO - key and data/header ptrs
+*
+*    On exit, RVR:
+*      0 - OK
+*
+CHWRITE  PROC  @CAIO,SCOPE=GLOBAL
+         L     RM,@CAIOCIT
+         WITH  (CITH,RM)
+         WITH  (CABH,RN)
+         IF    (CITHBID,NE,'CITH'),'ABORT CHWRITE_BADCIT'
+*
+         INCRS CITH#WR             Count no of write requests
+*
+         CHHASH @CAIOKEY           Calc hash and displacement
+         GRGET RID=CITHGRES,EXCL=YES Get resource hold
+*
+         L     RX,CITHQFP          Get forward pointer
+         LA    RY,CITHQUE          Point to list head
+         WHILE (RX,NE,RY),BEGIN
+         LR    RN,RX               Point to item
+         SH    RN,=Y(CABHQUE-CABH) Adjust to start of block
+         IF    (CABHKEY,EQ,@CAIOKEY),EXIT Found!
+         L     RX,CABHQFP          Point to next in line
+         END   ,
+         IF    (RX,EQ,RY),BEGIN    Not found
+         L     RN,CITHAFP          Get first on aging queue
+         SH    RN,=Y(CABHAGE-CABH) Adjust to start of block
+         IF    (CABHQUE,NZ),BEGIN  It is on another queue
+         LREM  CABHQ               Remove from other hash queue
+         END   ,
+         LPUSH CITHQ,CABHQ         First on this hash queue
+         XC    CABHCLR,CABHCLR     Clear record data
+         STCK  CABHKEY             Get TOD
+         MVC   CABHTOD,CABHKEY     Move to TOD
+         MVC   CABHKEY,@CAIOKEY    Set the key
+         END   ,                   Not found
+*
+         LREM  CABHA               Remove from aging queue
+         LQUE  CITHA,CABHA         Put on end of aging queue
+         INCR  R15,CABHNWRS        Number of writes
+*
+         IF    CITHFCHK,BEGIN      Checksum option
+         L     R14,@CAIODP         Get data pointer
+         L     R15,=A(4096)        Length
+         CKSM  RK,R14              Calculate check sum
+         ST    RK,CABHCHK          Save
+         END   ,
+         L     R14,@CAIOHP         Move header
+         L     R15,@CAIOHL
+         DEX   R15,'MVC CABHHDR(1),@R14'
+         L     RS,@CAIODP          Get data pointer
+         LA    R15,4095
+         IF    ('NR R15,RS',NZ),BEGIN
+         ABORT CHWRI_NOT_PAGE_B
+         END
+         LRA   RS,@RS              Guest real (MVS virtual)
+         CLEAR CITHESO
+         LA    RY,CITHESO          Point to parm area
+         WITH  (#HSPDO,RY),BEGIN
+         WITH  (#HSPL,#HSPEND),BEGIN
+         ST    RS,#HSPLPGE         Set data pointer
+         OI    #HSPLPGE,X'80'      Indicate last page in list
+         LA    R15,#HSWRIT         Set to write command
+         ST    R15,#HSPDCMD
+         LA    R15,#HSPL           Point to page list
+         LRA   R15,@R15            Guest real (MVS virtual)
+         ST    R15,#HSPLIST        Set page list
+         MVC   #HSPCNT,=H'1'       One page
+         MVC   #HSPLBLK,CABHBLKN   Hiperspace cache block number
+         END   ,                   #HSPDO addressing
+         END   ,                   #HSPL addressing
+*
+         PSET  @IOSDOIO            Call IO Supervisor
+         PMOV  @IOSCHID,CITHTOKN
+         PMOV  @IOSID,CITHIORB     I/O supervisor ID
+         PMOV  @IOSPID,PZCURPID
+         PMOV  @IOSCP,(RY)
+         SET   @IOSFSYNC           Wait for I/O to complete
+         VCALL IOSDOIO
+         PSET  @IOSTIME
+         PMOV  @IOSTID,CITHIORB
+         VCALL IOSTIME
+         LM    R14,R15,CITH#WRT    Get total write IO time
+         LOOP  BEGIN
+         LR    R0,R14
+         LR    R1,R15
+         ADL   R0,@IOSIOTIME       Calc new total
+         CDS   R14,R0,CITH#WRT     Save
+         UNTIL Z,END
+*
+         GRREL RID=CITHGRES        Release resource
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+         LTORG ,
+         END   .

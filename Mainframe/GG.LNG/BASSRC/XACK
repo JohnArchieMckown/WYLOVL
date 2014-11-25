@@ -1,0 +1,242 @@
+XACK     TITLE 'PACKCON'
+PACKCON  CSECT
+***********************************************************************
+*                                                                     *
+*                 WYLBUR/BASIC PACKCON PROGRAM                        *
+*                       BATCH VERSION                                 *
+*                                                                     *
+***********************************************************************
+*
+*REGISTER USAGE
+*
+R0       EQU   0                  HOLDS THE CONSTANT 16
+R1       EQU   1                  FOR PASSING ERROR CODE BACK THRU HOME
+R2       EQU   2                  ADDRESS OF CONSTANTS
+R3       EQU   3                  # OF 4 BYTE ENTRIES CURRENTLY IN
+*                                 CONS TABLE
+R4       EQU   4
+R5       EQU   5                  ADDR OF TOP OF TABLE
+R6       EQU   6                  DISPL TO OPEN SLOT
+R7       EQU   7                  HOLDS THE CONSTANT 4
+R8       EQU   8                  HOLDS THE CONSTANT 16
+R9       EQU   9                  BASE ADDR OF INLINE BUFFER
+R10      EQU   10                 BASE FOR 'CONTROL' WORK AREA
+R11      EQU   11                 BASE OF USER AREA
+R12      EQU   12                 BASE FOR PACKCON
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14
+R15      EQU   15
+*
+BASER    EQU   12                 BASE FOR PACKCON
+*
+*OS ENTRY LINKAGE (TYPE 3: DEPENDENT)
+*
+          SAVE (14,12),,*
+         BALR  BASER,0            ESTABLISH ADDRESSABILITY FOR
+         USING *,BASER             CALLED
+         LR    3,13               COPY CALLERS SAVE AREA ADDRESS
+         LA    13,72(0,13)        LOAD ADDRESS OF CALLEDS SAVE AREA
+         ST    13,8(0,3)          PUT CALLEDS SAVE AREA ADDRESS
+*                                  IN CALLERS SAVE AREA
+         ST    3,4(0,13)          PUT CALLERS SAVE AREA ADDRESS
+*                                  IN CALLEDS SAVE AREA
+*
+*SET UP FOR CONTROL PROGRAMS WORK AREA
+*
+         USING TWORK,10           TELL ASSEMBLER ABOUT TWORK
+         USING AREA,11            TELL ASSEMBLER ABOUT AREA
+*
+*
+*
+*
+***********************************************************************
+         EJECT
+*******************************************************************
+*
+*   THIS ROUTINE STORES CONSTANTS CONVERTED BY INLINE INTO THE
+*   CONSTANT TABLE.  IT ALSO PLACES IN THE INFIX LINE HALFWORDS
+*   GIVING INFORMATION ABOUT THE LOCATION OF THESE CONSTANTS IN THE
+*   CONS TABLE FOR THE EXECUTIONER.
+*   THE DATA TABLE AND CONSTANT TABLE SHARE A COMMON SPACE IN THE USER
+*   AREA.  THE DATA INFORMATION IS STORED FORWARD FROM THE BEGINNING
+*   OF THIS AREA.  THE CONSTANT INFORMATION IS STORED BACKWARD FROM
+*   THE END OF THE AREA.
+*
+*   INPUT TO PACKCON IS A LINE PUT IN TWORK BY INLINE.
+*   THE FORMAT OF THE LINE IS SHOWN BELOW.
+*
+*   INFIXNO   1ST HALFWORD - BINARY STATEMENT NUMBER
+*             2ND HALFWORD - STATEMENT TYPE
+*                  .
+*             NEXT 72 HALFWORDS - TRANSLATED STATEMENT.  POINTERS
+*                            TO CONSTANTS ARE NOT YET FILLED IN HERE.
+*                  .
+*   INFIXCON  73RD HALFWORD - INDEX PAST INFIXNO (I.E. POSITION IN
+*                            TRANSLATED LINE) WHERE A POINTER TO THIS
+*                            CONSTANT SHOULD BE PLACED.
+*             74TH HALFWORD - CONSTANT TYPE DESCRIPTOR
+*                     X'0000' END OF CONSTANT LIST
+*                     X'0004' NUMERIC CONSTANT FOLLOWS
+*                     X'0016' STRING CONSTANT FOLLOWS
+*             NEXT 4 (OR 16) BYTES - THE NUMERIC (OR STRING) CONSTANT
+*
+*   THERE ARE ADDITIONAL 8 (OR 20) BYTE ENTRIES FOR EACH CONSTANT
+*   FOUND BY INLINE.
+*
+*   DESCRIPTION OF CONS TABLE
+*
+*   THE FIRST 11 CONSTANTS IN THE TABLE ARE ALWAYS 0 THRU 10.
+*
+*                          CONSTANT     SYMBOL TABLE DESIGNATION
+*                          ________     ________________________
+*                             10               X'600A'
+*                             .                 .
+*                             .                 .
+*          ACONSBEG           0                X'6000'
+*
+*   IF THE 1ST CONSTANT ENTERED IS A STRING, IT IS PLACED IN THE CONS
+*   TABLE IN THE 16 BYTES PRECEDING THE 10 ENTRY.  ITS SYMBOL TABLE
+*   DESIGNATION (STD) IS '700B'.  IF THE NEXT CONSTANT ENTERED IS
+*   NUMERIC IT IS PLACED IN THE TABLE IN THE 4 BYTES PRECEDING THE
+*   STRING ENTRY.  ITS STD IS '600F'.
+*   THE EXECUTIONER USES THE LAST 12 BITS OF THE STD *4 AS AN INDEX
+*   INTO THE CONS TABLE.
+*
+*   PACKCON CHECKS EACH CONSTANT TO SEE IF IT IS AN INTEGER IN THE
+*   RANGE 0-10.  IF SO, IT DOES NOT PUT THE CONSTANT IN THE TABLE BUT
+*   INSTEAD PLACES IN THE INFIX LINE THE STD FOR THE CONSTANT ALREADY
+*   IN THE TABLE.  IF THE CONSTANT IS NOT 0-10, IT IS PLACED IN THE
+*   CONS TABLE BY PACKCON AND THE APPROPRIATE STD IS PLACED IN THE
+*   INFIX LINE.
+*
+*   THE CONSTANT TABLE POINTER (ACONSPTR) ALWAYS POINTS AT THE LAST 4
+*   BYTE ENTRY IN THE CONS TABLE. ITS VALUE IS A DISPLACEMENT PAST
+*   THE BEGINNING OF THE DATA TABLE.
+*   THE DATA TABLE POINTER (ADATAPTR) ALWAYS POINTS AT THE NEXT FREE
+*   ENTRY IN THE DATA TABLE.  IT IS A DISPLACEMENT PAST THE BEGINNING
+*   OF THE DATA TABLE (I.E. PAST ADATABEG).  THESE POINTERS ARE
+*   CHECKED AGAINST EACH OTHER TO DETERMINE WHEN THE TABLE IS FULL.
+*                                                                     *
+***********************************************************************
+*                                                                     *
+*ESTABLISH ADDR TO INLINE BUFFER
+*                                                                     *
+         LA    R9,INFIXNO         BASE ADDR OF INLINE BUFFER
+         LA    R7,4               LOAD REGISTERS WITH CONSTANTS
+         LA    R8,15
+         L     R5,ADATABEG        GET DISP TO BEG OF DATA TABLE
+         LA    R5,0(R5,R11)       BUMP BY DISP OF USER
+         L     R6,ACONSPTR        GET DISP TO NEXT OPEN SLOT IN TABLE
+         LA    R2,INFIXCON        ADDR OF FIRST CONSTANT IF ANY
+         L     R3,INLDCN
+*                                                                     *
+*CHECK FOR ANYTHING TO DO
+*                                                                     *
+PC1      LH    R4,0(R2)           FIND WHAT KIND OF CONSTANT
+         LA    R4,0(R4,R9)        BY LOOKING INTO INFIX CODE
+         TM    0(R4),X'70'        THATS BEING REFERENCED
+         BO    PS                 X'70' IS STRING
+         TM    0(R4),X'60'        X'60' IS NUMBER
+         BNO   HOME               OTHERWISE WERE DONE CAUSE OF 0 AT END
+*                                                                     *
+*PROCESS NUMERICAL CONSTANT INTO THE TABLE
+*                                                                     *
+PN       L     R4,4(,R2)          PICK UP THE CONSTANT
+         LR    R1,R4
+         N     R1,MASK1           ARE THE LAST 20 BITS ZERO?
+         BNZ   NOTHERE            NO-SO # IS NOT INTEGER 1 THRU 10
+         LTR   R4,R4              IS THE CONSTANT 0?
+         BZ    PACK3              YES
+         CL    R4,TEN             IS NUMBER > 10?
+         BH    NOTHERE            YES
+         CL    R4,ONE             IS NUMBER < 1?
+         BL    NOTHERE            YES
+PACK3    LR    R1,R4
+         SRL   R1,20              MOVE THE 41X LEFT IN REGISTER
+         NR    R1,R8              MASK OUT ALL BUT LAST 4 BITS
+         B     PACK1
+*
+NOTHERE  SR    R6,R7
+         C     R6,ADATAPTR        IS THERE SPACE FOR THIS ENTRY?
+         BL    FULL               NO
+         ST    R6,ACONSPTR        SAVE CONS TABLE POINTER
+         ST    R4,0(R6,R5)         PUT NEW ENTRY AWAY
+         LR    R1,R3              # OF ENTRIES IN CONS TABLE INTO REG
+         LA    R3,1(R3)           BUMP BY 1
+         ST    R3,INLDCN          STORE AWAY
+PACK1    LH    R4,0(,R2)          PICK UP INDEX INTO INFIX LINE
+         LA    R2,8(R2)           BUMP REG TO POINT AT NEXT CONSTANT
+         AH    R1,MASK2           ADD '6000' TO DISP IN CONS
+         STH   R1,0(R4,R9)        STORE SYMBOL TABLE DESIGNATION IN
+*                                 INFIX LINE
+         B     PC1
+*                                                                     *
+*PROCESS STRING CONSTANT INTO THE TABLE
+*                                                                     *
+PS       LH    R14,2(R2)
+         SH    R6,=H'4'           NOW POINTING BACK ENOUGH
+         C     R6,ADATAPTR        IS THERE ROOM FOR THIS ENTRY?
+         BL    FULL               NO
+         L     R4,ASTR2PTR       FIND WHERE STRING GOES
+         SR    R4,R14             SEE WHERE IT WILL END
+         C     R4,ASTR1PTR       ARE WE PAST END
+         BNH   FULL               YES, THEN TABLE FULL
+         ST    R4,ASTR2PTR       ELSE, SAVE NEW NEXT STRG PTR
+         A     R4,ASTRGBEG        NOW GET ACTUAL STRING LOC.
+         LA    R4,0(R4,R11)
+         ST    R4,0(R6,R5)        SAVE AS 1ST OF 4 WDS IN CONS TABLE
+         STC   R14,0(R6,R5)       WITH STRING LENGTH IN 1ST BYTE
+         BCTR  R14,0               MINUS 1 FOR EXECUTE
+         LTR   R14,R14
+         BM    PS1
+         EX    R14,MVCST          MOVE IN STRING (NOT INCLUDING LENGTH)
+PS1      ST    R6,ACONSPTR        STORE PNTR AWAY
+         LR    R1,R3              CONSTANT POINTER
+         LA    R3,1(,R1)          AND NEW INDEX VALUE
+         ST    R3,INLDCN          SAVE FOR NEXT CONSTANT
+         LH    R4,0(,R2)
+         LA    R14,4(R14)
+         SRL   R14,2
+         SLL   R14,2
+         LA    R2,4(R14,R2)       R2 NOW POINTS WHERE NEXT CONST. GOES
+         AH    R1,MASK3           NOW HAVE STRING ID ON IT
+         STH   R1,0(R4,R9)        STORE CONST. ID AWAY
+         B     PC1
+*
+FULL     LA    R1,1               PICK UP ERROR CODE
+         LH    R0,PREST1ST        PICK UP LINE # FOR RUNERR
+         L     R15,ARUNERR        CALL RUNERR TO PRINT TABLE FULL
+         BALR  14,R15             MESSAGE
+         LR    R0,R1              LOAD ERROR CODE FOR CONTROL PROGRAM
+         B     RETURN
+HOME     SR    R0,R0
+*
+*
+*RETURN TO CALLER
+*
+RETURN   L     13,4(0,13)         PUT ADDR OF CALLERS SAVE AREA BACK
+         LM    14,15,12(13)       RESTORE CALLERS REGISTERS
+         LM    1,12,24(13)         EXECPT REGISTER 0
+         BCR   15,14              RETURN TO CALLER
+         DS    0F
+*
+*ADDRESS CONSTANTS FOR EXTERNAL CONTROL SECTIONS (V TYPE IF ANY)
+*
+ARUNERR  DC    V(RUNERR)
+MVCST    MVC   0(0,R4),4(R2)
+         DS    0F
+MASK1    DC    X'000FFFFF'
+ONE      DC    X'41100000'
+TEN      DC    X'41A00000'
+MASK2    DC    X'6000'
+MASK3    DC    X'7000'
+*
+         LTORG
+*
+         EJECT
+TWORK    DSECT
+         COPY TWORK
+         EJECT
+AREA     DSECT
+        COPY AREA
+         END

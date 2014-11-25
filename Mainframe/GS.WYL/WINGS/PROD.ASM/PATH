@@ -1,0 +1,529 @@
+PATH     TITLE 'Wings Path Routines'
+********************************************************************
+*** %%Module: wings asm path;                                      *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- FILE SERVER PATH ROUTINES.                           *
+***                                                                *
+***    These are the Suzan path communications routines based      *
+***    on Wylbur's path routines.                                  *
+***                                                                *
+***    Created, 11/29/90, Parker Gillespie                         *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***                                                                *
+***  2002/03/20  mcl  clear suzan flag AFTER debug dump!           *
+***  2002/01/11  mcl  dump RC after send if debugging              *
+***  1996/07/02  mcl  additional debugging code                    *
+***  1995/06/02  mcl  use PIBUFSIZ value                           *
+***  1994/11/01  mcl  dynamic path buffer length, ORVYL kluge      *
+***  1994/02/24  mcl  clear ecb before SCOM send                   *
+***  1990/12/11  Niz  Cleanup.                                     *
+***  1990/11/30  PJG  Initial version (Based on about everything). *
+***                                                                *
+********************************************************************
+PATH     HIBAL
+         IDENT 2079                16:24:51 03/20/2002 MCL
+*
+         REGS  FSR,,,,,,,,,WAR,BR,TVTR,(GVTR,LSR),SPR,RAR
+*
+         SYSDEFN
+*
+         PUSH  DSECTS              Common DSECTS
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+         POP   PRINT
+*
+SEGCB    RECORD 'SEGCB'
+*
+KWR      RECORD 'KWR'
+*
+*
+         COPY  PINFO
+*
+         COPY  UPATH
+*
+         COPY  PDBUGREC
+
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+         TITLE 'PATHALLO - Allocate a new user path'
+*box
+*
+*   PATHALLO -- Routine to allocate a new user path.
+*
+PATHALLO XPROC
+*-
+*-       Get core for PATH control block and initialize with
+*-         model path.
+*-
+         LA    R0,L'UPATH
+         VCALL GETCORE             Get memory for PATH
+*
+         LR    R5,R1
+         WITH  (UPATH,R5),BEGIN
+         MOVEL UPATH,L:=A(MPATH),L'UPATH  Move in model path block
+         MVC   UPATMY,=CL8' '      Set MYTAG
+         LA    R15,UPATSECB        Our ECB
+         ST    R15,UPATECB         Save ptr in PATH
+         LA    R15,UPATSPST        Our Suzan post byte
+         ST    R15,UPATECBF        Save ptr in PATH
+         END
+*
+         LR    R1,R5               Path ptr
+         PRETURN (R1)
+         CLEAR R15                 A-ok
+         PEND
+         TITLE 'PATHOPEN - Open path'
+*box
+*
+*   PATHOPEN -- Routine to open a path.
+*
+*     On entry:
+*       R1 - UPATH ptr
+*
+*     On exit, R15 (and cc):
+*       0 - opened
+*       nz- error of some sort
+*
+*
+**-POPNWA   RECORD BEGIN
+**-POPNWORD DS    F                   Work word
+POPNWORD EQU   PDBSAVER            work word
+**-         END
+*-
+PATHOPEN XPROC PDBUGREC
+         LR    R5,R1
+         WITH  (UPATH,R5)
+         FAIL  (UPATH,NE,'PATH'),'Bad UPATH address'
+*-
+*-       Open the path.
+*-
+         LA    R1,UPAT             Suzan path control block
+         ST    R1,POPNWORD         Build parm (path addr)
+         SET   POPNWORD.X'80'      Flag end of parm list
+         SCOM  OPEN,LA:POPNWORD    Open the path
+*-
+*-       (Returns with R15 return code set by the Suzan SVC.)
+*-
+         IF    TVTXDBUG,BEGIN      debug trace
+         ST    R15,PDBSAVER        Save return code
+         MVC   PDBMSG(PDB#SMAL),GVTBLANK       clear
+         MVC   PDBMAGIC,UPATMGC    magic cookie
+         MVC   PDBTSTYP,=CL10'PathOpen'
+         MVC   PDBSVNAM,TVTNAME    server name
+         SR    R0,R0
+         IC    R0,UPATSPST         SUZAN post flag byte
+         BTX   PDBFLAGS,2,(R0)     Dump flag bits
+         STCK  TVTLCLDB             get time
+         LM    R0,R1,TVTLCLDB
+         LA    R15,PDBTIME
+         XCALL FMTTIME             convert time
+         LH    R0,TVTLINE          requestor's line number
+         BTD   PDBLINO,4,(R0)
+         BTD   PDBDATA1,4,PDBSAVER Return from SCOM OPEN
+         MVC   PDBDATA1,UPATFLAG   some data
+         QSNAP PDBMSG,PDB#SMAL     dump it to log
+         L     R15,PDBSAVER        Restore R15
+         END   ,                      (debug trace)
+
+         PEND
+         TITLE 'PATHREAD - Read record from path buffer'
+*box
+*
+*   PATHREAD -- Routine to read a new line from the path buffer.
+*
+*     On entry:
+*       R1 - UPATH ptr
+*
+*     On exit, R15 (and cc):
+*       0 - ok; R1,R0 - line loc, len
+*       nz- no data; R1,R0 - error msg loc, len
+*
+PATHREAD XPROC (R2,LSR),PDBUGREC
+         LR    R5,R1
+         WITH  (UPATH,R5)
+         IF    (UPATH,NE,'PATH'),'FAIL "Bad UPATH address"'
+*-
+*-       First check to see if there is still data in the current
+*-         xact.
+*-
+         IF    (UPATDLEN,NZ),PRDOK  Fine, scram
+*-
+*-       Get the next transaction and process its header.
+*-
+         SCOM  FREELOC,0,L:UPATMGC  Get next transaction
+         IF    (R15,NZ),BEGIN
+         ACALL PATHRC              Get error msg text
+         B     PRDEXIT
+         END
+*
+         IF    (R0,Z),PRDOK        Nothing to read, scram
+*-
+*-       Update trace.
+*-
+         STCK  UPATRTIM            Time stamp
+         ST    R0,UPATRLEN         Save length
+         LR    R15,R0              Copy length
+         CEIL  R15,L'UPATRDAT      Truncate to trace area length
+         DEX   R15,'MVC UPATRDAT(0),@R1'  Move data to trace area
+         IF    TVTXDBUG,BEGIN      debug trace
+         STM   R0,R1,PDBSAVER      Save
+         MVC   PDBMSG(PDB#LARG),GVTBLANK  clear buffer
+         MVC   PDBSVNAM,TVTNAME    server name
+         SR    R0,R0
+         IC    R0,UPATSPST         SUZAN post flag byte
+         BTX   PDBFLAGS,2,(R0)     Dump flag bits
+         MVC   PDBMAGIC,UPATMGC    magic cookie
+         MVC   PDBTSTYP,=CL10'PathRead'
+         LM    R0,R1,UPATRTIM      Set into parameter registers
+         LA    R15,PDBTIME         Move address of work area
+         XCALL FMTTIME             Convert time
+         LH    R0,TVTLINE          requestor's line number
+         BTD   PDBLINO,4,(R0)
+         MVC   PDBDATA1,UPATRDAT   some data
+         QSNAP PDBMSG,PDB#LARG     log the debug data
+         LM    R0,R1,PDBSAVER      restore
+         END   ,                      (debug trace)
+*-
+*-       Return data to caller if not in "multiple line" format.
+*-
+         IF    ((R0,LT,4),OR,(@R1,NE,X'00')),BEGIN
+         CLEAR UPATFHDR            Flag not multiple line format
+         INCR  R15,TVTCNTRECVD     Count transaction received
+         CLEAR R14                 Zero high word for double
+         LR    R15,R0              Copy bytes read
+         ADL   R14,TVTCNTBRECVD    Count bytes received
+         STM   R14,R15,TVTCNTBRECVD    Replace stats in TVT
+         CLEAR R15                 RC=0
+         EXIT  PATHREAD            Exit
+         END
+*
+         SET   UPATFHDR            Data is in multiple line format
+         ST    R1,UPATDLOC         Save data location
+         ST    R0,UPATDLEN         ...and remaining length
+*-
+*-       Return pointer to next line of data (R1,R0 = line loc,len).
+*-
+PRDOK    LT    R2,UPATDLEN
+         IF    Z,'SETMSG "NO DATA"; LH R15,=H"-4"; B PRDEXIT'
+         L     R3,UPATDLOC
+         L     R0,@R3              Get length
+         LA    R3,@R3+4            Adjust for length
+         SH    R2,=H'4'
+         IF    NEG,'CLEAR R2'
+         CEIL  R0,R2               Not too much now
+         LR    R1,R3               Start of data
+         AR    R3,R0               Adjust for data bytes
+         SR    R2,R0
+         ST    R3,UPATDLOC
+         ST    R2,UPATDLEN
+         INCR  R15,TVTCNTRECVD     Count transaction received
+         CLEAR R14                 Zero high word for double
+         LR    R15,R0              Copy bytes read
+         ADL   R14,TVTCNTBRECVD    Count bytes received
+         STM   R14,R15,TVTCNTBRECVD    Replace stats in TVT
+*
+         CLEAR R15                 A-ok
+PRDEXIT  PEND
+         TITLE 'PATHSEG - Path SEG routine'
+*box
+*
+*   PATHSEG -- Seg processing routine to handle writing
+*     data across the Suzan path.
+*
+*     On entry:
+*       R15 - SEGCB ptr
+*
+*     Note:
+*       In the SEGCB, "SEGCBUSR" must point to our UPATH.
+*
+PSGWA    RECORD BEGIN
+PSGHDRA  DS    A                   SCOM parm: header address
+PSGHDRL  DS    F                   SCOM parm: header length
+PSGDATAA DS    A                   SCOM parm: address
+PSGDATAL DS    F                   SCOM parm: length
+         END
+*-
+PATHSEG  XPROC PSGWA,TRACE=NO
+         CLEAR PSGWA
+*
+         LR    R5,R15              Move SEGCB address
+         WITH  (SEGCB,R5)          Addressability to SEGCB
+*-
+*-       SEGWR/SEGCR (or overflow).
+*-
+         IF    (SEGCBWR,OR,SEGCBCR,OR,SEGCBOVF),BEGIN  SEGWR...
+*
+         L     R3,SEGCBUSR         Get our UPATH ptr
+         WITH  (UPATH,R3),BEGIN
+         FAIL  (UPATH,NE,'PATH'),'Bad UPATH address'
+         IF    UPATFWHDR,BEGIN     Need to include wings header
+         S     R1,=A(16)           Back off wings header length
+         A     R0,=A(16)           Adjust length to send
+         END   ,
+         LTR   R2,R0
+         IF    P,BEGIN             Current buffer length
+         IF    ((R0,GE,16),AND,(@R1,EQ,'FILE_ERROR:')),BEGIN
+         XCALL XPRTCMD             Log file_error return
+         END   ,
+         INCR  R15,TVTCNTSENT      Tally scom send
+         CLEAR R14                   zero for byte count
+         LR    R15,R0                  set byte count of send
+         ADL   R14,TVTCNTBSENT           tally total byte count
+         STM   R14,R15,TVTCNTBSENT         replace in tvt
+         ST    R1,PSGDATAA         Seg data ptrs
+         ST    R0,PSGDATAL
+*
+         SETMSG PSGDATAL
+         ST    R1,PSGHDRA          Length
+         ST    R0,PSGHDRL
+         L     R4,UPATECB          ->SUZAN ECB             ML940224
+*
+         SET   PSGDATAA.X'80'      Set VL bit
+*
+*
+         LOOP  BEGIN               Resend transaction on error
+         LA    R1,PSGDATAA         Assume sending data only
+         IF    UPATFHDR,'LA R1,PSGHDRA'  Send length + data
+         MVI   @R4,0               Clear SUZAN ECB         ML940224
+         IF    TVTXDBUG,BEGIN      special debug trace     ml950515
+         XPUSH ,,L'PDBUGREC,PTR=R7 Get debug space         ml960702
+         WITH  (PDBUGREC,R7),BEGIN
+         STM   R0,R1,PDBSAVER      save
+         MVC   PDBMSG(PDB#LARG),GVTBLANK       clear
+         MVC   PDBMAGIC,UPATMGC    magic cookie
+         MVC   PDBTSTYP,=CL10'PathWrite'
+         MVC   PDBSVNAM,TVTNAME    server name
+         SR    R0,R0
+         IC    R0,UPATSPST         SUZAN post flag byte
+         BTX   PDBFLAGS,2,(R0)     Dump flag bits
+         STCK  TVTLCLDB            get time
+         LM    R0,R1,TVTLCLDB
+         LA    R15,PDBTIME
+         XCALL FMTTIME             convert time
+         LH    R0,TVTLINE          requestor's line number
+         BTD   PDBLINO,4,(R0)
+         L     R1,PSGDATAA         ->data
+         MVC   PDBDATA1,@R1        some data
+         QSNAP PDBMSG,PDB#LARG   log debugging data
+         LM    R0,R1,PDBSAVER      restore R0-R1
+         END   ,                      (with R7)
+         XPOP  PTR=R7              free workarea
+         END   ,                      (debug)
+
+         MVI   UPATSPST,0          clr reason-for-post flags   ML02
+         SCOM  SEND,(R1),L:UPATMGC Send transaction
+         PTRACE SCOMSEND
+         STC   R15,UPATWRC         Save return code
+         IF    TVTXDBUG,BEGIN      special debug trace     ml020111
+         QSNAP (R15)               dump return code        ml020111
+         END   ,                      (debug trace)        ml020111
+         IF    (R15,Z),EXIT        Exit loop on successful send
+         LT    RAR,SEGCBERR        Load error recovery routine addr
+         IF    NZ,BEGIN            Enter recovery routine
+         LR    R1,R15              Save return code
+         LR    R15,R5              Load address of segcb
+         BALR  RAR,RAR             Enter recovery routine
+         IF    NZ,BEGIN
+         FAIL  'Unexpected path return code'
+         END   ,                      (bad RC from recovery)
+         END   ,                      (recovery)
+         END   ,                      (loop)
+         END
+         IF    UPATFWHDR,BEGIN
+         S     R2,=A(16)           Adjust if we included the header
+         END   ,
+         LCR   R0,R2               For overflow: nbytes processed
+         PRETURN (R0)
+         END   ,
+         END
+*-
+*-       Post processing (set return code only).
+*-
+         IF    SEGCBSPP,BEGIN      Post processing...
+         CLEAR R0                  Assume A-ok
+         END
+*
+         PEND
+         TITLE 'PATHCLS - Close user path'
+*box
+*
+*   PATHCLS -- Routine to close a user path.
+*
+*     On entry:
+*       R1 - path number
+*
+*     On exit, R15 (and cc):
+*       0 = closed
+*       4 = not closed; R1,R0 = error msg loc, len
+*
+PATHCLS  XPROC PDBUGREC
+         LR    R5,R1
+         WITH  (UPATH,R5)
+         IF    (UPATH,NE,'PATH'),'FAIL "Bad UPATH address"'
+*-
+*-       Close path (we don't care if it's not open).
+*-
+         IF    TVTXDBUG,BEGIN      debug trace
+         MVC   PDBMSG(PDB#SMAL),GVTBLANK       clear
+         MVC   PDBMAGIC,UPATMGC    magic cookie
+         MVC   PDBTSTYP,=CL10'PathClose'
+         MVC   PDBSVNAM,TVTNAME    server name
+         SR    R0,R0
+         IC    R0,UPATSPST         SUZAN post flag byte
+         BTX   PDBFLAGS,2,(R0)     Dump flag bits
+         STCK  TVTLCLDB             get time
+         LM    R0,R1,TVTLCLDB
+         LA    R15,PDBTIME
+         XCALL FMTTIME             convert time
+         LH    R0,TVTLINE          requestor's line number
+         BTD   PDBLINO,4,(R0)
+         ST    R5,PDBDATA1         path number is extra info
+         MVC   PDBDATA1,UPATFLAG   some data
+         QSNAP PDBMSG,PDB#SMAL     dump it to log
+         END   ,                      (debug trace)
+
+         SCOM  CLOSE,0,L:UPATMGC   Close path
+         MVC   UPATHID,=C'FPTH'    Zap id
+*-
+*-       Free UPATH memory.
+*-
+         LA    R1,UPATH
+         VCALL FREECORE            Release memory
+         CLEAR R15                 A-ok
+         PEND
+         TITLE 'PATHINFO - Get path partner information'
+*box
+*
+*  PATHINFO -- Routine to get path partner information.
+*
+*    On entry:
+*      R1 - UPATH ptr
+*
+*    On exit:
+*      UPATH information fields are filled in
+*
+PIWA     RECORD BEGIN
+PIPARMS  DS    2A                  Suzan INFO parm: loc, len
+*-
+*-       Information returned from the "SCOM INFO" call.
+*-
+PIASCBP  DS    A                   Info:  Partner's ASCB ptr
+PIBUFSIZ DS    F                   Info:  Partner's buffer size
+PIPATHNM DS    CL8                 Info:  Partner's path name
+PIXACTP  DS    A                   Info:  Input XACT chain ptr
+         DS    XL16                Info:  Zeros (reserved)
+PIPINFO  DS    XL(L'PINFO)         Info:  Partner's "PINFO"
+PIINFO   EQU   PIASCBP,*-PIASCBP,C'X'
+*
+PIWORK   DS    XL64                Local work area
+         END
+*-
+PATHINFO XPROC PIWA
+         LR    R5,R1
+         WITH  (UPATH,R5)
+         FAIL  (UPATH,NE,'PATH'),'Bad UPATH address'
+*-
+*-       Get path information from Suzan.
+*-
+         LA    R0,PIINFO           Addr of area
+         LA    R1,L'PIINFO         Length
+         STM   R0,R1,PIPARMS
+         SET   PIPARMS.X'80'       Mark as end of list
+*
+         SCOM  INFO,PIPARMS,L:UPATMGC  Get Suzan info
+         IF    (R15,NZ),EXIT       Couldn't get info, forget it
+*
+         IF    (PIASCBP,Z),EXIT    No partner's ASCB, forget it
+*
+         MVC   UPATPASC,PIASCBP    Save partner's ASCB ptr
+*-
+*-       Save partner information when PINFO is present.
+*-
+         LA    R4,PIPINFO
+         WITH  (PINFO,R4)
+         IF    (PINFO,EQ,'PINF'),BEGIN  We have info...
+         IF    (PINFOCAL,EQ,'AUTH'),'SET UPATFAUTH'  Authorized
+         MVC   UPATPJOB,PINFOSYS   Save partner's "jobname"
+         MVC   UPATPACT,PINFOACC   Save partner's account
+         MVC   UPATPLNO,PINFOLNO   Save partner's line number
+         MVC   UPATPNAM,PINFONAM   Save partner's user name
+         L     R0,PIBUFSIZ         Partner's buffer size   ml950602
+         ST    R0,UPATBUFL                                 ml950602
+         IF    PINFOIFL.KWRIFSPR,'SET UPATFSPR'  Sys privs
+         IF    PINFOIFL.KWRIFOPR,'SET UPATFOPR'  Opr privs
+         END
+*-
+*-       Save partner information for batch jobs (no PINFO).
+*-
+         ELSE  BEGIN               No PINFO, get jobname...
+         QSNAP 'PATHINFO: No Wylbur/Orvyl PINFO block',MODE=WTL
+         HASPSERV JOBNAME,PIWORK,ASCB=UPATPASC  Get jobname
+         MVC   UPATPJOB,PIWORK     Save jobname
+*
+         HASPSERV JOBACCT,PIWORK,ASCB=UPATPASC  Get account
+         MVC   UPATPACT,GVTBLANK   Form "gg.uuu"...
+         MVC   UPATPACT(2),PIWORK+3
+         MVI   UPATPACT+2,C'.'
+         MVC   UPATPACT+3(3),PIWORK
+         IF    PIWORK+7.KWRIFSPR,'SET UPATFSPR'  Sys privs
+         IF    PIWORK+7.KWRIFOPR,'SET UPATFOPR'  Opr privs
+*
+         MVC   UPATPLNO,=H'-1'     No line number
+         CLEAR UPATPNAM            No user name
+         END   ,                     (no PINFO)
+*
+         CLEAR R15                 (Neatness)
+         PEND
+         TITLE 'PATHRC - Format path return code'
+*box
+*
+*   PATHRC -- Routine to form string from return code.
+*
+*     On entry:
+*       R15 - return code from Suzan
+*
+*     On exit:
+*       R1,R0 - message loc, len
+*
+PATHRC   XPROC (R2,LSR)
+         SETMSG 'OK'
+         IF    (R15,NZ),'SETMSG "ERROR"'
+         IF    (R15,EQ,=A(UPATRIFC)),'SETMSG "BAD SUZAN FUNCTION CODE"'
+         IF    (R15,EQ,=A(UPATRPMW)),'SETMSG "BAD SUZAN CONTROL BLOCK"'
+         IF    (R15,EQ,=A(UPATRBAF)),'SETMSG "BUFFER FULL"'
+         IF    (R15,EQ,=A(UPATRNOP)),'SETMSG "NO PARTNER"'
+         IF    (R15,EQ,=A(UPATRBOM)),'SETMSG "TOO BIG"'
+         IF    (R15,EQ,=A(UPATRIBS)),'SETMSG "BUFFER TOO SMALL"'
+         IF    (R15,EQ,=A(UPATRBPI)),'SETMSG "BAD SUZAN BUFFER ADDR"'
+         IF    (R15,EQ,=A(UPATRIAD)),'SETMSG "BAD SUZAN ADDR"'
+         PEND
+*-
+*-       Constants.
+*-
+         COPY  MPATH               Model UPATH
+*
+         QLTORG
+PATHX    EQU   *-PATH              Module length
+*
+         DC    0D'0'               FORCE OUT TO DOUBLE WORD
+         ENTRY SYMPATH             DEFINE SYMBOL ENTRY FOR PATH
+SYMPATH  DC    CL8'PATH',A(PATH),A(PATHX)
+         DC    A(0)                End of symbols
+         END   .

@@ -1,0 +1,216 @@
+;
+;;  BITHOSTS -- build Bitnet entries for Wylbur host table
+;;               using XMAILER.NAMES and DOMAIN.NAMES
+;;
+;;  Changes:
+;;    05/09  Make BSMTP mailer type default
+;;    05/16  ALIAS line format changes
+;;    06/30  Generate HOST entry for all hosts
+;;    07/17  Check 'interconnect' in DOMAIN NAMES
+
+xproc () begin
+
+   set exec nolimit                ;major hog
+
+   open
+   x.out_act = actno
+
+   putend ;  BITNET table  -  created  &(xdate)
+
+   pcall domains
+
+   pick &(x.out_act)
+
+   comm Active file contains new table.
+
+end
+
+;<.page>
+;
+;  xmailer -- build host table entries from XMAILER NAMES
+;
+
+proc xmailer () begin
+
+   dcl str key, value
+
+   use wyl.gs.net.xmailer.names keep
+
+   del ~':nick.'1
+   squash all
+   num from 1 by 1
+
+   ln = first
+   while (ln le last) begin
+      host = ''
+      alias = ''
+      mailer = ''
+
+      pcall get_key(':nick.',line(ln),host)
+      pcall get_key(':alias.',line(ln),alias)
+      pcall get_key(':mailer.',line(ln),mailer)
+
+      pcall xmailer_entry (host,mailer)
+      if (alias ne '' and alias ne host) \
+         pcall xmailer_entry (alias,mailer)
+      ln = ln + 1
+   end
+
+   close
+
+end
+
+;
+;  xmailer_entry -- build host table entry
+;
+
+proc xmailer_entry (host,mailer) begin
+
+   asave = actno
+   pick &(x.out_act)              ;select output file
+
+   mailtype = ''
+
+   if (ind(mailer,'?') gt 0) mailer = ''
+   n = ind(mailer,' ')
+   if (n gt 0) begin
+      mailtype = strip(sub(mailer,n+1))
+      mailer = sub(mailer,1,n-1)
+      n = ind(mailtype,' ')
+      if (n gt 0) \
+         mailtype = sub(mailtype,1,n-1)
+   end
+
+   if (mailer ne '') begin
+      if (ind(mailer,'@') eq 0) \
+         mailer = mailer||'@'||host
+      if (mailtype eq '') \
+         mailtype = 'BSMTP'
+   end
+
+   stemp = 'ALIAS '||left(host,10)||host||'.BITNET'
+   if (mailer eq '') \
+      stemp = left(stemp,35)||';BITHOST &(host)=*'
+   else \
+      stemp = left(stemp,35)||';BITHOST &(host)='|| \
+      mailer||' '||mailtype
+   putend &(stemp)
+
+
+   putend ;
+   putend HOST &(host).BITNET BEGIN
+
+   if (index(mailtype,'BSMTP') ne 0) begin
+      putend   BSMTP
+      putend   GATE  &(mailer)
+   end
+   else begin
+      putend   BITMAIL
+   end
+
+   putend END
+
+   pick &(asave)
+end
+
+;<.page>
+;
+;  domains -- build host table entries from DOMAIN NAMES
+;
+
+proc domains () begin
+
+   dcl str key, value
+
+   use wyl.gs.net.domain.names keep
+
+   del ~':'1
+   del c':mailer.SMTP@INTERBIT'
+   squash all
+   num from 1 by 1
+
+   ln = first
+
+   while (ln le last) begin
+      domain = ''
+      mailer = ''
+      site = ''
+      interconnect = ''
+
+      repeat begin
+         pcall get_key(':nick.',line(ln),domain)
+         pcall get_key(':mailer.',line(ln),mailer)
+         pcall get_key(':site.',line(ln),site)
+         pcall get_key(':interconnect.',line(ln),interconnect)
+
+         ln = ln+1
+      end
+      until (ln gt last or sub(line(ln),1,5) eq ':nick')
+
+      pcall domain_entry (domain,mailer,site,interconnect)
+   end
+end
+
+;
+;  domain_entry -- build entry for domain
+;
+
+proc domain_entry (domain,mailer,site,interconnect) begin
+
+   if (interconnect eq 'YES' or interconnect eq 'MX') begin
+      topd = domain
+      n = index(rev(domain),'.')
+      if (n gt 0) \
+         topd = sub(domain,size(domain)+2-n)
+      topd = ' '||topd||' '
+      if (ind(' EDU GOV COM ARPA NET ORG MIL US ',topd) gt 0) \
+         return
+   end
+
+   if (sub(domain,1,1) ne '.') begin
+      pcall domain_add (site,domain,mailer)
+      domain = '.'||domain
+   end
+
+   pcall domain_add (site,'*'||domain,mailer)
+end
+
+
+;
+;  domain_add -- add new entry to domain table
+;
+
+proc domain_add (site,domain,mailer) begin
+
+   asave = actno
+   pick &(x.out_act)
+
+   putend ; &(site)
+   putend HOST &(domain) BEGIN
+   if (index(mailer,'BSMTP 3') gt 0) \
+      putend   BSMTP
+   n = index(mailer,' ')
+   if (n gt 0) mailer = sub(mailer,1,n-1)
+   putend   GATE &(mailer)
+   putend END
+
+   pick &(asave)
+end
+
+
+
+;
+;  scan_key -- scan key and value from input text
+;
+
+proc get_key (key,text,value) begin
+
+   n = ind(text,key)
+   if (n gt 0) begin
+      value = strip(sub(text,n+size(key)))
+      n = ind(value,':')
+      if (n gt 0) \
+         value = strip(sub(value,1,n-1))
+      return(value)
+   end
+end

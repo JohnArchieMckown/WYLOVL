@@ -1,0 +1,192 @@
+;  wylrest - restore wylbur, testwyl, and milten
+;
+;  To use this xproc, include the following define command in your
+;  logon exec file:
+;
+;      def  WYLREST as  "xcall wyl.gs.wyl.lib#wylrest /" rep
+;
+;  command syntax:
+;      wylrest <subsys> <date>
+;
+;  <subsys>:
+;      The name of the system you want to restore.  This must be
+;      one of WYLBUR, TESTWYL, MILTEN, or TESTMIL.
+;  <date>:
+;      The date in the backup tape data set name.
+;
+;  The job WYL#REST will run under account gs.wyl; make sure your
+;  account can run jobs under this account.
+;
+;  Updated:
+;
+;  09/25/02  slp  Initial version
+
+xproc () \
+  begin
+
+  ; declare variables
+  dcl string subsys, dsndate
+
+  ; set up error handling
+  on attn cmd ' pcall attn ' interrupt
+  on error cmd ' pcall error '
+
+  ; open temp active file for work space
+  x.act = actno                    ; save current active file number
+  open wylrest tit 'wylrest temporary active' temp
+  x.temp = actno                   ; save temp active file number
+
+  ; scan command
+  pcall scan_command (parm_count, parm_string, \
+    subsys, dsndate);
+  if (x.program eq 'WYLBUR') x.stem = 'WYL'
+  else x.stem = 'MIL'
+
+  putend //WYL#REST JOB WYL$GS,'&(subsys) RESTORE'
+  putend /*SETUP T3480=1, INPUT=CATLG
+  putend //*
+  putend //* DSS RESTORE - SELECTIVE (DATA SET) RESTORE
+  putend //*
+  putend //DSS      EXEC PGM=ADRDSSU,REGION=1024K ,PARM='TYPRUN=SCAN'
+  putend //SYSPRINT DD SYSOUT=A
+  putend //SYSA03   DD UNIT=SYSALLDA,VOL=SER=SYSA03,DISP=OLD
+  putend //TAPE     DD UNIT=T3480,DSN=WYL.GS.WYL.TAPE.BACKUPS.&(dsndate),
+  putend //            DISP=OLD
+  putend //SYSIN    DD *
+  putend   RESTORE INDDNAME(TAPE) -
+  putend           OUTDDNAME(SYSA03) -
+  putend           RENAMEU((WYL.GS.&(x.stem).&(subsys).**, -
+  putend                    WYL.GS.&(x.stem).&(dsndate).**)) -
+  putend           DATASET(INCLUDE(WYL.GS.&(x.stem).&(subsys).** ))
+
+
+  run unn hold
+
+  ; cleanup and return
+  pcall cleanup
+  xreturn
+  end
+
+
+;<.page>
+;
+;  scan parameters passed on invoking command
+;
+proc scan_command (pc,ps,subsys,dsndate) \
+  begin
+
+  dcl string token,remain,type
+  dcl string delims
+
+  delims = ' ,;=''"'               ; define parm delimiters
+
+  ;  check for at least one parameter
+  remain = ps
+  if (ps eq '') \
+    begin
+    comm At least one parameter is required.
+    ps = '?'
+    end
+  if (strip(ps) eq '?') pcall error_msg( \
+    'Command syntax: wylrest <subsys> <dsndate>')
+  if (pc ne -1) pcall error_msg(ps||': invalid options')
+
+  ;  scan:  <subsys> <dsndate>
+  while (remain ne '') \
+    begin
+    syscall scan_parm(token,remain,type,' ,',delims)
+;   comm token=&(token) remain=&(remain)
+
+    cases \
+      begin
+      case (upper(token) eq 'WYLBUR') \
+        begin
+        subsys = 'WYLBUR'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'TESTWYL') \
+        begin
+        subsys = 'TESTWYL'
+        x.program = 'WYLBUR'
+        end
+      case (upper(token) eq 'MILTEN') \
+        begin
+        subsys = 'MILTEN'
+        x.program = 'MILTEN'
+        end
+      case (upper(token) eq 'TESTMIL') \
+        begin
+        subsys = 'TESTMIL'
+        x.program = 'MILTEN'
+        end
+      case (substr(upper(token),1,2) eq 'DT') \
+        begin
+        dsndate = upper(token)
+        end
+      case (TRUE) \
+        begin
+        pcall error_msg( \
+          'Invalid parameter specified:  &(token)')
+        end
+      end
+;   comm subsys=&(subsys) module=&(module) prompt=&(prompt) deck=&(deck)
+    end
+  if (subsys eq '') pcall error_msg('subsys parm is required')
+  if (dsndate eq '') pcall error_msg('dsndate parm is required')
+  return(subsys,dsndate)
+  end
+
+;<.page>
+;
+;  ignore attn routine
+;
+proc ignore_attn () \
+  begin
+  clear attn
+  on attn reset
+  end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () \
+  begin
+  comm Command stopped by attention.
+  pcall cleanup
+  xreturn attn attnid=MSGGIVEN
+  end
+
+;
+;  error routine - clean up actives and exit
+;
+proc  error () \
+  begin
+  comm &(errinfo)
+  pcall cleanup
+  xreturn err errid=&(ERRID) errmsg='Exec wylrest failed.'
+  end
+
+;
+;  give error message, clean up and exit
+;
+proc error_msg (msg) \
+  begin
+  pcall cleanup
+  xreturn errid=WASMERR errmsg='&(msg)'
+  end
+
+
+;  cleanup
+;
+;  close temp active file, give last line msg if dumping
+;
+proc cleanup () \
+  begin
+  ; ignore attentions during cleanup, we are going to exit anyway
+  on attn cmd = 'pcall ignore_attn '
+  on error cmd = \
+    'xreturn errid=wasmerr errmsg="wylrest failed during cleanup)"'
+  ; close temp active file
+  pick &(x.temp)
+  close
+  end

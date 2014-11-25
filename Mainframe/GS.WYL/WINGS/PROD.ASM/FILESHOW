@@ -1,0 +1,1789 @@
+FILESHOW TITLE 'WINGS:  Show Catalog/DSN'
+*******************************************************************
+*** %%Module: wings asm fileshow;                                  *
+*******************************************************************
+***
+***  Created 1994/07/29, Mark Lawrence.  Based on CATLIST pgm
+***
+***  Revision history:
+***
+***  1999/11/08 ml   SMSINFOR as macro
+***  1999/08/04 ml   ANY amode spec. for DEVTYPE for UCB>16M
+***  1998/08/05 ml   CVAF error processing
+***  1997/08/04 ml   FSHOMAXN (MAXNAMES) passed to ctl wkarea size
+***  1997/01/21 ml   unit type, pseudo-volser for MIGRAT stuff
+***                  back out FCLDSNST check, zero count b4 resume
+***  1996/12/16 ml   corrections to CVAF VTOC read:  check FCLDSNST
+***  1996/11/25 ml   add SMS info to FILESHOW record
+***  1996/11/22 ml   symbolic refs. to SUPERLOCATE volume entry;
+***                  standard LOCATE for volume info; tape MV bug
+***  1996/11/12 ml   TICKLEDS entry
+***  1996/10/16 ml   recover from vtoc allocate error
+***  1996/09/20 ml   ERRID corrections, EXPDT handling
+***  1996/07/29 ml   further tweak err handling, SUPLOC err no abort
+***  1996/07/08 ml   correct error message handling
+***  1996/02/22 ml   new workareas replace OSFWK1
+***  1995/11/15 ml   from/to/like in FSHOAREA
+***  1995/09/19 ml   correct work area overflow msg, various errid
+***                  and msg format stuff
+***  1995/07/27 ml   handle multiple FMT3 DSCBs (vsam)
+***  1995/07/26 ml   handle tracks alloc>32k
+***  1995/06/22 ml   do specific search if generic fails
+***  1995/05/20 ml   support for entrytype U (user catalog)
+***  1995/05/12 ml   like=gdg(n)
+***  1995/05/09 ml   support for VSAM cluster, index, data
+***  1995/04/19 ml   FILESHOW ONLY bug
+***  1995/04/06 ml   more stuff into TVT, use GETLOW/FREECORE
+***  1995/04/03 ml   fix bug in FMT3 processing with >7 extents
+***  1995/03/31 ml   VTOCSHOW from/to, modify LIKE for CVAFFILT
+***  1995/03/29 ml   VTOCSHOW ctd.
+***  1995/03/16 ml   VTOCSHOW
+***  1995/02/14 ml   corrections to FILESHOW KB alloc/used format
+***  1995/02/07 ml   SHO DSN ONLY ON VOL (not catlg'd)
+***  1995/01/17 ml   fix bug 0C4 when no names
+***  1995/01/09 ml   new report layout, use DSNINFO dsect
+***  1995/01/06 ml   report track balance
+***  1995/01/05 ml   UCB/DEVTYPE logic
+***  1995/01/04 ml   fixes to ONLY logic
+***  1995/01/03 ml   DSCB-not-found logic; add device type info
+***  1994/12/27 ml   fixes to disk/tape/gdg logic
+***  1994/12/23 ml   implement ON VOL option
+***                  new output format with catlg/dscb info.
+***  1994/11/16 ml   implement ONLY option (avoid catlg scan)
+***  1994/09/14 ml   corrections to FMT3 DSCB processing
+***  1994/09/08 ml   fixes to DSCB fmt, work areas
+***  1994/09/06 ml   add DSCB formatting code
+***  1994/09/06 ml   redesign of options:  always do "internal" fmt,
+***                  option controls only level of info obtained,
+***                  e.g. only dsn; vol list; dscb.
+***  1994/08/03 ml   tweaks to first-pass showcat stuff
+***
+*******************************************************************
+         SPACE 3
+FILESHOW HIBAL ASSOC=YES           Initialize HIBAL macro system
+FILESHOW AMODE 31                  Initial 31-bit addressing mode
+FILESHOW RMODE 24                  Reside below 16MB line
+FILESHOW CSECT ,                   Define module control section
+         IDENT 7022                09:35:12 01/22/97 (MCL)
+         SPACE 3
+         REGS  FSR,,,,,,,,WAR,BRR,BR,TVTR,(GVTR,LSR),SPR,RAR
+         SPACE ,
+         SYSDEFN ,                 Include Stanford defaults
+         EJECT ,
+         SPACE 2
+*box
+*
+*   Define system mapping macros
+*
+         SPACE ,
+         PRINT NOGEN
+         CVT   DSECT=YES           Communications vector table
+         IHASDWA                   Stae/dump work area
+         DCBD  DEVD=DA,DSORG=PS    Data control bock
+         LSPACE MF=(D,DATA)        Define LSPACE data return area
+         PRINT GEN
+JFCBDSCT DSECT ,
+         IEFJFCBN ,                Job file control block
+DSCBDSCT DSECT ,
+         IECSDSL1 (1,2,3)          VTOC data set control blocks
+UCB      DSECT ,
+         IEFUCBOB ,                Unit control block
+         PRINT NOGEN
+         IEFZB4D0 ,                Dynamic allocation
+         IEFZB4D2 ,                Dynamic allocation
+         IHADVCT ,                 Device characteristics table
+         IHAEVNT ,                 Map EVENTS table format
+         IKJTCB DSECT=YES          Task control block
+TIOTDSCT IEFTIOT1 ,                Task input/output table
+         IEZDEB ,                  Data extent block
+         IECDDCE ,                 Device characteristics table
+         PRINT GEN
+         IEZCTGPL ,
+CTGF2WKA EQU   X'04'               Work area is fmt 2
+FILESHOW CSECT ,
+DVTAREA  RECORD 'DVTAREA'
+*
+         SPACE 2
+*-
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+         EJECT
+         COPY  DEVINFO
+         TITLE 'Wings: Disk I/O support: Global vector table'
+GVT      RECORD BEGIN
+         COPY  GVT
+         END   ,
+         TITLE 'Wings: Disk I/O support: Mapping macros'
+         COPY  UPATH               INCLUDE PATH MAPPING INFORMATION
+         EJECT ,
+         COPY  ERRTABLE            ERROR TABLE FORMAT DEFINITION
+         SPACE 3
+         COPY  SYMTAB
+         SPACE 3
+         COPY  TRCENTRY
+         SPACE 3
+         COPY  DEVCAPCT
+         SPACE ,
+         COPY  SPACALC
+         SPACE 2
+         COPY  RBINFO
+         EJECT ,
+         COPY  WGSLINE
+         SPACE 2
+         COPY  S26ENTRY
+         SPACE 2
+         COPY  VOLENTRY
+         SPACE 2
+         COPY  FSHOAREA
+FSDEVREC RECORD BEGIN              FILESHOW device record
+FSDUCBPT DS    A                   ->UCB
+FSDVOLSR DS    CL6                 Volser
+         DS    H                   pad
+FSDEVTAB DS    6F                  DEVTAB area
+FSDEVTC  EQU   FSDEVTAB+10,2    tracks/cyl from devtype
+FSDEVTL  EQU   FSDEVTAB+12,2    track length from devtype
+         END   ,                   FSDEVRC
+         COPY  DYNTABLE
+VOLBUFL  EQU   4*1024              L'area:  4k
+
+         EJECT ,
+*box
+*
+*  Map segment control block fields
+*
+         SPACE 2
+SEGCB    RECORD 'SEGCB'
+         SPACE 3
+         TITLE 'Wings: Disk I/O support: Task vector table'
+TVT      RECORD BEGIN
+         COPY  TVT                 Basic TVT
+         COPY  TVTOSFIL            OSFILE extension
+         END
+         TITLE 'Show Catalog'
+*box
+*  SHOW CATALOG - display catalog/dsn info
+*  On entry:   R15 ->SEGCB
+*              R1=FSHOAREA area
+*
+*  On exit:  RC=0 normal
+*               4 invalid node ?
+*               8 catalog error?
+*  info seg'd.
+*
+*
+         SPACE ,
+FILESHOW CSECT ,                   resume control section
+         USING GVT                 Global vector table ptr
+         USING TVT                 Task vector table
+         SPACE ,
+SHOWCAT  XPROC
+         LR    R9,R1               Save parm pointer
+         USING FSHOAREA,R9
+         ST    R15,SEGSAVE         Save seg ptr.
+         SEGDEF L:SEGSAVE
+         LH    R4,FSHO#LIK         Save length
+         STC   R4,#USERNOD         Save for svc26 parmlist
+         MVC   USERNODE,FSHOLIKE
+         TITLE 'Get storage and read catalog'
+         L     R0,FSHOMAXN         MAXNAMES value
+         MH    R0,=H'45'           bytes per name
+         IF    (R0,LT,S26SZMIN),'L R0,S26SZMIN'  minimum
+         ELSEIF (R0,GT,S26SZMAX),'L R0,S26SZMAX' maximum
+         ST    R0,S26SIZE          Amount to get
+CMDSET   L     R0,=A(VOLBUFL)          L'VOL work area
+         VCALL GETLOW              **AREA MUST BE BELOW!!!!!**
+         ST    R1,TVTFSWKA1        save pointer
+         RECVRY ROUT=S26WFREE      and free it on closeup
+         SPACE
+*  Now, get an area for the dsname list.
+         SPACE
+         IF    ~FSHOONLY,BEGIN     not ONLY but should it be?
+         TRT   USERNODE,$PAREN     Look for DSN(gen) i.e. GDG memb
+         IF    NZ,'SET FSHOONLY'   if so can only be one, and
+*                                  generic superloc won't find it
+         END   ,                      (not ONLY)
+
+         IF    FSHOONLY,BEGIN      SHO DSN ONLY xxx: just 1 ds
+         CLEAR TVTFSWKA2           show no dynamic area
+* fake up a dataset entry
+         MVI   FSHOODST,C'A'       data set type
+         MVC   FSHOODSN,FSHOLIKE   dsname
+         END   ,                     (ONLY)
+
+         ELSE  BEGIN               not SHO DSN ONLY xxx - scan
+         L     R0,S26SIZE          Size to get
+         VCALL GETLOW              must be below!
+         ST    R1,TVTFSWKA2        Save pointer
+         SPACE
+**-      IF    (R15,NZ),BEGIN      no core
+**? GETLOW is unconditional getmain...
+**-     SEG   'ERRID=WYLBUG ERRMSG=''ERROR: FILESHOW could not get wor*
+**-            karea '''
+**-      SEGWR ,
+**-      LA    R15,20              RC
+**-      EXIT  SHOWCAT
+**-      END   ,                   (no core)
+         END   ,                     (not ONLY)
+         SPACE
+*  following from PJG's SVC26 research..........
+*  ok -- here is the start of the good stuff
+*        it might not seem like it but the return codes from
+*        svc 26 are documented under message idc3009i.  reason
+*        codes are provided only under idcams i beleive.  basically
+*        return codes are as follows:
+*               8  -  data set not found
+*              40  -  work area too small
+*              44  -  work area too small
+*
+*        any others are abnormal.
+*
+*  General setup, used even if we don't do catalog scan:
+*
+         LA    R6,CATPL            Address of catalog parameter list
+         USING CTGPL,R6            ## addr to catalog parm list
+         XC    CATPL,CATPL         Zero out catalog parm list
+         OI    CTGOPTN1,CTGNAME    Set data set name provided
+         OI    CTGOPTN1,CTGCNAME   Not sure
+         OI    CTGOPTN1,CTGGENLD   Set "generic" locate requested
+         SPACE
+         IF    ~FSHOONLY,BEGIN     not ONLY, scan catalog
+*  Set up for catalog scan
+         OI    CTGOPTN2,CTGRCATN   Return catalog name
+         OI    CTGOPTN3,CTGSUPLT   This is a "superlocate" request
+         OI    CTGOPTN3,CTGAM0     This is a vsam request
+         OI    CTGOPTN4,CTGCOIN    Request controller intercept
+         LA    R1,#USERNOD         Address of our dsn stem(incl len)
+         ST    R1,CTGENT           Save in catalog entry
+         OI    CTGDSORG,CTGF2WKA   Set "format 2" workarea format
+**-?     XC    CVOL,CVOL           Clear control volume area
+         ACALL DSNCLR              Set up work area
+         L     R2,TVTFSWKA2        ADDRESS OF WORKAREA
+         ST    R2,CTGWKA           SAVE INTO CATALOG PARM LIST
+         LR    R1,R6               -->Parm list
+         SPACE
+         SVC   26                  DO IT!
+         SPACE
+         ST    R15,RC26            Save return code
+         LTR   R15,R15             Return Code
+         BZ    GOTNAMES            OK
+*  Non-zero return code.
+         IF    ((R15,EQ,40),OR,(R15,EQ,44)),BEGIN
+         SEGDEF DUMMY
+         SEGCLR ERRSCB             Clear error seg control block
+         SEG   'ERRID=SHOWFAIL ERRMSG=''FILESHOW ERROR:  '
+         SEG   'Too many names, work area overflow'''
+         SET   TERRMSG
+         LA    R15,4               revised RC
+         ST    R15,FSHORCOD        save rc
+         L     R2,TVTFSWKA2        ->work area
+         L     R1,S26SIZE          area size
+         S     R1,=F'53'           Less 8-byte prefix +phony dsn
+*  we'll calc. #nlist based on what fit, area will have actual no.
+*  found and we don't have all of them...
+         B     GOTNAME2            and process what we got
+*        OSFILE will send error msg at end of name info...
+         END   ,                   (40 or 44)
+         ELSEIF (R15,EQ,8),BEGIN   No entries
+         B     X#DSL               so just quit
+         END   ,                   (no entries)
+         ELSE BEGIN                other non-zero is strange
+         LR    R3,R15              Save the bad RC
+         SEGCLR ERRSCB             Clear error seg control block
+         SEG   'ERRID=SHOWFAIL ERRMSG='''
+         SEG   'FILESHOW ERROR: unexpected return code '
+         SEGDC (R3)                the RC
+         SEG   ' from SUPERLOCATE'''
+         SET   TERRMSG
+         LA    R15,12              RC
+         ST    R15,FSHORCOD        save it
+         B     X#DSL               and quit
+         END   ,                      (other non-zero)
+         SPACE
+GOTNAMES L     R2,TVTFSWKA2        ->Work area
+         L     R1,4(R2)            Length used in work area
+         S     R1,=F'53'           Less 8-byte prefix +phony dsn
+         IF    NP,X#DSL            If nothing left, no names
+GOTNAME2 SR    R0,R0
+         D     R0,=F'45'           length/(bytes per entry)=entries
+         ST    R1,#NLIST           Save number of entries
+         CLEAR FSHOGOT1            haven't found a useful one yet
+         CLEAR FSHOFAKE
+         SPACE
+         LA    R3,53(R2)           -->first data set name
+         L     R5,#NLIST           Number of names
+         END   ,                     (not ONLY, scan catlg)
+         ELSE  BEGIN               ONLY dsn
+         LA    R3,FSHOODST         ->fake entry for desired file
+         LA    R5,1                Number of entries
+         END   ,                     (ONLY)
+         SPACE 2
+*  Now go thru name list.
+*  R3-->Name entry   +0=entry type  +1=name
+*  R5 = loop counter (decremented)
+         SEGDEF L:SEGSAVE
+         SPACE
+DSLOOP   CLC   FSHOFROM,@R3+1      FROM name
+         IF    H,E#DSL             if below FROM, next entry
+         CLC   FSHOTO,@R3+1        TO name
+         IF    L,X#DSL             if above TO, done
+         CLI   @R3,C'0'
+         IF    NL,E#DSL            forget this one...
+         IF    ((FSHOTYPD,OR,FSHOTYPT),AND,((@R3,EQ,C'A'),OR,          *
+               (@R3,EQ,C'0'),OR,(@R3,EQ,C'D'),OR,(@R3,EQ,C'I'),OR,     *
+               (@R3,EQ,C'C'),OR,(@R3,EQ,C'U'))),BEGIN  can get vollist
+
+         IF    (@R3,NE,C'0'),'SET FSHOGOT1'  found real entry
+         IF    (FSHOWVOL,OR,FSHOONLY),BEGIN  want unit/vol info;
+*                                  for ONLY, verify entry exists
+         ACALL SUPLOC              Get entry and print msgs
+         END   ,                      (unit/vol info)
+         ELSE  BEGIN               only dsn info wanted
+         SEGB  @R3,1               Entry type
+         SEG   @R3+1,44            DSN to msg
+         SEGWR ,
+         END   ,                      (only dsn)
+         B     E#DSL               Loop back as usual
+         END   ,                      (can get vollist)
+         SPACE
+         CLI   @R3,C'B'            GDG base or other
+         IF    (GE,AND,FSHOTYPG),BEGIN   do non-ds entry
+         CLI   @R3,C'B'            GDG base  ?
+         IF    EQ,BEGIN            GDG base yes
+         ACALL SUPLOC              get GDG info and write
+         END   ,                     (do GDG base)
+         SPACE
+         ELSE  BEGIN               non-dataset non-GDG
+         SEGB  @R3,1               Entry type
+         SEG   @R3+1,44            DSN to msg
+         SEGWR ,
+         END   ,                      (non-ds non-gdg)
+         END   ,                      (non-ds entry)
+         SPACE ,
+E#DSL    LA    R3,45(R3)           -->Next entry
+         BCT   R5,DSLOOP
+         SPACE
+         IF    ~FSHOGOT1,BEGIN     didn't find any useful stuff
+*                                  i.e. just had alias ptrs etc.
+* this might be a gdg member; fake up a dataset entry, try specific
+         MVI   FSHOODST,C'A'       data set type
+         MVC   FSHOODSN,FSHOLIKE   dsname
+         LA    R3,FSHOODST         ->type/name
+         SET   FSHOFAKE            sho fake entry
+         ACALL SUPLOC              go get info
+         END   ,                      (didn't find any)
+
+X#DSL    L     R1,TVTFSWKA2        ->DSN buffer
+         IF    (R1,NZ),BEGIN       if present
+         XCALL FREECORE
+         CLEAR TVTFSWKA2
+         END   ,                      (DSN buffer present)
+         L     R1,TVTFSWKA1        ->volume list buffer
+         IF    (R1,NZ),BEGIN
+         XCALL FREECORE
+         CLEAR TVTFSWKA1
+         END   ,                      (vollist buffer present)
+         SPACE
+         L     R15,FSHORCOD        Return Code
+         PEND  ,                      (SHOWCAT)
+         LTORG ,
+         TITLE 'SUPERLOCATE Routine'
+
+SUPWK    RECORD BEGIN
+SUP@DS   DS    A
+SUPVOLCT DS    H
+SUPDTYP  DS    CL10
+SUPTTYP  EQU   SUPDTYP+4,6
+SUPDEVRC DS    9F                  FSDEVREC area
+         SPACE
+WK20     DS    CL20
+         SPACE
+SUPCAMCT DS    4F                  CAMLST for standard locate
+
+DSNREC   EQU   *                   Dataset information record
+         COPY  DSNINFO
+
+SUPFLGS  FLAG  ,
+         FLAG  USELOCATE
+         END   ,
+SUPLOC   PROC  SUPWK
+*  R3-->Name entry   +0=entry type  +1=name
+         ST    R3,SUP@DS           Save name pointer
+         MVC   SUPDTYP,GVTBLANK
+         MVC   DSNREC(DSNREC#),GVTBLANK
+         MVC   DSNCATTP,0(R3)      entry type
+         MVC   DSNDSN,1(R3)        DSNAME
+         XC    CATPL,CATPL         Zero out catalog parm list
+         OI    CTGOPTN3,CTGSUPLT   Set "superlocate"
+         OI    CTGOPTN3,CTGAM0     Set vsam request
+         OI    CTGOPTN4,CTGCOIN    Request control intercept
+         OI    CTGDSORG,CTGF2WKA   Set format 2 work area
+         LA    R1,1(R3)            Point to data set name
+         ST    R1,CTGENT           Save in entry parm list
+         LA    R1,CATSMALL         Little work area
+         ST    R1,CTGWKA           Save in catalog parm list
+         XC    CATSMALL,CATSMALL   Zero work area
+         L     R1,TVTFSWKA1        Address of volume buffer
+         ST    R1,CATSMALL         Save in work area
+         L     R1,=A(VOLBUFL)          Length of volume buffer
+         STH   R1,CATSMALL+4       Save in work area
+         L     R7,TVTFSWKA1        Address of volume list area
+         USING S26ENTRY,R7
+
+*  Set up for standard locate too
+
+         L     R15,=A(CAMCATMD)
+         MVC   SUPCAMCT(16),@R15       Move in model camlst
+         LA    R15,@R3+1               ->DSN
+         ST    R15,SUPCAMCT+4          Save pointer to data set name
+         LA    R0,1024(R7)             part of catlg work area
+         ST    R0,SUPCAMCT+12          Save pointer to work area
+
+*
+*  temporary code ... for "A" (nonvsam dataset) entry, use LOCATE.
+*
+         CLI   0(R3),C'A'          Nonvsam dataset entry
+
+         IF    EQ,BEGIN            NONVSAM, use LOCATE
+         SET   USELOCATE           remember we did it
+         LOCATE SUPCAMCT
+         IF    (R15,Z),BEGIN       found it
+*  convert volume list to SUPERLOCATE form
+         L     R15,SUPCAMCT+12     ->LOCATE work area
+         LH    R14,@R15             volume count
+         STH   R14,CATSMALL+6       into suploc area
+         LA    R15,@R15+2          ->first LOCATE volentry
+         USING VOLENTRY,R15
+         USING S26ENTRY,R7
+CVL      MVC   S26VOLSR,VOLVOLSR   volser
+         MVC   S26UCBTP,VOLUCBTP   UCBTYPE
+         MVC   S26FILSQ,VOLFILSQ   FILE SEQ
+         LA    R15,VOLNEXT         ->next entry
+         LA    R7,S26NEXT          ...
+         BCT   R14,CVL
+         SR    R15,R15             reset RC
+         L     R7,TVTFSWKA1        reset R7
+         DROP  R15
+*  Get SMS info
+         LA    R0,DSNSTORC         ->SMS area in record
+         LA    R1,DSNDSN           ->Dsname
+         XCALL SMSINFO             get info
+* don't care about RC, area left blank if not found/nonsms
+         SR    R15,R15             restore "good" RC from LOCATE
+         END   ,                      (found it)
+         END   ,                      (use LOCATE)
+
+         ELSE  BEGIN               use SUPERLOCATE
+         LR    R1,R6               Copy parameter list address
+         SVC   26                  There we go
+         END   ,                      (SUPERLOCATE)
+
+         IF    (R15,NZ),BEGIN      SUPERLOCATE error
+
+         IF    FSHOFAKE,'EXIT SUPLOC' fake, don't care
+         IF    ~FSHOONLY,BEGIN       not ONLY, unusual err
+         MVI   DSNERRCD,C'Z'       show suploc error
+         CVD   R15,FSHOP#          RCODE
+         UNPK  DSNTRKAL,FSHOP#     in tracks alloc field
+         OI    DSNTRKAL+L'DSNTRKAL-1,C'0'   clean up sign
+         B     VDONE               done here
+         END   ,                     (not ONLY, SUPERLOCATE err)
+
+         ELSE  BEGIN               ONLY, not in catlg
+         CLI   TVTPBVOL,C' '
+         IF    GT,BEGIN            but user gave us a volume
+         MVC   S26VOLSR,TVTPBVOL   so fake up an entry
+         LA    R5,1
+         ST    R5,SUPVOLCT         with one vol
+         STH   R5,CATSMALL+6
+         MVI   DSNCATTP,C'0'       show no catlg entry
+         LA    R1,TVTPBVOL         ->volser
+         VCALL FINDUCB             get actual UCB
+         IF    (R15,Z),BEGIN       if we got it
+         LA    R2,SUPDEVRC         ->device record area
+         WITH  (FSDEVREC,R2),BEGIN
+         ST    R1,FSDUCBPT         Save UCB pointer
+         END   ,                     (with FSDEVREC)
+         MVC   S26UCBTP,16(R1)     UCBTYPE info
+         END   ,                     (found UCB)
+         ELSE  'EXIT SUPLOC'       no UCB
+         END   ,                     (user gave volume)
+         ELSE  'EXIT SUPLOC'       no vol, and no catlg
+
+         END   ,                     (ONLY, not in catlg)
+
+         END   ,                      (SUPERLOCATE error)
+*  got some catlg info.
+         SPACE
+         IF    ((DSNCATTP,EQ,C'A'),OR,(DSNCATTP,EQ,C'0'),OR,           *
+               (DSNCATTP,EQ,C'D'),OR,(DSNCATTP,EQ,C'I'),OR,            *
+               (DSNCATTP,EQ,C'C'),OR,(DSNCATTP,EQ,C'U')),BEGIN
+*                                  dataset entry or fake
+         CLC   S26VOLSR,=C'MIGRAT'  HSM migrated dataset
+         IF    EQ,BEGIN            it's migrated
+         MVI   DSNERRCD,C'A'       show HSM Archived
+         END   ,                      (migrated)
+
+         MVC   DSNDSN,1(R3)        DSNAME again, in case gdg(n) it got
+*                                  converted by locate
+         LH    R5,CATSMALL+6       Get count of volumes
+         LTR   R5,R5               Check vol count
+         BP    *+8                 If OK
+         LA    R5,1                ...else use 1
+         STH   R5,SUPVOLCT         Save it
+         IF    FSHOONVL,BEGIN      only want if on given vol
+         LH    R1,TVTPB#VOL        L'volstem
+VCLOOP   CMPR  R1,TVTPBVOL,S26VOLSR req vol: actual
+         IF    EQ,VCGOT            match found
+         LA    R7,S26NEXT          ->next entry in vol list
+         BCT   R5,VCLOOP           check next
+         EXIT  SUPLOC              none of vols matched
+VCGOT    L     R7,TVTFSWKA1        restore R7
+         LH    R5,SUPVOLCT         ...and R5
+         END   ,                     (on vol)
+         IF    FSHOTEMP,BEGIN      TEMP option
+         CLC   =C'SCR',S26VOLSR    SCRxxx volume?
+         IF    NE,'EXIT SUPLOC'    nope, skip it
+         END   ,                      (TEMP)
+         TM    S26UCBDV,DEVCLDA    disk?
+         IF    O,BEGIN             DISK file
+         IF    ~FSHOTYPD,'EXIT SUPLOC' don't want disk
+         MVC   DSNVOL,S26VOLSR     volser
+         MVI   DSNDEVTP,C'D'       type=disk
+         CVD   R5,FSHOP#           volume count
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNVOLCT,FSHOXW+2   now in msg w/leading 0s
+         SR    R2,R2
+         MVC   SUPDTYP,=C'????      ' unknown so far
+         IC    R2,S26UCBTP+3       Model ID byte DEVUNTYP
+         C     R2,=A(##DEVTAB)     See if invalid code
+         IF    H,DISK2             Done if invalid
+         MH    R2,=AL2(##LDEVTB)   * table offset
+         L     R1,=A(DEVTABLE)
+         LA    R2,0(R1,R2)         Point to ID in table
+         MVC   SUPDTYP(8),0(R2)     Move ID into msg
+         SPACE
+DISK2    LABEL ,                   Top of loop thru volume list
+*  get unit info
+         LA    R1,SUPDEVRC         ->our device record area
+         WITH  (FSDEVREC,R1),BEGIN
+         MVC   FSDVOLSR,S26VOLSR   volser
+         ACALL FSUCB               Get device info
+         END   ,                      (with R1)
+         BTX   DSNDVDES,8,L4:S26UCBTP DEVTYPE in hex
+         MVC   DSNUCBTP,@R1
+         MVC   DSNDVDES,SUPDTYP    device description
+         CLI   DSNERRCD,C'A'       archived dataset?
+         IF    EQ,VDONE            yes, no DSCB available
+         IF    (FSHOWDSC),BEGIN    get DSCBs
+*  DO FMT1 STUFF
+         MVC   TVTPBDSNAME,@R3+1   DSN
+         MVC   TVTVOLSER,S26VOLSR  VOLSER
+*box
+*
+*  OBTFMT1 - Obtain format 1 DSCB, and FMT3 if present.
+*
+*  1994/08/19  ml  copied from OSFILE OBTFMT1, OBTFMT3 code
+*
+*  On entry:   TVTPBDSNAME contains the fully qualified data set name
+*              and the TVTPBVOL field must contain the volume
+*              serial number for the DASD device.
+*
+*  On exit:    For R15=0 the TVT field OSFFMT1 contains the 96
+*              byte portion of the requested FMT1 DSCB, and the
+*              OSFFMT3 field contains the FMT3 DSCB if present.
+*
+*
+         SPACE ,
+OBTFMT1  LABEL
+         L     R15,=A(CAMOBT)
+         MVC   OSFCAMCT(16),@R15   Move in model camlist control
+         LA    R1,TVTPBDSNAME      Address of fully qual dsn
+         ST    R1,OSFCAMCT+4       Save address in camlist
+         LA    R1,TVTVOLSER        Address of volume serial
+         ST    R1,OSFCAMCT+8       Save address in camlist
+         LA    R1,OSFDSCWK         Address of work area
+         ST    R1,OSFCAMCT+12      Save address in camlist
+         CLEAR OSFFMT1             Clear DSCB buffer
+         CLEAR OSFFMT3             clear buffer area
+         OBTAIN OSFCAMCT           Read in fmt1 dscb
+         PTRACE obfmt1RT           Trace return code
+         LTR   R2,R15              Save and test obtain return code
+         IF    Z,BEGIN             Successful obtain has been done
+         MVC   OSFFMT1(44),TVTPBDSNAME Set data set name into FMT1
+         MVC   OSFFMT1+44(96),OSFDSCWK Move in fmt1 dscb
+         LA    R5,OSFFMT1          ->DSCB
+         WITH  (IECSDSL1,R5),BEGIN
+         CLC   DS1PTRDS,=D'0'      ->FMT3 else zero
+         IF    NE,BEGIN            Got a FMT3
+         LA    R0,DS1PTRDS         ->CCHHR of FMT3
+         LA    R1,TVTVOLSER        ->VOL
+*  Obtain format 3 DSCB.  Copied from OSFILE OBTFMT3 routine
+*
+         SPACE ,
+         L     R15,=A(CAMOBSK)     Address of model camlst
+         MVC   OSFCAMCT(16),@R15   Move in model camlist
+         ST    R0,OSFCAMCT+4       Address of cchhr required
+         ST    R1,OSFCAMCT+8       Address of required volume serial
+         LA    R0,OSFFMT3          Address of fmt3 area return
+         ST    R0,OSFCAMCT+12      Address to receive fmt3
+         OBTAIN OSFCAMCT           Read in fmt3 dscb
+         PTRACE OBTFMT3RT
+         END   ,                      (get FMT3)
+         END   ,                      (with IECSDSL1)
+         END   ,                      (RC=0 from OBTAIN FMT1)
+         ELSEIF (R15,EQ,4),BEGIN   Volume not mounted error return
+         MVI   DSNERRCD,C'M'       volume not Mounted
+         B     DSCBDONE            so there's no more to say
+         END   ,                     (not mounted)
+         ELSEIF (R15,EQ,8),BEGIN   Data set not on volume
+         MVI   DSNERRCD,C'D'       DSCB not found
+         CLI   DSNCATTP,C'0'       fake entry (ONLY, ON VOL)
+         IF    EQ,'EXIT SUPLOC'    not there and ONLY, quit
+         B     DSCBDONE
+         END   ,                     (not on volume)
+         ELSE  BEGIN               Process unkown return codes
+         CVD   R15,FSHOP#          RCODE
+         UNPK  DSNTRKAL,FSHOP#     in tracks alloc field
+         OI    DSNTRKAL+L'DSNTRKAL-1,C'0'   clean up sign
+         MVI   DSNERRCD,C'X'       unknown rcode
+         B     DSCBDONE
+         END   ,                      (unknown rcode)
+
+         LA    R1,OSFFMT1          ->FMT1, FMT3 DSCBs
+         LA    R0,SUPDEVRC         ->volume record
+         ACALL XTRDSCB             extract space, format, etc.
+*                                  from dscbs
+         LA    R1,SBUF             ->extracted data
+         LA    R2,DSNREC           ->output record
+         ACALL WDSNINT             Format data
+
+* ETC.....
+DSCBDONE LABEL ,
+         END   ,                      (DSCB stuff)
+         LH    R5,SUPVOLCT         Vol count
+         S     R5,=F'1'            vol count:  just did one
+         STH   R5,SUPVOLCT         save updated count
+         IF    P,BEGIN             if any left
+*  report remaining volumes
+*  Emit main record, if not already done
+         SEGDEF L:SEGSAVE
+         LA    R1,DSNREC           ->record
+         LA    R0,DSNREC#          L'record
+         VCALL RTRIM
+         IF    (R0,P),BEGIN        got data
+         SEG   DSNREC,(R0)         write it
+         SEGWR ,
+         END   ,                      (got data)
+         LA    R7,S26NEXT          --> next entry
+         L     R3,SUP@DS           Restore pointer
+* Loop thru to do all volumes.
+         SPACE
+         MVC   DSNREC(DSNREC#),GVTBLANK
+         MVI   DSNCATTP,C'+'       type is "continuation"
+         MVC   DSNDSN,@R3+1        dsn
+         MVC   DSNVOL,S26VOLSR     volser
+         MVI   DSNDEVTP,C'D'       type=disk
+         B     DISK2               do the rest in the usual way
+         END   ,                       (more to do)
+         END   ,                      (DISK FILE)
+         ELSE  BEGIN               not disk
+         TM    S26UCBDV,DEVCLTA        tape?
+         IF    (O,AND,~FSHOTYPT),'EXIT SUPLOC' tape and no want
+         SPACE
+*  Here for tape dataset
+         SPACE
+         MVC   DSNCATTP,@R3        entry type
+         MVC   DSNDSN,@R3+1        dsn
+         MVC   DSNVOL,S26VOLSR     volser
+         MVI   DSNDEVTP,C'T'       type=tape
+         LH    R0,S26FILSQ         fileseq
+         CVD   R0,FSHOP#
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNFLSQ,FSHOXW+1    now in msg w/leading 0s
+         CVD   R5,FSHOP#           volume count
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNVOLCT,FSHOXW+2   now in msg w/leading 0s
+* Following lifted from IOPROGM unit reporting in IOPDSMSG
+         LA    R1,S26UCBTP         ->UCBTYPE
+         WITH  (DEVINFO,R1),BEGIN
+         CLI   DEVUNTYP,DEVUN348   3480 TAPE?
+         IF    NL,BEGIN            3480 or 3490
+         IF    EQ,BEGIN            3480
+         MVC   SUPDTYP,=C'3480      '
+         TM    DEVOPTFT,DEVOPIDR   IDRC?
+         IF    O,BEGIN             IDRC
+         MVC   SUPDTYP+4(5),=C'-IDRC'
+         END   ,                      (IDRC)
+         END   ,                      (3480)
+         SPACE
+         CLI   DEVUNTYP,DEVUN349   3490?
+         IF    EQ,BEGIN            3490
+         MVC   SUPDTYP,=C'3490       '
+         END   ,                      (3490)
+         END   ,                      (3480/3490)
+         ELSE  BEGIN               not 3480/90
+*  Here if 9-track.
+         SPACE
+         MVC   SUPDTYP,=C'3420      '
+         TM    DEVIFLGC,DEVIF62    6250?
+         IF    O,BEGIN             6250 BPI
+         MVC   SUPTTYP,=C'-6250 '
+         END   ,                      (6250)
+         SPACE
+         TM    DEVIFLGC,DEVIF16    1600?
+         IF    O,BEGIN             1600.
+         MVC   SUPTTYP,=C'-1600 '
+         END   ,                      (1600)
+         SPACE
+         END   ,                     (not 3480/90)
+         END   ,                     (with R1)
+         BTX   DSNUCBTP,8,L4:S26UCBTP DEVTYPE in hex
+         MVC   DSNDVDES,SUPDTYP    device description
+         S     R5,=F'1'            vol count:  just did one
+         IF    P,BEGIN             if any left
+*  report remaining volumes
+         LA    R7,S26NEXT          --> next entry
+VLOOP    LA    R1,DSNREC           main (or previous) record
+         LA    R0,DSNREC#          L'rec
+         VCALL RTRIM               no trailing blanks
+         SEG   (R1),(R0)
+         SEGWR ,                   emit main record
+         SPACE
+         MVC   DSNREC(DSNREC#),GVTBLANK    clear
+         MVI   DSNCATTP,C'+'       type is "continuation"
+         MVC   DSNDSN,@R3+1        dsn
+         MVC   DSNVOL,S26VOLSR     Volume serial
+         MVI   DSNDEVTP,C'T'       device type is tape
+         LH    R0,S26FILSQ         fileseq
+         CVD   R0,FSHOP#
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNFLSQ,FSHOXW+1    now in msg w/leading 0s
+         BTX   DSNUCBTP,8,L4:S26UCBTP  DEVTYPE in hex
+         MVC   DSNUCBTP,@R1
+         MVC   DSNDVDES,SUPDTYP
+         LA    R7,S26NEXT          --> next entry
+         BCT   R5,VLOOP            Do next volume
+         B     VDONE
+         END   ,                      (remaining vols)
+         ELSE  BEGIN               only one vol
+         B     VDONE
+         END   ,                     (only one vol)
+         SPACE 2
+         B     VDONE
+         END   ,                     (tape file)
+         END   ,                     (dataset entry)
+         SPACE
+         ELSE  BEGIN               GDG base
+         LH    R5,CATSMALL+10      Number of generations
+         MVC   DSNCATTP,@R3        entry type
+         MVC   DSNDSN,@R3+1        DSN to msg.
+         CVD   R5,FSHOP#           no. generations
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNVOLCT,FSHOXW+2   now in msg w/leading 0s
+         END   ,                      (GDG base)
+         SPACE ,
+VDONE    LA    R1,DSNREC           ->record
+         LA    R0,DSNREC#          L'record
+         VCALL RTRIM
+         IF    (R0,P),BEGIN        Got data
+         SEG   (R1),(R0)
+         SEGWR ,                   write it out
+         END   ,                      (got data)
+         CLEAR R15                 RC
+         SPACE
+         PEND ,
+         DROP  R7
+         LTORG ,
+         TITLE 'DSN setup routine'
+DSNCLR   PROC ,
+         L     R0,TVTFSWKA2        Get address
+         L     R1,S26SIZE          And length of buffer
+         SR    R15,R15             Zero for clear length
+         MVCL  R0,R14              Zip that buffer to zero
+         L     R2,TVTFSWKA2        Get address of buffer again
+         L     R1,S26SIZE          And length too mom
+         ST    R1,0(R2)            Set total length of buffer
+         LA    R1,8                Length of header data
+         ST    R1,4(R2)            Save in workarea
+         PEND  ,                      (DSNCLR)
+         EJECT
+         LTORG ,
+S26SZMIN DC    A(45*10000)         enough for 10000 entries
+S26SZMAX DC    A(2*1024*1024)      2 meg is about the max.
+*                                  for below the line storage,
+*                                  since we have lotta tasks
+CAMOBT   CAMLST SEARCH,*-*,*-*,*-*
+
+CAMOBSK  CAMLST SEEK,*-*,*-*,*-*
+
+CAMCATMD CAMLST NAME,*-*,,*-*
+
+$PAREN   DC    XL256'00'           translate table: look for
+         ORG   $PAREN+C'('            a ( in dsn
+         DC    X'01'
+         ORG   ,
+         TITLE 'Free Catalog Areas'
+S26WFREE PROC  ,
+         LT    R1,TVTFSWKA2        ->work area 2
+         IF    NZ,BEGIN            got some, free it
+         VCALL FREECORE
+         CLEAR TVTFSWKA2           Show it's gone
+         END   ,                   (free work area 2)
+
+         LT    R1,TVTFSWKA1        ->work area 1
+         IF    NZ,BEGIN            got one
+         VCALL FREECORE            free it
+         CLEAR TVTFSWKA1           show no area
+         END   ,                   (free work area 1)
+
+         PEND
+         TITLE 'Stack Overflow'
+*box
+*
+*  Error recovery stack overflow
+*
+         SPACE ,
+STCKOVFL LABEL ,
+         FAIL  'Error Recovery stack overflow.'
+
+         TITLE 'Format Dsname Record'
+*********
+*  Format dsname record (Internal)
+*
+*        On Entry:  R1  -> SDSNBUF
+*                   R2  -> DSNREC
+*  1995/01/09 ml   use fixed record layout (no SEG), to tracks
+*                  used to .01 trk (a la disklook)
+*  1994/09/06 ml:  copied from WYLDIR code
+*
+*********
+WDSNWKA  RECORD BEGIN
+WDSNWK   DS    5F
+         END   ,
+WDSNINT  PROC  WDSNWKA
+         LR    R4,R1               Save pointer to SDSNBUF
+         USING SBUF,R4
+         LR    R6,R2               ->output record
+         USING DSNREC,R6
+*box
+*
+*  Setup standard dsname stuff
+*
+WDSNL2   CLI   @R1,X'40'
+         BNE   HAVDSNL2            Br if last char
+         DECR  R1                  Check nxt char
+         BCT   R0,WDSNL2           Loop
+HAVDSNL2 LABEL ,
+*box
+*
+*  Format space allocated
+*
+         L2    R15,SBTRK           Number of tracks allocated
+         IF    (R15,NEG),BEGIN     Space alloc complete?
+         MVC   DSNTRKAL,=C'*****'  Something wrong ...
+         END   ELSE,BEGIN            (wrong/got alloc)
+         CVD   R15,FSHOP#          into msg
+         UNPK  FSHOXW(5),FSHOP#     ...
+         OI    FSHOXW+4,C'0'         sign to zone
+         MVC   DSNTRKAL,FSHOXW     now in msg w/leading 0s
+         L2    R0,SBTRKL           track length
+         SRL   R0,10               in Kbytes
+         MR    R14,R0              space in K
+         CVD   R15,FSHOP#          as decimal
+         UNPK  FSHOXW(9),FSHOP#    in chars
+         OI    FSHOXW+8,C'0'       sign to zone
+         MVC   DSNKBYTA,FSHOXW+1   in msg, kbytes alloc
+         END   ,                      (got trks alloc)
+*
+*  Format space used
+*  adapted from DISKLOOK   mcl 950109
+*
+         TM    SBDSORG,B'00100000' DSORG=DA?
+         IF    O,BEGIN             yes "tracks free" meaningless
+         MVC   DSNTRKUS(5),DSNTRKAL  used=allocated
+         MVC   DSNTRKUS+5(3),=C'.00'  ...exactly
+         END   ,                      (DA, used=alloc)
+         ELSE  BEGIN               not DA
+         MVC   DSNTRKUS,=C'      --'
+         CLC   SBLSTAR(5),=XL5'0' Check if final TTR applies
+         IF    NE,BEGIN            got good LSTAR
+         TM    SBDSORG,B'01000010'  Check if DSORG=PS or PO
+         IF    NZ,BEGIN            If either -- get trks used/free
+         L2    R1,SBLSTAR          Tracks used - 1
+         LTR   R1,R1               Check if negative
+         BNM   LSTOK               Branch if >= 0
+LSTBAD   MVC   DSNTRKUS,=C'      ***'
+         B     GEXT
+LSTOK    MH    R1,=H'100'          We'll use hundredths
+         CLI   SBLSTAR+2,0        Check if this track used
+         BE    LSTMT               If not - don't count it
+         L2    R15,SBTRKL          Track length (unsigned hfwd)
+         L2    R14,SBTRBAL         Track balance   "       "
+         SR    R15,R14             (track len) - (bytes used)
+         BM    LSTBAD              Negative is bad TRBAL  MCL890605
+         SR    R14,R14
+         MH    R15,=H'100'         We want hundredths
+         L2    R0,SBTRKL
+         DR    R14,R0                of a track...
+         LTR   R14,R14             Any remainder?
+         BZ    *+8                 If not
+         LA    R15,1(R15)          Round up
+         AR    R1,R15              Tracks used in hundredths
+LSTMT    LABEL ,
+         MVC   FSHOXW(11),=X'40212020202020204B2020' ptrn
+         CVD   R1,FSHOP#
+         ED    FSHOXW(11),FSHOP#+3
+         MVC   DSNTRKUS,FSHOXW+3  this way we get enuf leading 0s
+         L2    R15,SBTRKL          Track len
+         SRL   R15,10                in K bytes
+         MR    R0,R15              KBYTES used, hundredths
+         D     R0,=F'100'          kbytes used
+         CVD   R1,FSHOP#           to decimal
+         UNPK  FSHOXW(9),FSHOP#    in chars
+         OI    FSHOXW+8,C'0'       sign to zone
+         MVC   DSNKBYTU,FSHOXW+1   in msg, kbytes used
+*
+GEXT     LABEL ,
+         END   ,                      (PS/PO)
+         END   ,                      (good LSTAR)
+         END   ,                      (not DA)
+*
+*  format extent info
+*
+         LC    R15,SBNOEX          Number of extents
+         CVD   R15,FSHOP#          into msg
+         UNPK  FSHOXW(3),FSHOP#     ...
+         OI    FSHOXW+2,C'0'         sign to zone
+         MVC   DSNXTNTS,FSHOXW     now in msg w/leading 0s
+*box
+*
+*  Format DSORG information
+*
+         IF    (SBDSORG,NE,X'00'),BEGIN  Use first DSORG byte
+         LC    R15,SBDSORG         Get dsorg byte
+         N     R15,=X'000000E2'    clear irrelevant bits
+         SRL   R15,4               Move ps,is,da to low bits
+         IF    SBDSORG.X'02','LA R15,@R15+1'  PO - add its bit
+         STC   R15,WDSNWK          Save dsorg index byte
+*   WDSNWK now has low order four bits representing PS/IS/DA/PO
+         TR    WDSNWK(1),DSORGTR2    Translate into index byte
+         IC    R15,WDSNWK          Get index
+         LA    R15,DSORGTB2(R15)   Get addr of display
+         END   ELSE,BEGIN          (use 1st/don't)
+         LA    R15,DSORGTB2        R15 -> "**"
+         IF    SBDSORG+1.X'08','LA R15,=C"AM"'  VSAM
+         END
+         MVC   DSNDSORG(2),@R15    basic DSORG
+         TM    SBDSORG,DS1DSGU     Unmoveable?
+         IF    O,BEGIN
+         MVI   DSNDSORG+2,C'U'
+         END   ,                      (unmov)
+*box
+*
+*  Format first char of RECFM
+*
+         LC    R15,SBRECFM
+         SRL   R15,6               Only process F/V/U
+         LA    R15,RECFMTB2(R15)   Get addr of char
+         MVC   DSNRECFM(1),@R15
+*box
+*
+*  Format rest of RECFM
+*
+         LA    R2,DSNRECFM+1       Four char RECFM
+*
+         IF    SBRECFM.X'10',BEGIN Blocked ...
+         MVI   @R2,C'B'
+         INCR  R2
+         END
+*
+         IF    SBRECFM.X'20',BEGIN Track overflow ...
+         MVI   @R2,C'T'
+         INCR  R2
+         END
+*
+         IF    SBRECFM.X'08',BEGIN Standard ...
+         MVI   @R2,C'S'
+         INCR  R2
+         END
+*
+         IF    SBRECFM.X'04',BEGIN ASA control ...
+         MVI   @R2,C'A'
+         INCR  R2
+         END
+*
+         IF    SBRECFM.X'02',BEGIN Machine control ...
+         MVI   @R2,C'M'
+         INCR  R2
+         END
+*
+*box
+*
+*  Format LRECL, BLKSIZE, KEYLEN
+*
+         LH    R0,SBLRECL          LRECL (signed)
+         IF    (R0,NM),BEGIN       real LRECL
+         CVD   R0,FSHOP#
+         UNPK  FSHOXW(5),FSHOP#    LRECL as chars.
+         OI    FSHOXW+4,C'0'       make printable
+         MVC   DSNLRECL,FSHOXW     LRECL
+         END   ,                     (real LRECL)
+         ELSEIF (SBLRECL,EQ,X'8000'),BEGIN  LRECL=X
+         MVC   DSNLRECL,=C'    X'  LRECL=X
+         END   ,                      (LRECL=X)
+         ELSE  BEGIN               funny negative value
+         MVI   DSNLRECL,C'X'
+         BTX   DSNLRECL+1,4,L2:SBLRECL  Convert to hex
+         END   ,                      (funny val)
+*
+         L2    R0,SBBLKSZ          BLKSIZE (unsigned)
+         CVD   R0,FSHOP#           to dec.
+         UNPK  FSHOXW(5),FSHOP#    BLKSI as chars.
+         OI    FSHOXW+4,C'0'       make printable
+         MVC   DSNBKSIZ,FSHOXW     BLKSI
+*
+         LC    R0,SBKEYL
+         CVD   R0,FSHOP#           to dec.
+         UNPK  FSHOXW(3),FSHOP#    KEYLEN as chars.
+         OI    FSHOXW+2,C'0'       make printable
+         MVC   DSNKEYLN,FSHOXW     KEYLEN
+*box
+*
+* Format creation date and last access date
+*
+         MVC   FSHOFW+1,SBCRDT     Creation date
+         LA    R15,FSHOFW          Addr of creation date
+         LC    R0,@R15+1           Get year
+         MH    R0,=H'1000'         Year value
+         AH    R0,@R15+2           Add julian day
+         CVD   R0,FSHOWK           Convert to dec
+         L     R0,FSHOWK+4         Get value
+         LA    R1,DSNCRDAT         Place to put the date
+         VCALL NDATE               Convert
+*
+         MVC   FSHOFW2+1,SBRFDT    Last access date
+         LA    R15,FSHOFW2         Addr of last access date
+         LC    R0,@R15+1           Get year
+         MH    R0,=H'1000'         Year value
+         AH    R0,@R15+2           Add julian day
+         CVD   R0,FSHOWK           Convert to dec
+         L     R0,FSHOWK+4         Get value
+         LA    R1,DSNLADAT         Place to put the date
+         VCALL NDATE               Convert
+*
+         MVC   DSNEXPDT,=C'0000/00/00'  in case undefined
+         IF    (SBEXDT,NZ),BEGIN   expdt is defined
+         MVC   FSHOFW2+1,SBEXDT    Expiration Date
+         LA    R15,FSHOFW2
+         LC    R0,@R15+1           Get year
+         MH    R0,=H'1000'         shift year
+         AH    R0,@R15+2           get yyddd
+         CVD   R0,FSHOWK           Convert to dec
+         L     R0,FSHOWK+4         Get value
+         LA    R1,DSNEXPDT         Place to put the date
+         VCALL NDATE               Convert
+         END   ,                      (expdt is defined)
+*box
+*
+*  Format DSIND02 status (Write since last backup)
+*
+         MVI   DSNCHGED,C'N'       tentative "not"
+         IF    SBDSIND.SBWSB,BEGIN written since backup
+         MVI   DSNCHGED,C'Y'       Yes
+         END   ,                      (written since backup)
+*
+         PEND
+*
+DSORGTR2 DC    AL1(0,4,6,0,2),XL3'0',AL1(8),XL7'0'  index values
+DSORGTB2 DC    C'**PSPODAIS'       Displays
+RECFMTB2 DC    C'*VFU'             Displays
+*
+         DROP  BR,R4,R6
+         QLTORG
+BLANKS   DC    CL44' '
+         SPACE ,
+         LTORG ,
+         TITLE 'Extract DSCB Data'
+XTRDSCBR RECORD BEGIN
+XTRDEVTL DS    H                   track length
+XTRDEVTC DS    H                   tracks/cyl
+         END   ,
+
+XTRDSCB  PROC  XTRDSCBR
+
+*box
+*  Extract data from DSCB(s) and place in SDSNBUF.
+*
+*  On entry:  R9->FSHOAREA (includes SDSNBUF)
+*             R1->FMT1 DSCB, followed by FMT3 if present
+*             R0->FSDEVREC volume info record
+*
+*  On exit:  Fields filled in in SDSNBUF
+*
+
+** Following copied from WYLDISK routine
+*        USING FSHOAREA,R9
+         LR    R5,R1               ->DSCB(s)
+         LR    R15,R0              ->vol rec
+         WITH  (FSDEVREC,R15),BEGIN     copy useful vol info
+         MVC   XTRDEVTL,FSDEVTL    track length
+         MVC   XTRDEVTC,FSDEVTC    tracks/cyl
+         END   ,                      (with FSDEVREC)
+         CLEAR FMT3S1DONE          haven't done FMT3 yet
+         CLEAR FMT3S2DONE          haven't done FMT3 yet
+         WITH  (IECSDSL1,R5),BEGIN
+         MVC   SBDSN,DS1DSNAM      DSNAME
+         MVC   SBCRDT,DS1CREDT     CREATION DATE
+         MVC   SBEXDT,DS1EXPDT     Expiration date (for real)
+**-XPDT  MVC   SBRFDT,DS1EXPDT     previously used to hold LA date...
+**-XPDT  IF  ((DS1REFD+1,GE,=H'1'),AND,(DS1REFD+1,LE,=H'366')),BEGIN
+         MVC   SBRFDT,DS1REFD      Last referenced date (MVS)
+**-XPDT  END   ,                      (good REFD)
+         MVC   SBDSIND,DS1DSIND    Data set indicators
+         MVC   SBNOEX,DS1NOEPV     NUMBER OF EXTENTS
+         MVC   SBDSORG,DS1DSORG    DSORG
+         MVC   SBRECFM,DS1RECFM    RECFM
+         MVC   SBLRECL,DS1LRECL    LRECL
+         MVC   SBBLKSZ,DS1BLKL     BLKSIZE
+         MVC   SBKEYL,DS1KEYL      KEY LENGTH
+         MVC   SBLB,DS1LSTAR       LAST RECORD WRITTEN
+         MVC   SBTRKL,XTRDEVTL     track length from devtype
+*   Compute amount of space allocated from extent information
+SDSNSPAC CLEAR R3                  Total space (in trks)
+         LA    R0,3                Number of extents in fmt 1
+         LC    R2,DS1NOEPV         Total number of extents
+         IF    DS1EXT1.X'40','LA R2,@R2+1'  Count user label extent
+         LA    R15,DS1EXT1         Addr of first extent descrip
+NXTXSECT CR    R2,R0               TOTAL REMAINING VS MAX THIS SECT
+         BH    MULTSECT            BR IF MORE SECTIONS FOLLOWING
+         LTR   R0,R2               TOTAL IS REMAINING
+         BZ    XTNTALL             UNLESS ZERO
+MULTSECT SR    R2,R0               REMAINING AFTER THIS SECTION
+XTNTLP   CLI   @R15,0              IS THIS EXTENT ACTIVE?
+         BE    XTNTDONE            BR IF NO
+         MVC   FSHOWK,@R15+2       MOVE LOWER/UPPER DESCRIP
+         LH    R1,FSHOWK+6         LAST TRACK
+         LA    R1,@R1+1            +1 FOR SUBT
+         SH    R1,FSHOWK+2         LESS FIRST TRACK
+         AR    R3,R1
+         LH    R1,FSHOWK+4         UPPER CYL
+         SH    R1,FSHOWK           LOWER CYL
+         MH    R1,XTRDEVTC         trks/cyl
+         AR    R3,R1
+XTNTDONE LA    R15,DS1EXT2-DS1EXT1(R15)  TO NEXT DESCRIP
+         BCT   R0,XTNTLP           PROCESS NEXT ONE
+*   All extents in this section of DSCB processed
+         END   ,                      (with IECSDSL1)
+         LTR   R2,R2               ARE THERE MORE?
+         BZ    XTNTALL             BR IF NO
+         WITH  (IECSDSL3,R5),BEGIN
+         IF    FMT3S1DONE,FMT3SEC2  if already did section 1
+         IF    FMT3S2DONE,BEGIN    Just finished a FMT3, get more
+         LA    R0,DS3PTRDS         ->CCHHR of FMT3
+         LA    R1,TVTVOLSER        ->VOL
+*  Obtain format 3 DSCB.  Copied from OSFILE OBTFMT3 routine
+
+         L     R15,=A(CAMOBSK)     Address of model camlst
+         MVC   OSFCAMCT(16),@R15   Move in model camlist
+         ST    R0,OSFCAMCT+4       Address of cchhr required
+         ST    R1,OSFCAMCT+8       Address of required volume serial
+         LA    R0,OSFFMT3          Address of fmt3 area return
+         ST    R0,OSFCAMCT+12      Address to receive fmt3
+         OBTAIN OSFCAMCT           Read in fmt3 dscb
+         PTRACE OBTFMT3RT
+         CLEAR FMT3S1DONE
+         CLEAR FMT3S2DONE
+         END   ,                      (get more FMT3s)
+         ELSE  BEGIN               must have just finished the FMT1
+         LA    R5,140(,R5)         ->FMT3 then (just did FMT1)
+         END   ,                      (just did FMT1)
+*  Start processing a FMT3
+         LA    R0,4                4 EXTENTS IN FIRST SECTION
+         LA    R15,DS3EXTNT        ADDR OF FIRST SECTION
+         SET   FMT3S1DONE          remmber we did it
+         B     NXTXSECT            GO PROCESS IT
+*
+FMT3SEC2 LA    R15,DS3ADEXT        ADDR OF SECTION 2 IN FMT 3
+         LA    R0,9                9 EXTENTS IN SECT 2
+         SET   FMT3S2DONE          remmber we did it
+         B     NXTXSECT
+         SPACE 2
+XTNTALL  STH   R3,SBTRK            SAVE TOTAL
+
+         CLEAR R15                 COMP CODE
+         END   ,                      (With IECSDSL3)
+         PEND  ,                   XTRDSCB
+
+         TITLE 'Show Volume Table Of Contents'
+*box
+*  SHOW VTOC - display dsn info in VTOC
+*  On entry:   R15 ->SEGCB
+*              R1=FSHOAREA area
+*
+*  On exit:  RC=0 normal
+*               4 invalid node ?
+*               8 VTOC error?
+*  info seg'd.
+*
+*
+CVAFWORK DSECT ,                   Dynamic area for VTOCSHOW
+
+*  Record area for formatted output, mapped by DSNREC (see SUPERLOC)
+
+VDSNREC  DS    CL(DSNREC#)
+
+*  Parameter list area for CVAFFILT
+
+CVAFLST  CVAFFILT ACCESS=READ,FCL=*-*,FLTAREA=KEEP,IOAREA=KEEP,        *
+               BUFLIST=*-*,MF=L
+CVSTAT   EQU   CVAFLST+7,1,C'X'    status code
+CVFUNC   EQU   CVAFLST+6,1,C'X'    function code
+
+
+*  Filter Criterea List
+*  In spite of the DSECT=NO, this %!%?* macro generates a DSECT stmt,
+*  so beware...
+         PUSH  DSECTS
+FCLIST   DC    0A(0)
+         ICVFCL DSECT=NO
+         POP   DSECTS              resume our dsect
+
+*  Dsname list for filter criterea:  One dsname entry
+
+FCNTRY   DC    F'0'                FCL entry
+FXNLN    EQU   FCNTRY+1            name length
+FC@DSN   DC    A(0)                ->dsname
+
+BFLE$N   EQU   20                  #DSCBs we want to get per buf
+DSCB$SIZ EQU   140                 L'DSCB
+
+*  Buffer List
+
+BFLH$DEF DC    (BFLHLN)X'00'       Buffer List Header
+BFLE$DEF DC    (BFLE$N*BFLELN)X'00' buffer list elements
+BFL$SIZE EQU   *-BFLH$DEF
+DSCB$DEF DS    0XL(DSCB$SIZ)       buffers (DSCB area)
+         DS    (BFLE$N*DSCB$SIZ)X
+         DS    0D
+#CVAFWKA EQU   *-CVAFWORK          Length of area
+BFL$MAP  ICVAFBFL
+         SPACE ,
+FILESHOW CSECT ,                   resume control section
+         USING GVT                 Global vector table ptr
+         USING TVT                 Task vector table
+
+DYNCHWK  RECORD BEGIN
+DYNCHRGD DC    C'(0000-0000)'''   info/reason code area, quote
+         ORG   DYNCHRGD
+         DC    C'('
+DYNCHRG1 DC    C'0000',C'-'        first digits
+DYNCHRG2 DC    C'0000',C')'        second digits
+#DYNCHWK EQU   *-DYNCHWK           length
+         END   DYNCHWK
+
+SHOWVTOC XPROC FSDEVREC
+         LR    R9,R1               Save parm pointer
+         USING FSHOAREA,R9
+         ST    R15,SEGSAVE         Save seg ptr.
+         SEGDEF L:SEGSAVE
+         LH    R4,FSHO#LIK         Save length
+         STC   R4,#USERNOD         Save for CVAF parmlist
+         MVC   USERNODE,FSHOLIKE
+         CLEAR TVTFSWKA1           No storage yet
+
+*  tweak the LIKE string to use CVAF "wildcard" chars as needed
+
+         IF    ~FSHOONLY,BEGIN     ONLY doesn't use wildcard
+         TRT   FSHOLIKE,$FILTCHR   does it already use wildcards?
+         IF    Z,BEGIN             If not, gotta add one
+         LH    R2,FSHO#LIK         L'LIKE
+         LA    R1,USERNODE(R2)     ->past end
+         IF    (R2,LE,40),BEGIN    plenty of room
+         LR    R15,R1              ->past end
+         S     R15,=F'1'           ->last byte
+         CLI   @R15,C'.'           last is dot?
+         IF    NE,BEGIN            last not dot
+         MVC   @R1(4),=C'*.**'     generic "zero or more"
+         LA    R2,4(R2)            new length
+         END   ,                     (last not dot)
+         ELSE  BEGIN               last is dot
+         MVC   @R1(2),=C'**'       zero or more quals
+         LA    R2,2(R2)            new length
+         END   ,                     (last is dot)
+         END   ,                     (plenty)
+         ELSE  BEGIN               too long to add wildcards
+         SEGCLR ERRSCB             Clear error seg control block
+         SET   TERRMSG             msg processing
+         SEG   'ERRID=BADDSN ERRMSG='''
+         SEGT  FSHOLIKE            the dsn
+         SEG   ':  name too long for LIKE'''
+         B     VBARF               QUIT
+         END   ,                      (too long)
+         STC   R2,#USERNOD         New length
+         END   ,                      (not already wild)
+         END   ,                      (not ONLY)
+         TITLE 'Get storage and read VTOC'
+         L     R0,VTOCWKAL         L'VOL work area
+         VCALL GETLOW
+         SPACE
+**-      IF    (R15,NZ),BEGIN      no core
+**-      SEG   'ERRID=WINGFAIL ERRMSG='''
+**-      SEG   'VTOC_SHOW could not get workarea'''
+**-      SEGWR ,
+**-      LA    R15,20              RC
+**-      EXIT  SHOWVTOC
+**-      END   ,                   (no core)
+         ST    R1,TVTFSWKA1        save pointer
+         RECVRY ROUT=S26WFREE,STCKOVFL=STCKOFL2
+         SPACE
+* Check volume
+         CLC   TVTPBVOL,GVTBLANK   VOL given?
+         IF    NH,BEGIN            no VOL
+         SEGCLR ERRSCB             Clear error seg control block
+         SET   TERRMSG             msg processing
+         SEG   'ERRID=NOVOL ERRMSG='''
+         SEG   'Volume not specified'
+         SEG   ''''
+         B     VBARF
+         END   ,                   (no vol)
+         ELSE  BEGIN               check vol
+         MVC   FSDVOLSR,TVTPBVOL   volser
+         LA    R1,FSDEVREC         volume record area
+         ACALL FSUCB               see if mounted, get info
+         IF    (R15,NZ),BEGIN      No volume
+         SEGCLR ERRSCB             Clear error seg control block
+         SET   TERRMSG             msg processing
+         SEG   'ERRID=NOTMNTD ERRMSG='''
+         SEG   'volume '
+         SEGB  TVTPBVOL            The vol-ser
+         SEG   ' is not mounted'''
+         B     VBARF
+         END   ,                   (no volume)
+         END   ,                   (check vol)
+         SPACE ,
+         DYNCLEAR ,                Clean dynamic allocation buffer
+         MVC   TVTPBDSNAME,=C'SYS99999.T000000.RA000.D#' like tempname
+*                             0....v....1....v....2....v....3.          ...
+         MVC   TVTPBDSNAME+25(6),TVTPBVOL    volser in the dsn
+         MVC   TVTPBDSNAME+31(13),GVTBLANK   clean up...
+         DYNADD (DALDSNAM,1,44),TVTPBDSNAME  Specify data set name
+         DYNADD (DALSTATS,1,1),=X'08'        disp=shr
+         DYNADD (DALVLSER,1,6),TVTPBVOL      set volume serial
+         DYNADD (DALUNIT,1,8),=CL8'SYSALLDA' Add unit specification
+         DYNADD (DALRTDDN,1,8),GVTBLANK      return ddname
+         XPUSH R1                            save address of ddname
+         DYNCALL ,                           allocate file
+
+         IF    (R15,NZ),BEGIN      dynalloc failed (unusual error)
+         L     R2,TVTDYNBF         Load address of dyntable control
+         WITH  (DYNTABLE,R2)       Addressability to dynamic buffer
+         XPUSH ,,#DYNCHWK,PTR=R5
+         WITH  (DYNCHWK,R5),BEGIN
+*  Get return codes
+
+         L     R3,DYNTRETC         R3 - RETURN CODE
+         L     R4,DYN99CBP         ->parmlist
+         WITH  (S99RB,R4)          S99RB area
+
+*  Prepare dump of error/info codes
+
+         MVC   DYNCHRGD,=C'(0000-0000) '''       prime it
+         BTX   DYNCHRG1,4,L2:S99ERROR    error code
+         BTX   DYNCHRG2,4,L2:S99INFO     info code
+         SEGCLR ERRSCB             Clear error seg control block
+         SEG   'ERRID=VTOCERR ERRMSG=''FILESHOW ERROR:  VTOC allocate f*
+               ailed '
+         SEG   DYNCHRGD            info/reason codes
+         SEG   ''''                close quote
+         SET   TERRMSG
+         XPOP  PTR=R5              free work space
+         END   ,                      (with R5)
+         B     VBARF               give up
+         END   ,                   (dynalloc fail)
+
+         XPOP  R2                  Retrieve address of ddname ret
+         MVC   TVTDDNAME,GVTBLANK  Blank out ddname
+         LH    R1,@R2+4            Load length of returned ddname
+         DEX   R1,'MVC TVTDDNAME(0),@R2+6'   move in ddname
+         L     R7,TVTFSWKA1        ->VTOCSHOW dynamic area
+         USING CVAFWORK,R7
+
+*  Initialize DSN record (compatible with FILESHOW)
+
+         LA    R6,VDSNREC          ->our version of DSNREC
+         WITH  (DSNREC,R6),BEGIN   addressability
+         MVC   DSNREC(DSNREC#),GVTBLANK
+         MVI   DSNCATTP,C'0'       not a catalog entry
+         MVC   DSNVOL,TVTPBVOL     volser
+         MVI   DSNDEVTP,C'D'       it's a disk
+         MVC   DSNVLCNT,=C'001'    volume count
+         BTX   DSNUCBTP,8,L4:FSDEVTAB   UCBTYP info in hex
+         SR    R2,R2
+         MVC   DSNDVDES,=C'????      ' unknown so far
+         IC    R2,FSDEVTAB+3       Model ID byte DEVUNTYP
+         C     R2,#DEVTABL         See if invalid code
+         IF    NH,BEGIN            Done if invalid
+         MH    R2,=AL2(##LDEVTB)   * table offset
+         LA    R2,DEVTABLE(R2)     Point to ID in table
+         MVC   DSNDVDES(8),0(R2)    Move ID into msg
+         END   ,                      (valid code)
+         END   ,                      (with VDSNREC)
+
+*  Build CVAF parameter list
+
+         MVC   CVAFLST(CVAFL###),CVAFL##         copy skeleton list
+
+*  Initialize FCL (DSN and its length done above)
+         LA    R0,1
+         STH   R0,FCLCOUNT
+         MVC   FCLID,=C'FCL '      FCL ID
+         XC    FCLDSCBR,FCLDSCBR   none returned yet       ml961216
+         MVI   FCL1FLAG,0
+         MVI   FCL2FLAG,0
+         XC    FCLDRSV,FCLDRSV
+         XC    FCNTRY,FCNTRY       clear
+         MVC   FXNLN,#USERNOD      L'DSN
+         LA    R0,USERNODE         ->DSN
+         ST    R0,FC@DSN           in FCL
+*  Initialize buffer list
+         LA    R2,BFLH$DEF         ->area
+         L     R3,=A(BFLE$N*DSCB$SIZ+BFL$SIZE) length
+         SR    R15,R15             no from, pad zero
+         MVCL  R2,R14              clear area
+         LA    R15,BFLH$DEF
+         WITH  (BFL$MAP,R15),BEGIN
+         MVI   BFLHNOE,BFLE$N      no. entries
+         MVI   BFLHKEY,BFLHDSCB    we want DSCBs
+         END   ,                   (with R15)
+         LA    R2,BFLE$DEF         ->buf list elements
+         WITH  (BFLE,R2),BEGIN
+         LA    R3,DSCB$DEF         ->1st DSCB buffer
+         LA    R4,BFLE$N           no. buffers
+BFLP     OI    BFLEFL,BFLECHR      We want CCHHRs
+         MVI   BFLELTH,DSCB$SIZ    L'element=DSCB length
+         ST    R3,BFLEBUF          ->buffer
+         LA    R2,BFLELN(R2)       ->next element
+         LA    R3,DSCB$SIZ(R3)     ->next buffer
+         BCT   R4,BFLP             do next one
+         END   ,                   (with R2)
+
+         RECVRY ROUT=CVAFFREE,STCKOVFL=STCKOFL2
+
+*  go get 'em
+         SPACE
+CVCALL   CVAFFILT ACCESS=READ,FCL=FCLIST,BUFLIST=BFLH$DEF,UCB=FSDUCBPT,*
+               MF=(E,CVAFLST)
+
+TESTRC   LABEL ,
+         ST    R15,FSHORCOD        Save RC
+         LA    R15,FCLHDEND        ->dsn list
+**-      WITH  (FCLDSN,R15),'CLI FCLDSNST,FCLST01' Got any DSCBs?
+**-      BNE   RLSE                If none                 ml961216
+** the above created a new bug, the field isn't updated until all
+** dscbs matching a name are found.  Added clear of count below,
+** hoping that fixes the original problem (0C4 chasing undefined
+** pointer)                                                ml970121
+         SPACE
+*  Process buffer contents
+         LA    R5,BFLE$DEF         ->buf list elements
+         WITH  (BFLE,R5),BEGIN
+         LA    R3,DSCB$DEF         ->1st DSCB buffer
+         LH    R4,FCLDSCBR         no. DSCBs returned
+         IF    (R4,P),DCLP         if any
+
+*  if none, check RC
+         L     R15,FSHORCOD        the return code
+         IF    (R15,Z),RLSE        RC=0, no items ->ok
+
+*  Prepare dump of error/info codes
+
+         SEGCLR ERRSCB             Clear error seg control block
+         SEG   'ERRID=VTOCERR ERRMSG=''FILESHOW ERROR:  VTOC access err*
+               or, RC='
+         SEGDC FSHORCOD,2          Return code from CVAFFILT
+         SEG   ', status code='
+         CLEAR R0
+         IC    R0,CVSTAT           CVAF status code
+         SEGHX (R0),2
+         SEG   ''''                close quote
+         SET   TERRMSG
+         B     VBARF               give up
+
+*  loop through buffer list
+
+dclp     L     R1,BFLEBUF          ->buffer (has DSCB)
+
+*box
+*
+*  Process format 1 DSCB, and FMT3 if present.  If there is a FMT3,
+*  it follows the FMT1 in the same buffer.
+*
+
+         SEGDEF L:SEGSAVE
+
+         CLI   @R1+(DS3FMTID-IECSDSL3),C'3'   is this a FMT3?
+         IF    EQ,PMSG             if so, skip it, was processed
+*                                  in previous pass thru loop
+         CLC   FSHOFROM,@R1        FROM name
+         IF    H,PMSG              if below FROM, next entry
+         CLC   FSHOTO,@R1          TO name
+         IF    L,PMSG              if above TO, next entry
+**? If we're guaranteed to get them in sorted order, this could be
+**? "done" instead of "next entry"
+         LA    R2,VDSNREC          ->output record
+         WITH  (DSNREC,R2),BEGIN
+         MVC   DSNDSCBA,GVTBLANK   clear our part
+         MVC   DSNDSN,@R1          DSN from fmt-1 DSCB
+         END   ,                      (with dsnrec)
+*              R1 -> DSCB(s)
+         LA    R0,FSDEVREC         ->volume record
+         ACALL XTRDSCB             extract info for report
+
+         LA    R1,SBUF             ->extracted data
+         ACALL WDSNINT             Format data
+         LA    R1,VDSNREC          ->record
+         LA    R0,DSNREC#          L'record
+         VCALL RTRIM
+         SEG   VDSNREC,(R0)        write it
+         SEGWR ,
+
+PMSG     label ,
+         LA    R5,BFLELN(R5)       ->next element
+         BCT   R4,dclp             do next one
+         DROP  R2
+         END   ,                   (with BFLE)
+OUT      EQU   *
+         L     R15,FSHORCOD        Restore RC
+         C     R15,=F'4'
+         BH    VBARF               if errors, don't resume
+         CLI   CVSTAT,X'40'        OK to resume?
+         BNE   RLSE                if not
+         LA    R2,DSCB$DEF         ->area
+         L     R3,=A(BFLE$N*DSCB$SIZ) length
+         SR    R15,R15             no from, pad zero
+         MVCL  R2,R14              clear area
+         XC    FCLDSCBR,FCLDSCBR   none returned yet       ml970121
+         CVAFFILT ACCESS=RESUME,MF=(E,CVAFLST)   go get more
+         B     TESTRC
+
+RLSE     ACALL CVAFFREE            Free system's workareas
+
+         L     R1,TVTFSWKA1        ->wkarea
+         XCALL FREECORE
+         CLEAR TVTFSWKA1
+
+         DYNCLEAR ,                dynamic alloc buffer
+         DYNSET S99VRBUN           Set for dynamic unallocation
+         DYNADD (DUNDDNAM,1,8),TVTDDNAME
+         DYNCALL ,                 De-allocate volume
+         MVI   TVTDDNAME,C' '      show no allocation
+         L     R15,FSHORCOD        RCODE
+         B     VTDONE
+
+VBARF    LA    R15,999
+VTDONE   LABEL ,
+         PEND
+         COPY  DEVTABLE            disk info table
+VTOCWKAL DC    A(#CVAFWKA)         length of dynamic area
+
+CVAFL##  CVAFFILT ACCESS=READ,FCL=*-*,FLTAREA=KEEP,IOAREA=KEEP,        *
+               BUFLIST=*-*,MF=L
+CVAFL### EQU   *-CVAFL##           parm list length
+$FILTCHR DC    XL256'00'           translate table to find wildcard
+         ORG   $FILTCHR+C'%'       % is one of 'm
+         DC    X'01'
+         ORG   $FILTCHR+C'*'       * is the other...
+         DC    X'02'
+         ORG   ,
+         TITLE 'Release CVAF Areas'
+*
+*  RLSE-mode call to CVAFFILT to free system-obtained storage.
+*
+CVAFFREE PROC  ,
+         L     R7,TVTFSWKA1        ->VTOCSHOW dynamic area
+         IF    (R7,NZ),BEGIN       area still exists
+         USING CVAFWORK,R7
+
+*  parameter list in in CVAFWORK, built by VTOCSHOW proc
+
+         CVAFFILT ACCESS=RLSE,FCL=0,BUFLIST=0,FLTAREA=NOKEEP,          *
+               MF=(E,CVAFLST)
+
+         END   ,                      (area exists)
+         PEND  ,
+         TITLE 'Scan/Update UCB/DEVTYPE list'
+FSUCBWK  RECORD BEGIN
+**-DPRM0 DEVTYPE ,(*-*,24),UCBLIST=YES,MF=L
+FSDDPRM0 DEVTYPE ,UCBLIST=YES,(*-*,24),PLISTVER=1,MF=L ml19990804
+FSDDPARM EQU   FSDDPRM0,*-FSDDPRM0
+         END   ,                   FSUCBWK
+         SPACE
+FSUCB    PROC  FSUCBWK
+*  R1->device info record
+         LR    R6,R1               ->Area
+         WITH  (FSDEVREC,R6),BEGIN
+         CLEAR FSDUCBPT
+         CLEAR FSDEVTAB
+         LA    R1,FSDVOLSR         -> volser
+         VCALL FINDUCB
+         IF    (R15,NZ),'EXIT FSUCB'
+         ST    R1,FSDUCBPT         Save UCB pointer
+         MVC   FSDDPARM,XDPARM     Copy dummy parmlist
+**-    DEVTYPE ,(FSDEVTAB,24,ANY),UCBLIST=(FSDUCBPT,1),MF=(E,FSDDPARM)
+       DEVTYPE ,UCBLIST=(FSDUCBPT,1,ANY),(FSDEVTAB,24),MF=(E,FSDDPARM),*
+               PLISTVER=1          mcl 1999/08/04
+         END   ,                   (with FSDEVRC)
+         PEND  ,
+**-ARM   DEVTYPE ,(*-*,24),UCBLIST=YES,MF=L   skeleton list
+XDPARM   DEVTYPE ,UCBLIST=YES,(*-*,24),PLISTVER=1,MF=L   skeleton list
+         EJECT
+         TITLE 'Recall from Migration'
+TICKLEDS XPROC  ,
+
+*  OK, this is a kluge.  We found that our superlocate call to get
+*  info on one dataset triggered a recall from migration, so this is
+*  a modified copy of the SVC26 routine.  This will be replaced by a
+*  command to HSM, once we set up a way to pass such commands.
+*
+*  Doing an SVC99 allocate would also work, but this appears to have
+*  less overhead.
+*
+*  On entry:  R1->dsname
+*  On exit:  R15=RC from SVC26; dataset recalled.
+*
+
+         LR    R9,R1               Save parm pointer
+         CLEAR TVTFSWKA2           show no dynamic area
+         L     R0,=A(VOLBUFL)          L'VOL work area
+         VCALL GETLOW              **AREA MUST BE BELOW!!!!!**
+         ST    R1,TVTFSWKA1        save pointer
+         RECVRY ROUT=S26WFREE,STCKOVFL=STCKOFL2  and free on closeup
+
+         LA    R6,CATPL            Address of catalog parameter list
+         USING CTGPL,R6            ## addr to catalog parm list
+         XC    CATPL,CATPL         Zero out catalog parm list
+         OI    CTGOPTN3,CTGSUPLT   Set "superlocate"
+         OI    CTGOPTN3,CTGAM0     Set vsam request
+         OI    CTGOPTN4,CTGCOIN    Request control intercept
+         OI    CTGDSORG,CTGF2WKA   Set format 2 work area
+         ST    R9,CTGENT           ->DSN in parm list
+         LA    R1,CATSMALL         Little work area
+         ST    R1,CTGWKA           Save in catalog parm list
+         XC    CATSMALL,CATSMALL   Zero work area
+         L     R1,TVTFSWKA1        Address of volume buffer
+         ST    R1,CATSMALL         Save in work area
+         L     R1,=A(VOLBUFL)          Length of volume buffer
+         STH   R1,CATSMALL+4       Save in work area
+         L     R7,TVTFSWKA1        Address of volume list
+         LR    R1,R6               Copy parameter list address
+         SVC   26                  There we go
+
+         PEND  ,                   RC is from SVC26
+         TITLE 'Stack Overflow'
+*box
+*
+*  Error recovery stack overflow
+*
+         SPACE ,
+STCKOFL2 LABEL ,
+         FAIL  'Error Recovery stack overflow.'
+
+         TITLE 'Get SMS Information on Dataset'
+*box
+*
+*  On entry:  R1->dsname
+*             R0->?? byte return area
+*  On exit:   R15 = 0 dataset found, info filled in.
+*             R15 > 0, dataset not found.
+*
+*  Info mapped by SMSINFO record:
+*
+
+SMSINFOR RECORD BEGIN
+         SMSINFOR
+         END   ,
+
+SMSWORK  RECORD BEGIN
+
+PROBDET  DC    2F'0'               problem determination area
+
+SMSDATA  DC    0CL30' '
+STORCLAS DC    CL30' '
+MGMTCLAS DC    CL30' '
+DATACLAS DC    CL30' '
+
+DSTYPE   DC    F'0'                1=PDSE
+
+MYRC     DC    F'0'                Return Code
+MYRSN    DC    F'0'                Reason Code
+
+L#DSN    DC    F'0'                L'datasetname
+
+SMSPARMS DC    0A(0)
+
+SMSPRC   DC    A(0)
+SMSPRS   DC    A(0)
+SMSPPD   DC    A(0)
+SMSPLD   DC    A(0)
+SMSPDS   DC    A(0)
+SMSPSM   DC    A(0)
+SMSPDT   DC    A(0)
+         END   SMSWORK
+
+SMSINFO  XPROC SMSWORK
+         LR    R6,R1               ->DSNAME
+         LR    R5,R0               ->result
+         LA    R0,44               L'DSN
+         VCALL RTRIM               get dsn length
+         ST    R0,L#DSN            save dsn length
+         LA    R1,MYRC
+         ST    R1,SMSPRC           in parm list
+         LA    R1,MYRSN
+         ST    R1,SMSPRS
+         LA    R1,PROBDET
+         ST    R1,SMSPPD
+         LA    R1,L#DSN
+         ST    R1,SMSPLD
+         ST    R6,SMSPDS           ->dsn
+         LA    R1,SMSDATA
+         ST    R1,SMSPSM
+         LA    R1,DSTYPE
+         ST    R1,SMSPDT
+
+
+**       L     R15,@SMS            V(status routine)
+         LA    R1,SMSPARMS         ->arglist
+**       BASSM R14,R15             go call it
+         LINK  EP=IGWASMS
+**       LA    R1,G2
+**       BSM   0,R1                Reset 24 bit mode!
+**G2       L     R0,MYRC             Retcode
+         WITH  (SMSINFOR,R5),BEGIN
+         MVC   SMSISTCL,STORCLAS
+         MVC   SMSIMGCL,MGMTCLAS
+         MVC   SMSIDTCL,DATACLAS
+
+*SMSPARMS DC    A(MYRC),A(MYRSN),A(PROBDET),A(L#DSN),A(DSNAME)
+*         DC    A(SMSDATA),A(DSTYPE)
+
+         END   ,                      (WITH R5)
+         PEND  ,
+
+         TITLE 'ending stuff'
+FILESHO@ EQU   *-FILESHOW,,C'N'       Module length
+*-
+*-       Our symbols.
+*-
+         ENTRY SYMSHOCT            FILESHOW symbol table entries
+         DC    0D'0'               Force double word alignment
+SYMSHOCT DC    CL8'FILESHOW',A(FILESHOW,FILESHO@)
+         DC    A(0)                End of table
+         END   .

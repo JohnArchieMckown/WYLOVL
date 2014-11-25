@@ -1,0 +1,133 @@
+CLOS     TITLE   'DISK ROUTINE TO CLOSE ALL FILES'
+*
+CLOSE    CSECT
+*
+*  ROUTINE TO CLOSE ALL OPEN FILES
+*
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0                  LOCAL WORK ONLY..USED BY SVC
+R1       EQU   1                  LOCAL WORK ONLY..USED BY SVC
+R2       EQU   2             =0 NO ERRORS  =4 ERRORS IN CLOS OPERATION
+R3       EQU   3
+R4       EQU   4                  LOCAL WORK WHEN NOT INTERNAL BRANCH
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8                  LOOP CONTROL COUNTER
+R9       EQU   9                  POINTER TO FCTB ENTRY
+R10      EQU   10                 BASE FOR FILE CONTROL BLOCK  (FCB)
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'CLOS'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14                 LOCAL WORK ONLY..USED BY SVC
+R15      EQU   15                 LOCAL WORK ONLY..USED BY SVC
+*
+*
+**CLOS(E) ENTRY
+START    STM   R14,R12,12(R13)    SAVE REGS
+         LA    R1,72(R0,R13)      POINT TO NEW SAVE AREA
+         ST    R13,4(R0,R1)       STORE CHAIN TO PRIOR SAVE AREA
+         ST    R1,8(R0,R13)       CHAIN NEW TO OLD SAVE AREA
+         LR    R13,R1             SET UP FOR CALLS DOWN
+         BALR  R12,0              SET ADDRESSABILITY
+         USING *,R12              TELL ASSEMBLER
+         USING AREA,R11           TELL ASSEMBLER ABOUT AREA
+*
+**ZERO REG 2 TO KEEP TRACK OF WHETHER AN ERROR CONDITION IS FOUND
+*
+         SR    R2,R2              0=NO ERRORS 4=ERRORS
+*
+**GO WRITE OUT WRITTEN RECORDS
+*
+         L     R15,=V(FLUSH)
+         BALR  R14,R15       GO WRITE OUT CHANGED RECORDS IN ALL FILES
+         B     ERRW               ERROR ON RETURN FROM FLUSH
+*
+**SET UP TO LOOP THRU FILE CONTROL BLOCKS
+*
+RUN      LA    R8,15(R0,R0)       SET TO COUNT DOWN TABLE
+         L     R9,AFCB            PICK UP ADDR OF FCBT
+         LA    R10,64(R0,R9)      GET ADDR OF FIRST FCB
+         USING FCB,R10            TELL ASSEMBLER ABOUT THE FCB
+*
+**START LOOP THRU CONTROL BLOCKS LOOKING FOR PHYSICAL RECORDS
+**TO WRITE OUT AND CHECKING INTERNAL CONSISTENCE
+*
+TOP      L     R1,0(R0,R9)        GET FCBT ENTRY
+         LA    R1,0(R0,R1)        TAKE OUT HIGH BYTE
+         LTR   R1,R1              TEST FOR ENTRY IN USE
+         BZ    ENDLOOP            IF NOT SET TO LOOP
+         L     R1,FCBOID          GET ORVYL ID (IF 0 NOT ATTACHED)
+         LTR   R1,R1              SEE IF ZERO
+         BZ    ENDLOOP            FILE NOT ATTACHED
+*
+**WE ARE NOW READY TO DETACH THE FILE
+*
+         DETACH L:FCBOID
+         B     *+4 (WAS BNZ ERRX) IF NOT ZERO WE HAVE ERROR FROM DETACH
+         WAIT  L:FCBOID           WAIT FOR DETACH TO COMPLETE
+         B     PURGE   (WAS BZ)   IF ZERO WE ARE OK ON DETACH
+         B     ERRY
+*
+**MARK PHYSICAL RECORD NOT CHANGED
+*
+PURGE    XC    FCBOID(4),FCBOID   MARK FILE NOT ATTACHED
+*
+**ADVANCE TO THE NEXT TABLE ENTRIES DECREMENT CONTROL COUNT
+**AND LOOP BACK IF NOT DONE
+*
+ENDLOOP  LA    R9,4(R0,R9)        MOVE TO NEXT FCBT ENTRY
+         LA    R10,108(R0,R10)    MOVE TO NEXT FCB ENTRY
+         BCT   R8,TOP             KEEP GOING UNTIL ALL ARE DETACHED
+*
+**DETACH THE DISPLAY IF IT IS ATTACHED
+*
+         L     R0,SCOPEID
+         LTR   R0,R0
+         BZ    TYPEIT             SKIP DETACH IF ZERO
+         DETACH (0)
+         WAIT  (0)
+         XC    SCOPEID(4),SCOPEID  ZAP THE ID
+*
+**DETERMINE TYPE OF RETURN TO THE CALLER
+*
+TYPEIT   B     *+4(R2)            SORT ON ERROR REGISTER
+         B     NEXIT              GO TO NORMAL EXIT (NO ERROR)
+*
+**ERROR RETURN TO CALLER
+*
+         L     R13,4(R0,R13)      CHAIN UP SAVE AREA
+         LM    R14,R12,12(R13)    RESTORE REGISTERS
+         BR    R14                ERROR RETURN
+*
+**NON-ERROR RETURN TO CALLER
+*
+NEXIT    L     R13,4(R0,R13)      CHAIN UP SAVE AREA
+         LM    R14,R12,12(R13)    RESTORE REGS
+         B     4(R0,R14)          GOOD RETURN
+*
+**SET UP ERROR MESSAGE CODES
+*
+E        EQU   1
+ERRW     LA    R2,4(R0,R0)    ERROR FROM FLUSH (MARK FOR LATER RETURN)
+         B     RUN                GO ATTEMPT TO DETACH ANYWAY
+ERRX     LA    E,45               SYSTEM ERROR IN START OF DETACH
+         B     ERR
+ERRY     LA    E,46               SYSTEM ERROR IN RETURN FROM DETACH
+         B     ERR
+*
+**WE SEND THE MESSAGE OUT TO THE USER NOW
+*
+ERR      LA    R2,4(R0,R0)        MARK WE HAD AN ERROR
+         AH    R1,=H'7000'        BUMP TO THIS LOGICS AREA
+         L     R15,=V(RUNERR)     SET ENTRY TO RUNERR
+         SR    R0,R0              FAKE LINE NUMBER
+         BALR  R14,R15            SEND THE ERROR MESSAGE OUT
+         B     ENDLOOP            BACK UP FOR THE REST OF THEM
+         LTORG
+         EJECT
+AREA     DSECT
+         COPY  AREA
+         END

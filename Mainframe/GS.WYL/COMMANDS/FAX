@@ -1,0 +1,702 @@
+; FAX - Process FAX command
+;
+;  Syntax is like PRINT command, with extra options:
+;
+;    FAX [<range>] TO <phone> [AUTH <auth-code>]
+;                 [RECIPIENT 'name']
+;                 [SENDER 'name']
+;                 [SUBJECT 'subject text...']
+;                 [print options]
+;
+;    The RECIPIENT and SENDER lines can be used to specify text
+;    for the 'To:' and 'From:' lines on the fax cover sheet.
+;    Multiple lines of text can be specified, separated by ';'.
+;    The sender and recipient parms are optional; the sender name
+;    defaults to the keyword file name.
+;
+;    The default print format is 'UNN INDENT=6'.
+;
+;    The NOSEP print option can be used to suppress transmitting
+;    a fax cover sheet.
+;
+;  Modifications:
+;    10/04/91  jws  New version
+;    10/21/91  jws  Better auth prompt, block call cards
+;    11/04/91  jws  Block international calls
+;    11/07/91  jws  Strip leading '9'
+;    11/12/91  jws  Fix problem with '916' number
+;    01/06/92  jws  Fix phone number edit bug
+;    01/13/92  jws  Add prompt mode
+
+xproc () begin
+
+   dcl str  x.phone, x.auth, x.recipient, x.sender, x.subject, x.fax_options
+   dcl str  x.cmd_text, x.cmd_comm, rc, stemp
+   dcl bool x.add_rcpt, x.add_subj, x.add_phone, x.add_auth, x.add_opts
+   dcl bool x.nosep, x.first_fax, x.noprompt, x.prompt_mode
+   dcl num  x.fax_count
+
+   x.maint = 'gg.jws'
+
+   on attn  cmd='pcall cleanup("attn")'
+   if (acct ne 'JWS$GG') \
+      on error cmd='pcall errorexit'
+
+   if (mach eq 'SYSC') begin
+      comm FAX command isn't available on SYSC
+      xreturn
+   end
+
+   if (fetype eq 'VIRTUAL') \
+      x.noprompt = true
+
+   x.first_fax = true
+
+; Scan SET FAX default options
+
+   if (vartype('ses.fax_options') ne 'UNDEFINED') \
+      pcall scan_parms (ses.fax_options)
+
+; Scan command line options
+
+   pcall scan_parms (parm_string,x.cmd_text,x.cmd_comm)
+
+; Get phone number if not specified, and validity check it
+
+next_fax:
+   if (x.phone eq '' and ~x.noprompt) begin
+      if (x.first_fax) \
+         write 'Enter fax options (type HELP at any prompt for more information)'
+      pcall get_phone (x.phone,rc)
+      if (rc eq 'OK' and x.phone eq '') \
+         pcall cleanup
+      x.prompt_mode = true
+   end
+   else begin
+      pcall check_phone (x.phone,rc)
+   end
+
+   if (rc ne 'OK') \
+      pcall cleanup (rc)
+
+; Get auth code if not local area phone number
+
+   pcall check_auth (x.phone,rc)
+
+   if (rc ne 'OK' and x.auth eq '') begin
+      if (x.noprompt) \
+         pcall cleanup ('This phone number requires a long distance authorization code')
+      pcall get_auth (x.auth,rc)
+      if (rc NE 'OK') \
+         pcall cleanup (rc)
+      x.add_auth = true
+   end
+
+; Prompt for other FAX command options
+
+   if (~x.noprompt) begin
+      pcall get_options (rc)
+      if (rc ne 'OK') \
+         pcall cleanup (rc)
+   end
+
+; Now issue _FAX command to Wylbur
+
+   stemp = ''
+   if (x.add_phone) \
+      stemp = 'TO '||x.phone
+   if (x.add_auth) \
+      stemp = stemp||' AUTH=&(x.auth)'
+   if (x.add_rcpt) \
+      stemp = stemp||' RECIPIENT='||x.recipient
+   if (x.add_subj) \
+      stemp = stemp||' SUBJECT='||x.subject
+   if (x.add_opts) \
+      stemp = stemp||' '||x.fax_options
+
+   try _FAX &(x.cmd_text) &(stemp)
+   if (tryerr) \
+      pcall cleanup ('')
+
+;;If in prompt mode, go back for another phone number
+;;
+;; if (x.prompt_mode) begin
+;;    x.phone = ''
+;;    x.recipient = ''
+;;    x.first_fax = false
+;;    comm
+;;    comm Press RETURN if no more fax phone numbers
+;;    goto next_fax
+;; end
+
+; Normal exit
+
+   pcall cleanup
+
+end
+;<.page>
+;
+; SCAN_PARMS - scan parm list
+;
+;  Scan for phone number or authorization code.
+;
+;   On entry: pstr     - parm string to scan
+;
+;   On exit:  x.phone  - phone number
+;             x.auth   - auth code
+;             cmdtext  - command text (up to ';' if found)
+;             cmdcomm  - comment text (if found)
+
+proc scan_parms (pstr,cmdtext,cmdcomm) begin
+
+   dcl str token,stype
+
+   cmdtext = pstr
+
+   while (true) begin
+      cmdcomm = pstr
+      syscall scan_parm (token,pstr,stype,' ,=')
+
+      if (token eq ';') \
+         cmdtext = sub(cmdtext,1,size(cmdtext)-size(cmdcomm))
+
+      if (token eq '' or token eq ';') begin
+         if (parm_count lt 3) \
+            return
+         else \
+            return (cmdtext,cmdcomm)
+      end
+
+      utoken = upp(token)
+      cases begin
+         case (utoken eq 'TO') begin
+            syscall scan_parm (token,pstr,stype,' ,=')
+            pcall dequote(token)
+            x.phone = token
+         end
+         case (abbr('AUTH',utoken,3)) begin
+            syscall scan_parm (token,pstr,stype,' ,=')
+            pcall dequote(token)
+            if (size(token) ne 7 or verify(token,'0123456789') ne 0) begin
+               comm Authorization code must be 7 digits
+               pcall cleanup ('Invalid long-distance authorization code')
+            end
+            x.auth = token
+         end
+         case (abbr('RECIPIENT',utoken,3)) begin
+            syscall scan_parm (token,pstr,stype,' ,=')
+            pcall dequote(token)
+            x.recipient = token
+         end
+         case (abbr('SUBJECT',utoken,3) or \
+               abbr('TITLE',utoken,3) or \
+               abbr('HEADER',utoken,3)) begin
+            syscall scan_parm (token,pstr,stype,' ,=')
+            pcall dequote(token)
+            x.subject = token
+         end
+         case (abbr('NOSEP',utoken,3)) begin
+            x.nosep = TRUE
+         end
+         case (abbr('NOPROMPT',utoken,4)) begin
+            x.noprompt = TRUE
+         end
+      end
+   end
+end
+;<.page>
+;
+; GET_PHONE - prompt for phone number
+;
+;  On exit: RC='OK' or RC='ATTN'
+;
+
+proc get_phone (phone,rc) begin
+
+   rc = ''
+
+   while (rc ne 'OK') begin
+      phone = strip(upp(input ('Fax phone number? ','attn')))
+      if (ioresult eq 'ATTN') begin
+         rc = 'ATTN'
+         return (rc)
+      end
+
+      if (abbr('QUIT',phone,1) or \
+         abbr('EXIT',phone,2) or \
+         abbr('NONE',phone,1)) \
+         phone = ''
+
+      if (phone eq '') begin
+         rc = 'OK'
+         return (phone,rc)
+      end
+      if (phone eq '?' or match('HELP',phone,'c')) \
+         pcall fax_help ('TO')
+      else begin
+         pcall check_phone (phone, rc)
+         if (rc ne 'OK') \
+            comm &(rc)
+      end
+   end
+
+   x.add_phone = true
+
+   return (phone,rc)
+end
+
+
+;
+; GET_OPTIONS - prompt for fax command options
+;
+;  On exit: RC='OK' or RC='ATTN'
+;
+
+proc get_options (rc) begin
+
+   rc = ''
+
+getrcpt:
+   if (x.recipient eq '' and ~x.nosep) begin
+      x.recipient = strip(input ('Recipient name? ','attn'))
+      if (ioresult eq 'ATTN') begin
+         rc = 'ATTN'
+         return (rc)
+      end
+      if (x.recipient eq '?' or match('HELP',x.recipient,'c')) begin
+         x.recipient = ''
+         pcall fax_help ('RECIPIENT')
+         goto getrcpt
+      end
+      if (match('NONE ',x.recipient,'c')) \
+         x.recipient = ''
+      if (x.recipient ne '') begin
+         pcall dequote(x.recipient)
+         x.recipient = '"'||chstr(x.recipient,'"','""')||'"'
+         x.add_rcpt = true
+      end
+   end
+
+getsubj:
+   if (x.subject eq '' and x.first_fax and ~x.nosep) begin
+      x.subject = \
+         strip(input('Subject? ','attn'))
+      if (ioresult eq 'ATTN') begin
+         rc = 'ATTN'
+         return (rc)
+      end
+      if (x.subject eq '?' or match('HELP',x.subject,'c')) begin
+         x.subject = ''
+         pcall fax_help ('SUBJECT')
+         goto getsubj
+      end
+      if (match('NONE ',x.subject,'c')) \
+         x.subject = ''
+      if (x.subject ne '') begin
+         pcall dequote(x.subject)
+         x.subject = '"'||chstr(x.subject,'"','""')||'"'
+         x.add_subj = true
+      end
+   end
+
+getopts:
+;; if (x.fax_options eq '' and x.first_fax and x.prompt_mode) begin
+;;    x.fax_options = \
+;;       strip(input('Other options? ','attn'))
+;;    if (ioresult eq 'ATTN') begin
+;;       rc = 'ATTN'
+;;       return (rc)
+;;    end
+;;    if (x.fax_options eq '?' or match('HELP',x.subject,'c')) begin
+;;       x.fax_options = ''
+;;       pcall fax_help ('OPTIONS')
+;;       goto getopts
+;;    end
+;;    if (ind(' N NO NONE ',' '||upp(x.fax_options)||' ') gt 0) \
+;;       x.fax_options = ''
+;;    if (x.fax_options ne '') \
+;;       x.add_opts = true
+;; end
+
+   rc = 'OK'
+   return (rc)
+end
+;<.page>
+;
+; GET_AUTH - prompt for auth code
+;
+;  On exit: RC='OK' or RC='ATTN'
+;
+
+proc get_auth (auth,rc) begin
+
+   comm &(x.phone) is outside the Stanford local calling area.
+
+; If ELF front-end, use routine with fancy echoing
+
+   if (fetype eq 'ELF' or fetype eq 'PDP') begin
+      pcall get_auth_elf (auth,rc)
+      return (auth,rc)
+   end
+
+; Not ELF front-end, just prompt without echo
+
+   auth = ''
+   while (auth eq '') begin
+      auth = input ('Enter your long-distance authorization code: ','attn clean noecho')
+      if (ioresult eq 'ATTN') begin
+         rc = 'ATTN'
+         return (rc)
+      end
+      auth = strip(auth)
+      if (auth eq '?' or match('HELP',auth,'c')) begin
+         pcall fax_help('AUTH')
+         auth = ''
+      end
+      elseif (size(auth) ne 7 or verify(auth,'0123456789') ne 0) begin
+         comm Authorization code must be 7 digits
+         auth = ''
+      end
+   end
+
+   rc = 'OK'
+   return (auth,rc)
+end
+
+
+;
+; GET_AUTH_ELF - ALF/ELF auth code prompt routine
+;
+
+proc get_auth_elf (auth,rc) begin
+
+restart:
+   write ''
+   write 'Enter your long-distance authorization code: ' nonl
+   auth = ''
+
+; Main loop, get next character
+
+loop:
+   c = input('','noecho clean attn transparent rundown=1')
+
+   c = noparity(c)
+
+   if (ioresult eq 'ATTN' or c eq s'03') begin
+      if (auth ne '') begin
+         write '...'
+         goto restart
+      end
+      else begin
+         rc = 'ATTN'
+         write "&(s'0d')"
+         return (rc)
+      end
+   end
+
+   c = ebcdic(c)
+
+; Return if CR, NL, or LF
+
+   if (c eq s'0d' or c eq s'15' or c eq s'25') begin
+      write ''
+      if (auth eq '?' or match('HELP',auth,'c')) begin
+         pcall fax_help('AUTH')
+         goto restart
+      end
+      if (size(auth) ne 7 or \
+            verify(auth,'0123456789') ne 0) begin
+         comm Authorization code must be 7 digits
+         goto restart
+      end
+      rc = 'OK'
+      return (auth,rc)
+   end
+
+; Check for DEL or BS
+
+   if (c eq s'07' or c eq s'16') begin
+      if (auth ne '') begin
+         auth = sub(auth,1,size(auth)-1)
+         write "&(s'164016')" nonl clean
+      end
+      goto loop
+   end
+
+;;Echo BEL if not digit or too many chars
+;;
+;; if (c lt '0' or c gt '9' or \
+;;       size(auth) eq 7) begin
+;;    write "&(s'2f')" nonl clean
+;;    goto loop
+;; end
+
+; Echo '*' and add digit to string
+
+   if (c ge '0' and c le '9') \
+     write '*' nonl clean
+   else \
+     write c nonl clean
+   auth = auth || c
+   goto loop
+
+end
+;<.page>
+;
+; FAX_HELP - write help message
+;
+
+proc fax_help (option) begin
+
+   on attn cmd='goto help_exit'
+
+   cases begin
+      case (option eq 'TO') begin
+         comm
+         comm Enter the phone number you are sending your fax to. For example:
+         comm   3-4567
+         comm   234-5678
+         comm   1-408-123-4567
+         comm
+      end
+
+      case (option eq 'AUTH') begin
+         comm
+         comm To send a fax to this phone number you must have a 7-digit
+         comm long-distance authorization code, which is assigned to
+         comm members of the Stanford community by Communication Services.
+         comm
+      end
+      case (option eq 'RECIPIENT') begin
+         comm
+         comm Enter the name of the person you are sending the fax to.  This
+         comm name will appear on the cover page that the system will send
+         comm as the first page of the fax transmission.
+         comm
+      end
+
+      case (option eq 'SUBJECT')  begin
+         comm
+         comm Enter any subject or comment information that you want to be
+         comm placed on the fax cover page.  This information is optional;
+         comm press RETURN to continue.
+         comm
+      end
+
+      case (option eq 'OPTIONS') begin
+         comm
+         comm Enter any special formatting options that you want to use when
+         comm sending your fax.  You can use the various output formatting
+         comm options that are available on the Wylbur PRINT command, like
+         comm CHARS, INDENT, LANDSCAPE, MARKER, CC, and so on.  If you don't
+         comm specify any formatting options the system will use a default
+         comm of 'UNNUMBERED INDENT=6'.
+         comm
+         comm To see the full list of options, type HELP FAX before using the
+         comm the FAX command.
+         comm
+      end
+   end
+
+help_exit:
+   on attn  cmd='pcall cleanup("attn")' reenable
+
+end
+;<.page>
+;
+; DEQUOTE - dequote string
+;
+
+proc dequote (pstr) begin
+
+   if (size(pstr) gt 1) begin
+      if (sub(pstr,1,1) eq "'") begin
+         pstr = sub(pstr,2,size(pstr)-2)
+         pstr = chstr(pstr,"''","'")
+      end
+      elseif (sub(pstr,1,1) eq '"') begin
+         pstr = sub(pstr,2,size(pstr)-2)
+         pstr = chstr(pstr,'""','"')
+      end
+   end
+
+   return (pstr)
+end
+
+;
+; CLEANUP - Exit routine
+;
+
+proc cleanup (msg) begin
+
+   if (parm_count eq 0) \
+      xreturn
+   elseif (upp(msg) eq 'ATTN') begin
+      comm FAX command terminated
+      xreturn attn attnid=ATTN
+   end
+   else \
+      xreturn errmsg "&(msg)"
+end
+
+;
+; ERROREXIT -- Routine to handle an error in the exec.
+;
+
+proc errorexit() begin
+
+   comm An error has occurred in the FAX command.
+
+   open
+   putend FAX command error:
+   putend  errmsg:  &(errmsg)
+   putend  errinfo: &(errinfo)
+   putend
+   dump vars type error
+   dump vars type x
+
+   try mail to &(x.maint) sub 'FAX command error'
+   close
+
+   pcall cleanup('exec error')
+end
+;<.page>
+;
+; NOTE: THE FAX AND NETFAX EXECS SHARE THE FOLLOWING ROUTINES
+;
+;
+; CHECK_PHONE -- validity check phone number
+;
+;  On exit, rc='OK' or rc='err msg'
+;
+
+proc check_phone (phone,rc) begin
+
+; Check for missing phone number
+
+   if (phone eq '') begin
+      rc = 'Fax phone number not specified'
+      return (rc)
+   end
+
+; Simple validity checks on phone number
+
+   digits = trans(phone,'',xrange(s'00',s'ef')||xrange(s'fa',s'ff'),' ')
+   digits = chstr(digits,' ','')
+   phone = upp(phone)
+
+   if (size(digits) lt 5) begin
+      rc = 'Invalid phone number'
+      return (rc)
+   end
+
+   if (sub(phone,1,2) ne 'AT' and \
+         verify(phone,'-0123456789') ne 0) begin
+      rc = 'Invalid phone number'
+      return (rc)
+   end
+
+; Get rid of leading '9-'
+
+   if (sub(phone,1,2) eq '9-') begin
+      phone = sub(phone,3)
+      digits = sub(digits,2)
+   end
+
+; Block international calls
+
+   if (sub(digits,1,3) eq '011') begin
+      rc = 'International fax transmissions are not yet supported'
+      return (rc)
+   end
+
+; Block calling card calls
+
+   if (sub(digits,1,1) eq '0' and \
+         sub(digits,1,3) ne '011') begin
+      rc = 'Calling card numbers cannot be used for fax transmission'
+      return (rc)
+   end
+
+; Add leading '1-' if not local area code
+
+   if (size(digits) ge 10 and \
+         sub(digits,1,1) gt '1') begin
+      digits = '1'||digits
+      phone = '1-' || phone
+   end
+
+; This check prevents dialing 911
+
+   if (sub(digits,1,2) eq '11' or \
+         sub(digits,1,3) eq '911') begin
+      rc = 'Invalid phone number'
+      return(rc)
+   end
+
+; Return edited phone number
+
+   rc = 'OK'
+   ;;if (acct eq 'JWS$GG') comm phone is &(phone)
+   return (phone,rc)
+end
+
+;<.page>
+;
+; CHECK_AUTH - check if phone number requires auth code
+;
+;  On exit: RC = 'OK' or 'NEED AUTH'
+;
+
+proc check_auth (phone,rc) begin
+
+; Initialize return code
+
+   rc = 'OK'
+
+; Assume no auth needed if ATxxx sequence
+
+   if (sub(phone,1,2) eq 'AT')  return(rc)
+
+; Strip non-digits from phone number
+
+   phone = trans(phone,'',xrange(s'00',s'ef')||xrange(s'fa',s'ff'),' ')
+   phone = chstr(phone,' ','')
+
+; Assume local call if short number
+
+   if (size(phone) lt 7)  return(rc)
+
+; Check for 800 number
+
+   if (sub(phone,1,4) eq '1800')  return(rc)
+   if (sub(phone,1,4) eq '1888')  return(rc)
+
+; Check for international call with auth code
+
+   if (sub(phone,1,3) eq '011') begin
+      rc = 'NEED AUTH'
+      return(rc)
+   end
+
+; Check for calling card prefix
+
+   if (sub(phone,1,1) eq '0') return(rc)
+
+; Get area code and prefix and check local phone record group
+
+   area = '415'
+   prefix = sub(phone,1,3)
+
+   if (sub(phone,1,1) eq '1') begin
+      area = sub(phone,2,3)
+      prefix = sub(phone,5,3)
+   end
+
+   stemp = ''
+   try stemp = rec_get (pub.local_phones,area||'-'||prefix)
+   if (stemp eq '') \
+      rc = 'NEED AUTH'
+
+   return (rc)
+end

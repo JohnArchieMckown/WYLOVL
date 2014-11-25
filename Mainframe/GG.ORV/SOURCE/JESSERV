@@ -1,0 +1,1308 @@
+JESSERV  TITLE 'MP-ORVYL JES services'
+         COPY  HEADER
+         SPACE
+JESSERV  MODULE TRCNUM=15
+         SPACE
+M1ADRMSK EQU   X'00FFFFFF'             Address mask for mode 1
+         TITLE 'Global data areas'
+         COPY  PZERO                   Page Zero
+         EJECT
+         COPY  MAT                     Master Address Table
+         TITLE 'Global parameter areas'
+         COPY  VMPARM                  Virtual Memory
+         EJECT
+         COPY  DISPPARM                Dispatching
+         EJECT
+         COPY  XITPARM                 Exit Processing
+         EJECT
+         COPY  LOCKPARM                Locks
+         EJECT
+         COPY  SIGPARM                 Signal/Await
+         EJECT
+         COPY  IOSPARM                 I/O Supervisor
+         EJECT
+         COPY  PAGEPARM                Paging
+         EJECT
+         COPY  TRCEPARM                Tracing
+         EJECT
+         COPY  ACCTPARM                Accounting
+         EJECT
+         COPY  LISTPARM                List management defs
+         EJECT
+         COPY  LSTMAC                  List management macros
+         EJECT
+         COPY  JESPARM                 Host JES parameters
+         EJECT
+         COPY  JSALPARM                Jes allocation parameters
+         EJECT
+         COPY  UJESPARM                User JES parameters
+         TITLE 'Local data areas'
+JESCB    RECORD BEGIN
+JESCBID  DC    CL8'JESCB'              Alpha ID for global cont blk
+JESWTLK  DS    A                       Global lock for JES waiter Q
+JESWAIT  LHEAD PFX=JESW
+         END   ,
+JESWELEM RECORD BEGIN                  Waiting Element
+JWTCHAIN LELEM PFX=JWT
+JWTPID   DS    D                       Process ID of waiting task
+JWTASB   EQU   JWTPID,4,C'A'           | ASB
+JWTTID   EQU   JWTPID+4,4,C'A'         | task ID
+JWTECB   DS    D                       ECB for this waiter
+JWTDEV   DS    A                       Device control block
+JWTSRID  DS    A                       SYSR ID (if any)
+         END   ,
+         SPACE ,
+DOATTACH RECORD BEGIN
+ATHOST   DS    XL(L'#JESOPEN)          Host I/O parameters
+ATALLOC  DS    XL(L'@JSALLO)
+         END   ,
+         SPACE
+DODETAC  RECORD BEGIN
+DETHOST  DS    XL(L'#JESCLOS)
+         END   ,
+         SPACE
+DOWRITE  RECORD BEGIN
+WRHOST   DS    XL(L'#JESWRIT)          Host I/O parameters
+WRLIST   DS    2A                      Location/Length list
+         DS    2A                      |
+         END   ,
+         SPACE
+DOEOJ    RECORD BEGIN                  Specify End of JOB
+EOJHOST  DS    XL(L'#JESJBND)
+EOJRET   DS    A                       Return from JES - EBCDIC job #
+         END   ,
+         SPACE
+JRQCB    RECORD BEGIN                  Request control block
+JRQMPID  DS    D                       Master Process ID
+*
+JRQIOAREA LABEL ,
+         DS    XL(L'DOATTACH)          Attach host parms
+         ORG   JRQIOAREA
+         DS    XL(L'DODETAC)           Detach host parms
+         ORG   JRQIOAREA
+         DS    XL(L'DOWRITE)           Write host parms
+         ORG   JRQIOAREA
+         DS    XL(L'DOEOJ)             EOJ host parameters
+         ORG   ,
+         DS    0D
+JRQINPUT DS    XL(L'@M1JES)            Input parameters
+*
+JRQIOID  DS    A                       I/O Supervisor ID
+*
+JRQR01   DS    A                       Return registers
+JRQR14   DS    A                       |
+JRQR15   DS    A                       |
+         END   ,
+         SPACE
+JDEVCB   RECORD BEGIN
+JDEVID   DC    CL4'JDEV'               JES device char-id
+JDEVXID  DS    A                       Exit ID
+JDEVCHID DS    A                       Channel ID
+JDEVSTAT DS    A                       State of Device
+JDEVSOK  EQU   0                       | Status OK
+JDEVSWAIT EQU  4                       | Waiting for device
+JDEVSHALT EQU  -4                      | Halted request
+JDEVACCT DS    CL8                     Account of requestor
+JDEVUSR  EQU   JDEVACCT,3              | user UUU
+JDEVGRP  EQU   JDEVACCT+3,2            | group GG
+JDEVFLG  FLAG  ,
+         FLAG  JFJACT                  Job active in Intrdr
+*
+         DS    0D
+JDEVRQ   DS    XL(L'JRQCB)             Request parameters
+         END   ,
+         TITLE 'JESSERV - Local calling parameters'
+@JES     RECORD BEGIN
+@JESDEV  DS    A                       Device control block
+@JESF    FLAG  ,
+         FLAG  @JPFDONE                Clean up - done w/ device
+         END   ,
+         SPACE
+@JESCHK  RECORD BEGIN
+@JESCDEV DS    A                       Device control block
+@JESCINP DS    A                       Input parameters
+         END   ,
+         TITLE 'Main Mode 1 entry point for JES services'
+*********************************************************************
+*  Mode 1 entry point for JES services                              *
+*                                                                   *
+*   Input - @M1JES                                                  *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             transaction started                                   *
+*           RVR <> 0                                                *
+*             RVR = panic number                                    *
+*           For attach operations, @M1JDVID is set to the device id *
+*             which is to be returned for subsequent I/Os           *
+*                                                                   *
+*********************************************************************
+M1JNOCB  EQU   6                       Control block not avail
+M1JBADBUF EQU  5                       Addr error
+         SPACE
+M1JES    PROC  @M1JES,SCOPE=GLOBAL
+         L     RN,@M1JDVID             Get device ID - not attach
+*
+*  Do checking that needs to be done before sub-task
+*
+         PSET  @JESCHK
+         PMOV  @JESCDEV,(RN)
+         PMOV  @JESCINP,LA:@M1JES
+         LC    EPAR,@M1JTYPE
+         L     EPAR,SVCTABLE(EPAR)
+         CLEAR RVR
+         ACALL (EPAR)
+CHKNIL   LABEL ,
+         IF    (RVR,NZ),EXIT           Error returned from check rtn
+*
+*  Get our addressability
+*
+         L     RN,@JESCDEV             Device ID
+         WITH  (JDEVCB,RN)             |
+         WITH  (JRQCB,JDEVRQ)          |
+         IF    (JDEVID,NE,'JDEV'),'ABORT JESDEV'
+         ST    RN,@M1JDVID             Return the device ID
+*
+         IF    ^@M1JHALT,BEGIN         Not a halt request
+*
+*  Start subtask to do main work
+*
+         PSET  @TCREATE                Create task
+         MVC   @TCRPSW(4),=X'070C0000' PSW
+         LC    RA,@M1JTYPE             entry address
+         L     RA,ACTTABLE(RA)         |
+         ST    RA,@TCRPSW+4            |
+         PMOV  @TCRPARM,LA:JDEVCB      parameter
+         SET   @TCRFSTK                enter w/ stack
+         VCALL TCREATE
+*
+         END   ,                       OF Not a halt request
+         CLEAR RVR
+         PEND  ,
+         SPACE
+SVCTABLE EQU   VERIFY-4
+VERIFY   DC    A(CHKATTAC)             Checking rtns before subtask
+         DC    A(CHKWRITE)             Write
+         DC    A(CHKCONTR)             Control
+         DC    A(HALT)                 Halt done inline
+         DC    A(CHKDETAC)             Detach
+ACTTABLE EQU   TABLE-4
+TABLE    DC    A(X'80000000'+ATTACH)
+         DC    A(X'80000000'+WRITE)
+         DC    A(X'80000000'+CONTROL)
+         DC    A(0)                    Halt done inline
+         DC    A(X'80000000'+DETACH)
+         TITLE 'JES attach'
+*********************************************************************
+*  JES attach - pre subtask                                         *
+*                                                                   *
+*   Input - @JESCHK                                                 *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             all ok                                                *
+*           RVR <> 0                                                *
+*             RVR contains panic code to issue user                 *
+*                                                                   *
+*********************************************************************
+CHKATTAC PROC  @JESCHK
+*
+*  Get control block
+*
+         VMGET L'JDEVCB,LOC=LOCSYS,ONEPAGE=YES
+         LTR   RN,RVR
+         IF    ZERO,BEGIN              Control block not avail
+         LA    RVR,M1JNOCB             |
+         EXIT  CHKATTAC                |
+         END   ,                       OF Control block not avail
+         WITH  (JDEVCB,RN)
+         ST    RN,@JESCDEV             Return CB addr for attach
+         CLEAR JDEVCB
+         MVC   JDEVID,=CL4'JDEV'
+*
+*  Copy input parameters
+*
+         L     RM,@JESCINP
+         WITH  (@M1JES,RM)
+         WITH  (JRQCB,JDEVRQ)
+         USING PZERO,R0                Set master process ID
+         MVC   JRQMPID,PZCURPID        |
+         DROP  R0                      |
+         MVC   JRQINPUT,@M1JES
+*
+*  Allocate exit ID for this device
+*
+         PSET  @XITNEW
+         VCALL XITNEW
+         ST    RVR,JDEVXID
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  JES attach                                                       *
+*                                                                   *
+*   Input - @TENTRY                                                 *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+M1JAOK   EQU   0
+M1JAVAIL EQU   -4
+         SPACE
+ATTACH   PROC  @TENTRY
+         L     RN,@TEPARM              Device ID
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         WITH  (@M1JES,JRQINPUT)
+         WITH  (DOATTACH,JRQIOAREA)
+         WITH  (#JESOPEN,ATHOST)
+         WITH  (@JSALLO,ATALLOC)
+*
+*  We won't change user regs 14 and 1
+*
+         SET   JRQR01.@M1JINRV
+         SET   JRQR14.@M1JINRV
+*
+*  Fix host parameter area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOATTACH
+         PMOV  @PAGLEN,LA:L'DOATTACH
+         VCALL PAGFIX
+*
+*  Allocate channel ID
+*
+         LA    RM,#IOUJES
+         SYSCTL RM,TYPE=ALLOC
+         IF    (RM,ZERO),'ABORT JESNOCHID'
+         ST    RM,JDEVCHID
+*
+*  Get an ID from I/O supervisor
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         LR    RY,RVR                  Save I/O sup ID
+*
+*  Open JES device
+*
+         PMOV  #JESOCMD,LA:#JCOPEN
+         LRA   RA,@JSALLO
+         ST    RA,#JESALLO
+*
+         SET   @JSINTR                 Specify this as an int reader
+*
+         USING PZERO,R0
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,(RM)           Channel ID - from ALLOC
+         PMOV  @IOSID,(RY)             I/O Supervisor ID
+         PMOV  @IOSPID,PZCURPID        This process ID
+         PMOV  @IOSCP,LA:#JESOPEN      Channel program
+         SET   @IOSFSYNC
+         VCALL IOSDOIO
+         LR    RX,RVR                  Save open RC
+*
+*  Free I/O Supervisor ID
+*
+         PSET  @IOSID
+         PMOV  @IOSID,(RY)
+         VCALL IOSIDFRE
+*
+*  Unfix host parameter area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOATTACH
+         PMOV  @PAGLEN,LA:L'DOATTACH
+         VCALL PAGUFIX
+         LA    RJ,M1JAOK               Set state to attach OK
+*
+*  Handle an unsuccessful JES allocate
+*
+ATTAVAIL IF    (RX,NZ),BEGIN           Failed JES allocate
+         CLEAR JDEVCHID                Ch ID released on failed alloc
+*
+         IF    ^@M1JWAIT,BEGIN         Not wait mode
+         L     RJ,=A(M1JAVAIL)         Device not avail
+         EXIT  ATTAVAIL
+         END   ,                       OF Not wait mode
+*
+*  Get memory for global resource wait
+*
+         VMGET L'JESWELEM,LOC=GLOBHI,FIX=YES
+         LR    RY,RVR
+         WITH  (JESWELEM,RY)
+         CLEAR JESWELEM
+*
+*  Initialize our wait element
+*
+         USING PZERO,R0
+         PMOV  JWTPID,PZCURPID
+         PMOV  JWTDEV,LA:JDEVCB
+         DROP  R0
+ATTWAIT  BEGIN ,                       Wait for JES device
+         VCALL ASLOCK
+         L     RJ,=A(JDEVSHALT)
+         IF    (RJ,EQ,JDEVSTAT),BEGIN           Device is halted
+         VCALL ASULOCK
+         L     RJ,=A(M1JAVAIL)         Halted - not avail
+         EXIT  ATTWAIT
+         END   ,                       OF Device is halted
+*
+*  Addressability to global wait chain
+*
+         MVC   JDEVSTAT,=A(JDEVSWAIT)  Say we're waiting
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATJESCB'
+         WITH  (JESCB,RM)
+*
+*  Add ourselves to queue and wait
+*
+         LKOB  JESWTLK
+         LADD  JESWAIT,LA:JESWELEM,WR=RS
+         LKREL JESWTLK
+         VCALL ASULOCK
+         AWAIT JWTECB                  Posted w/ channel ID
+*
+         CLEAR JDEVSTAT                Clear state
+         DS    0SL2(0-JDEVSOK,JDEVSOK-0)
+*
+         ST    RVR,JDEVCHID
+         LA    RJ,M1JAOK
+         IF    (RVR,ZERO),BEGIN        No alloc
+         L     RJ,=A(M1JAVAIL)
+         END   ,                       OF No alloc
+         IF    ('LT RA,JWTSRID',NZ),BEGIN       An id to free
+         PSET  @SYSRDEL
+         PMOV  @SYSRDID,(RA)
+         VCALL SYSRDEL
+         END   ,                       OF An id to free
+*
+         END   ,                       OF Wait for JES device
+         VMFREE A=LA:JESWELEM,L'JESWELEM,LOC=GLOBHI,FIX=YES
+         END   ,                       OF Failed JES allocate
+*
+*  Post caller, RJ = return code
+*
+         PMOV  JRQR15,(RJ)
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+         IF    (RJ,EQ,=A(M1JAVAIL)),BEGIN
+         SET   @JPFDONE
+         END   ,
+         LCALL JESPOST
+         PEND  ,
+         TITLE 'JES write'
+*********************************************************************
+*  JES write - pre subtask                                          *
+*                                                                   *
+*   Input - @JESCHK                                                 *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             all ok                                                *
+*           RVR <> 0                                                *
+*             RVR contains panic code to issue user                 *
+*                                                                   *
+*********************************************************************
+CHKWRITE PROC  @JESCHK
+         L     RN,@JESCDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+*
+*  Copy parameters to request block
+*
+         CLEAR JRQCB                   Clear request work area
+         L     RM,@JESCINP
+         WITH  (@M1JES,RM),BEGIN       Addr to input
+         MVC   JRQINPUT,@M1JES         Save input parameters
+         END   ,                       OF Addr to input
+         USING PZERO,R0
+         MVC   JRQMPID,PZCURPID        Save master task ID
+         DROP  R0
+*
+*  Check parameters
+*
+         WITH  (@M1JES,JRQINPUT)
+         L     RA,@M1JR01              Buffer location
+         IF    ^@M1JM31,'N RA,=A(M1ADRMSK)'
+         L     RB,@M1JR15              Buffer length
+         IF    ((RB,NPOS),OR,(RB,GT,=A(8*1024))),BEGIN  Bad len
+         LA    RVR,M1JBADBUF
+         EXIT  CHKWRITE
+         END   ,                       OF Bad len
+         LR    RJ,RA                   Compute number of pages
+         LR    RK,RB                   |
+         ALR   RK,RJ                   |
+         DECR  RK                      | last byte
+         SRL   RJ,12                   |
+         SRL   RK,12                   |
+         SLR   RK,RJ                   |
+         IF    (RK,GT,1),BEGIN         Too many pages
+         LA    RVR,M1JBADBUF
+         EXIT  CHKWRITE
+         END   ,                       OF Too many pages
+*
+*  Verify buffer
+*
+         PSET  @PAGE                   Test protection
+         PMOV  @PAGLOC,(RA)            | range
+         PMOV  @PAGLEN,(RB)            |
+         PMOV  @PAGKEY,@M1JPKEY        | PSW key of caller
+         VCALL PAGTPROT                |
+         IF    (RVR,GT,1),BEGIN        Bad buffer
+         LA    RVR,M1JBADBUF
+         EXIT  CHKWRITE
+         END   ,                       OF Bad buffer
+*
+*  Fix buffer for I/O
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,(RA)
+         PMOV  @PAGLEN,(RB)
+         VCALL PAGFIX
+*
+         CLEAR RVR
+         PEND  ,
+         EJECT ,
+*********************************************************************
+*  JES write                                                        *
+*                                                                   *
+*   Input - @TENTRY                                                 *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+#WRITE   RECORD BEGIN
+#WRITFLG FLAG  ,
+         FLAG  #WJACT                  Job active on reader
+@M1JBLOC EQU   @M1JR01                 Buffer loc = R1
+@M1JBLEN EQU   @M1JR15                 Buffer len = R15
+@M1JLREC EQU   @M1JR14                 LRECL = R14
+*
+M1JWOK   EQU   0                       Write OK
+M1JWIOER EQU   4                       I/O error
+M1JWBUFN EQU   8                       Invalid buffer format
+M1JWJOB  EQU   12                      Invalid JOB card
+M1JWCARD EQU   16                      Invalid card found
+         END   ,
+         SPACE
+WRITE    PROC  @TENTRY,#WRITE
+         CLEAR #WRITFLG
+         L     RN,@TEPARM              Device Identifier
+         WITH  (JDEVCB,RN)             |
+         WITH  (JRQCB,JDEVRQ)          |
+         WITH  (@M1JES,JRQINPUT)       |
+         IF    JFJACT,'SET #WJACT'     Job active on reader
+         SET   JRQR14.@M1JINRV         Don't change requester R14
+*
+*  Check buffer format
+*
+WCHKBUF  BEGIN ,                       Check buffer format
+         MVC   JRQR01,@M1JBLOC         Prime return w/ buffer start
+*
+         L     RJ,@M1JLREC             LRECL
+         IF    (RJ,NZ),BEGIN           Check FB format
+         IF    ((RJ,NEG),OR,(RJ,GT,254)),BEGIN
+         LA    RVR,M1JWBUFN            Invalid buffer format
+         EXIT  WCHKBUF
+         END   ,
+         CLEAR RA                      Check for even num of FB recs
+         L     RB,@M1JBLEN             Total len
+         DR    RA,RJ
+         IF    (RA,NZ),BEGIN
+         LA    RVR,M1JWBUFN            Invalid buffer format
+         EXIT  WCHKBUF
+         END   ,
+         END   ,                       OF Check FB format
+*
+*  Check buffer lines
+*
+         L     RA,@M1JBLOC             Start of buffer
+         IF    ^@M1JM31,'N RA,=A(M1ADRMSK)'
+         LR    RM,RA                   | buffer + 1
+         AL    RM,@M1JBLEN             |
+WCHKLOOP LOOP  BEGIN                   Check buffer lines
+         L     RB,@M1JLREC             Record length
+         IF    (RB,ZERO),BEGIN         Variable len
+         LA    RB,@RA+4
+         IF    (RB,GT,RM),BEGIN        No room for RDW
+         LA    RVR,M1JWCARD
+         EXIT  WCHKLOOP
+         END   ,                       OF No room for RDW
+         LH    RB,@RA                  Record len
+         LA    RJ,0(RA,RB)             Next data
+*    A record must not be less than 5 bytes long, or more than
+*  258 bytes long.  The data can't extend past the end
+*  of the buffer.
+         IF    ((RB,LT,5),OR,(RB,GT,258),OR,(RJ,GT,RM)),BEGIN
+         LA    RVR,M1JWCARD
+         EXIT  WCHKLOOP
+         END   ,                       Invalid VB rec
+         SH    RB,=Y(4)                | - header
+         LA    RA,@RA+4                New location
+         END   ,                       OF Variable len
+*
+         PSET  @JESCARD
+         PMOV  @JCDEV,LA:JDEVCB
+         PMOV  @JCLOC,(RA)             Record loc
+         PMOV  @JCLEN,(RB)             Record length
+*
+         IF    #WJACT,BEGIN            Job active on reader
+         LCALL CHKREC                  Check this record
+         END   ELSE,BEGIN              First record to reader
+         LCALL CHKJOB                  Check for valid JOB card
+         SET   #WJACT                  | set as job on reader
+         END   ,                       OF First record to reader
+         IF    (RVR,NZ),EXIT
+         LA    RA,@RA(RB)
+         UNTIL (RA,GE,RM),END          OF Check buffer lines
+*
+         ST    RA,JRQR01
+         IF    (RVR,ZERO),BEGIN        Buffer validated - write it
+*
+*  Write text buffer
+*
+         PSET  @JESPUT
+         PMOV  @JPDEV,LA:JDEVCB        Device control block
+         L     RA,@M1JBLOC             Buffer start
+         IF    ^@M1JM31,'N RA,=A(M1ADRMSK)'
+         PMOV  @JPLOC,(RA)             |
+         PMOV  @JPLEN,@M1JBLEN         Buffer length
+         PMOV  @JPLRECL,@M1JLREC       Buffer format
+         LCALL JESPUT
+         IF    (RVR,NZ),'LA RVR,M1JWIOER'
+*
+         SET   JFJACT                  Job now active on reader
+         END   ,                       OF Buffer validated - write it
+         END   ,                       OF Check buffer format
+WRITEXIT ST    RVR,JRQR15              Set WAIT return code
+*
+*  Unfix user buffer
+*
+         PSET  @PAGE
+         L     RA,@M1JBLOC
+         IF    ^@M1JM31,'N RA,=A(M1ADRMSK)'
+         PMOV  @PAGLOC,(RA)
+         PMOV  @PAGLEN,@M1JBLEN
+         VCALL PAGUFIX
+*
+*  Post master task
+*
+         PUSH  USING
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+         LCALL JESPOST
+         POP   USING
+         PEND  ,
+         TITLE 'Check Job card'
+*********************************************************************
+*  Check Job card                                                   *
+*    This routine verifies that the current record is a valid job   *
+*  card and belongs to the submitting user.                         *
+*                                                                   *
+*   Input - @JESCARD                                                *
+*                                                                   *
+*  Output - RVR =  0  All OK                                        *
+*           RVR <> 0  This is the error code to be returned to user *
+*                                                                   *
+*********************************************************************
+@JESCARD RECORD BEGIN
+@JCDEV   DS    A                       JES device ID
+@JCLOC   DS    A                       Location of card
+@JCLEN   DS    A                       Length of card
+         END   ,
+         SPACE 2
+CHKJOB   PROC  @JESCARD
+         L     RN,@JCDEV
+         WITH  (JDEVCB,RN)
+         L     RA,@JCLOC               GET START ADDRESS
+         LR    RVR,RA                  GET END ADDRESS
+         AL    RVR,@JCLEN              |
+         IF    (@RA,NE,'//'),RET12     MUST START WITH THIS
+         LA    RA,@RA+2                POINT AT THE JOBNAME
+*
+*  Check job name
+*
+         CLEAR RB                      NAME LENGTH COUNTER
+         WHILE (@RA,NE,' '),BEGIN
+         LA    RB,@RB+1                COUNT ONE CHARACTER
+         LA    RA,@RA+1                POINT AT THE NEXT CHAR
+         END
+         IF    ((RA,GE,RVR),OR,(RB,GT,8)),RET12 JOB NAME TOO LONG
+         IF    (RB,ZERO),RET12         OR TOO SHORT
+*  Skip blanks
+         WHILE (@RA,EQ,' '),'LA RA,@RA+1'  SCAN OVER BLANKS
+         IF    (RA,GE,RVR),RET12
+*
+*  Check for JOB in card
+*
+         IF    (@RA,NE,'JOB '),RET12   MUST HAVE THE WORD JOB
+         LA    RA,@RA+4                GET TO THE NEXT AREA
+         IF    (RA,GE,RVR),RET12
+*  Skip blanks
+         WHILE (@RA,EQ,' '),'LA RA,@RA+1'  SCAN OVER BLANKS
+         IF    (RA,GE,RVR),RET12
+*
+*  Check account
+*
+         IF    ((@RA,EQ,''''),OR,(@RA,EQ,'(')),BEGIN
+         LA    RA,@RA+1
+         END
+         LR    RJ,RA                   POINT AT THE ACCOUNT
+         CLEAR RB                      CLEAR THE REGISTER
+         WHILE ((@RA,NE,','),AND,(@RA,NE,' '),AND,(@RA,NE,''''),       *
+               AND,(@RA,NE,')'),AND,(RA,LT,RVR)),BEGIN
+         LA    RA,@RA+1                MOVE OVER THE ACCT
+         LA    RB,@RB+1                COUNT THE CHARS
+         END   ,
+         IF    (RA,GT,RVR),RET12       Card not long enough
+         IF    (RB,LT,6),RET12         CANT BE THIS SHORT
+         IF    (RB,GT,8),RET12         OR THIS LONG
+         IF    (@RJ+2,EQ,'.'),BEGIN    GG.UUU
+         IF    (RB,NE,6),RET12         MUST BE 6 HERE
+         MVC   JDEVGRP,@RJ             MOVE IN THE GROUP
+         MVC   JDEVUSR,@RJ+3           MOVE IN THE USER
+         B     JOBACOK                 ACCOUNT IS THERE
+         END
+*
+*        IF    (@RJ+3,EQ,'.'),BEGIN    GGS.UUU
+*        IF    (RB,NE,7),RET12         MUST BE 7 HERE
+*        MVC   JWAJGRP,@RJ             MOVE IN THE GROUP
+*        MVC   JWAJUSR,@R1+4           MOVE IN THE USER
+*        B     JOBACOK                 GO CHECK THE ACCOUNT
+*        END   ,
+*
+*        IF    (@R1+4,EQ,'.'),BEGIN    GGSS.UUU
+*        IF    (RB,NE,8),RET12         NO GOOD
+*        MVC   JWAJGRP,@R1             MOVE IN THE GROUP
+*        MVC   JWAJUSR,@R1+5           AND THE USER
+*        B     JOBACOK                 CHECK ACCOUNT
+*        END
+*
+         IF    (@RJ+3,EQ,'$'),BEGIN    UUU$GG,UUU$GGS,UUU$GGSS
+         MVC   JDEVGRP,@RJ+4           MOVE GROUP IN
+         MVC   JDEVUSR,@RJ             AND THE USER
+         END   ,
+         SPACE 2
+JOBACOK  XTRC  R0,R0,JESJOBOK          NOW VERIFY IT
+         PSET  @ACAINFO
+         USING PZERO,R0
+         PMOV  @ACAASB,PZCURASB
+         DROP  R0
+         VCALL ACAINFO
+*
+         CLC   JDEVACCT(5),@ACAUID     COMPARE SUBMITTER ACCOUNT
+         IF    NE,RET12                ONCE AGAIN
+         CLEAR RVR
+         IF    FALSE,BEGIN             Branch around
+RET12    LA    RVR,M1JWJOB             Job card error for JES write
+         END   ,
+         PEND  ,
+         TITLE 'Check JES record for write'
+*********************************************************************
+*  Check JES record                                                 *
+*    This routine verifies that the current record is not an        *
+*  invalid command to JES                                           *
+*                                                                   *
+*   Input - @JESCARD                                                *
+*                                                                   *
+*  Output - RVR =  0  All OK                                        *
+*           RVR <> 0  This is the error code to be returned to user *
+*                                                                   *
+*********************************************************************
+CHKREC   PROC  @JESCARD
+         L     RA,@JCLOC               Record address
+         L     RB,@JCLEN               Record length
+         LA    RJ,@RA(RB)              1 past record
+         CLEAR RVR
+         IF    (RB,LT,5),EXIT          All invalid cards > 5 chars
+         IF    (@RA,EQ,'/*PUR'),RECBAD NO PURGE CARDS
+         IF    (@RA,EQ,'/*DEL'),RECBAD OR DELETE CARDS
+         IF    (@RA,EQ,'/*EOF'),RECBAD OR EOF CARDS
+*
+*  Check for another JOB card
+*
+         IF    (@RA,EQ,'//'),BEGIN     Could be a JOB card
+         LA    RA,@RA+2
+         SH    RB,=Y(2)
+         WHILE ((RB,POS),AND,(@RA,NE,' ')),BEGIN
+         LA    RA,@RA+1                SKIP Non blanks
+         DECR  RB
+         END   ,
+         WHILE ((RB,POS),AND,(@RA,EQ,' ')),BEGIN
+         LA    RA,@RA+1                SKIP BLANKS
+         DECR  RB
+         END   ,
+         IF    ((RB,GE,4),AND,(@RA,EQ,'JOB ')),RECBAD   JOB CARD
+         END   ,                       OF Could be a JOB card
+         IF    FALSE,BEGIN             Branch around
+RECBAD   LA    RVR,M1JWCARD            Bad card
+         END   ,
+         PEND  ,
+         TITLE 'JES control'
+*********************************************************************
+*  JES control - pre subtask                                        *
+*                                                                   *
+*   Input - @JESCHK                                                 *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             all ok                                                *
+*           RVR <> 0                                                *
+*             RVR contains panic code to issue user                 *
+*                                                                   *
+*********************************************************************
+M1JCSPEC EQU   6                       Specification error
+         SPACE
+@M1JCNUM EQU   @M1JR01                 Control number
+         SPACE
+CHKCONTR PROC  @JESCHK
+         L     RN,@JESCDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         CLEAR JRQCB
+         USING PZERO,R0                Set master process ID
+         MVC   JRQMPID,PZCURPID        |
+         DROP  R0                      |
+         L     RM,@JESCINP
+         WITH  (@M1JES,RM),BEGIN       Input addr
+         MVC   JRQINPUT,@M1JES
+         END   ,                       OF Input addr
+         WITH  (@M1JES,JRQINPUT)
+         CLEAR RVR
+         L     RA,@M1JCNUM             Control number
+         IF    ((RA,NEG),OR,(RA,GT,MAXCONT)),BEGIN
+         LA    RVR,M1JCSPEC
+         END   ,
+         PEND  ,
+         EJECT
+*********************************************************************
+*  JES control                                                      *
+*                                                                   *
+*   Input - @TENTRY                                                 *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+M1JCOK   EQU   0                       Control OK
+M1JCIOER EQU   4                       JES I/O error
+M1JCACT  EQU   8                       No job active on reader
+         SPACE
+CONTROL  PROC  @TENTRY
+         L     RN,@TEPARM
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         WITH  (@M1JES,JRQINPUT)
+*
+*  Assume registers 14 and 1 don't change
+*
+         SET   JRQR01.@M1JINRV
+         SET   JRQR14.@M1JINRV
+*
+*  Split to control routine
+*
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+*
+         L     EPAR,@M1JCNUM
+         SLL   EPAR,2
+         L     EPAR,CONSTART(EPAR)
+         ACALL (EPAR)
+         ST    RVR,JRQR15              Set return code
+*
+*  Post caller
+*
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+         LCALL JESPOST
+         PEND  ,
+         SPACE ,
+CONSTART DC    A(CONTERM)              0  = terminate jobstream
+         DC    A(CONABORT)             1  = abort jobstream
+MAXCONT  EQU   ((*-CONSTART)-4)/4
+         EJECT
+*********************************************************************
+*  JES control 0 - terminate a jobstream                            *
+*                                                                   *
+*   Input - @JES                                                    *
+*                                                                   *
+*  Output - RVR = completion code for posting                       *
+*                                                                   *
+*********************************************************************
+CONTERM  PROC  @JES
+         L     RN,@JESDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         IF    ^JFJACT,BEGIN           No job active on reader
+         LA    RVR,M1JCACT
+         EXIT  CONTERM
+         END   ,                       OF No job active on reader
+*
+*  Allocate I/O control block
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         LR    RM,RVR
+*
+*  Fix I/O control area
+*
+         WITH  (DOEOJ,JRQIOAREA)
+         WITH  (#JESJBND,EOJHOST)
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOEOJ
+         PMOV  @PAGLEN,LA:L'DOEOJ
+         VCALL PAGFIX
+*
+*  Set up channel program
+*
+         PMOV  #JESNCMD,LA:#JCJBND     I/O command
+         LRA   RA,EOJRET               Job number return area
+         PMOV  #JESNLOC,(RA)           |
+*
+*  Call to do I/O
+*
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,JDEVCHID       Channel ID
+         PMOV  @IOSID,(RM)             I/O Supervisor ID
+         PMOV  @IOSCP,LA:#JESJBND      Channel program
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+         LR    RA,RVR                  Save return code from I/O
+*
+         CLEAR JFJACT                  No job on reader any more
+*
+*  Unfix I/O control area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOEOJ
+         PMOV  @PAGLEN,LA:L'DOEOJ
+         VCALL PAGUFIX
+*
+*  Release I/O supervisor ID
+*
+         PSET  @IOSIDFRE
+         PMOV  @IOSFID,(RM)
+         VCALL IOSIDFRE
+*
+         MVC   JRQR01,EOJRET           EBCDIC job number
+*
+         LTR   RVR,RA                  Return I/O return code
+         IF    NZ,BEGIN
+         LA    RVR,M1JCIOER
+         END   ,                       OF JES I/O error
+         DS    0SL2(0-M1JCOK,M1JCOK-0) Make sure OK return is 0
+         PEND  ,
+         EJECT
+*********************************************************************
+*  JES control 1 - abort a jobstream                                *
+*                                                                   *
+*   Input - @JES                                                    *
+*                                                                   *
+*  Output - RVR = completion code for posting                       *
+*                                                                   *
+*********************************************************************
+ABCARD   EQU   WRLIST+8
+         DS    0SL2(8-L'PGCARD)        Only room for 8 characters
+         SPACE
+CONABORT PROC  @JES
+         L     RN,@JESDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         IF    ^JFJACT,BEGIN           No job active on reader
+         LA    RVR,M1JCACT
+         EXIT  CONABORT
+         END   ,                       OF No job active on reader
+*
+*  Put in /*PURGE to abort a jobstream
+*
+         WITH  (DOWRITE,JRQIOAREA)
+         WITH  (#JESWRIT,WRHOST)
+         MVC   ABCARD(L'PGCARD),PGCARD Move in purge card
+         PSET  @JESPUT                 Do JES I/O put
+         PMOV  @JPDEV,LA:JDEVCB        |
+         PMOV  @JPLOC,LA:ABCARD        |
+         PMOV  @JPLEN,LA:L'PGCARD      |
+         PMOV  @JPLRECL,LA:L'PGCARD    |
+         LCALL JESPUT                  |
+*
+         CLEAR JFJACT                  No jobs active now
+*
+         IF    (RVR,NZ),BEGIN          JES I/O error
+         LA    RVR,M1JCIOER
+         END   ,                       OF JES I/O error
+         DS    0SL2(0-M1JCOK,M1JCOK-0) Make sure OK return is 0
+         PEND
+         SPACE ,
+PGCARD   DC    C'/*PURGE'
+         TITLE 'JES halt'
+*********************************************************************
+*  JES halt                                                         *
+*                                                                   *
+*   Input - @JES                                                    *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+HALT     PROC  @JESCHK
+         L     RN,@JESCDEV
+         WITH  (JDEVCB,RN)
+         VCALL ASLOCK                  Get address space lock
+         L     RJ,JDEVSTAT             Save old state
+         MVC   JDEVSTAT,=A(JDEVSHALT)  Set state to halted
+         IF    (RJ,EQ,JDEVSWAIT),BEGIN Was in wait state
+*
+*  Wake up waiter so halt processing can continue
+*
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATJESCB'
+         WITH  (JESCB,RM)
+         LKOB  JESWTLK
+         L     RA,JESWCNT              Positive number of waiters
+         IF    (RA,POS),BEGIN          |
+         L     RB,JESWFP               First waiter
+         CLEAR RJ
+         WITH  (JESWELEM,RB),BEGIN     Addr to wait elem
+HLTLOOP  LOOP  BEGIN                   Loop through waiters
+         IF    (JWTDEV,EQ,RN),BEGIN    This is it
+         LREM  JESWAIT,LA:JESWELEM,WR=RS        Remove from wait list
+         SIGNL JWTECB                           | and signal
+         EXIT  HLTLOOP
+         END   ,                       OF This is it
+         L     RB,JWTFP                Next waiter
+         UNTIL (BCT,RA),END            OF Loop through waiters
+         END   ,                       OF Addr to wait elem
+         END   ,                       OF Positive number of waiters
+         LKREL JESWTLK
+         END   ,                       OF Was in wait state
+         VCALL ASULOCK                 Free address space lock
+*
+         LA    RVR,0                   Return non-zero
+         PEND  ,
+         TITLE 'JES detach'
+*********************************************************************
+*  JES detach - pre subtask                                         *
+*                                                                   *
+*   Input - @JESCHK                                                 *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             all ok                                                *
+*           RVR <> 0                                                *
+*             RVR contains panic code to issue user                 *
+*                                                                   *
+*********************************************************************
+         SPACE
+CHKDETAC PROC  @JESCHK
+         L     RN,@JESCDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         CLEAR JRQCB
+         USING PZERO,R0                Set master process ID
+         MVC   JRQMPID,PZCURPID        |
+         DROP  R0                      |
+         L     RM,@JESCINP
+         WITH  (@M1JES,RM),BEGIN       Input addr
+         MVC   JRQINPUT,@M1JES
+         END   ,
+         CLEAR RVR
+         PEND
+         EJECT
+*********************************************************************
+*  JES detach                                                       *
+*                                                                   *
+*   Input - @JES                                                    *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+DETACH   PROC  @TENTRY
+         L     RN,@TEPARM
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         IF    ('LT RM,JDEVCHID',NZ),BEGIN      There is a device ID
+*
+*  If there is a jobstream on the reader, abort it
+*
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+         ACALL CONABORT
+*
+         CLEAR JFJACT                  No job on reader any more
+*
+         L     RM,MATPTR
+         WITH  (MAT,RM),'L RM,MATJESCB'
+*
+*  See if someone wants our device
+*
+         WITH  (JESCB,RM),BEGIN
+         LKOB  JESWTLK
+         L     RA,JESWCNT
+         END   ,
+         IF    (RA,NZ),BEGIN           Someone waiting
+         WITH  (JESCB,RM)
+         LREM  JESWAIT,WR=RS
+         LR    RA,RVR
+         LKREL JESWTLK
+         WITH  (JESWELEM,RA)
+         USING PZERO,R0
+         CLEAR (RJ),(RK)
+         IF    (JWTASB,NE,PZCURASB),BEGIN       Post in another AS
+         L     RJ,JWTASB               Other ASB
+         PSET  @SYSRNEW                Get SYSR ID
+         VCALL SYSRNEW                 |
+         LR    RK,RVR                  |
+         ST    RK,JWTSRID              | save so we can free it later
+         END   ,                       OF Post in another AS
+         SIGNL JWTECB,JDEVCHID,(RJ),(RK)
+         DROP  R0
+         END   ,                       OF Someone waiting
+         ELSE  BEGIN                   No one waiting
+*--------------
+*  Close our device
+*--------------
+         WITH  (JESCB,RM),BEGIN
+         LKREL JESWTLK
+         END   ,
+*
+*  Allocate I/O control block
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         LR    RM,RVR
+*
+*  Fix I/O control area
+*
+         WITH  (DODETAC,JRQIOAREA)
+         WITH  (#JESCLOS,DETHOST)
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DODETAC
+         PMOV  @PAGLEN,LA:L'DODETAC
+         VCALL PAGFIX
+*
+*  Set up channel program - pretty minimal
+*
+         PMOV  #JESCCMD,LA:#JCCLOSE    I/O command
+*
+*  Call to do I/O
+*
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,JDEVCHID       Channel ID
+         PMOV  @IOSID,(RM)             I/O Supervisor ID
+         PMOV  @IOSCP,LA:#JESCLOS      Channel program
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+         LR    RA,RVR                  Save return code from I/O
+*
+         CLEAR JFJACT                  No job on reader any more
+*
+*  Unfix I/O control area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DODETAC
+         PMOV  @PAGLEN,LA:L'DODETAC
+         VCALL PAGUFIX
+*
+*  Release I/O supervisor ID
+*
+         PSET  @IOSIDFRE
+         PMOV  @IOSFID,(RM)
+         VCALL IOSIDFRE
+*
+         END   ,                       OF No one waiting
+         END   ,                       OF There is a device ID
+*
+*  No return registers
+*
+         SET   JRQR01.@M1JINRV         No return registers
+         SET   JRQR14.@M1JINRV
+         SET   JRQR15.@M1JINRV
+*
+         PSET  @JES
+         PMOV  @JESDEV,LA:JDEVCB
+         SET   @JPFDONE
+         LCALL JESPOST
+         PEND  ,
+         TITLE 'JES put - write I/O'
+*********************************************************************
+*  JES Put - I/O through host                                       *
+*                                                                   *
+*   Input - @JESPUT                                                 *
+*                                                                   *
+*  Output - RVR =  0                                                *
+*             I/O ok                                                *
+*           RVR <> 0                                                *
+*             I/O error code from I/O supervisor                    *
+*                                                                   *
+*********************************************************************
+@JESPUT  RECORD BEGIN
+@JPDEV   DS    A                       JES device control block
+@JPLOC   DS    A                       Buffer location
+@JPLEN   DS    A                       Buffer length
+@JPLRECL DS    A                       Buffer lrecl (0 = variable)
+         END   ,
+         SPACE
+JESPUT   PROC  @JESPUT
+         L     RN,@JPDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+         WITH  (DOWRITE,JRQIOAREA)
+         WITH  (#JESWRIT,WRHOST)
+*
+*  Allocate I/O control block
+*
+         PSET  @IOSIDGET
+         SET   @IOSFWAIT
+         VCALL IOSIDGET
+         LR    RM,RVR
+*
+*  Fix I/O control area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOWRITE
+         PMOV  @PAGLEN,LA:L'DOWRITE
+         VCALL PAGFIX
+*
+*  Set up channel program
+*
+         PMOV  #JESWCMD,LA:#JCWRITE    Write command
+         PMOV  #JESWLEN,@JPLEN         Total buffer len
+         PMOV  #JESWLRC,@JPLRECL       Record length
+*
+*  Set up real memory buffer list
+*
+         LRA   RA,WRLIST               List of buffers
+         ST    RA,#JESWLST             |
+         L     RA,@JPLOC               Buffer address
+         L     RB,@JPLEN               Buffer length
+         LA    RJ,WRLIST               List of data loc/len
+         LOOP  BEGIN                   Fill in location/lengths
+         LR    RS,RA                   Length on this page
+         AL    RS,=A(4096)             |
+         N     RS,=X'7FFFF000'         |
+         SLR   RS,RA                   |
+         LRA   EPAR,@RA                Real address
+         ST    EPAR,@RJ                |
+         ST    RS,@RJ+4                |
+         IF    (RB,LE,RS),EXIT         Done
+         SLR   RB,RS                   Next length
+         ALR   RA,RS                   Next addr
+         LA    RJ,@RJ+8                Next in data addr list
+         END   ,                       OF Fill in location/lengths
+         ST    RB,@RJ+4                Set last length
+         SET   @RJ.X'80'               | and it's the last one
+*
+*  Call to do I/O
+*
+         PSET  @IOSDOIO
+         PMOV  @IOSCHID,JDEVCHID       Channel ID
+         PMOV  @IOSID,(RM)             I/O Supervisor ID
+         PMOV  @IOSCP,LA:#JESWRIT      Channel program
+         SET   @IOSFSYNC               Synchronous I/O
+         VCALL IOSDOIO
+         LR    RA,RVR                  Save return code from I/O
+*
+*  Unfix I/O control area
+*
+         PSET  @PAGE
+         PMOV  @PAGLOC,LA:DOWRITE
+         PMOV  @PAGLEN,LA:L'DOWRITE
+         VCALL PAGUFIX
+*
+*  Release I/O supervisor ID
+*
+         PSET  @IOSIDFRE
+         PMOV  @IOSFID,(RM)
+         VCALL IOSIDFRE
+*
+         LR    RVR,RA                  Return I/O return code
+         PEND  ,
+         TITLE 'JES post - I/O complete'
+*********************************************************************
+*  JES Post                                                         *
+*                                                                   *
+*   Input - @JES                                                    *
+*             Any channel IDs must be released before calling with  *
+*             the 'done' flag set.                                  *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+JESPOST  PROC  @JES
+         L     RN,@JESDEV
+         WITH  (JDEVCB,RN)
+         WITH  (JRQCB,JDEVRQ)
+*
+*  Notify master task of completion
+*
+         PSET  @XITDO
+         PMOV  @XITRQID,JDEVXID        Exit ID
+         PMOV  @XITTSK,JRQMPID         Master process ID
+         PMOV  @XITTYPE,LA:XITTIOCN    I/O exit type
+         WITH  (@M1JIOCP,@XITPARM)
+         WITH  (@M1JES,JRQINPUT)
+         PMOV  @M1JICRQ,@M1JRQID       Master's request ID
+         IF    @JPFDONE,'SET @M1JICRQ.@M1JDONE'
+         PMOV  @M1JIR01,JRQR01,SLEN=12,DLEN=12  Registers for request
+         VCALL XITDO
+*
+*  NB - I/Os for Mode I are single threaded per device, so we can
+*       use a section of the device identifier block as our request
+*       information control block.
+*
+*        VMFREE A=LA:JRQCB,L'JRQCB,LOC=LOCSYS
+*
+*
+*  Last call
+*
+         IF    @JPFDONE,BEGIN          Last call
+         PSET  @XITDEL                 Delete exit request ID
+         PMOV  @XITDID,JDEVXID         |
+         VCALL XITDEL                  |
+*
+         MVI   JDEVID,C'j'             Change ID - no longer valid
+         VMFREE A=LA:JDEVCB,L'JDEVCB,LOC=LOCSYS
+         END   ,                       OF Last call
+*
+         PSET  @TEXIT                  Exit this task
+         VCALL TEXIT                   |
+*
+         PEND  CODE=NO
+         TITLE 'Initialize JES services'
+*********************************************************************
+*  Initialize JES services                                          *
+*                                                                   *
+*   Input - none                                                    *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+         SPACE
+JESINIT  PROC  SCOPE=GLOBAL
+         L     RN,MATPTR
+         WITH  (MAT,RN)
+*
+*  Allocate global control block
+*
+         VMGET L'JESCB,LOC=GLOBHI,FIX=YES
+         LR    RM,RVR
+         ST    RM,MATJESCB
+         WITH  (JESCB,RM)
+         CLEAR JESCB
+         MVC   JESCBID,=CL8'JESCB'
+*
+*  Create wait queue lock
+*
+         LKCRE JESWAIT
+         ST    RVR,JESWTLK
+*
+*  Init waiter queue
+*
+         LA    RA,JESWAIT              No one waiting
+         ST    RA,JESWFP               |
+         ST    RA,JESWBP               |
+*
+         CLEAR RVR
+         PEND  ,
+         TITLE 'MP-ORVYL JES services'
+         XTRCDATA ,
+         END   .

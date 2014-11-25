@@ -1,0 +1,603 @@
+PARMS    TITLE 'MP-ORVYL initialization parameter services'
+         COPY  HEADER
+PARMS    MODULE ,
+         EJECT
+         COPY  CBAT
+         EJECT
+         COPY  RTCB
+         EJECT
+         COPY  CONVPARM
+         EJECT
+         COPY  PARMPARM
+         EJECT
+@PRMIOPN RECORD BEGIN
+@PRMIONM DS    CL8                     Name of parm file to open
+         END   ,
+         EJECT
+         COPY  MEMPARM
+         EJECT
+         COPY  LSTMAC
+         EJECT
+LHEAD    RECORD BEGIN
+         LHEAD PFX=LH
+         END   ,
+         SPACE
+LELEM    RECORD BEGIN
+         LELEM PFX=L
+         END   ,
+         TITLE 'Parms local work areas'
+PARMHEAD RECORD BEGIN
+PHHEAD   LHEAD PFX=PH                  List of elements
+PHPAR    DS    A                       Pointer to parent header
+PHFLG    FLAG  ,
+         FLAG  PHFMULT                 Allow multiple sensing of parm
+         DS    0A
+         END   ,
+         SPACE 4
+PARMBASE RECORD BEGIN
+PEELEM   LELEM PFX=PE
+PEKEY    DS    CL8                     Keyword for this element
+PEFLG    FLAG  ,
+         FLAG  PEFLEAF                 This is a leaf record
+         FLAG  PEFSHOWN                This value already shown
+         FLAG  PEFMULT                 Allow multiple sensing of parm
+         DS    0A
+         END   ,
+         SPACE
+PARMHELEM RECORD BEGIN                 Header element
+PEHBASE  DS    XL(L'PARMBASE)
+PEHSUB   DS    XL(L'PARMHEAD)          Header for sub-keys
+         END   ,
+         SPACE
+PARMVELEM RECORD BEGIN                 Value element for leaf
+PEVBASE  DS    XL(L'PARMBASE)
+PEVAL    DS    A                       Pointer to value
+         END   ,
+         SPACE 2
+FILEELEM RECORD BEGIN
+FELINK   LELEM PFX=FE
+FILNAME  DS    CL8                     Name of parm file to be opened
+FILHDR   DS    A                       Pointer to header to add to
+         END   ,
+         SPACE 4
+PARMCB   RECORD BEGIN
+PARMID   DC    CL4'PARM'
+PARMROOT DS    XL(L'PARMHEAD)
+*
+PARMFILS LHEAD PFX=PFIL
+*
+PARMCHDR DS    A                       Current header for keywords
+PARMSTAT FLAG  ,
+         FLAG  PARMFINIT               Parms initialized
+         FLAG  PARMFCLOS               Parms closed
+         END   ,
+         TITLE 'PARMS local calling parameters'
+@PARMREC RECORD BEGIN
+@RECLOC  DS    A                       VB record location
+         END   ,
+         SPACE
+@PARMPARS RECORD BEGIN
+@PARSLOC DS    A                       Input location
+@PARSLEN DS    A                       | length
+@PARSKEY DS    CL8                     Return keyword
+@PARSFLG FLAG  ,
+         FLAG  @PARSFMUL               Can be multiply requested
+         END   ,
+         TITLE 'Initialize parameter services'
+*********************************************************************
+*  Initialization for this module                                   *
+*                                                                   *
+*   Input - none                                                    *
+*                                                                   *
+*  Output - none                                                    *
+*                                                                   *
+*********************************************************************
+PARMINIT PROC  ,SCOPE=GLOBAL
+*
+*  Allocate and init global control block for init parms
+*
+         WITH  (RTCB,RTCBR),BEGIN
+         L     RM,RTCBCBAT
+         WITH  (CBAT,RM)
+         MEMGET L'PARMCB,TYPE=GLOBAL   Parameter CT
+         ST    RVR,CBATPARM            |
+         LR    RM,RVR                  |
+         END   ,
+         WITH  (PARMCB,RM)
+         CLEAR PARMCB
+         MVC   PARMID,=CL4'PARM'
+         WITH  (PARMHEAD,PARMROOT)
+         LA    RA,PHHEAD               Init linked list of elements
+         ST    RA,PHFP                 |
+         ST    RA,PHBP                 |
+*
+         LA    RA,PARMFILS             Init list of parameter files
+         ST    RA,PFILFP               |
+         ST    RA,PFILBP               |
+*
+*  Call to open and read parameters
+*
+         ACALL PARMOPEN
+         PEND  ,
+         TITLE 'Open and set-up parameter files'
+*********************************************************************
+*                                                                   *
+*********************************************************************
+PARMOPEN PROC  ,
+         WITH  (RTCB,RTCBR),'L RM,RTCBCBAT'
+         WITH  (CBAT,RM),'L RM,CBATPARM'
+         WITH  (PARMCB,RM)
+         WITH  (PARMHEAD,PARMROOT)
+*
+*  Put nul file element on list of init files
+*
+         MEMGET L'FILEELEM,TYPE=GLOBAL
+         LR    RA,RVR                  No-name file element on list
+         WITH  (FILEELEM,RA)           |
+         LA    RB,PARMHEAD             |
+         ST    RB,FILHDR               |
+         LADD  PARMFILS,LA:FILEELEM,WR=RS
+*
+         WHILE (PFILCNT,NZ),BEGIN      Open and read all parm files
+         LREM  PARMFILS,WR=RS
+         LR    RA,RVR
+         WITH  (FILEELEM,RA),BEGIN     FILEELEM addr
+         MVC   PARMCHDR,FILHDR         Set the current header
+*
+*  Open parameter file
+*
+         PSET  @PRMIOPN
+         PMOV  @PRMIONM,FILNAME
+         VCALL PRMIOPEN
+         IF    (RVR,NZ),'KAPUT PARMOPEN'
+         MEMFREE L'FILEELEM,A=LA:FILEELEM,TYPE=GLOBAL
+         END   ,                       OF FILEELEM addr
+*
+*  Read all records
+*
+         LOOP  BEGIN                   Read all records
+         VCALL PRMIORD
+         IF    (RVR,ZERO),EXIT         No more records/error
+*
+*  Process this record
+*
+         LR    RA,RVR
+         PSET  @PARMREC
+         PMOV  @RECLOC,(RA)
+         LCALL PARMREC
+         END   ,                       OF Read all records
+         END   ,                       OF Open and read all parm files
+*
+*  Tell Richie to clean up
+         VCALL PRMIOEND
+         PEND  ,
+         TITLE 'Process a parameter record'
+*********************************************************************
+*                                                                   *
+*********************************************************************
+#PARMREC RECORD BEGIN
+         DS    XL(L'@PARMPARS)
+#RECKEY  DS    CL8                     Work area for keyword
+         END   ,
+         SPACE
+PARMREC  PROC  @PARMREC,#PARMREC
+*
+*  Parse record
+*
+         L     RA,@RECLOC
+         PSET  @PARMPARS
+         PMOV  @PARSLOC,LA:@RA+4       Record location
+         LH    RB,@RA                  Subtract RDW len
+         SH    RB,=Y(4)                |
+         PMOV  @PARSLEN,(RB)           Record length
+         LCALL PARMPARS
+*
+         IF    (@PARSKEY,ZERO),EXIT    Not a keyword assignment
+         MVC   #PARMREC,@PARMPARS
+         WITH  (@PARMPARS,#PARMREC)
+*
+*  Get addr to global control block
+*
+         WITH  (RTCB,RTCBR),'L RM,RTCBCBAT'
+         WITH  (CBAT,RM),'L RM,CBATPARM'
+         WITH  (PARMCB,RM)
+*--------------
+*  Check for reserved words
+*--------------
+*
+*  BEGIN keyword
+*
+         IF    (@PARSKEY,EQ,=CL8'BEGIN'),BEGIN  Begin keyword
+         MEMGET L'PARMHELEM,TYPE=GLOBAL
+         LR    RA,RVR                  Memory is cleared from MEMGET
+         WITH  (PARMHELEM,RA)
+         WITH  (PARMBASE,PEHBASE)
+*
+*  Set keyword of group
+*
+         MVC   PEKEY,=CL8' '           Set keyword
+         L     RB,@PARSLOC             |
+         L     RS,@PARSLEN             |
+         CEIL  RS,8                    |
+         DEX   RS,'MVC PEKEY(0),@RB'   |
+*
+         WITH  (PARMHEAD,PEHSUB),BEGIN Setup header for sub keys
+         LA    RB,PHHEAD               |
+         ST    RB,PHFP                 |
+         ST    RB,PHBP                 |
+         L     RJ,PARMCHDR             | parent of this header
+         WITH  (PARMHEAD,RJ),LABEL=PAR |
+         PMOV  PHPAR,LA:PAR.PARMHEAD   |
+         IF    (@PARSFMUL,OR,PAR:PHFMULT),BEGIN
+*        SET   PHFMULT                 Multiple sense for this blk
+         END   ,
+         END   ,                       OF Setup header for sub keys
+*
+*  Add to current header
+*
+         LADD  L:PARMCHDR,LA:PARMHELEM,WR=RS
+*
+*  Make this the current header
+*
+         PMOV  PARMCHDR,LA:PARMHEAD
+         END   ,                       OF Begin keyword
+*
+*  END keyword
+*
+         ELSEIF (@PARSKEY,EQ,=CL8'END'),BEGIN   End keyword
+*
+*  Make sure we're not at the root, and that block labels match
+         L     RA,PARMCHDR
+         WITH  (PARMHEAD,RA),BEGIN
+         IF    (PHPAR,ZERO),'KAPUT PARMROOTBAL'
+         END   ,
+*
+         SH    RA,=Y(PEHSUB-PARMHELEM)
+         WITH  (PARMHELEM,RA)
+         WITH  (PARMBASE,PEHBASE)
+         MVC   #RECKEY,=CL8' '
+         L     RB,@PARSLOC
+         L     RS,@PARSLEN
+         CEIL  RS,8
+         DEX   RS,'MVC #RECKEY(0),@RB'
+         IF    (#RECKEY,NE,PEKEY),'KAPUT PARMBALANCE'
+         WITH  (PARMHEAD,PEHSUB)
+*
+*  Pop the level at the end of a block
+*
+         MVC   PARMCHDR,PHPAR
+         END   ,                       OF End keyword
+*
+*  INCLUDE keyword
+*
+         ELSEIF (@PARSKEY,EQ,=CL8'INCLUDE'),BEGIN       Include key
+*
+*  Set up include member w/ name, and point to current header
+*
+         MEMGET L'FILEELEM,TYPE=GLOBAL
+         LR    RA,RVR
+         WITH  (FILEELEM,RA)
+         MVC   FILNAME,=CL8' '
+         L     RB,@PARSLOC
+         L     RS,@PARSLEN
+         CEIL  RS,8
+         DEX   RS,'MVC FILNAME(0),@RB'
+         MVC   FILHDR,PARMCHDR         Point to current header
+*
+*  Add to list of include files
+*
+         LADD  PARMFILS,LA:FILEELEM,WR=RS
+         END   ,                       OF Include key
+*
+*  Here we handle the actual KEY=value statements of the parmfile
+*
+         ELSE  BEGIN                   Not a reserved keyword
+         MEMGET L'PARMVELEM,TYPE=GLOBAL
+         LR    RA,RVR
+         WITH  (PARMVELEM,RA)
+         WITH  (PARMBASE,PEVBASE)
+*
+*  Set keyword, and indicate it's a leaf
+*
+         MVC   PEKEY,@PARSKEY
+         SET   PEFLEAF
+         IF    @PARSFMUL,'SET PEFMULT' Allow multiple senses
+*
+*  Set value
+*
+         L     RS,@PARSLEN             Length of value
+         LA    RK,@RS+4                | + room for RDW
+         MEMGET (RK),TYPE=GLOBAL
+         LR    RB,RVR
+         ST    RB,PEVAL                Pointer to value
+         L     RJ,@PARSLOC
+         DEX   RS,'MVC @RB+4(0),@RJ'   Move in location
+         STH   RK,@RB                  Move in length
+*
+*  Add this element to header
+*
+         L     RJ,PARMCHDR
+         WITH  (PARMHEAD,RJ)
+         LADD  PARMHEAD,LA:PARMVELEM,WR=RS
+*
+*  If the parent block has multiple senses, this block gets it too
+*
+         IF    PHFMULT,'SET PEFMULT'
+         END   ,                       OF Not a reserved keyword
+         PEND  ,
+         TITLE 'Parse records'
+*********************************************************************
+*  Output - @PARMPARS                                               *
+*              IF @PARSKEY <> 0 then @PARSLOC and @PARSLEN          *
+*                point to the parameter area                        *
+*                @PARSFMUL is set if the value can be multiply      *
+*                requested.                                         *
+*              IF @PARSKEY = 0, keyword/value pair not found        *
+*                                                                   *
+*********************************************************************
+SKIPCHAR EQU   C' '
+EOLNCHAR EQU   C';'
+ASNCHAR  EQU   C'='
+QUOTCHAR EQU   C''''
+         SPACE
+#PARMPARS RECORD BEGIN
+#PARSKEY DS    CL8
+         END   ,
+         SPACE ,
+PARMPARS PROC  @PARMPARS,#PARMPARS
+         CLEAR @PARSKEY
+         L     RA,@PARSLOC             First char
+         L     RS,@PARSLEN             1 past last
+         ALR   RS,RA                   |
+PPLOOP   LABEL ,
+*
+*  Skip leading blanks
+*
+         WHILE ((RA,LT,RS),AND,(@RA,EQ,SKIPCHAR)),BEGIN
+         LA    RA,@RA+1
+         END   ,
+         IF    (RA,GE,RS),EXIT
+*
+*  Get keyword
+*
+         LR    RB,RA                   Start of keyword
+         WHILE ((RA,LT,RS),AND,(@RA,NE,SKIPCHAR),AND,                  *
+               (@RA,NE,ASNCHAR),AND,(@RA,NE,EOLNCHAR)),BEGIN
+         LA    RA,@RA+1
+         END   ,
+         LR    RK,RA
+         SLR   RK,RB
+         IF    ((RA,GE,RS),OR,(RK,ZERO)),EXIT   No keyword
+         LR    RJ,RB                   Location/RK=len
+*
+*  Skip blanks/assign char
+*
+         WHILE ((RA,LT,RS),AND,(@RA,NE,EOLNCHAR),AND,                  *
+               ((@RA,EQ,SKIPCHAR),OR,(@RA,EQ,ASNCHAR))),BEGIN
+         LA    RA,@RA+1
+         END   ,
+         IF    (RA,GE,RS),EXIT
+*
+*  Copy keyword to temp buffer... see if it is option keyword
+*
+         IF    ^@PARSFMUL,BEGIN        Mult option not already set
+         MVC   #PARSKEY,=CL8' '        Blank key
+         CEIL  RK,8
+         DEX   RK,'MVC #PARSKEY(0),@RJ'
+         INCR  RK
+         OC    #PARSKEY,=CL8' '        Convert keyword to upper case
+         IF    ('CLC #PARSKEY,=CL8"RESCAN"',EQ),BEGIN
+         SET   @PARSFMUL
+         B     PPLOOP
+         END   ,
+         END   ,                       Mult option not already set
+*
+*  Get value, blank terminated or single quoted
+*
+         LA    RM,C' '                 Default delimiter
+         IF    (@RA,EQ,QUOTCHAR),BEGIN
+         LA    RM,QUOTCHAR
+         LA    RA,@RA+1
+         END   ,
+         ELSE  BEGIN                   Look for EOLN char
+         LR    RB,RA
+         WHILE ((RB,LT,RS),AND,(@RB,NE,EOLNCHAR)),BEGIN
+         LA    RB,@RB+1
+         END   ,
+         LR    RS,RB                   New end char
+         END   ,                       OF Look for EOLN char
+         LR    RB,RA                   Start of value parameter
+         WHILE ((RA,LT,RS),AND,('CLM RM,1,@RA',NE)),BEGIN
+         LA    RA,@RA+1
+         END   ,
+         SLR   RA,RB                   RB = LOC, RA = length
+         IF    (RA,ZERO),EXIT          No keyword value
+*
+*  Found keyword/value pair - set parameter area w/ uppercase keyword
+*
+         MVC   @PARSKEY,=CL8' '        Blank key
+         CEIL  RK,8
+         DEX   RK,'MVC @PARSKEY(0),@RJ'
+         OC    @PARSKEY,=CL8' '        Convert keyword to upper case
+*
+*  Set value - possibly convert it to upper case
+*
+         ST    RB,@PARSLOC
+         ST    RA,@PARSLEN
+         IF    (RM,NE,QUOTCHAR),BEGIN  Uppercase non-quoted value
+         DECR  RB                      Start -1
+         LOOP  BEGIN                   Set all to upper
+         LA    RS,@RB(RA)
+         OI    @RS,C' '
+         UNTIL (BCT,RA),END            OF Set all to upper
+         END   ,                       OF Uppercase non-quoted value
+         PEND  ,
+         TITLE 'Get parameter'
+*********************************************************************
+*  Get initialization parameter                                     *
+*                                                                   *
+*   Input - @PARMDO                                                 *
+*                The input area consists of a fixed area followed   *
+*              by a variable length section of keywords.  Each      *
+*              keyword is 8 bytes long, and padded with blanks.     *
+*                                                                   *
+*  Output - RVR = 0                                                 *
+*                Keyword found and output area is filled in         *
+*           RVR > 0                                                 *
+*                Keyword not found                                  *
+*           RVR < 0                                                 *
+*                Keyword found, but type specified is invalid, or   *
+*              actual keyword does not match the type requested     *
+*                                                                   *
+*                The area pointed to in the @PARMDO area will be    *
+*              filled in according to the type of keyword that is   *
+*              specified.  String length is returned in @PAROLEN,   *
+*              and an integer parameter is returned as a fullword.  *
+*                                                                   *
+*********************************************************************
+         SPACE
+#PARMDO  RECORD BEGIN
+#PDLAST  DS    A                       Last keyword address
+#PDKEY   DS    A                       Address of current key
+#PDKEYUP DS    CL8                     Work area for key
+#PDFLTW  DS    D                       Floating pt work area
+#PDFLT0  DS    D                       Save for floating point reg
+         END   ,
+         SPACE
+PARMDO   PROC  @PARMDO,#PARMDO,SCOPE=GLOBAL
+         WITH  (RTCB,RTCBR),'L RM,RTCBCBAT'
+         WITH  (CBAT,RM),'L RM,CBATPARM'
+         WITH  (PARMCB,RM)
+*
+*  Set last keyword input parameter
+*
+         L     RA,@PARILOC             Set last keyword parameter
+         L     RB,@PARILEN             |
+         LPR   RB,RB                   |
+         ALR   RB,RA                   |
+         SH    RB,=Y(8)                |
+         ST    RB,#PDLAST              |
+*
+         L     RA,@PARILOC             First keyword
+         WITH  (PARMIN,RA),'LA RA,PARMKEYS'
+         LA    RB,PARMROOT             Current header
+         LA    RVR,4                   Default = nothing found
+KEYMATCH LOOP  BEGIN                   Search for keyword match
+         WITH  (PARMHEAD,RB),'L RJ,PHFP'
+         WHILE (RJ,NE,RB),BEGIN        Look for keyword
+         WITH  (PARMBASE,RJ)
+         MVC   #PDKEYUP,@RA            Convert to uppercase
+         OC    #PDKEYUP,=CL8' '        |
+         IF    (('CLC PEKEY,#PDKEYUP',EQUAL),AND,^PEFSHOWN),EXIT
+         L     RJ,PEFP
+         END   ,                       OF Look for keyword
+         IF    (RJ,EQ,RB),EXIT         Not found - we're @ the header
+         WITH  (PARMBASE,RJ)
+         IF    (PEFLEAF,AND,(RA,NE,#PDLAST)),EXIT
+         IF    (^PEFLEAF,AND,(RA,EQ,#PDLAST)),EXIT
+         IF    (^PEFLEAF,AND,(RA,NE,#PDLAST)),BEGIN     Push level
+*
+*  Go one level deeper
+         WITH  (PARMHELEM,RJ)
+         LA    RB,PEHSUB
+         LA    RA,@RA+8
+         NEXT  KEYMATCH
+         END   ,                       OF Push level
+         IF    (PEFLEAF,AND,(RA,EQ,#PDLAST)),BEGIN      Found match
+*
+*  Keyword match
+*
+         IF    ^PEFMULT,'SET PEFSHOWN'
+         DROP  RJ
+         WITH  (PARMVELEM,RJ),'L RJ,PEVAL'      Source loc
+         L     RX,@PARILOC
+         WITH  (PARMIN,RX)
+*
+         IF    PARMFSTR,BEGIN          Parameter is type string
+         LH    RK,@RJ                  Source length
+         SH    RK,=Y(4)                |
+         L     RA,@PAROLOC             Dest loc
+         L     RB,@PAROLEN             | length
+         LH    RVR,=Y(-4)              Check for bad length
+         IF    (RB,NPOS),EXIT
+         CEIL  RK,RB                   Limit length
+         ST    RK,@PAROLEN
+         DEX   RK,'MVC @RA(0),4(RJ)'
+         CLEAR RVR                     Found string type
+         END   ,                       OF Parameter is type string
+*
+*  Process Yes/No requests
+*
+         ELSEIF PARMFYN,BEGIN          Parameter is type yes/no
+         LH    RK,@RJ                  Source length
+         SH    RK,=Y(4)                |
+         L     RA,@PAROLOC             Dest loc
+         L     RB,@PAROLEN             | length
+         LH    RVR,=Y(-4)              Check for bad length
+         IF    (RB,NPOS),EXIT
+         CEIL  RK,L'#PDKEYUP           Limit length
+         MVC   #PDKEYUP,=CL8' '
+         EX    RK,'OC  #PDKEYUP(0),@RJ+4'  Move and convert to upper
+         IF    (#PDKEYUP,EQ,C'ON '),'MVC  #PDKEYUP,=C"YES "'
+         IF    (#PDKEYUP,EQ,C'OFF '),'MVC  #PDKEYUP,=C"NO "'
+         IF    ((#PDKEYUP,EQ,C'YES '),OR,(#PDKEYUP,EQ,C'NO ')),BEGIN
+         MVC   @RA(1),#PDKEYUP
+         MVC   @PAROLEN,=A(1)
+         CLEAR RVR                     Found string type
+         END
+         END   ,                       OF Parameter is type string
+         ELSEIF PARMFINT,BEGIN         Parameter is type integer
+         L     RA,@PAROLOC
+         L     RB,@PAROLEN
+         LH    RVR,=Y(-4)
+         IF    ((RB,NPOS),OR,(RB,LT,4)),EXIT    Not enough room
+         LH    RK,@RJ                  Parameter Length
+         SH    RK,=Y(4)                |
+         LA    RJ,@RJ+4                Location
+         DTB   (RJ),(RK)
+         IF    @DTBVALID,BEGIN         Valid integer
+         ST    RVR,@RA                 Save integer parm
+         CLEAR RVR
+         END   ,                       OF Valid integer
+         ELSE  'LH RVR,=Y(-4)'
+         END   ,                       OF Parameter is type integer
+*
+*  Get float type parameter
+*
+         ELSEIF PARMFFLT,BEGIN         Parameter is float type
+         L     RA,@PAROLOC
+         L     RB,@PAROLEN
+         LH    RVR,=Y(-4)
+         IF    (RB,LT,4),EXIT          Not enough room
+         LH    RK,@RJ
+         SH    RK,=Y(4)
+         LA    RJ,@RJ+4
+         STB   (RJ),(RK),4             Convert w/ 4 decimal pts
+         IF    @STBVALID,BEGIN         Valid scaled parm
+         STD   R0,#PDFLT0              Save float reg
+         X     RVR,TWO31+4
+         ST    RVR,#PDFLTW+4           Save scaled integer
+         MVC   #PDFLTW(4),TWO31         and convert it to float
+         LD    R0,#PDFLTW
+         SD    R0,TWO31
+         DD    R0,=D'1E4'                and bring it down to size
+         LRER  R0,R0
+         STE   R0,@RA                     save it
+         LD    R0,#PDFLT0              Restore float reg
+         CLEAR RVR                     All OK
+         END   ,                       OF Valid scaled parm
+         ELSE  'LH RVR,=Y(-4)'         Invalid parm type
+         END   ,                       OF Parameter is float type
+         ELSE  BEGIN                   Parameter is of invalid type
+         LH    RVR,=Y(-4)
+         END   ,                       OF Parameter is of invalid type
+         EXIT  KEYMATCH
+         END   ,                       OF Found match
+         END   ,                       OF Search for keyword match
+         PEND  ,
+         DS    0D
+TWO31    DC    X'4E000000800000'
+         TITLE 'Clean up parameter tables'
+PARMCLOS PROC  ,
+         PEND  ,
+         END   .

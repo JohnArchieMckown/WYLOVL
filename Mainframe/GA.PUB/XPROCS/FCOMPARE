@@ -1,0 +1,355 @@
+;
+;   "Compare Files"  Exec File
+;
+;
+;   command usage:
+;        fcompare <new file> to <old-file> <collect options>
+;
+;
+;
+xproc () begin
+   ; ignore attentions until initialized
+   on attn cmd 'pcall ignore_attn '
+   on err  cmd 'pcall error'
+   set exec llimit 10000
+   declare string newfile oldfile col_opts
+   pcall initialize
+   on attn cmd 'pcall attn'
+   pcall scan_command(parm_count,parm_string, \
+      newfile,oldfile,col_opts);
+   pcall get_files(newfile,oldfile)
+   pcall process_col_opts(col_opts)
+   pcall compare
+   pcall cleanup
+   xreturn
+end
+
+;
+;  initialization.  set up xproc global variables.  open
+;  required active files.
+;
+proc initialize () begin
+   x.act = actno
+   open
+   x.old = actno
+   open
+   x.new = actno
+   pick &(x.act)
+end
+
+;
+;  scan compare command
+;
+;  input: parm_count (must be -1) and parm_string
+;  scan command: <new file> to <old file> <collect options>
+;  return: new file, old file, collect options
+;
+proc scan_command(pc,ps,f1,f2,col_opts) begin
+   dcl str token,remain,temp
+   remain = ps
+   if (strip(ps) eq '') pcall error_msg( \
+      'Command usage: fcompare <new-file> to <old-file> <collect-opts>')
+   if (pc ne -1) pcall error_msg(ps||': invalid options')
+   ; scan:  <new> to <old> <collect-opts>
+   syscall scan_parm(token,remain)
+   syscall scan_parm(token,remain)
+   while ((upper(token) ne 'TO') and (token ne '')) begin
+      syscall scan_parm(token,remain)
+   end
+   if (upper(token) ne 'TO') begin
+      pcall error_msg('Missing "to" <old-file-name>. ')
+   end
+   f1 = strip(substr(ps,1,size(ps)-size(remain)-2))
+   ps = substr(ps,size(ps)-size(remain)+1)
+   syscall scan_parm(token,remain)
+   syscall scan_parm(token,remain)
+   while ((not abbrev('COLLECT',upper(token),3)) and \
+         (token ne '')) begin
+      syscall scan_parm(token,remain)
+   end
+   f2 = strip(substr(ps,1,size(ps)-size(remain)-size(token)))
+   col_opts = strip(token||remain)
+   return(f1,f2,col_opts)
+end
+
+;
+;  scan and get files to compare into open active files.
+;  also scan and process options.
+;
+proc get_files (newfile,oldfile) begin
+   ; process new file
+   if (abbrev('ACTIVE',upper(newfile),3)) begin
+      pick &(x.new)
+      close
+      x.new = x.act
+   end
+   else begin
+      if (find(newfile,'*') ne 0) begin
+         pick &(x.act)
+         try quiet newfile = dsnformat(newfile)
+      end
+      pick &(x.new)
+      try quiet copy all from &(newfile) combine
+      if (tryattn) pcall attn
+      if (tryerr) begin
+         clear xdump
+         try copy all from &(newfile) combine
+         pcall error_msg('Unable to use file: '||newfile)
+      end
+   end
+   ; process old file
+   if (abbrev('ACTIVE',upper(oldfile),3)) begin
+      pick &(x.old)
+      close
+      x.old = x.act
+   end
+   else begin
+      if (find(oldfile,'*') ne 0) begin
+         pick &(x.act)
+         try quiet oldfile = dsnformat(oldfile)
+      end
+      pick &(x.old)
+      try quiet copy all from &(oldfile) combine
+      if (tryattn) pcall attn
+      if (tryerr) begin
+         clear xdump
+         try copy all from &(oldfile) combine
+         pcall error_msg('Unable to use file: '||oldfile)
+      end
+   end
+   pick &(x.act)
+end
+
+;
+;  process collect options
+;
+proc process_col_opts(col_opts) begin
+   pick &(x.act)
+   try syscall collect_scan(col_opts)
+   if (tryerr or tryattn) begin
+      comm Command stopped.
+      pcall cleanup
+      xreturn
+   end
+   if (strip(col_opts) ne '') begin
+      pcall error_msg(col_opts||': invalid.')
+   end
+end
+
+;
+;  compare files,
+;  main workhorses are the compare_lines and match_line system
+;  procedures.  check it out.  (great comments hey !)
+;
+proc compare () begin
+   ; set up line numbers
+   start1 = lno_first(0,x.new)
+   start2 = lno_first(0,x.old)
+   last1 = lno_last(99999.999,x.new)
+   last2 = lno_last(99999.999,x.old)
+   index1 = start1
+   index2 = start2
+   ; see if any lines match
+   syscall match_lines(index1,index2,x.new,x.old)
+   ; if no lines match, exit now
+   if (index1 eq -1 or index2 eq -1) begin
+      comment Files do not match.
+      return
+   end
+   if (index2 ne start2) begin
+      pcall del_msg(start2,index2-0.001)
+   end
+   if (index1 ne start1) begin
+      pcall add_msg(start1,index1-0.001)
+   end
+   ;
+   ; main compare loop,,,
+   ;   compare looking for mis-match,  print matching numbers
+   ;   compare looking for match, print mis-matches
+   ;
+   while (true) begin
+      start1 = index1
+      start2 = index2
+      syscall compare_lines(index1,index2,x.new,x.old)
+      if (index1 gt last1) index1 = -1;
+      if (index2 gt last2) index2 = -1;
+      cases begin
+         case (index1 ne -1 and index2 ne -1) begin
+            pcall match_msg(start1,index1-0.001,start2,index2-0.001)
+         end
+         case (index1 eq -1 and  index2 ne -1) begin
+            pcall match_msg(start1,last1,start2,index2-0.001)
+            pcall del_msg(index2,last2)
+            return
+         end
+         case (index1 ne -1 and index2 eq -1) begin
+            pcall match_msg(start1,index1-0.001,start2,last2)
+            pcall add_msg(index1,last1)
+            return
+         end
+         case (index1 eq -1 and index2 eq -1) begin
+            pcall match_msg(start1,last1,start2,last2)
+            return
+         end
+      end
+      start1 = index1
+      start2 = index2
+      syscall match_lines(index1,index2,x.new,x.old)
+      if (index1 gt last1) index1 = -1;
+      if (index2 gt last2) index2 = -1;
+      cases begin
+         case (index1 ne -1 and index2 ne -1) begin
+            if (index2 ne start2) begin
+               pcall del_msg(start2,index2-0.001)
+            end
+            if (index1 ne start1) begin
+               pcall add_msg(start1,index1-0.001)
+            end
+         end
+         case (index1 eq -1 and index2 eq -1) begin
+            pcall del_msg(start2,last2)
+            pcall add_msg(start1,last1)
+            return
+         end
+         case (true) begin
+            bomb
+         end
+      end
+   end
+end
+
+;
+;  output deleted lines
+;
+proc del_msg (start,stop) begin
+   pick &(x.old)
+   count &(start)/&(stop) quiet
+   if (count eq 0)  bomb
+   comment &(count) lines deleted.
+   list &(start)/&(stop)
+end
+
+;
+;  output added lines
+;
+proc add_msg (start,stop) begin
+   pick &(x.new)
+   count &(start)/&(stop) quiet
+   if (count eq 0)  bomb
+   comment &(count) lines added.
+   list &(start)/&(stop)
+end
+
+;
+; output lines matched message
+;
+proc match_msg (start1,end1,start2,end2) begin
+   ;
+   pick &(x.new)
+   count &(start1)/&(end1) quiet
+   count1 = count
+   first1 = lno_first(start1)
+   last1 = lno_last(end1)
+   ;
+   pick &(x.old)
+   count &(start2)/&(end2) quiet
+   count2 = count
+   first2 = lno_first(start2)
+   last2 = lno_last(end2)
+   ;
+   if (count1 eq 0 or count2 eq 0 or count1 ne count2) bomb
+   comment &(count1) lines match.   (new = &(first1)/&(last1)  old = &(first2)/&(last2))
+   ;
+end
+
+
+;
+;   ignore attn routine
+;
+proc ignore_attn () begin
+   clear attn
+   on attn reset
+end
+
+;
+;  attn routine - clean up actives and exit
+;
+proc  attn () begin
+   dumpflag = false
+   if (attnid ne 'MSGGIVEN') begin
+      if (xdump) dumpflag = true
+      clear xdump
+      comm Command stopped.
+      if (dumpflag) set xdump
+   end
+   pcall cleanup
+   xreturn attn attnid=MSGGIVEN
+end
+
+
+;
+;  error routine - clean up actives and exit
+;
+;  this routine processes unanticipated errors. for
+;  unanticipated errors we print exec error line info.
+;  otherwise we do not, we hide that command is an exec.
+;  a few errors are anticipated and processed separately
+;  below.  they are:
+;
+;  if dump error, do not print errid
+;
+proc  error () begin
+   ; if dump error, do not print exec error info
+   if (errid eq 'BADXDUMP') begin
+      pcall cleanup
+      xreturn err errid=BADXDUMP errmsg=''
+   end
+   ; unanticipated error, print it all
+   comm &(errinfo)
+   pcall cleanup
+   xreturn err errid=&(ERRID) errmsg='Fcompare failed.'
+end
+
+;
+;
+;  give error message, clean up and exit
+;
+;
+proc error_msg (msg) begin
+   clear xdump
+   pcall cleanup
+   xreturn errid=BADFCOMP errmsg='&(msg)'
+end
+
+
+;
+;  clean up routine
+;
+;  clean up active files, if not called from attn routine
+;  print dump active file if requested.
+;
+proc cleanup () begin
+   on attn cmd='pcall ignore_attn'
+   on error cmd= \
+      'xreturn errid=BADFCOMP errmsg="Fcompare failed. (during cleanup)" '
+   if (x.new ne x.act) begin
+      pick &(x.new)
+      close
+   end
+   if (x.old ne x.act) begin
+      pick &(x.old)
+      close
+   end
+   if (xdump) begin
+      dcl num dumpline,dumpnext,dumpdelta,dumpact
+      syscall collect_get_info(dumpline,dumpnext,dumpdelta,dumpact)
+      pick &(dumpact)
+   end
+   ; below, we do not pick &(x.act), it will be picked when we
+   ; close the new and old files above. we don't pick it because
+   ; it may be closed.  (ie. com file to dkdkdkd col clear)
+   ;
+   ; if (not xdump) begin
+   ;    try quiet pick &(x.act)
+   ; end
+end

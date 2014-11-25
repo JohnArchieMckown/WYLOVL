@@ -1,0 +1,663 @@
+IPLTEXT  TITLE 'IPLTEXT -- Initial Program for the Guest machine'
+         COPY  HEADER
+IPLTEXT  AMODE 31
+IPLTEXT  RMODE ANY
+IPLTEXT  CSECT 0
+         COPY  PZERO
+         EJECT ,
+         COPY  IPLPARM
+         EJECT ,
+         MACRO
+&L       IPLERR &TEXT
+         LCLA  &LEN
+&L       SVC   2
+&LEN     SETA  K'&TEXT-2
+         DC    AL1(&LEN)
+         DC    C&TEXT
+         DS    0H
+         MEND  ,
+         EJECT ,
+ISTKE    RECORD BEGIN        Format of the interrupt stack entry
+ISTKPSW  DS    D             PSW at the time of the interrupt
+ISTKREGS DS    16F           General purpose registers
+         END   ,
+         SPACE 2
+MAPENT   RECORD BEGIN
+MAPNAME  DS    CL8           Name of the CSECT/ENTRY
+MAPLOC   DS    A             Value of the symbol
+MAPLEN   DS    A             Length of a CSECT
+         END   ,
+         EJECT ,
+CSR      RECORD BEGIN        CESD Record format from load module
+CSRTYPE  DC    X'20'         Record type
+CSRFL    DS    X             Flags
+         DS    H
+CSRFID   DS    H             ESDID of first item
+CSRCNT   DS    H             Count of ESD data
+CSRDATA  DS    0H            Start of the ESD data
+         END   ,
+         SPACE 2
+CSD      RECORD BEGIN        CESD data format
+CSDNAME  DS    CL8           Symbol
+CSDTYPE  FLAG  ,                       Symbol type
+         FLAG  (CSDTSD,B'00001111',OFF) SD
+         FLAG  (CSDTLR,B'00000011',EQ)  LR
+         FLAG  (CSDTPC,B'00000100',EQ)  PC
+         FLAG  (CSDTCM,B'00000101',EQ)  CM
+         FLAG  (CSDTPR,B'00000110',EQ)  PR
+         FLAG  (CSDTNL,B'00000111',EQ)  null
+         FLAG  (CSDTER,B'00000010',EQ)  ER
+         FLAG  (CSDTWX,B'00001010',EQ)  WX
+*
+CSDADDR  DS    AL3           Address of the symbol
+         DS    X
+CSDIDL   DS    AL3           Length or ID
+         END   ,
+         SPACE 2
+IDR      RECORD BEGIN        IDR record format
+         DC    X'80'
+IDRLEN   DS    X             Length of the IDR data
+IDRTYPE  FLAG  ,
+         FLAG  (IDRTID,X'08')          Identify type record
+IDRDATA  DS    0X            Start of the data
+         END   ,
+         EJECT ,
+CR       RECORD BEGIN        Control/RDL record format
+CRTYPE   FLAG  ,             Record type
+         FLAG  (CRTCR,X'01')   Record contains Control info
+         FLAG  (CRTRLD,X'02')  Record contains RLD info
+         FLAG  (CRTEOM,X'0C')  Record is last in module
+         DS    AL2
+CR#CRS   DS    X             Number of CR's following next text
+CRCLEN   DS    H             Length of the control data
+CRRLEN   DS    H             Length of the relocation data
+CRCCW    DS    0D            Channel command word to read in text
+         DS    X
+CRADDR   DS    AL3           Linkage editor assigned addr for text
+         DS    H
+CRTLEN   DS    H             Length of the text record following
+CRDATA   DS    0X            Start of the relocation/control data
+         END   ,
+         SPACE 2
+CRD      RECORD BEGIN        Control data format
+CRDID    DS    H             ESDID of the owning control section
+CRDLEN   DS    H             Length of text for that control section
+         END   ,
+         SPACE 2
+RLD      RECORD BEGIN        RLD data format
+RLDR     DS    H             Relocation pointer (ESDID)
+RLDP     DS    H             Position pointer (ESDID)
+RLDFLG   FLAG  ,             RLD type information
+         FLAG  (RLDFV,X'10')      V-type (vs A-type)
+         FLAG  (RLDFNEG,X'02')    negative relocation
+         FLAG  (RLDFSP,X'01')     next rld entry has same R/P values
+RLDADDR  DS    AL3           Linkage editor assigned address
+         END   ,
+         SPACE 2
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  IPLTEXT -- This program is loaded when the machine is IPLed  *
+*             at location 0.  It is 4096 bytes long and must    *
+*             not contain ANY relocatable constants.            *
+*                                                               *
+*****************************************************************
+         SPACE 2
+         DC    (L'PZERO)X'00'          Zero the hardware area
+*
+* Set up the interrupt vectors
+*
+         ORG   IPLTEXT+(PZRSNPSW-PZERO)
+         DC    X'000C000080',AL3(IPLSTRT-IPLTEXT) Starting PSW
+         ORG   IPLTEXT+(PZEXNPSW-PZERO)
+         DC    X'000C000080',AL3(IEXFLIH-IPLTEXT) External
+         DC    X'000C000080',AL3(ISVFLIH-IPLTEXT) SVC
+         DC    X'000C000080',AL3(IPIFLIH-IPLTEXT) Program
+         DC    X'000A000000',AL3(5)               Machine check
+         DC    X'000C000080',AL3(IIOFLIH-IPLTEXT) I/O
+         ORG
+         EJECT ,
+*
+* IPL Data area --
+*
+*        Information needed during the IPL phase of initialization
+*
+IPGOPSW  DS    D             PSW storage
+IPREGS   DS    16F           Register storage
+ISTO     DC    A(0)          Address of the segment table
+IWORK    DS    A(0)          Work areas
+IDWORK   DS    D'0'
+*
+* Load information
+*
+IKSTART  DC    A(0)          Address of the start of the kernel
+IKLEN    DC    A(0)          Length of the kernel
+IKEPA    DC    A(0)          Entry point address in the kernel
+IMAPST   DC    A(0)          Starting address of the kernel map
+IMAPLEN  DC    A(0)          Length of the kernel map
+*
+* Load status info
+*
+ICURLOC  DC    A(0)          Next free area of the Kernel map
+IMAXPAG  DC    A(0)          Address of the highest page
+STAFLAG  FLAG  ,             Status flags
+         FLAG  ILEOM         - End of module flag seen
+         FLAG  AUTOPF        - Automatic page fault resolution
+         FLAG  REALINITED    - Real memory has been init'd
+         DS    0D
+IBUFFER  DC    XL256'00'     Buffer for Linkage Editor info
+ILIDAW1  DC    A(0)          IDAW for control records
+ILIDAW2  DC    5A(0)         IDAWs for text records
+*
+* Control register Setup Area
+*
+ICR00    DC    X'10B00000'   Low address + trans format
+ICR01    DC    X'00000000'   STO
+*
+* The interrupt Save area
+*
+         DS    0D
+ISREASON DS    0CL64
+         DC    56C'-'
+         DC    C'--ISA-->'
+ISAPSW   DS    D             Interrupt PSW
+ISAREGS  DS    16A           Interrupt Registers
+         EJECT ,
+*
+* IPLSTRT -- This is the start of the IPL code.
+*
+IPLSTRT  LABEL ,
+         USING PZERO,R0                Address the PAGE ZERO
+         USING IPLTEXT,PZERO           IPLTEXT starts there too
+         MVC   PZRSNPSW,PZMCNPSW       Restarts are machine checks
+         EJECT ,
+*
+* Allocate and open up the kernel load module. It also returns the
+* size of the load module and its entry point address.
+*
+         SYSCTL RA,RB,TYPE=LOADSTA     Returns length, EPA of kernel
+         L     RS,=A(4096)             Starting point of the kernel
+         ST    RS,IKSTART              Save it for now
+         ST    RA,IKLEN                Save the length
+         AR    RB,RS                   Add our offset to the epa
+         ST    RB,IKEPA                Save the Actual EPA
+         AR    RA,RS                   Get the ending address
+         LA    RA,@RA+4095
+         N     RA,=X'7FFFF000'         Round up to the next page
+         ST    RA,IMAPST               Save the map location
+         ST    RA,ICURLOC              It is also the first free loc
+*
+* Clear the Load module area
+*
+         L     RA,IKSTART              Get the kernel address
+         L     RB,IKLEN                And the length
+         CLEAR RJ                      Source has no length
+         CLEAR RK                      or address
+         MVCL  RA,RJ                   Clear whole kit & kaboodle
+*
+* Now we read in the load module
+*
+         LA    RA,IBUFFER              Get the address of the buffer
+         ST    RA,ILIDAW1
+LMRLOOP  WHILE ^ILEOM,BEGIN
+         LA    RA,ILIDAW1              Get the IDAW for the I/O
+         SYSCTL RA,RS,TYPE=LOADBLK     Get a block and it's length
+         IF    (RS,GT,L'IBUFFER),BEGIN
+         IPLERR 'BAD LOAD MODULE FORMAT'
+         END   ,
+         LA    RA,IBUFFER              Location of the data
+*
+* We have a block in... Find out what's in it
+*
+*   Its a CESD record.  We scan through all the data and build up
+*   our map.
+*
+         IF    (@RA,EQ,X'20'),BEGIN    CESD Record
+         WITH  (CSR,RA)
+         LH    RB,CSRCNT               Get length of the CSD data
+         LA    RB,CSRDATA(RB)          Get address of end of data
+         LA    RA,CSRDATA
+         WITH  (CSD,RA)
+         WHILE (RA,LT,RB),BEGIN        Loop through the CSD entries
+*
+*    See it this is an SD entry
+*
+         IF    CSDTSD,BEGIN            If so, fill in a map entry
+         L     RJ,ICURLOC              Get map record pointer
+         WITH  (MAPENT,RJ),BEGIN
+         MVC   MAPNAME,CSDNAME         Move in the symbol name
+         L3    RS,CSDADDR              Get the symbol address
+         A     RS,IKSTART              Relocate the symbol
+         ST    RS,MAPLOC               Save it's value
+         MVC   MAPLEN+1(3),CSDIDL      Keep the length of the csect
+         END   ,
+*
+*    Update the map pointer
+*
+         AH    RJ,=Y(L'MAPENT)
+         ST    RJ,ICURLOC              Save the updated pointer
+         END   ,
+*
+*    Update the CSD pointer
+*
+         AH    RA,=Y(L'CSD)            Point at the next
+         END   ,
+         END   ,
+         EJECT ,
+*
+*  It is a CTR/RLD record.  Both types are handled here.
+*
+         ELSEIF ('TM @RA,3',NZ),BEGIN
+         WITH  (CR,RA)
+*
+*   Take care of the RLD portion of the record first
+*
+         IF    CRTRLD,BEGIN
+         LA    RJ,CRDATA               Address of the first RLD
+         LH    RK,CRRLEN               Length of the RLD data
+         AR    RK,RJ                   Addr of end of RLD data
+         WHILE (RJ,LT,RK),BEGIN
+         WITH  (RLD,RJ)
+         L3    RS,RLDADDR              Get the offset of the symbol
+         A     RS,IKSTART              Convert that to an address
+*
+* We know where the Adcon is.  Now we have to relocate it based
+* on how long it is.
+*
+         TM    RLDFLG,X'0C'            Length bits
+         IF    ON,BEGIN                4 byte adcon
+         L     RVR,@RS
+         A     RVR,IKSTART             Add relocation value
+         ST    RVR,@RS                 And put it back
+         END   ELSE,BEGIN
+         TM    RLDFLG,X'08'            Length bits again
+         IF    ON,BEGIN                3 byte adcon
+         L3    EPAR,@RS
+         A     EPAR,IKSTART            Relocate it
+         ST3   EPAR,@RS
+         END   ELSE,BEGIN              2 byte adcon
+         L2    EPAR,@RS
+         A     EPAR,IKSTART            Relocate it
+         ST2   EPAR,@RS
+         END   ,
+         END   ,
+*
+* Now we move on to the next RLD entry.  How far we move is based
+* on whether the next entry has new R/P pointers.
+*
+         IF    RLDFSP,BEGIN            It has same relocation vals
+         AH    RJ,=Y(L'RLD-(RLDFLG-RLD))  Move over flag and addr
+         END   ELSE,BEGIN
+         AH    RJ,=Y(L'RLD)            Move it the full length
+         END   ,
+         END   ,
+         END   ,
+*
+*  Now we take care of the control portion of the record
+*
+         IF    CRTCR,BEGIN
+*
+* Set up the IDAW list (max 8K blocksize)
+*
+         L3    RJ,CRADDR               Address for the text
+         A     RJ,IKSTART              Get the Read location
+         LA    RK,5                    Number of IDAWs to make
+         LA    RX,ILIDAW2              Address of the first one
+RIDL     LA    RS,@RJ                  Get the real addr
+*RIDL     LRA   RS,@RJ                  Get the real addr
+         ST    RS,@RX                  Save it in the list
+         LA    RJ,@RJ+2048             Get the next block
+         N     RJ,=X'7FFFF800'         Round down to 2K bdy
+         LA    RX,@RX+4                Point at the next IDAW
+         BCT   RK,RIDL                 Loop it up
+*
+* Do the I/O
+*
+         LA    RX,ILIDAW2              Get the IDAW list addr
+         SYSCTL RX,RS,TYPE=LOADBLK     Get the block of data in
+         IF    (RS,NE,CRTLEN),BEGIN    Bad text block
+         IPLERR 'BAD TEXT BLOCK'       Bad load module format
+         END   ,
+         END   ,
+*
+* Check for end of module
+*
+         IF    CRTEOM,'SET ILEOM'      Set the flag
+         END   ,
+*
+* Processing of other load module record type should go here
+*
+         END   ,
+         EJECT ,
+*
+* Update the map pointers and close the input dataset
+*
+         L     RS,ICURLOC
+         S     RS,IMAPST               Map length
+         ST    RS,IMAPLEN              Save that too
+         SYSCTL TYPE=LOADEND
+         EJECT ,
+*
+* Find out how many real pages we have left
+*
+         SYSCTL RA,TYPE=MEMSIZE        Get the number of pages
+         BCTR  RA,0                    Reduce it by one
+         SLL   RA,12                   Get the addr of the last one
+         ST    RA,IMAXPAG              Save it
+         L     RA,ICURLOC              Get the current location
+         AH    RA,=Y(4095)
+         N     RA,=X'7FFFF000'         Round up to the next page
+*
+* Reserve the V=R stack area
+*
+         LR    WAR,RA                  Get the next page address
+         A     RA,=A(16*4096)          Maximum number of CPU's
+         ST    RA,ICURLOC              Update the current page loc
+         LA    SPR,@WAR+8              Set up the stack pointer
+         EJECT ,
+*
+* Now we get into virtual mode.  We create a full size segment table
+* and page tables enough to cover the kernel, etc.
+*
+         L     RA,ICURLOC              Get the first free page
+         LR    RVR,RA                  Copy that address
+         AH    RVR,=Y(4096)            Bump it up
+         ST    RVR,ICURLOC             And replace it
+         ST    RA,ISTO                 Save the address of it
+*
+         LA    RB,1024                 Number of segments to init
+         LA    RJ,X'20'                Invalid segment entry
+STILP    ST    RJ,@RA                  Invalidate each segment
+         LA    RA,@RA+4
+         BCT   RB,STILP                And go to the end of the page
+*
+* Set up the Control Registers
+*
+         LA    RA,63                   Segment table length
+         O     RA,ISTO                 Get origen
+         ST    RA,ICR01
+         LCTL  0,1,ICR00               Load the control regs
+*
+* Set up the page tables we need
+*
+         L     RY,ISTO                 Get the seg table location
+         SRL   RY,12                   Shift to get count before it
+*
+* Calculate the number of page table pages needed
+*
+         LA    RX,@RY+255
+         SRL   RX,8                    Get the count
+         LR    RS,RX                   Copy the count
+         SLL   RS,12                   Convert to length
+         L     RA,ICURLOC              Get the next free page
+         AR    RS,RA                   Add the length we need
+         ST    RS,ICURLOC              Update the free pointer
+*
+* We have the addr of the page table(s) in RA.  All entries
+* need to be invalidated.
+*
+         LA    RVR,X'0400'             Invalid bits
+         LR    RB,RA                   Starting point
+         WHILE (RB,LT,RS),BEGIN
+         ST    RVR,@RB                 Invalidate the entry
+         LA    RB,@RB+4                Go to the next entry
+         END   ,
+*
+* The pages we have defined must be validated.  They are all
+* V=R and are the kernal and map pages are protected.
+*
+         LR    RB,RA                   Get the page table addr
+         LA    RVR,X'0200'             Protect bits
+PGLP     ST    RVR,@RB                 Save the entry
+         LA    RB,@RB+4                Point at the next entry
+         AH    RVR,=Y(4096)            Update the real frame pointer
+         BCT   RY,PGLP                 For the number of defd frames
+*
+* Turn off the page protection for page zero
+*
+         CLEAR (@RA,4)                 No protect here
+*
+* Turn off the page protection for the V=R stack
+*
+         LR    RB,WAR                  Address of the first
+         SRL   RB,10                   Get the offset in the PT
+         AR    RB,RA                   Get the address of the entry
+         LA    RY,16                   Number of stack frames
+PGVRL    NI    @RB+2,X'FD'             Turn off the prot bit
+         LA    RB,@RB+4                Point at the next entry
+         BCT   RY,PGVRL                For all 16 frames
+*
+* Update the segment table with the page table info
+*
+         L     RB,ISTO                 Get the ST address
+         O     RA,=X'0000000F'         Set the PTL
+STLP     ST    RA,@RB                  Update the entry
+         LA    RB,@RB+4
+         AH    RA,=Y(4096)             Point at the next page table
+         BCT   RX,STLP                 Loop for the number of PTS
+*
+* Start using those translation values
+*
+         SSM   =X'04'                  Turn on translation
+*
+* Go call the kernal that we just loaded.
+*
+         PSET  @IPLPARM
+         MVC   @IPLKLOC,IKSTART
+         MVC   @IPLKLEN,IKLEN
+         MVC   @IPLMLOC,IMAPST
+         MVC   @IPLMLEN,IMAPLEN
+         ST    WAR,@IPLSLOC
+         ACALL IKEPA
+         EJECT ,
+*
+* Interrupt handling routines
+*
+*
+IEXFLIH  STM   R0,R15,IPREGS           Save the registers
+         MVC   IPGOPSW,PZEXOPSW        Save the old psw
+         IPLERR 'UNEXPECTED EXTERNAL INTERRUPT'
+*
+IMCFLIH  STM   R0,R15,IPREGS           Save the registers
+         MVC   IPGOPSW,PZMCOPSW        Save the old psw
+         IPLERR 'UNEXPECTED MACHINE CHECK INTERRUPT'
+*
+IIOFLIH  STM   R0,R15,IPREGS           Save the registers
+         MVC   IPGOPSW,PZIOOPSW        Save the old psw
+         IPLERR 'UNEXPECTED I/O INTERRUPT'
+         EJECT ,
+*
+* Supervisor FLIH -- this routine handles the SVC requests that
+* are defined for the IPL environment.  These are:
+*
+*        SVC 0 -- Turn on automatic page fault resolution.
+*
+*        SVC 1 -- Turn off automatic page fault resolution.
+*
+*        SVC 2 -- Error.  The PSW points to some text that
+*                 describes the error.
+*
+*        SVC 3 -- Define page table for a segment.
+*                   R1 = virtual addr to define
+*
+*        SVC 4 -- Real memory initialization has been done.
+*                 (This prevents anyone from allocating more real
+*                 memory using the initialization routines.)
+*
+ISVFLIH  LABEL
+         MVC   ISAREGS-IPLTEXT(64,0),IPREGS    Copy Registers
+         STM   R0,R15,IPREGS           Save the registers
+*-
+*-       SVC 0 -- Turn on auto page resolution.
+*-
+         IF    (PZSVIC,EQ,X'0000'),BEGIN  Auto...
+         SET   AUTOPF                  Start the page resolution
+*
+         LM    R0,R15,IPREGS           Load the registers
+         LPSW  PZSVOPSW                And back in the saddle
+         END
+*-
+*-       SVC 1 -- Turn off auto page resolution.
+*-
+         IF    (PZSVIC,EQ,X'0001'),BEGIN  No auto...
+         CLEAR AUTOPF                  Stop the page resolution
+*
+         LM    R0,R15,IPREGS           Load the registers
+         LPSW  PZSVOPSW                And back in the saddle
+         END
+*-
+*-       SVC 2 -- Error SVC.
+*-
+         IF    (PZSVIC,EQ,X'0002'),BEGIN   Error SVC...
+         L     RS,PZSVOPSW+4           Get the Text pointer
+         LC    RA,@RS                  Get the text count
+         LA    RS,@RS+1                Point at the text
+         DEX   RA,'MVC ISREASON(0),@RS'  Move in the reason
+*
+         MVC   ISAPSW,IPGOPSW          Error PSW
+         LPSW  WAITPSW                 Take a nap
+         END
+*-
+*-       SVC 3 -- Define page table for a segment.
+*-         R1 = virtual address to define
+*-
+         IF    (PZSVIC,EQ,X'0003'),BEGIN  Define seg/page...
+         IF    REALINITED,'IPLERR "CANT DEFINE SEGTBL HERE"'
+*
+         L     RA,ICURLOC          Allocate a new real 4K page
+         LR    RB,RA
+         AH    RB,=Y(4096)
+         ST    RB,ICURLOC          Update next real addr ptr
+         IF    (RA,GT,IMAXPAG),BEGIN  Trouble...
+         IPLERR 'OUT OF PAGE FRAMES'  No more pages
+         END
+*-
+*-       Fix up the segment table.
+*-
+         LA    RB,@R1              Get virtual address to define
+         LRA   RB,@RB              Get SGTE entry ptr
+         IF    ^NEG,BEGIN          We expect segment invalid cc...
+         IPLERR 'INV VIRTUAL ADDR'  Already defined or bad virt addr
+         END
+         ST    RA,@RB              Validate the segment
+         OI    @RB+3,X'0F'         To full length
+*-
+*-       Now format the page table with all pages invalid.
+*-
+         LA    RB,256              Number of pages
+         LA    RJ,X'400'           Invalid value
+         WHILE (RB,POS),BEGIN      Build page table...
+         ST    RJ,@RA              Invalidate the entry
+         LA    RA,@RA+4            Move to the next one
+         DECR  RB                  One less PGTE
+         END
+*
+         LM    R0,R15,IPREGS       Load the registers
+         LPSW  PZSVOPSW            Return to caller
+         END
+*-
+*-       SVC 4 -- Can't allocate real memory just by referencing
+*-         it any more.  Issued by PFINIT after real memory
+*-         allocated in initialization has been accounted for.
+*-
+         IF    (PZSVIC,EQ,X'0004'),BEGIN  Stop allocating real...
+         SET   REALINITED          Real memory has been accounted
+*
+         LM    R0,R15,IPREGS       Restore registers
+         LPSW  PZSVOPSW            And back in the saddle
+         END
+*-
+*-       All other SVCs.
+*-
+         MVC   ISREASON(L'INVSVC),INVSVC  Invalid SVC message
+         MVC   ISAREGS(64),IPREGS      Move the SVC regs in
+         MVC   ISAPSW,PZSVOPSW         And use the SVC PSW
+         LPSW  WAITPSW                 Take a nap
+*
+         DS    0D
+WAITPSW  DC    X'000A000000000000'
+INVSVC   DC    C'INVALID SVC FOR IPL ENVIRONMENT'
+         EJECT
+*
+* Program interrupt FLIH -- this routine is entered disabled and
+* in dat-off mode.  If the interrupt is a segment fault it formats
+* a page table and validates the segment.  If it is a page fault, it
+* allocates a new page and validates the page table. If there is
+* anything else or if the NOAUTOPF flag is set then it complains.
+*
+IPIFLIH  LABEL ,
+*-
+*-       Save the machine state.
+*-
+         STM   R0,R15,IPREGS           Save the registers
+         MVC   IPGOPSW,PZPIOPSW        Save the resume PSW
+*-
+*-       Check the interrupt code.
+*-
+         IF    AUTOPF,BEGIN        We're handling auto page faults
+         IF    REALINITED,'IPLERR "CANT PAGE FAULT HERE"'
+*
+         IF    (PZPIIC,EQ,X'0010'),BEGIN Segment Fault
+         L     RA,ICURLOC
+         LR    RB,RA
+         AH    RB,=Y(4096)
+         ST    RB,ICURLOC
+         IF    (RA,GT,IMAXPAG),BEGIN
+         IPLERR 'OUT OF PAGE FRAMES'   No more pages
+         END
+*
+* Fix up the segment table
+*
+         L     RB,PZTREXA              Get the exception address
+         LRA   RB,@RB
+         IF    O,BEGIN                 Too long (CC=3)
+         IPLERR 'INVALID VIRTUAL ADDR'
+         END   ,
+         ST    RA,@RB                  Validate the segment
+         OI    @RB+3,X'0F'             To full length
+*
+* Now format the page table.  All pages invalid.
+*
+         LA    RB,256                  Number of pages
+         LA    RJ,X'400'               Invalid value
+PGTBL    ST    RJ,@RA                  Invalidate the entry
+         LA    RA,@RA+4                Move to the next one
+         BCT   RB,PGTBL                Keep looping
+*
+* Return to the caller
+*
+         LM    R0,R15,IPREGS           Restore the registers
+         LPSW  IPGOPSW                 Then back to the caller
+         END   ,
+*
+* If it is a page fault... we just get a new page and stick it on
+*
+         IF    (PZPIIC,EQ,X'0011'),BEGIN Page Fault
+         L     RA,ICURLOC
+         LR    RB,RA
+         AH    RB,=Y(4096)
+         ST    RB,ICURLOC
+         IF    (RA,GT,IMAXPAG),BEGIN
+         IPLERR 'OUT OF PAGE FRAMES'   No more pages
+         END   ,
+*
+* Fix up the Page table
+*
+         L     RS,PZTREXA              Get the exception address
+         LRA   RS,@RS                  Get PTE address (real)
+         ST    RA,@RS                  Validate the page
+*
+* Return to the caller
+*
+         LM    R0,R15,IPREGS           Restore the registers
+         LPSW  IPGOPSW                 Then back to the caller
+         END   ,
+         END   ,
+*
+* Any other program check and we just can it
+*
+         IPLERR 'PROGRAM CHECK'        Program check in IPL
+         EJECT ,
+         LTORG
+         DC    (4096-(*-IPLTEXT))X'00'           Fill out the page
+         END   .

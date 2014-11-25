@@ -1,0 +1,1922 @@
+*PROCESS NOALIGN                                                   U008 00010000
+IEFACTRT TITLE '-----  SMF JOB/STEP TERMINATION EXIT ROUTINE  -----'    00020000
+         MACRO                                                     U006 00030000
+         QSNAP                                                          00040000
+         MEND                                                      U006 00050000
+*********************************************************************** 00060000
+*                                                                     * 00070000
+* MODULE NAME = IEFACTRT                                              * 00080000
+*                                                                     * 00090000
+* DESCRIPTIVE NAME = SMF ACCOUNTING EXIT ROUTINE                      * 00100000
+*                                                                     * 00110000
+* FUNCTION =                                                          * 00120000
+*         PUT MESSAGES VIA WTO ON JOB LOG.                            * 00130000
+*                                                                     * 00140000
+* OPERATION =                                                         * 00150000
+*         FOR JOB STEP TERMINATION PUT STATISTICS OF STEP.            * 00160000
+*         FOR JOB TERMINATION PUT OUT JOB ENDED MESSAGE.              * 00170000
+*                                                                     * 00180000
+* REGISTER CONVENTIONS = STANDARD CONVENTIONS.                        * 00190000
+*                                                                     * 00200000
+* ATTRIBUTES = KEY 0, SUPERVISOR STATE, REENTRANT,                    * 00210000
+*              ENABLED, NO LOCKS HELD                                 * 00220000
+*                                                                     * 00230000
+* ENTRY POINTS = IEFACTRT (ONLY ENTRY POINT)                          * 00240000
+*                                                                     * 00250000
+* INPUT = R1 POINTS TO LIST OF FULLWORD ADDRESSES AS FOLLOWS          * 00260000
+*          1. PTR TO COMMON EXIT PARAMETER AREA                       * 00270000
+*          2. PTR TO STEPNAME FIELD                                   * 00280000
+*          3. PTR TO PROGRAMMER NAME FIELD                            * 00290000
+*          4. PTR TO JOB CPU TIME FIELD                               * 00300000
+*          5. PTR TO JOB ACCOUNTING FIELDS                            * 00310000
+*          6. PTR TO STEP CPU TIME FIELD                              * 00320000
+*          7. PTR TO STEP ACCOUNTING FIELDS                           * 00330000
+*          8. PTR TO CANCEL FLAG & STEP NUMBER                        * 00340000
+*          9. PTR TO CONDITION CODE FIELD                             * 00350000
+*         10. PTR TO SMF RECORD TO BE WRITTEN                         * 00360000
+*                                                                     * 00370000
+* OUTPUT = WTO'S ON JOB LOG AND CONSOLE                               * 00380000
+*                                                                     * 00390000
+* EXIT - NORMAL = AT PROGRAM END VIA BRANCH REGISTER 14               * 00400000
+*                                                                     * 00410000
+* EXIT - ERROR = NONE                                                 * 00420000
+*                                                                     * 00430000
+* EXTERNAL REFERENCES =                                               * 00440000
+*                                                                     * 00450000
+*      ROUTINES = IEFYS                                               * 00460000
+*                                                                     * 00470000
+*      MACROS = SAVE, WTO, RETURN, GETMAIN, FREEMAIN, ESTAE,          * 00480000
+*               SETRP, IFASMFR, IEFJMR, IHASDWA                       * 00490000
+*                                                                     * 00500000
+* ABEND CODES = NONE                                                  * 00510000
+*                                                                     * 00520000
+* Updates:                                                            * 00530000
+* 04Nov98 U010 LDW  Fix date bug (use current time for job end        * 00531000
+*                      instead of SMF30DTE which isn't always         * 00532000
+*                      set in type 30 records)                        * 00533000
+* 08Aug97 U009 LDW  More fixes to time formatting                     * 00540000
+*                   Fix class L charge computation                    * 00550000
+* 31Jul97 U008 LDW  Bug fixes                                         * 00560000
+*                   Handle elapsed time computation correctly when    * 00570000
+*                      start and end times are different dates        * 00580000
+* 23Jul97 U007 LDW  Correctly handled continued and continuation recs * 00590000
+*                   Widen cost field to handle PJG jobs               * 00600000
+*                   Show date for both job start and end times        * 00610000
+* 07May97 U006 LDW  Update for Stanford                               * 00620000
+*                   Add SYSPARM(DEBUG) option for reading SMF records * 00630000
+*                      from SMFIN instead of passed as a parm         * 00640000
+*                   Add MSGFLAG=NOCPY to suppress step WTOs from log  * 00650000
+*                   Rewrite to generate all print data into a print   * 00660000
+*                      line array to facilitate moving fields around  * 00670000
+*                      in the output                                  * 00680000
+* 07OCT94 U005 CSL  ADD AMODE 31 AND RMODE ANY FOR MVS 5.1            * 00690000
+* 05OCT94 U004 CSL  SMF4RECL & SMF4CRCL MOVED FROM RECD4. ZEROED VALUE* 00700000
+* 29APR86 U003 SDM  FIX ERROR IN U002                                 * 00710000
+* 12MAR84 U002 SDM  FIX LEAP YEAR DATE ERROR                          * 00720000
+* 25FEB83 U001 SDM  SMALL CLEANUP - INSTALL AT TERADATA               * 00730000
+*                                                                     * 00740000
+*********************************************************************** 00750000
+         SPACE                                                          00760000
+                                                                        00770000
+         LCLA  &SUBPOOL                                            U006 00780000
+&SUBPOOL SETA  252                      USE SUBPOOL 252 FOR GETMAIN     00790000
+         LCLB  &DEBUG                                              U006 00800000
+          AIF   ('&SYSPARM' NE 'DEBUG').DEBUG01                    U006 00810000
+&DEBUG    SETB  1                       test by reading SMF recs   U006 00820000
+&SUBPOOL  SETA  252-128                 unpriv subpool for testing U006 00830000
+.DEBUG01  ANOP                                                     U006 00840000
+          AIF   (&DEBUG).DEBUG03                                   U006 00850000
+         PUNCH ' INCLUDE AOSB3(IEFTB724)'                          U006 00860000
+.DEBUG03  ANOP                                                     U006 00870000
+         PUNCH ' ORDER IEFACTRT'                                        00880000
+          AIF   (&DEBUG).DEBUG04                                   U006 00890000
+         PUNCH ' ORDER IEFTB724'                                        00900000
+.DEBUG04  ANOP                                                     U006 00910000
+         PUNCH ' ENTRY IEFACTRT'                                        00920000
+                                                                        00930000
+                                                                        00940000
+         MACRO                                                          00950000
+&NFS     SMFSECTION  &OFFSET,&COUNT,&DSECT,&NONE=                  U006 00960000
+&NFS     CLC   =H'0',&COUNT             section count = 0?         U006 00970000
+         BE    &NONE                    yes - section not present  U006 00980000
+         L     R8,&OFFSET               get section offset         U006 00990000
+         AR    R8,R9                    relocate                   U006 01000000
+         USING &DSECT,R8                                           U006 01010000
+                                                                        01020000
+         MEND  ,                                                   U006 01030000
+         EJECT                                                          01040000
+IEFACTRT AMODE 31                                                  U005 01050000
+          AIF   (&DEBUG).DEBUG05                                   U006 01060000
+IEFACTRT RMODE ANY                                                 U005 01070000
+          AGO   .DEBUG06                                           U006 01080000
+.DEBUG05  ANOP                                                     U006 01090000
+IEFACTRT RMODE 24                       DCBs in test driver        U006 01100000
+.DEBUG06  ANOP                                                     U006 01110000
+IEFACTRT CSECT ,                                                        01120000
+*                                                                       01130000
+* REGISTER EQUATES                                                      01140000
+*                                                                       01150000
+R0       EQU   00                       WORK REG                        01160000
+R1       EQU   01                       WORK/PARAMETER REG              01170000
+R2       EQU   02                       WORK REG                        01180000
+R3       EQU   03                       WORK REG                        01190000
+R4       EQU   04                       WORK REG                   U006 01200000
+R5       EQU   05                       ** UNUSED **                    01210000
+R6       EQU   06                       ** UNUSED **               U006 01220000
+R7       EQU   07                       BASE FOR COMMON PARM AREA       01230000
+R8       EQU   08                       -> TO RELOCATE SECTION OF SMFR  01240000
+R9       EQU   09                       BASE FOR SMF RECORD             01250000
+R10      EQU   10                       LINKAGE REGISTER                01260000
+R11      EQU   11                       first base reg             U006 01270000
+R12      EQU   12                       second base reg            U006 01280000
+R13      EQU   13                       DATA DSECT BASE REG             01290000
+R14      EQU   14                       LINKAGE REGISTER                01300000
+R15      EQU   15                       WORK REG                        01310000
+                                                                        01320000
+F0       EQU   0                        work                       U006 01330000
+F2       EQU   2                        cost accumulator           U006 01340000
+F4       EQU   4                        ** unused **               U006 01350000
+F6       EQU   6                        ** unused **               U006 01360000
+                                                                        01370000
+         AIF   (NOT &DEBUG).DEBUG11     skip for normal assembly   U006 01380000
+         EJECT                                                          01390000
+*                                                                       01400000
+*        THIS CODE TESTS THE EXIT BY PASSING ACTUAL SMF RECORDS    U006 01410000
+*        TO IT AND PUTTING THE OUTPUT OF THE EXIT ONTO PRINT       U006 01420000
+*        INSTEAD OF IN THE SMBS.                                   U006 01430000
+*                                                                       01440000
+*        Lifted from old Stanford ACTRT (DXJ 04/05/74)             U006 01450000
+*                                                                       01460000
+DRIVER   SAVE  (14,12),,'IEFACTRT-test_driver_&SYSDATE._&SYSTIME'  U006 01470000
+         LR    R11,R15                                             U006 01480000
+         USING DRIVER,R11                                          U006 01490000
+         GETMAIN  RU,LV=DRVWRKL,SP=3                               U006 01500000
+         ST    R13,4(,R1)               back chain                 U006 01510000
+         ST    R1,8(,R13)               forward chain              U006 01520000
+         LR    R13,R1                                              U006 01530000
+         USING DRVWRK,R13                                          U006 01540000
+         LA    R0,SMFBUFF                                          U006 01550000
+         ST    R0,ADDR99+(PARMRECD-PARMS)                          U006 01560000
+*                                                                       01570000
+*                                                                       01580000
+         OPEN  MF=(E,OPENMFL)           PRINTER, SMFIN, SMFOUT     U006 01590000
+         EJECT                                                          01600000
+LOOP99   GET   SMFIN,SMFBUFF            READ AN SMF RECORD              01610000
+         LA    R9,SMFBUFF                                          U006 01620000
+         USING SMFRCD30,R9                                         U006 01630000
+         CLI   SMF30RTY,30              common work record?        U006 01640000
+         BNE   LOOP99                   no - ignore it             U006 01650000
+         SMFSECTION  SMF30IOF,SMF30ION,SMF30ID,NONE=DRV_NOID       U006 01660000
+         MVC   FAKEJN,SMF30JBN          jobname                    U006 01670000
+         MVC   FAKESN,SMF30STM          stepname                   U006 01680000
+         MVC   DRVPROG,SMF30PGM         program name               U006 01690000
+         MVC   FAKEPGMR,SMF30USR        programmer's name          U006 01700000
+         MVC   FAKECLS,SMF30CLS         job class                  U006 01710000
+         MVC   DRVJOBID,SMF30JNM        jobid                      U006 01720000
+         MVC   FAKEUID,SMF30UIF         user identification        U006 01730000
+         DROP  R8                       SMF30ID                    U006 01740000
+                                                                        01750000
+                                                                        01760000
+DRV_NOID PUT   PRINTER,SEPLINE1         PUT A LINE IN BETWEEN STEPS     01770000
+         PUT   PRINTER,SEPLINE2         ...                        U006 01780000
+         MVC   DRVJOB,FAKEJN            jobname                    U006 01790000
+         MVC   DRVUSER,FAKEUID          USER IDENT                 U006 01800000
+         LH    R0,SMF30STP              get SMF record subtype     U006 01810000
+         CVD   R0,DRVDWD                                           U006 01820000
+         OI    DRVDWD+7,X'0F'           remove sign                U006 01830000
+         UNPK  DRVSUBTY,DRVDWD+6(2)                                U006 01840000
+         PUT   PRINTER,DRVLINE          WRITE LINE ID'ING THIS STEP     01850000
+                                                                        01860000
+GO_CALL  LA    R1,ADDR99                                                01870000
+         LA    R0,20                    indicate type 30 call      U006 01880000
+         LA    R15,THE_EXIT                                             01890000
+         BALR  R14,R15                                                  01900000
+         PUT   SMFOUT,SMFBUFF           WRITE OUT RECORD AFTER THE EXIT 01910000
+         B     LOOP99                                                   01920000
+         DROP  R9                       SMFRCD30                   U006 01930000
+         EJECT                                                          01940000
+*                                                                       01950000
+*   ALL DONE READING DATA INPUT, FINISH UP AND GO AWAY                  01960000
+*                                                                       01970000
+EOF      CLOSE MF=(E,OPENMFL)                                      U006 01980000
+         LR    R1,R13                   copy dynamic area addr     U006 01990000
+         L     R13,4(,R13)              dechain save areas         U006 02000000
+         FREEMAIN  RU,LV=DRVWRKL,SP=3,A=(1)                        U006 02010000
+         LM    R14,R12,12(R13)                                          02020000
+         SR    R15,R15                  set rc                          02030000
+         BR    R14                                                      02040000
+                                                                        02050000
+         DROP  R11,R13                  DRIVER, DRVWRK             U006 02060000
+         EJECT                                                          02070000
+OPENMFL  OPEN  (PRINTER,(OUTPUT),SMFIN,(INPUT),SMFOUT,(OUTPUT)),MF=L    02080000
+         PRINT NOGEN                                                    02090000
+PRINTER  DCB   DDNAME=PRINT,DSORG=PS,MACRF=PM,RECFM=FBA,LRECL=121       02100000
+SMFIN    DCB   DDNAME=SMFIN,DSORG=PS,MACRF=GM,RECFM=VBS,EODAD=EOF       02110000
+SMFOUT   DCB   DDNAME=SMFOUT,DSORG=PS,MACRF=PM,RECFM=VBS                02120000
+         PRINT GEN                                                      02130000
+         EJECT                                                          02140000
+*---  Note:  some fields not used by the exit are omitted here.    U006 02150000
+ADDR99   DC    A(FAKEJMR)               -> CEPA                    U006 02160000
+         DC    A(FAKESN)                -> stepname                U006 02170000
+         DC    A(FAKEPGMR)              -> programmer name         U006 02180000
+         DC    A(FAKEJCPU)              -> job cpu time            U006 02190000
+         DC    A(0)                     -> job accting fields      U006 02200000
+         DC    A(FAKESCPU)              -> step cpu time           U006 02210000
+         DC    A(0)                     -> step accting fields     U006 02220000
+         DC    A(0)                     -> cancel flag & step nbr  U006 02230000
+         DC    A(0)                     -> condition code          U006 02240000
+         DC    A(SMFBUFF-SMFBUFF)       -> SMF record              U006 02250000
+                                                                        02260000
+*-- Start of fake JMR                                              U006 02270000
+FAKEJMR  DC    0A(0)                                               U006 02280000
+FAKEJN   DC    CL8'jobname'   JMRJOB                               U006 02290000
+         DC    F'0'           JMRENTRY  entry time in 1/100's sec  U006 02300000
+         DC    F'0'           JMREDATE  entry date 00yydddF        U006 02310000
+         DC    CL4'cpu'       JMRCPUID  cpu - sid & mdl from SMCA  U006 02320000
+FAKEUID  DC    CL8'userid'    JMRUSEID  user id                    U006 02330000
+         DC    AL1(0)         JMRSTEP   step number                U006 02340000
+         DC    X'00'          JMRINDC   indicator switches         U006 02350000
+         DC    X'00'          JMRFLG    job status indicator       U006 02360000
+FAKECLS  DC    C'?'           JMRCLASS  job class                  U006 02370000
+         DC    A(0)           JMRUCOMM  user communication         U006 02380000
+*-- End of fake JMR                                                U006 02390000
+                                                                        02400000
+FAKESN   DC    CL8'stepname'                                       U006 02410000
+FAKEPGMR DC    CL20'Peter Programmer'                              U006 02420000
+FAKEJCPU DC    A((12*3600+34*60+56)*100+78)  12:34:56.78           U006 02430000
+FAKESCPU DC    A((01*3600+23*60+45)*100+67)   1:23:45.67           U006 02440000
+                                                                        02450000
+                                                                        02460000
+SEPLINE1 DC    CL121'-'                                            U006 02470000
+         ORG   SEPLINE1                                            U006 02480000
+         DC    C'          1         2         3         '         U006 02490000
+         DC    C'4         5         6         7         '         U006 02500000
+         DC    C'8         9         0         1         2'        U006 02510000
+         ORG   ,                                                   U006 02520000
+                                                                        02530000
+SEPLINE2 DC    CL121' '                                            U006 02540000
+         ORG   SEPLINE2                                            U006 02550000
+         DC    C' 123456789012345678901234567890123456789'              02560000
+         DC    C'0123456789012345678901234567890123456789'              02570000
+         DC    C'01234567890123456789012345678901234567890'        U006 02580000
+         ORG   ,                                                   U006 02590000
+                                                                        02600000
+DRVLINE  DC    CL121' '                                            U006 02610000
+         ORG   DRVLINE                                             U006 02620000
+         DC    C'0>>> Jobname='                                    U006 02630000
+DRVJOB   DC    C'XXXXXXXX'                                              02640000
+         DC    C'  JobId='                                         U006 02650000
+DRVJOBID DC    C'JOB12345'                                         U006 02660000
+         DC    C'  Userid='                                        U006 02670000
+DRVUSER  DC    C'YYYYYYYY'                                              02680000
+         DC    C'  Program='                                       U006 02690000
+DRVPROG  DC    C'zzzzzzzz'                                         U006 02700000
+         DC    C'  SMF30STY='                                      U006 02710000
+DRVSUBTY DC    CL3'nnn'                                            U006 02720000
+         ORG   ,                                                   U006 02730000
+                                                                        02740000
+                                                                        02750000
+         LTORG ,                                                   U006 02760000
+                                                                        02770000
+                                                                        02780000
+DRVWRK   DSECT ,                                                   U006 02790000
+         DS    18F                      save area                  U006 02800000
+DRVDWD   DS    D                        for CVD                    U006 02810000
+SMFBUFF  DS    32767C                                              U006 02820000
+DRVWRKL  EQU   *-DRVWRK                                            U006 02830000
+                                                                        02840000
+IEFACTRT CSECT ,                                                   U006 02850000
+.DEBUG11  ANOP                                                          02860000
+         EJECT                                                          02870000
+THE_EXIT SAVE  (14,12),,'IEFACTRT_&SYSDATE._&SYSTIME'                   02880000
+         LR    R11,R15                  LOAD BASE REGISTER         U001 02890000
+         LR    R4,R12                   save caller's R12 (IEFYS)  U006 02900000
+         LA    R12,4095(,R11)           prepare second base reg    U006 02910000
+         LA    R12,1(,R12)                                         U006 02920000
+         USING THE_EXIT,R11,R12         SET UP CSECT ADDRESSABILITYU006 02930000
+         QSNAP 'iefactrt entry &sysdate &systime'  %%%%%           U006 02940000
+         QSNAP (R11)                                               U006 02950000
+         L     R7,PARMEPRM-PARMS(,R1)   COMMON AREA ADDRESS        U001 02960000
+         USING JMR,R7                   SET UP ADDRBILITY TO COMMON     02970000
+         LR    R3,R1                    save entry parmlist addr   U006 02980000
+         LR    R2,R0                    save ENTRY CODE            U006 02990000
+*********************************************************************** 03000000
+*  When HASPHSRV is changed to get the completion information      U006 03010000
+*  from type 30 subtype 4, the following instruction should be     U006 03020000
+*  moved to after the test for entry code=20.                      U006 03030000
+*********************************************************************** 03040000
+          AIF   (&DEBUG).NO_HSRV                                   U006 03050000
+         HSPSRV  STEPTERM,(1)           call JES2                  U006 03060000
+.NO_HSRV  ANOP                                                     U006 03070000
+*U006    TM    JMRINDC,JMRFIND          IS IT TIME SHARING USER?        03080000
+*U006    BO    QUICKOUT                 YES - EXIT BEFORE GETMAIN       03090000
+         CH    R2,=H'20'                entry for SMF 30?          U006 03100000
+         BNE   QUICKOUT                 no - exit before GETMAIN   U006 03110000
+         L     R0,DATALEN               GET SP/LEN FOR GETMAIN          03120000
+         GETMAIN R,LV=(0),LOC=(ANY,ANY) GET STORAGE FOR DATA DSECT U006 03130000
+*%%      QSNAP 'iefactrt got wa'        %%%%                       U006 03140000
+         ST    R13,4(,R1)               SAVE CALLER'S SAVE AREA ADDR    03150000
+         ST    R1,8(,R13)               SAVE MY SAVE AREA ADDRESS       03160000
+         LR    R13,R1                   POINT TO NEW (GETMAINED) S.A.   03170000
+         USING DATA,R13                 SET UP DATA DSECT ADDR.         03180000
+         ST    R4,IEFYS_R12             save caller's R12 (IEFYS)  U006 03190000
+         ST    R12,ACTRT_R12            save my R12 for reload     U006 03200000
+*%%      QSNAP 'iefactrt 01'            %%%%                       U006 03210000
+         MVC   PARMS(LPARMS),0(R3)      SAVE INPUT PARMS           U006 03220000
+         MVI   BLANKS,C' '              INIT                            03230000
+         MVC   BLANKS+1(L'BLANKS-1),BLANKS   ...                        03240000
+         MVC   BLNKSTRT(BLNKLEN),BLANKS init a bunch of fields     U006 03250000
+         XC    ZEROSTRT(ZEROLEN),ZEROSTRT  ...                     U006 03260000
+*%%      QSNAP 'iefactrt 02'            %%%%                       U006 03270000
+         LA    R0,ARRAY                 -> target                  U006 03280000
+         LA    R1,ARRAYLEN              length to blank            U006 03290000
+         SR    R15,R15                  no source                  U006 03300000
+         ICM   R15,B'1000',BLANKS       pad byte                   U006 03310000
+         MVCL  R0,R14                   blank 'ARRAY'              U006 03320000
+*%%      QSNAP 'iefactrt 03'            %%%%                       U006 03330000
+                                                                        03340000
+*%       L     R?,JMRUCOM               get communications word    U006 03350000
+*%       LTR   R?,R?                    zero?                      U006 03360000
+*%       BZ    UCOM_GET                 yes - buy some storage     U006 03370000
+*%       CLC   =C'SU_ACTRT',0(R?)       is it ours?                U006 03380000
+*%       BE    HAVEUCOM                 yes - continue             U006 03390000
+*%       QSNAP 'IEFACTRT - JMRUCOM ~= 0, not SU_ACTRT'             U006 03400000
+*%       QSNAP (R?)                                                U006 03410000
+*---  Overlay somebody else's data for now, since we don't know    U006 03420000
+*---  anything about anybody else using JMRUCOM at Stanford.       U006 03430000
+                                                                        03440000
+                                                                        03450000
+*%OM_GET STORAGE  OBTAIN,length=SU_ACTLN,SP=&SUBPOOL,ADDR=(R?),    U006$03460000
+               LOC=(ANY,ANY)                                       U006 03470000
+                                                                        03480000
+*%       USING SU_ACTRT,R?                                         U006 03490000
+*%       ST    R?,JMRUCOM               save for future exit calls U006 03500000
+*%       MVC   0(8,R?),=C'SU_ACTRT'     set our eyecatcher         U006 03510000
+*%       XC    8(SU_ACTLN-8,R?),8(R?)   zero all counters          U006 03520000
+*%VEUCOM EQU   *                                                   U006 03530000
+                                                                        03540000
+          AIF   (&DEBUG).DEBUG12        %%%%%%%%%%%%%%%%%%%%%%%%%  U006 03550000
+*                                                                       03560000
+*        SET UP RECOVERY ENVIRONMENT                                    03570000
+*                                                                       03580000
+         MVC   ESTAEW(LESTAEL),ESTAEL   MOVE IN ESTAE PARAMETER LIST    03590000
+         LA    R0,RTRYRTN1              RETRY ROUTINE - NO SDWA         03600000
+         ST    R0,ESTAPARM              STORE IN PARAMETER LIST         03610000
+         LA    R0,RTRYRTN2              RETRY ROUTINE - WITH SDWA       03620000
+         ST    R0,ESTAPARM+4            STORE IN PARAMETER LIST         03630000
+         ST    R11,8(,R3)               STORE BASE REG INPARM      U006 03640000
+         ST    R13,12(,R3)              STORE DATA REG IN PARM     U006 03650000
+         ESTAE RECOVERY,CT,PARAM=ESTAPARM,MF=(E,ESTAEW) SETUP RCVRY     03660000
+*%%      QSNAP 'iefactrt estae set'     %%%%                       U006 03670000
+.DEBUG12  ANOP                                                     U006 03680000
+         EJECT                                                          03690000
+         L     R9,PARMRECD              LOAD ADDRESS OF SMF RECORD      03700000
+         USING SMFRCD30,R9                                         U006 03710000
+**********************************************************************  03720000
+*  Gather various info which is needed in multiple places            *  03730000
+**********************************************************************  03740000
+         TIME  DEC,LINKAGE=SVC          get current date/time      U010 03740100
+         ST    R1,CPY_DATE              save current date          U010 03741000
+*  The above should be changed to LINKAGE=SYSTEM, which will       U010 03742000
+*  require changing some of the processing code.                   U010 03743000
+         SMFSECTION  SMF30IOF,SMF30ION,SMF30ID,NONE=NO_ID          U006 03750000
+         MVC   CPY30JBN,SMF30JBN        save jobname               U006 03760000
+         MVC   CPY30STM,SMF30STM             stepname              U006 03770000
+         MVC   CPY30PSN,SMF30PSN             procstep              U006 03780000
+         MVC   CPY30USR,SMF30USR             programmer name       U006 03790000
+         MVC   CPY30SIT,SMF30SIT             job or step init time U006 03800000
+         MVC   CPY30STD,SMF30STD             job or step init date U007 03810000
+         MVC   CPY30RST,SMF30RST             reader time           U008 03820000
+         MVC   CPY30RSD,SMF30RSD             reader date           U008 03830000
+         MVC   CPY30CLS,SMF30CLS             job class             U006 03840000
+         MVC   CPY30JPT,SMF30JPT             priority              U006 03850000
+         DROP  R8                       SMF30ID                    U006 03860000
+                                                                        03870000
+NO_ID    SMFSECTION  SMF30COF,SMF30CON,SMF30CAS,NONE=NO_CAS        U006 03880000
+         MVC   CPY30TFL,SMF30TFL        save time invalid flags    U006 03890000
+         MVC   CPY30CPT,SMF30CPT             step TCB time         U006 03900000
+         MVC   CPY30CPS,SMF30CPS             step SRB time         U006 03910000
+         DROP  R8                       SMF30CAS                   U006 03920000
+                                                                        03930000
+NO_CAS   SMFSECTION  SMF30TOF,SMF30TON,SMF30CMP,NONE=NO_CMP        U006 03940000
+         MVC   CPY30STI,SMF30STI        save step term indicators  U006 03950000
+         MVC   CPY30SCC,SMF30SCC             step completion code  U006 03960000
+         DROP  R8                       SMF30TOF                   U006 03970000
+                                                                        03980000
+NO_CMP   SMFSECTION  SMF30ROF,SMF30RON,SMF30SAP,NONE=NO_SAP        U006 03990000
+         MVC   CPY30ARB,SMF30ARB        save system size used      U006 04000000
+         MVC   CPY30URB,SMF30URB             user   size used      U006 04010000
+         MVC   CPY30EAR,SMF30EAR             system ext size used  U006 04020000
+         MVC   CPY30EUR,SMF30EUR             user   ext size used  U006 04030000
+         MVC   CPY30DSV,SMF30DSV             dataspace used        U006 04040000
+         MVC   CPY30PGI,SMF30PGI             pages in from aux     U006 04050000
+         MVC   CPY30PGO,SMF30PGO             pages out  to aux     U006 04060000
+         MVC   CPY30PIE,SMF30PIE             pages in from exp     U006 04070000
+         MVC   CPY30BIE,SMF30BIE             ... blocked           U006 04080000
+         MVC   CPY30POE,SMF30POE             pages out to  exp     U006 04090000
+         MVC   CPY30BOE,SMF30BOE             ... blocked           U006 04100000
+         MVC   CPY30VPI,SMF30VPI             VIO page in           U006 04110000
+         MVC   CPY30VPO,SMF30VPO             VIO page out          U006 04120000
+         MVC   CPY30CPI,SMF30CPI             CSA+LPA page-in       U006 04130000
+         DROP  R8                       SMF30SAP                   U006 04140000
+                                                                        04150000
+NO_SAP   SMFSECTION  SMF30OOF,SMF30OON,SMF30OPS,NONE=NO_OPR        U006 04160000
+         L     R0,SMF30PTM              non-specific tape mounts   U006 04170000
+         A     R0,SMF30TPR              specific tape mounts       U006 04180000
+         ST    R0,CPY30TM               save total tape mounts     U006 04190000
+         DROP  R8                       SMF30OPS                   U006 04200000
+*%%      QSNAP 'iefactrt CPYxxx done'   %%%%                       U006 04210000
+                                                                        04220000
+NO_OPR   EQU   *                                                   U006 04230000
+*                                                                       04240000
+*        DETERMINE REASON FOR ENTRY  STEP/JOB TERMINATION               04250000
+*                                                                       04260000
+         CLC   SMF30STP,=H'5'           job term record?           U006 04270000
+         BE    JOBTERM                  YES, BR TO HANDLE JOBTERM       04280000
+         CLC   SMF30STP,=H'4'           step totals record?        U006 04290000
+         BNE   EXIT                     NO, THEN EXIT UNKNOWN ENTRY     04300000
+         EJECT                                                          04310000
+*---  Figure out whether this is a continuation record.  If it is, U007 04320000
+*---  format only the EXCP cells, because the other information    U007 04330000
+*---  was in previous records.                                     U007 04340000
+*---  Note that the manual is wrong:  it says that "if all of the  U007 04350000
+*---  following fields are zero, there are additional records."    U007 04360000
+         LH    R0,SMF30CON              nbr of processor sections  U007 04370000
+         AH    R0,SMF30OON              nbr of operator  sections  U007 04380000
+         AH    R0,SMF30PON              nbr of performance sects   U007 04390000
+         AH    R0,SMF30RON              nbr of storage   sections  U007 04400000
+         AH    R0,SMF30TON              nbr of completion sections U007 04410000
+         AH    R0,SMF30UON              nbr of i/o activity sects  U007 04420000
+         BZ    STEPCONT                 all zero - this is a cont  U007 04430000
+         OI    EXITFLGS,EF@FIRST        this is the first record   U008 04440000
+**********************************************************************  04450000
+*  FORMAT STEP TERMINATION WTO                                       *  04460000
+**********************************************************************  04470000
+*%%      QSNAP 'iefactrt step term'     %%%%                       U006 04480000
+         SPACE 2                                                        04490000
+*--------------------------------------*                                04500000
+*  JOBNAME/STEPNAME/PROCSTEPNAME       *                                04510000
+*--------------------------------------*                                04520000
+         MVC   WTOAREA(WTO1L),WTO1      COPY WTO PATTERN                04530000
+         MVC   JOBNAME,CPY30JBN         MOVE JOBNAME INTO LINE     U006 04540000
+         MVC   STEPNAME,CPY30STM                                   U006 04550000
+         MVC   PROCSTEP,CPY30PSN                                   U006 04560000
+         SPACE 2                                                        04570000
+*--------------------------------------*                                04580000
+*  ABEND OR RETURN CODE                *                                04590000
+*--------------------------------------*                                04600000
+         BAL   R14,PRETCDE              CALL RETURN CODE ROUTINE        04610000
+*%%      QSNAP 'iefactrt pretcod done'  %%%%                       U006 04620000
+         SPACE 2                                                        04630000
+*--------------------------------------*                                04640000
+*  TAPE I/O REQUEST COUNT              *                                04650000
+*--------------------------------------*                                04660000
+         LA    R0,X'80'                 INDICATE TAPE DEVICES           04670000
+         BAL   R14,EXCPCNT              CALL EXCP COUNT ROUTINE         04680000
+         ST    R15,TAPEIO               save for job msg box       U006 04690000
+         LR    R1,R15                   LOAD COUNT                      04700000
+         BAL   R14,PCOUNT               CALL CONVERT ROUTINE            04710000
+         MVC   EXCPTAPE,DWD+4           MOVE TAPE I/O COUNT TO LINE     04720000
+         QSNAP 'iefactrt pcount done'   %%%%                       U006 04730000
+         SPACE 2                                                        04740000
+*--------------------------------------*                                04750000
+*  DISK I/O REQUEST COUNT              *                                04760000
+*--------------------------------------*                                04770000
+         LA    R0,X'20'                 INDICATE DISK DEVICES           04780000
+         BAL   R14,EXCPCNT              CALL EXCP COUNT ROUTINE         04790000
+         ST    R15,DISKIO               save for job msg box       U006 04800000
+         LR    R1,R15                   LOAD COUNT                      04810000
+         BAL   R14,PCOUNT               CALL CONVERT ROUTINE            04820000
+         MVC   EXCPDISK,DWD+4           MOVE DISK I/O COUNT TO LINE     04830000
+         SPACE 2                                                        04840000
+*--------------------------------------*                                04850000
+*  CPU + SRB TIME ("MACHINE TIME")     *                                04860000
+*--------------------------------------*                                04870000
+         SR    R1,R1                    clear accumulator          U006 04880000
+                                                                        04890000
+         TM    CPY30TFL,SMF30CTF        SMF30CPT invalid?          U006 04900000
+         BO    *+8                      yes - skip it              U006 04910000
+         AL    R1,CPY30CPT              add STEP TCB TIME          U006 04920000
+                                                                        04930000
+         TM    CPY30TFL,SMF30CSF        SMF30CPS invalid?          U006 04940000
+         BO    *+8                      yes - skip it              U006 04950000
+         AL    R1,CPY30CPS              add STEP SRB TIME          U006 04960000
+                                                                        04970000
+         BAL   R14,PCLOCK               CONVERT FOR OUTPUT              04980000
+         MVC   WTO_CPU(6),EDWORK        MOVE nnnnnx TO OUTPUT LINE U006 04990000
+         SPACE 2                                                        05000000
+*--------------------------------------*                                05010000
+*  ELAPSED TIME                        *                                05020000
+*--------------------------------------*                                05030000
+         BAL   R14,ELAPSED              compute elapsed time       U008 05040000
+         BAL   R14,PCLOCK               CONVERT IT                      05050000
+         MVC   WTO_ELAP(6),EDWORK       MOVE nnnnnx TO OUTPUT LINE U006 05060000
+         SPACE 2                                                        05070000
+*--------------------------------------*                                05080000
+*  DISPLAY THE FINISHED MESSAGE        *                                05090000
+*--------------------------------------*                                05100000
+*U006    WTO   MF=(E,WTOAREA)           DO THE WTO                      05110000
+         HSPSRV  WTL,WTOAREA                                       U006 05120000
+         EJECT                                                          05130000
+**********************************************************************  05140000
+*  FORMAT STEP TERMINATION MESSAGE BOX                               *  05150000
+**********************************************************************  05160000
+                                                                        05170000
+                                                                        05180000
+COL1     EQU   3                        offset of left info column U006 05190000
+COL2     EQU   41                       offset of right info col   U006 05200000
+                                                                        05210000
+*--------------------------------------*                                05220000
+*  JOBNAME/STEPNAME/PROCSTEPNAME       *                                05230000
+*--------------------------------------*                                05240000
+         QSNAP 'iefactrt 04'                                       U006 05250000
+         MVC   S@JST+00(8),CPY30JBN     MOVE JOBNAME INTO LINE     U006 05260000
+         MVI   S@JST+08,C'/'            SEPARATOR                       05270000
+         MVC   S@JST+09(8),CPY30STM     step name                  U006 05280000
+         MVI   S@JST+17,C'/'            SEPARATOR                  U006 05290000
+         MVC   S@JST+18(8),CPY30PSN     proc step name             U006 05300000
+                                                                        05310000
+                                                                        05320000
+*--------------------------------------*                                05330000
+*  RETURN CODE                         *                                05340000
+*--------------------------------------*                                05350000
+         MVC   S@RC+00(11),=C'Return Code'                              05360000
+         MVC   S@RC+17(4),RC            ASSUME NOT *FLUSH*              05370000
+         TM    CPY30STI,SMF30ABD        DID IT ABEND?              U006 05380000
+         BNO   NO_ABEND                 NO - SKIP                       05390000
+         MVC   S@RC+00(15),=C'Completion code'                     U006 05400000
+         MVC   S@RC+23(7),=C'*ABEND*'   YES - TURN ON THE LIGHTS        05410000
+NO_ABEND CLC   =C'*FLUSH*',RCAB         THIS STEP FLUSHED?              05420000
+         BNE   NO_FLUSH                 no - continue              U006 05430000
+         MVC   S@RC+17(7),=C'*flush*'   YES - MOVE IT IN                05440000
+         B     STEP_END                 the rest is meaningless    U006 05450000
+                                                                        05460000
+NO_FLUSH EQU   *                                                   U006 05470000
+                                                                        05480000
+*--------------------------------------*                                05490000
+*  REGION USED                         *                                05500000
+*--------------------------------------*                                05510000
+         QSNAP 'iefactrt 05'                                       U006 05520000
+         MVC   S@RGN(11),=C'Region used'                                05530000
+         L     R1,CPY30URB              get user size used         U006 05540000
+         A     R1,CPY30ARB              add LSQA + SWA size used   U006 05550000
+         BAL   R14,CORE                 format                     U006 05560000
+         MVC   S@RGN+17(6),0(R1)        move in significant chars  U006 05570000
+         LA    R2,S@RGN+17+1(R15)       -> next output location    U006 05580000
+         MVI   0(R2),C'('                                          U006 05590000
+                                                                        05600000
+         L     R1,CPY30URB              get user size used         U006 05610000
+         BAL   R14,CORE                 format                     U006 05620000
+         MVC   1(6,R2),0(R1)            move in significant chars  U006 05630000
+         LA    R2,1+1(R15,R2)           -> next output location    U006 05640000
+         MVC   0(6,R2),=C'user +'                                  U006 05650000
+                                                                        05660000
+         L     R1,CPY30ARB              get LSQA + SWA size used   U006 05670000
+         BAL   R14,CORE                 format                     U006 05680000
+         MVC   7(6,R2),0(R1)            move in significant chars  U006 05690000
+         LA    R2,7+1(R15,R2)           -> next output location    U006 05700000
+         MVC   0(7,R2),=C'system)'                                 U006 05710000
+                                                                        05720000
+         MVC   S@ERGN(15),=C'Extended region'                      U006 05730000
+         L     R1,CPY30EUR              get user size used         U006 05740000
+         A     R1,CPY30EAR              add LSQA + SWA size used   U006 05750000
+         BAL   R14,CORE                 format                     U006 05760000
+         MVC   S@ERGN+17(6),0(R1)       move in significant chars  U006 05770000
+         LA    R2,S@ERGN+17+1(R15)      -> next output location    U006 05780000
+         MVI   0(R2),C'('                                          U006 05790000
+                                                                        05800000
+         L     R1,CPY30EUR              get user size used         U006 05810000
+         BAL   R14,CORE                 format                     U006 05820000
+         MVC   1(6,R2),0(R1)            move in significant chars  U006 05830000
+         LA    R2,1+1(R15,R2)           -> next output location    U006 05840000
+         MVC   0(6,R2),=C'user +'                                  U006 05850000
+                                                                        05860000
+         L     R1,CPY30EAR              get LSQA + SWA size used   U006 05870000
+         BAL   R14,CORE                 format                     U006 05880000
+         MVC   7(6,R2),0(R1)            move in significant chars  U006 05890000
+         LA    R2,7+1(R15,R2)           -> next output location    U006 05900000
+         MVC   0(7,R2),=C'system)'                                 U006 05910000
+                                                                        05920000
+                                                                        05930000
+*--------------------------------------*                                05940000
+*  Dataspace used                      *                           U006 05950000
+*--------------------------------------*                                05960000
+         QSNAP 'iefactrt 06'                                       U006 05970000
+         OC    CPY30DSV,CPY30DSV        any dataspace used?        U006 05980000
+         BZ    NO_DSPC                  no - don't format it       U006 05990000
+         MVC   S@DSPC(14),=C'Dataspace used'                       U006 06000000
+         L     R1,CPY30DSV              user key data space used   U006 06010000
+         BAL   R14,CORE                 convert                    U006 06020000
+         MVC   S@DSPC+17(6),0(R1)       move in significant chars  U006 06030000
+NO_DSPC  EQU   *                                                   U006 06040000
+                                                                        06050000
+                                                                        06060000
+         MVC   S@PHDR(31),=C'Paging              In      Out'      U006 06070000
+*--------------------------------------*                                06080000
+*  PRIVATE AREA PAGING COUNTS          *                                06090000
+*--------------------------------------*                                06100000
+         QSNAP 'iefactrt 07'                                       U006 06110000
+         MVC   S@PPVTA+00(15),=C'Private <-> Aux'                  U006 06120000
+         L     R1,CPY30PGI              pages paged in from aux    U006 06130000
+         BAL   R14,PAGES                EDIT IT                         06140000
+         MVC   S@PPVTA+15(7),EDWORK+1   MOVE IT IN                 U006 06150000
+                                                                        06160000
+         L     R1,CPY30PGO              pages paged out to aux     U006 06170000
+         BAL   R14,PAGES                EDIT IT                         06180000
+         MVC   S@PPVTA+24(7),EDWORK+1   MOVE IT IN                 U006 06190000
+                                                                        06200000
+         MVC   S@PPVTE+00(15),=C'Private <-> Exp'                  U006 06210000
+         L     R1,CPY30PIE              pages paged in from exp    U006 06220000
+         A     R1,CPY30BIE              (unblocked + blocked)      U006 06230000
+         BAL   R14,PAGES                EDIT IT                    U006 06240000
+         MVC   S@PPVTE+15(7),EDWORK+1   MOVE IT IN                 U006 06250000
+                                                                        06260000
+         L     R1,CPY30POE              pages paged out to exp     U006 06270000
+         A     R1,CPY30BOE              (unblocked + blocked)      U006 06280000
+         BAL   R14,PAGES                EDIT IT                    U006 06290000
+         MVC   S@PPVTE+24(7),EDWORK+1   MOVE IT IN                 U006 06300000
+                                                                        06310000
+                                                                        06320000
+*--------------------------------------*                                06330000
+*  VIO PAGING COUNTS                   *                                06340000
+*--------------------------------------*                                06350000
+         QSNAP 'iefactrt 08'                                       U006 06360000
+         MVC   S@PVIO(3),=C'VIO'                                   U006 06370000
+         L     R1,CPY30VPI              GET VIO PAGE-IN COUNT      U006 06380000
+         BAL   R14,PAGES                EDIT IT                         06390000
+         MVC   S@PVIO+15(7),EDWORK+1    MOVE IT IN                 U006 06400000
+                                                                        06410000
+         L     R1,CPY30VPO              GET VIO PAGE-OUT COUNT     U006 06420000
+         BAL   R14,PAGES                EDIT IT                         06430000
+         MVC   S@PVIO+24(7),EDWORK+1    MOVE IT IN                 U006 06440000
+                                                                        06450000
+*--- what about reclaim count?                                     U006 06460000
+                                                                        06470000
+                                                                        06480000
+*--------------------------------------*                                06490000
+*  CSA/LPA PAGING COUNTS               *                           U006 06500000
+*--------------------------------------*                                06510000
+         QSNAP 'iefactrt 09'                                       U006 06520000
+         MVC   S@PCMN(6),=C'Common'                                U006 06530000
+         L     R1,CPY30CPI              GET CSA+LPA PAGE-IN COUNT  U006 06540000
+         BAL   R14,PAGES                EDIT IT                         06550000
+         MVC   S@PCMN+15(7),EDWORK+1    MOVE IT IN                 U006 06560000
+         SPACE 1                                                        06570000
+         MVC   S@PCMN+24+4(3),=C'---'   CSA IS NOT PAGED OUT       U006 06580000
+                                                                        06590000
+                                                                        06600000
+*--------------------------------------*                                06610000
+*  TCB TIME USED                       *                                06620000
+*--------------------------------------*                                06630000
+         LD    F2,=D'0'                 init cost accumulator      U006 06640000
+         MVC   S@TCB(14),=C'CPU time (TCB)'                        U006 06650000
+         TM    CPY30TFL,SMF30CTF        SMF30CPT invalid?          U006 06660000
+         BO    NO_TCB                   yes - skip it              U006 06670000
+         L     R1,CPY30CPT              get STEP TCB TIME          U006 06680000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          06690000
+         MVC   S@TCB+16(12),EDWORK      MOVE IT IN                 U009 06700000
+                                                                        06710000
+                                                                        06720000
+*--------------------------------------*                                06730000
+*  CPU time in Dinosaur units          *                                06740000
+*--------------------------------------*                                06750000
+                                                                        06760000
+         QSNAP 'iefactrt 10'                                       U006 06770000
+*---  Set factors for cost computations                            U006 06780000
+         BAL   R14,GETBLOCK             find execution block entry U006 06790000
+         BAL   R14,GETPRTY              find execution prty entry  U006 06800000
+                                                                        06810000
+         LA    R15,S@SPUS+10            -> output area             U007 06820000
+         BAL   R10,CPU3081D             compute 3081D secs (SPUs)  U006 06830000
+         MVC   S@SPUS+00(9),=C'CPU Usage'                          U006 06840000
+                                                                        06850000
+*---  CPU seconds*100 still in R0                                  U006 06860000
+         LA    R15,S@SPUC               -> output area             U006 06870000
+         BAL   R10,CNVTCHG              compute & print CPU cost   U006 06880000
+         MVC S@SPUC+15(35),=C'Standard Processing Unit Equivalent' U006 06890000
+NO_TCB   EQU   *                                                   U006 06900000
+                                                                        06910000
+                                                                        06920000
+*--------------------------------------*                                06930000
+*  Tape mount count                    *                                06940000
+*--------------------------------------*                                06950000
+         L     R0,CPY30TM               TAPE MOUNT COUNT           U006 06960000
+         QSNAP 'iefactrt 11'                                       U006 06970000
+         LTR   R0,R0                    any?                       U006 06980000
+         BZ    NO_MOUNT                 skip if none               U006 06990000
+         CVD   R0,DWD                   convert mount count        U006 07000000
+         MVC   S@MOUNTS+11(13),=X'40402020206B2020206B202120'           07010000
+         ED    S@MOUNTS+11(13),DWD+3                               U006 07020000
+         LD    F0,TAPEMOUN              get mount charge (cents)   U006 07030000
+         LA    R15,S@MOUNTC             -> output area             U006 07040000
+         BAL   R10,CNVTCHG              calc & print mount charge  U006 07050000
+         AR    R2,R0                    add to job cost total      U006 07060000
+         MVC   S@MOUNTS+00(11),=C'Tape mounts'   MOVE IN TEXT      U006 07070000
+NO_MOUNT EQU   *                                                   U006 07080000
+                                                                        07090000
+                                                                        07100000
+*--------------------------------------*                                07110000
+*  Total step cost                     *                                07120000
+*--------------------------------------*                                07130000
+         QSNAP 'iefactrt 12'                                       U006 07140000
+         LDR   F0,F2                    get total job cost (cents) U006 07150000
+         LA    R15,S@TOTAL              -> output area             U006 07160000
+         BAL   R10,CNVTCHGT             compute & print CPU cost   U006 07170000
+         MVC   S@TOTAL+15(27),=C'Total Step execution charge'      U006 07180000
+                                                                        07190000
+                                                                        07200000
+*--------------------------------------*                                07210000
+*  SRB TIME USED                       *                                07220000
+*--------------------------------------*                                07230000
+         QSNAP 'iefactrt 13'                                       U006 07240000
+         MVC   S@SRB(14),=C'CPU time (SRB)'                        U006 07250000
+         TM    CPY30TFL,SMF30CSF        SMF30CPS invalid?          U006 07260000
+         BO    NO_SRB                   yes - skip it              U006 07270000
+         L     R1,CPY30CPS              get STEP SRB TIME          U006 07280000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          07290000
+         MVC   S@SRB+16(12),EDWORK      MOVE IT IN                 U009 07300000
+NO_SRB   EQU   *                                                   U006 07310000
+                                                                        07320000
+                                                                        07330000
+*--------------------------------------*                                07340000
+*  ELAPSED TIME                        *                                07350000
+*--------------------------------------*                                07360000
+         QSNAP 'iefactrt 14'                                       U006 07370000
+         MVC   S@ELAP(12),=C'Elapsed time'                              07380000
+         BAL   R14,ELAPSED              compute elapsed time       U008 07390000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          07400000
+         MVC   S@ELAP+16(12),EDWORK     MOVE IN JUST HH:MM:SS      U008 07410000
+         SPACE 1                                                        07420000
+NO_ELAP  EQU   *                                                   U006 07430000
+                                                                        07440000
+                                                                        07450000
+*--------------------------------------*                                07460000
+*  Write the fixed part of the box     *                                07470000
+*--------------------------------------*                                07480000
+         QSNAP 'iefactrt 15'                                       U006 07490000
+STEP_END BAL   R10,PUTSTARS             put out a line of stars    U006 07500000
+         LA    R2,ARRAY                 -> message array           U006 07510000
+         LA    R4,SLINENUM              # of lines                 U006 07520000
+         CLC   =C'*FLUSH*',RCAB         this step flushed?         U006 07530000
+         BNE   *+8                      no - do whole box          U006 07540000
+         LA    R4,2                     yes - make a short box     U006 07550000
+                                                                        07560000
+SBOX_LP  MVC   MSGAREA+1(L'MSGAREA-2),0(R2)  copy a line           U006 07570000
+         BAL   R10,PUTMSG               print it                   U006 07580000
+         LA    R2,L'SLINE01(,R2)        -> next line in array      U006 07590000
+         BCT   R4,SBOX_LP               do whole box               U006 07600000
+                                                                        07610000
+         BAL   R10,PUTMSG               AND A BLANK LINE                07620000
+         QSNAP 'iefactrt 16'                                       U006 07630000
+                                                                        07640000
+                                                                        07650000
+*--------------------------------------*                                07660000
+*  I/O COUNTS BY DEVICE ADDRESS        *                                07670000
+*--------------------------------------*                                07680000
+         MVC   MSGAREA+05(29),=C'I/O count  DDname   Type Addr'    U006 07690000
+         MVC   MSGAREA+45(29),=C'I/O count  DDname   Type Addr'    U006 07700000
+         BAL   R10,PUTMSG               WRITE HEADER LINE               07710000
+         SPACE 1                                                        07720000
+STEPCONT EQU   *                        come here to format a      U007 07730000
+*                                       continuation step record.  U007 07740000
+         MVC   MSGAREA+1(L'MSGAREA-2),BLANKS   clear the buffer    U007 07750000
+         MVI   MSGAREA,C'*'                                        U007 07760000
+         MVI   MSGAREA+L'MSGAREA-1,C'*'                            U007 07770000
+                                                                        07780000
+         SMFSECTION  SMF30EOF,SMF30EON,SMF30EXP,NONE=IO$NONE       U006 07790000
+         LH    R2,SMF30EON              get nbr of excp sections   U006 07800000
+         SPACE 2                                                        07810000
+IO$LINE  LA    R0,2                     ENTRIES PER LINE           U006 07820000
+         LA    R1,MSGAREA+2             FIRST SLOT                      07830000
+         USING EXCPCELL,R1              print line layout          U006 07840000
+         SPACE 1                                                        07850000
+IO$ENTRY MVC   EC@DDN,SMF30DDN          DDname                     U006 07860000
+         CLI   SMF30DEV,X'80'           tape?                      U006 07870000
+         BNE   *+10                     no                         U006 07880000
+         MVC   EC@TYPE,=C'Tape'                                    U006 07890000
+         CLI   SMF30DEV,X'20'           disk?                      U006 07900000
+         BNE   *+10                     no                         U006 07910000
+         MVC   EC@TYPE,=C'Disk'                                    U006 07920000
+         CLC   SMF30DEV(4),=X'00007FFF' NO CLASS/TYPE & ADDR=7FFF? U006 07930000
+         BNE   NOT_VIO                  NO - SKIP                       07940000
+         MVC   EC@TYPE,=C'VIO '         YES - IT'S REALLY VIO      U006 07950000
+         B     DEV_DASH                 and don't format devaddr   U006 07960000
+NOT_VIO  EQU   *                                                   U006 07970000
+*%%%%% more types?                                                 U006 07980000
+         UNPK  EC@DEV(4+1),SMF30CUA(2+1)  DEVICE ADDRESS           U006 07990000
+         TR    EC@DEV(4),HEXTAB         TRANSLATE TO PRINTABLE HEX U006 08000000
+         MVI   EC@DEV+4,C' '            fix flip byte              U006 08010000
+         CLC   SMF30DEV(4),=F'0'        ANY DEVICE CLASS/UNIT TYPE/ADR? 08020000
+         BNE   *+10                     YES - SKIP                      08030000
+DEV_DASH MVC   EC@DEV,=C'----'          INDICATE NO DEVICE ADDRESS U006 08040000
+         L     R15,SMF30BLK             GET EXCP COUNT             U006 08050000
+         CVD   R15,DWD                  CONVERT TO PACKED               08060000
+         OI    DWD+7,X'0F'              FIX SIGN                        08070000
+         MVC   EC@COUNT+1(11),=X'2020206B2020206B202120'           U006 08080000
+         ED    EC@COUNT(12),DWD+3                                  U006 08090000
+         LA    R8,SMF30EXCPLEN(,R8)     -> NEXT DEVICE ENTRY       U006 08100000
+         LA    R1,40(,R1)               -> NEXT SLOT IN PRINT LINE U006 08110000
+         BCT   R2,*+8   >=========+     decr remaining cell count  U006 08120000
+         B     IO$LAST            |     SKIP IF NO MORE                 08130000
+         BCT   R0,IO$ENTRY  <=====+     DO ANOTHER ENTRY ON THIS LINE   08140000
+         BAL   R10,PUTMSG               PUT OUT THE MESSAGE             08150000
+         B     IO$LINE                  DO ANOTHER LINE                 08160000
+         SPACE 2                                                        08170000
+         DROP  R1                       EXCPCELL                   U006 08180000
+         DROP  R8                       SMF30EXP                   U006 08190000
+                                                                        08200000
+                                                                        08210000
+*  If we kept a flag across exit calls, we could print the         U008 08220000
+*  following message more accurately.  Since we don't, we'll       U008 08230000
+*  just assume that if the record is continued, there were EXCP    U008 08240000
+*  cells in a previous record.                                     U008 08250000
+IO$NONE  TM    EXITFLGS,EF@FIRST        is this the first record?  U007 08260000
+         BZ    IO_OK                    no - may have printed I/O  U007 08270000
+*---  Check to see if there are EXCP sections in subsequent        U008 08280000
+*---  records.  If so, don't say "No I/O"                          U008 08290000
+         L     R0,SMF30EOS              get count in subseq sects  U008 08300000
+         LTR   R0,R0                    any more later?            U008 08310000
+         BNZ   IO_OK                    yes - skip                 U008 08320000
+         MVC   MSGAREA+26(28),=C'*** No I/O for this step ***'          08330000
+         BAL   R10,PUTMSG               PUT OUT THE MESSAGE        U008 08340000
+         BAL   R10,PUTSTARS             put out a line of stars    U008 08350000
+         B     EXIT                     all done                   U008 08360000
+                                                                        08370000
+IO$LAST  BAL   R10,PUTMSG               PUT OUT THE MESSAGE             08380000
+                                                                        08390000
+                                                                        08400000
+IO_OK    EQU   *                                                   U008 08410000
+*---  Check to see if there are EXCP sections in subsequent        U008 08420000
+*---  records.  If so, don't close the box.                        U008 08430000
+         L     R0,SMF30EOS              get count in subseq sects  U008 08440000
+         LTR   R0,R0                    any more later?            U008 08450000
+         BNZ   EXIT                     yes - skip                 U008 08460000
+         CLC   SMF30EON,=F'0'           any EXCP sects here?       U008 08470000
+         BZ    EXIT                     no - box already closed!   U008 08480000
+         BAL   R10,PUTSTARS             put out a line of stars    U006 08490000
+         B     EXIT                     BR TO EPILOGUE CODE             08500000
+                                                                        08510000
+                                                                        08520000
+EXCPCELL DSECT ,                        layout in print line       U006 08530000
+EC@COUNT DS    CL12,CL2                 nnn,nnn,nnn                U006 08540000
+EC@DDN   DS    CL8,C                    ddname                     U006 08550000
+EC@TYPE  DS    CL4,C                    disk/tape                  U006 08560000
+EC@DEV   DS    CL4,C                    addr or disk volser        U006 08570000
+                                                                        08580000
+IEFACTRT CSECT ,                        resume                     U006 08590000
+         EJECT                                                          08600000
+JOBTERM  EQU   *                                                   U007 08610000
+*---  Figure out whether this is a continuation record.  If it is, U007 08620000
+*---  bail out because there's nothing more to do, since the       U007 08630000
+*---  continuation record doesn't contain any info that we format  U007 08640000
+*---  here.                                                        U007 08650000
+*---  Note that the manual is wrong:  it says that "if all of the  U007 08660000
+*---  following fields are zero, there are additional records."    U007 08670000
+         LH    R0,SMF30CON              nbr of processor sections  U007 08680000
+         AH    R0,SMF30OON              nbr of operator  sections  U007 08690000
+         AH    R0,SMF30PON              nbr of performance sects   U007 08700000
+         AH    R0,SMF30RON              nbr of storage   sections  U007 08710000
+         AH    R0,SMF30TON              nbr of completion sections U007 08720000
+         AH    R0,SMF30UON              nbr of i/o activity sects  U007 08730000
+         BZ    EXIT                     all zero - this is a cont  U007 08740000
+**********************************************************************  08750000
+*  FORMAT JOB TERMINATION WTO                                        *  08760000
+**********************************************************************  08770000
+         MVC   WTOAREA(WTO1L),WTO1      SET UP OUTPUT LINE              08780000
+         MVC   JOBNAME((WTO_CPU-8)-JOBNAME),BLANKS                 U006 08790000
+         MVC   WTO_CPU-4-1-6(6),=C' Total'                         U006 08800000
+         MVC   JOBNAME+8(14),=C' Ended.  Name='                    U006 08810000
+         MVC   JOBNAME,CPY30JBN         MOVE JOBNAME INTO LINE     U006 08820000
+         MVC   PGMR,CPY30USR            move pgmr name to WTO      U006 08830000
+         SPACE 1                                                        08840000
+*--------------------------------------*                                08850000
+*  CPU + SRB TIME ("MACHINE TIME")     *                                08860000
+*--------------------------------------*                                08870000
+         SR    R1,R1                    clear accumulator          U006 08880000
+                                                                        08890000
+         TM    CPY30TFL,SMF30CTF        SMF30CPT invalid?          U006 08900000
+         BO    *+8                      yes - skip it              U006 08910000
+         AL    R1,CPY30CPT              add JOB TCB time           U006 08920000
+                                                                        08930000
+         TM    CPY30TFL,SMF30CSF        SMF30CPS invalid?          U006 08940000
+         BO    *+8                      yes - skip it              U006 08950000
+         AL    R1,CPY30CPS              add JOB SRB time           U006 08960000
+                                                                        08970000
+         BAL   R14,PCLOCK               CONVERT TIME FOR OUTPUT         08980000
+         MVC   WTO_CPU(6),EDWORK        MOVE nnnxxx TO OUTPUT LINE U006 08990000
+         SPACE 1                                                        09000000
+*--------------------------------------*                                09010000
+*  ELAPSED TIME                        *                                09020000
+*--------------------------------------*                                09030000
+         BAL   R14,ELAPSED              compute elapsed time       U008 09040000
+         BAL   R14,PCLOCK               CONVERT TIME FOR OUTPUT         09050000
+         MVC   WTO_ELAP(6),EDWORK       MOVE nnnnnx TO OUTPUT LINE U006 09060000
+         SPACE 2                                                        09070000
+DO_JMSG  EQU   *                                                   U006 09080000
+*U006    WTO   MF=(E,WTOAREA)           DO THE WTO                      09090000
+         HSPSRV  WTL,WTOAREA                                       U006 09100000
+         EJECT                                                          09110000
+*******************************************************************U006 09120000
+*  Format joblog cost lines (code formerly in HASPSSMX - EXIT104)  U006 09130000
+*******************************************************************U006 09140000
+                                                                        09150000
+*---  wto1 model is still in wtoarea                               U006 09160000
+                                                                        09170000
+*                                                                       09180000
+*%%%     tm    sjbflg4,sjb4mrex         execution restarted?       U006 09190000
+*%%%     bnz   seojmret                 return if yes              U006 09200000
+*                                                                       09210000
+         MVC   WTOTEXT(WTOTEXTL),BLANKS blank message area         U006 09220000
+         HSPSRV  WTL,WTOAREA            write spacer line          U006 09230000
+*                                                                       09240000
+         MVC   WTOTEXT(49),=C'Execution charges   Priority=pppppppp   B$09250000
+               lock=Day'                                           U006 09260000
+                                                                        09270000
+         BAL   R14,GETBLOCK             find execution block entry U006 09280000
+         MVC   WTOTEXT+46(8),8(R1)      put into message           U006 09290000
+                                                                        09300000
+         BAL   R14,GETPRTY              find execution prty entry  U006 09310000
+         MVC   WTOTEXT+29(8),8(R1)      put into msg               U006 09320000
+                                                                        09330000
+         HSPSRV  WTL,WTOAREA            write to log               U006 09340000
+                                                                        09350000
+         MVC   WTOTEXT(WTOTEXTL),BLANKS blank message area         U006 09360000
+         HSPSRV  WTL,WTOAREA            write spacer line          U006 09370000
+                                                                        09380000
+         LA    R15,SEOJCNT              -> output area             U006 09390000
+         BAL   R10,CPU3081D             compute 3081D secs (SPUs)  U006 09400000
+         MVC   SEOJDESC(9),=C'CPU Usage'                           U006 09410000
+         CLI   CPY30CLS,C'L'            class L?                   U009 09420000
+         BNE   NOT_LOW                  no - skip                  U009 09430000
+         C     R0,LMINCPU               3081D cpu < threshold?     U009 09440000
+         BNL   NOT_LOW                  no - ok                    U009 09450000
+         OI    EXITFLGS,EF@LLOW         yes - remember             U009 09460000
+                                                                        09470000
+NOT_LOW  EQU   *                                                   U009 09480000
+*---  SPU*100 still in R0                                          U006 09490000
+         LA    R15,SEOJCHG              -> output area             U006 09500000
+         BAL   R10,CNVTCHG              compute & print CPU cost   U006 09510000
+         CLI   CPY30CLS,C'L'            class L?                   U009 09520000
+         BNE   NOT_MIN                  no - ok                    U009 09530000
+         TM    EXITFLGS,EF@LLOW         SPU below threshold?       U009 09540000
+         BO    NOT_MIN                  yes - leave charge as is   U009 09550000
+         CD    F0,LMINCHG               CPU cost < minimum?        U009 09560000
+         BNL   NOT_MIN                  no - leave as is           U009 09570000
+         LD    F0,LMINCHG               yes - set to minimum       U009 09580000
+         LDR   F2,F0                    also set accumulator       U009 09590000
+         OI    EXITFLGS,EF@LMIN         and remember set to min    U009 09600000
+*---  R15 still -> SEOJCHG                                         U009 09610000
+         BAL   R10,CNVTCHGT             and format the minimum     U009 09620000
+                                                                        09630000
+NOT_MIN  EQU   *                                                   U009 09640000
+         MVC  SEOJTEXT(35),=C'Standard Processing Unit Equivalent' U006 09650000
+         HSPSRV  WTL,WTOAREA            write to log               U006 09660000
+                                                                        09670000
+                                                                        09680000
+         L     R0,CPY30TM               TAPE MOUNT COUNT           U006 09690000
+         LTR   R0,R0                    any?                       U006 09700000
+         BZ    SEOJXTOT                 no - skip                       09710000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA                  09720000
+         CVD   R0,DWD                   convert mount count             09730000
+         MVC   SEOJCNT(13),=X'40402020206B2020206B202120' MOVE IN MASK  09740000
+         ED    SEOJCNT(13),DWD+3                                   U006 09750000
+         LD    F0,TAPEMOUN              get mount charge (cents)   U006 09760000
+         LA    R15,SEOJCHG              -> output area             U006 09770000
+         BAL   R10,CNVTCHG              calc & print mount charge  U006 09780000
+         MVC   SEOJDESC(11),=C'Tape mounts'   MOVE IN TEXT              09790000
+         HSPSRV  WTL,WTOAREA            write to log               U006 09800000
+*                                                                       09810000
+SEOJXTOT MVC   WTOTEXT,BLANKS           BLANK MSG AREA                  09820000
+         MVC   SEOJCHG+6(7),=C'======='                            U007 09830000
+         HSPSRV  WTL,WTOAREA            write to log               U006 09840000
+*                                                                       09850000
+         LDR   F0,F2                    get total job cost (cents) U006 09860000
+         LA    R15,SEOJCHG              -> output area             U006 09870000
+         BAL   R10,CNVTCHGT             print job cost             U006 09880000
+         MVC   SEOJTEXT(26),=C'Total Job execution charge'         U006 09890000
+         HSPSRV  WTL,WTOAREA            write to log               U006 09900000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA             U009 09910000
+                                                                        09920000
+         TM    EXITFLGS,EF@LLOW         class L, below threshold?  U009 09930000
+         BZ    NO_LMSG1                 no - skip message          U009 09940000
+         MVC   WTOTEXT+18(66),=C'(usage below threshold; minimum class $09950000
+               L CPU charge does not apply)'                       U009 09960000
+         HSPSRV  WTL,WTOAREA            write message              U009 09970000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA             U009 09980000
+         B     NO_LMSG                  continue                   U009 09990000
+                                                                        10000000
+NO_LMSG1 EQU   *                                                   U009 10010000
+         TM    EXITFLGS,EF@LMIN         class L, min CPU charge?   U009 10020000
+         BZ    NO_LMSG2                 no - skip message          U009 10030000
+         MVC SEOJTEXT(36),=C'(minimum class L CPU charge applies)' U009 10040000
+         HSPSRV  WTL,WTOAREA            write spacer line          U009 10050000
+                                                                        10060000
+NO_LMSG2 EQU   *                                                   U009 10070000
+                                                                        10080000
+NO_LMSG  EQU   *                                                   U009 10090000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA                  10100000
+         HSPSRV  WTL,WTOAREA            write spacer line          U006 10110000
+*                                                                       10120000
+*---  Old JES2 code additionally formatted:                        U006 10130000
+*---     JCTCARDS (input card count / charge)                      U006 10140000
+*---     JCTPUNCH (if present)           *                         U006 10150000
+*---     JCTLINES +8 for last log lines  *                         U006 10160000
+*                                                                       10170000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA                  10180000
+         MVC  WTOTEXT(41),=C'See back separator page for print charges' 10190000
+         HSPSRV  WTL,WTOAREA            add to log                 U006 10200000
+*                                                                       10210000
+*                                                                       10220000
+         MVC   WTOTEXT,BLANKS           BLANK MSG AREA                  10230000
+         HSPSRV  WTL,WTOAREA            write spacer line          U006 10240000
+         EJECT                                                          10250000
+**********************************************************************  10260000
+*  FORMAT JOB TERMINATION MESSAGE BOX                                *  10270000
+**********************************************************************  10280000
+         SPACE 2                                                        10290000
+         MVC   J@NAME(37),=C'S t a n f o r d   U n i v e r s i t y'     10300000
+         MVC   J@SUMM(19),=C'*** Job Summary ***'                       10310000
+         SPACE 2                                                        10320000
+*--------------------------------------*                                10330000
+*  SYSTEM ID                           *                                10340000
+*--------------------------------------*                                10350000
+         MVC   J@SYSID(9),=C'System Id'                                 10360000
+         MVC   J@SYSID+15(4),SMF30SID                              U006 10370000
+         SPACE 2                                                        10380000
+*--------------------------------------*                                10390000
+*  INPUT TIME                          *                                10400000
+*--------------------------------------*                                10410000
+         MVC   J@INTIME(10),=C'Input time'                              10420000
+         ICM   R1,B'1111',CPY30RST      GET INPUT TIME             U006 10430000
+         BAL   R14,HHMMSS               FORMAT IT                       10440000
+         MVC   J@INTIME+15(8),EDWORK+1  MOVE IT IN                 U008 10450000
+         L     R1,CPY30RSD              get input date             U008 10460000
+         BAL   R14,DATE                 CONVERT TO mmm dd, yyyy    U008 10470000
+         MVC   J@INTIME+25(12),EDWORK   move in mmm dd, yyyy       U008 10480000
+         SPACE 2                                                        10490000
+*--------------------------------------*                                10500000
+*  OPERATING SYSTEM RELEASE            *                                10510000
+*--------------------------------------*                                10520000
+         MVC   J@SYSREL(14),=C'System Release'                          10530000
+         L     R1,16                    -> CVT                          10540000
+         SH    R1,=H'40'                BACK UP TO MVS/SP version  U006 10550000
+         MVC   J@SYSREL+15(8),0(R1)     'SP6.0.2'                  U006 10560000
+         SPACE 2                                                        10570000
+*--------------------------------------*                                10580000
+*  START TIME and date                 *                           U007 10590000
+*--------------------------------------*                                10600000
+         MVC   J@START(10),=C'Start time'                               10610000
+         L     R1,CPY30SIT              LOAD JOB START TIME        U006 10620000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          10630000
+         MVC   J@START+15(8),EDWORK+1   MOVE IN JUST HH:MM:SS      U008 10640000
+         L     R1,CPY30STD              LOAD JOB START date        U007 10650000
+         BAL   R14,DATE                 CONVERT TO mmm dd, yyyy    U007 10660000
+         MVC   J@START+25(12),EDWORK    move in mmm dd, yyyy       U007 10670000
+                                                                        10680000
+                                                                        10690000
+*--------------------------------------*                                10700000
+*  JOB NAME                            *                                10710000
+*--------------------------------------*                                10720000
+         MVC   J@JOBNM(8),=C'Job name'                                  10730000
+         MVC   J@JOBNM+15(8),CPY30JBN   move jobname into line     U006 10740000
+         SPACE 2                                                        10750000
+*--------------------------------------*                                10760000
+*  STOP  TIME and date                 *                           U007 10770000
+*--------------------------------------*                                10780000
+         MVC   J@STOP(10),=C'Stop  time'                                10790000
+         ICM   R1,B'1111',SMF30TME      LOAD JOB TERM TIME         U007 10800000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          10810000
+         MVC   J@STOP+15(8),EDWORK+1    MOVE IN JUST HH:MM:SS      U008 10820000
+*U010    ICM   R1,B'1111',SMF30DTE      LOAD JOB END date          U007 10830000
+         L     R1,CPY_DATE              LOAD JOB END date          U010 10831000
+         BAL   R14,DATE                 CONVERT TO mmm dd, yyyy    U007 10840000
+         MVC   J@STOP+25(12),EDWORK     move in mmm dd, yyyy       U007 10850000
+         SPACE 2                                                        10860000
+*--------------------------------------*                                10870000
+*  Account number                      *                           U006 10880000
+*--------------------------------------*                                10890000
+         MVC   J@ACCT(7),=C'Account'                               U006 10900000
+         SMFSECTION  SMF30AOF,SMF30AON,SMF30ACS,NONE=NO_ACCT       U006 10910000
+         CLI   SMF30ACL,6               at least 6 chars long?     U006 10920000
+         BL    NO_ACCT                  NO - BAIL OUT OF HERE      U006 10930000
+         MVC   J@ACCT+15(6),SMF30ACT    YES - MOVE TO PRINT LINE   U006 10940000
+NO_ACCT  EQU   *                                                   U006 10950000
+         SPACE 2                                                        10960000
+*--------------------------------------*                                10970000
+*  ELAPSED TIME                        *                                10980000
+*--------------------------------------*                                10990000
+         MVC   J@ELAP(12),=C'Elapsed time'                              11000000
+         BAL   R14,ELAPSED              compute elapsed time       U008 11010000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          11020000
+         MVC   J@ELAP+14(12),EDWORK     MOVE IN JUST HH:MM:SS      U008 11030000
+         SPACE 2                                                        11040000
+*--------------------------------------*                                11050000
+*  PROGRAMMER NAME                     *                                11060000
+*--------------------------------------*                                11070000
+         MVC   J@USER(9),=C'User Name'                                  11080000
+         MVC   J@USER+15(20),CPY30USR   move pgmr name to WTO      U006 11090000
+         DROP  R8                       SMF30ID                    U006 11100000
+         SPACE 2                                                        11110000
+*--------------------------------------*                                11120000
+*  JOB CLASS                           *                                11130000
+*--------------------------------------*                                11140000
+         MVC   J@CLASS(9),=C'Job class'                                 11150000
+         MVC   J@CLASS+15(1),CPY30CLS                              U006 11160000
+         SPACE 2                                                        11170000
+*--------------------------------------*                                11180000
+*  CPU TIME                            *                                11190000
+*--------------------------------------*                                11200000
+         MVC   J@CPU(8),=C'CPU time'                                    11210000
+         TM    CPY30TFL,SMF30CTF        SMF30CPT invalid?          U006 11220000
+         BO    NO_CPUJ                  yes - skip it              U006 11230000
+         L     R1,CPY30CPT              get STEP TCB TIME          U006 11240000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          11250000
+         MVC   J@CPU+14(12),EDWORK      MOVE IT IN                 U009 11260000
+NO_CPUJ  EQU   *                                                   U006 11270000
+                                                                        11280000
+                                                                        11290000
+*--------------------------------------*                                11300000
+*  SRB TIME                            *                                11310000
+*--------------------------------------*                                11320000
+         MVC   J@SRB(8),=C'SRB Time'                                    11330000
+         LTR   R8,R8                    have SMF30CAS?             U006 11340000
+         BZ    NO_SRBJ                  no - skip                  U006 11350000
+         TM    CPY30TFL,SMF30CSF        SMF30CPS invalid?          U006 11360000
+         BO    NO_SRBJ                  yes - skip it              U006 11370000
+         L     R1,CPY30CPS              get STEP SRB TIME          U006 11380000
+         BAL   R14,HHMMSS               CONVERT TO HH:MM:SS.TH          11390000
+         MVC   J@SRB+14(12),EDWORK      MOVE IT IN                 U009 11400000
+NO_SRBJ  EQU   *                                                   U006 11410000
+         SPACE 2                                                        11420000
+*--------------------------------------*                                11430000
+*  Write the whole job end box now     *                                11440000
+*--------------------------------------*                                11450000
+         BAL   R10,PUTSTARS             start the box              U006 11460000
+         LA    R2,ARRAY                 -> message array           U006 11470000
+         LA    R4,JLINENUM              # of lines                 U006 11480000
+                                                                        11490000
+JBOX_LP  MVC   MSGAREA+1(L'MSGAREA-2),0(R2)  copy a line           U006 11500000
+         BAL   R10,PUTMSG               print it                   U006 11510000
+         LA    R2,L'JLINE01(,R2)        -> next line in array      U006 11520000
+         BCT   R4,JBOX_LP               do whole box               U006 11530000
+         BAL   R10,PUTSTARS             end   the box              U006 11540000
+         SPACE 2                                                        11550000
+         DROP  R9                       SMFRCD30                   U006 11560000
+         EJECT                                                          11570000
+**********************************************************************  11580000
+*  RETURN TO SYSTEM                                                  *  11590000
+**********************************************************************  11600000
+EXIT     DC    0H'0'                    EXIT PROLOGUE                   11610000
+          AIF   (&DEBUG).DEBUG28        %%%%%%%%%%%%%%%%%%%%%%%%%  U006 11620000
+         ESTAE 0                        CANCEL ESTAE EXIT               11630000
+.DEBUG28  ANOP                                                     U006 11640000
+RTRYRTN2 DC    0H'0'                    ESTAE RETRY ROUTINE WITH SDWA   11650000
+*                                       JUST FREE STORAGE AND EXIT      11660000
+*---  First free common exit storage                               U006 11670000
+*%       STORAGE  RELEASE,LENGTH=SU_ACTLN,SP=&SUBPOOL,ADDR=(R?)    U006 11680000
+                                                                        11690000
+         LR    R1,R13                   GET FREEMAIN ADDRESS            11700000
+         L     R13,4(,R13)              GET PTR TO PREVIOUS SAVE AREA   11710000
+         L     R0,DATALEN               GET SP/LEN FOR FREEMAIN         11720000
+         FREEMAIN R,LV=(0),A=(1)        FREE DATA DSECT STORAGE         11730000
+                                                                        11740000
+QUICKOUT RETURN (14,12),RC=0            RETURN TO CALLER                11750000
+         EJECT                                                          11760000
+*********************************************************************** 11770000
+*                                                                     * 11780000
+*  EXCP COUNT ROUTINE                                                 * 11790000
+*        INPUT:  R9 -> SMF30                                       U006 11800000
+*                R0 =  device class (in low order byte)            U006 11810000
+*        OUTPUT  R15   HAS COUNT OF TOTAL EXCPS                       * 11820000
+*                                                                     * 11830000
+*********************************************************************** 11840000
+         USING SMFRCD30,R9                                         U006 11850000
+EXCPCNT  SR    R15,R15                  CLEAR ACCUMULATOR               11860000
+         SMFSECTION  SMF30EOF,SMF30EON,SMF30EXP,NONE=EXEXIT        U006 11870000
+         LH    R2,SMF30EON              get number of excp         U006 11880000
+*                                          sections in this rec    U006 11890000
+*U006%%% LTR   R2,R2                    any?                       U006 11900000
+*U006%%% BNP   EXEXIT                   no - skip                  U006 11910000
+                                                                        11920000
+EXCPLOOP CLM   R0,B'0001',SMF30DEV      IS THIS THE KIND WE WANT?  U006 11930000
+         BNE   *+8                      NO - DON'T COUNT THESE.         11940000
+         AL    R15,SMF30BLK             ADD EXCP COUNT                  11950000
+         LA    R8,SMF30EXCPLEN(,R8)     INCREMENT TO NEXT ENTRY    U006 11960000
+         BCT   R2,EXCPLOOP              LOOP THRU ALL ENTRIES           11970000
+         DROP  R8                       SMF30EXP                   U006 11980000
+                                                                        11990000
+EXEXIT   BR    R14                      RETURN TO CALLER                12000000
+                                                                        12010000
+                                                                        12020000
+*********************************************************************** 12030000
+*                                                                     * 12040000
+*  COUNT CONVERSION ROUTINE: CONVERTS BINARY TO CHARACTER OUTPUT      * 12050000
+*        INPUT   REG 1 HAS COUNT TO BE CONVERTED                      * 12060000
+*        OUTPUT  DWD COUNTAINS CHARACTER OUTPUT FIELD                 * 12070000
+*                                                                     * 12080000
+*********************************************************************** 12090000
+PCOUNT   CVD   R1,DWD                   CONVERT COUNT TO DECIMAL        12100000
+         OI    DWD+7,X'0F'              FIX SIGN                        12110000
+         UNPK  EDWORK(9),DWD            CONVERT TO PRINTABLE            12120000
+         MVC   DWD,EDWORK+1             MOVE 8 DIGITS TO RETURN AREA    12130000
+         C     R1,=F'9999'              DOES IT FIT IN 4?               12140000
+         BNH   PCNTEX                   YES - EXIT                      12150000
+         MVC   DWD+1(6),EDWORK          GET NUMBER OF THOUSANDS         12160000
+         MVI   DWD+7,C'K'               PUT IN THOUSANDS INDICATOR      12170000
+         C     R1,=F'999999'            IT IS OK?                       12180000
+         BNH   PCNTEX                   YES - EXIT                      12190000
+         MVC   DWD(8),=C'     . M'      INDICATE MILLION.......         12200000
+         MVC   DWD+4(1),EDWORK+2        GET # MILLION                   12210000
+         MVC   DWD+6(1),EDWORK+3        GET TENTHS OF MILLION           12220000
+         C     R1,=F'9999999'           LESS THAN 9.9M?                 12230000
+         BNH   PCNTEX                   YES - EXIT                      12240000
+         MVC   DWD+4(3),EDWORK          HUNDRED MILLION BETTER BE OK    12250000
+PCNTEX   BR    R14                      RETURN TO CALLER                12260000
+         SPACE 2                                                        12270000
+*********************************************************************** 12280000
+*                                                                     * 12290000
+*  CONVERT REGION (SIZE AND USED)                                     * 12300000
+*                                                                     * 12310000
+*********************************************************************** 12320000
+CORE     MVC   EDWORK(11),=X'402020202120D240404040'               U006 12330000
+         SRL   R1,10                    convert bytes to KBytes    U006 12340000
+         C     R1,=F'99999'             too big?                   U006 12350000
+         BNH   CORE_OK                  no - ok                    U006 12360000
+         SRL   R1,10                    convert KBytes to MBytes   U006 12370000
+         MVI   EDWORK+6,C'M'            ...                        U006 12380000
+                                                                        12390000
+CORE_OK  CVD   R1,DWD                   CONVERT TO PACKED               12400000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     12410000
+         LA    R1,EDWORK+5              -> past significance start U006 12420000
+         EDMK  EDWORK(6),DWD+5          MAKE IT PRINTABLE          U006 12430000
+         LA    R15,EDWORK+6+1           compute significant ...    U006 12440000
+         SR    R15,R1                   ... length of result       U006 12450000
+         BR    R14                      RETURN TO CALLER                12460000
+         SPACE 2                                                        12470000
+*********************************************************************** 12480000
+*                                                                     * 12490000
+*  CONVERT BINARY NUMBER TO HH:MM:SS.TH                               * 12500000
+*                                                                     * 12510000
+*********************************************************************** 12520000
+HHMMSS   MVC   EDWORK(10),=C'   :  :  .'  MOVE IN MASK             U008 12530000
+*  We can format up to 999 hours, but a 31 bit value for           U008 12540000
+*  seconds*100 overflows at 248.55 days.                           U008 12550000
+         SR    R0,R0                    CLEAR FOR DIVIDE                12560000
+         D     R1-1,=F'100'             R0=TH  R1=HHMMSS                12570000
+         CVD   R0,DWD                   CONVERT TO PACKED               12580000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     12590000
+         UNPK  EDWORK+10(2),DWD+6(2)    UNPACK 'th'                U008 12600000
+         SPACE 1                                                        12610000
+         SR    R0,R0                    CLEAR FOR DIVIDE                12620000
+         D     R1-1,=F'60'              R0=SS  R1=HHMM                  12630000
+         CVD   R0,DWD                   CONVERT TO PACKED               12640000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     12650000
+         UNPK  EDWORK+7(2),DWD+6(2)     UNPACK SECONDS             U008 12660000
+         SPACE 1                                                        12670000
+         SR    R0,R0                    CLEAR FOR DIVIDE                12680000
+         D     R1-1,=F'60'              R0=MM  R1=HH                    12690000
+         CVD   R0,DWD                   CONVERT TO PACKED               12700000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     12710000
+         UNPK  EDWORK+4(2),DWD+6(2)     UNPACK MINUTES             U008 12720000
+         SPACE 1                                                        12730000
+         CVD   R1,DWD                   CONVERT TO PACKED               12740000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     12750000
+         UNPK  EDWORK+0(3),DWD+6(2)     UNPACK HOURS               U008 12760000
+         CLI   EDWORK+0,C'0'            > 99 hours?                U008 12770000
+         BNER  R14                      yes - leave it             U008 12780000
+         MVI   EDWORK+0,C' '            no - show it as 2 digits   U008 12790000
+         BR    R14                      RETURN TO CALLER                12800000
+         SPACE 2                                                        12810000
+*********************************************************************** 12820000
+*                                                                     * 12830000
+*  Convert packed decimal date to mmm dd, yyyy                        * 12840000
+*                                                                     * 12850000
+*********************************************************************** 12860000
+DATE     ST    R1,DATEWORK              save date to be formatted  U007 12870000
+         XC    DWD,DWD                  CLEAR WORK AREA                 12880000
+*U007    MVC   DWD+6(2),DATEWORK+2      GET DAY OF YEAR                 12890000
+         STCM  R1,B'0011',DWD+6         get day of year            U007 12900000
+         MVC   EDWORK,BLANKS            clear output area          U007 12910000
+         CVB   R1,DWD                   GET IT IN BINARY                12920000
+         CH    R1,=H'60'                BEFORE FEB 29?                  12930000
+         BL    LEAP$OK                  YES, NEVER FUDGE IT        U002 12940000
+         TM    DATEWORK+1,X'01'         ODD YEAR?                  U007 12950000
+         BO    NOT$LEAP                 YES - NOT LEAP YEAR             12960000
+         TM    DATEWORK+1,X'12'         EVEN, IS IT LEAP YEAR?     U007 12970000
+         BNM   LEAP$OK                  YES, EVEN DECADE W/O 2 BIT U002 12980000
+*                                       OR ODD DECADE WITH 2 BIT        12990000
+NOT$LEAP LA    R1,1(,R1)                FUDGE FOR NON-LEAP YEAR    U003 13000000
+LEAP$OK  CH    R1,=H'366'               ANY GOOD?                  U002 13010000
+         BHR   R14                      NO - just return           U007 13020000
+         LA    R15,=C'JanFebMarAprMayJunJulAugSepOctNovDec'             13030000
+         LA    R2,=H'31,29,31,30,31,30,31,31,30,31,30,31'          U002 13040000
+MONTH$LP SH    R1,0(,R2)                IS IT THIS MONTH?               13050000
+         BNP   MONTH$GO                 YES                             13060000
+         LA    R2,2(,R2)                -> NEXT FACTOR                  13070000
+         LA    R15,3(,R15)              -> NEXT MONTH NAME              13080000
+         B     MONTH$LP                 LOOP                            13090000
+MONTH$GO AH    R1,0(,R2)                REPAIR THE DAY OF MONTH         13100000
+         CVD   R1,DWD                   MAKE IT PACKED DECIMAL          13110000
+         OI    DWD+7,X'0F'              REMOVE SIGN                     13120000
+         MVC   EDWORK+00(3),0(R15)      MOVE IN NAME OF MONTH      U007 13130000
+         UNPK  EDWORK+04(2),DWD+6(2)    GET DAY OF MONTH           U007 13140000
+         MVC   EDWORK+06(4),=C', 19'    MOVE IN CONSTANTS          U007 13150000
+         CLI   DATEWORK,1               year=20nn?                 U007 13160000
+         BNE   *+10                     no - leave it '19'         U006 13170000
+         MVC   EDWORK+08(2),=C'20'      yes                        U007 13180000
+         UNPK  EDWORK+10(2+1),DATEWORK+1(2)  AND THE YEAR          U007 13190000
+         MVI   EDWORK+12,C' '           GET RID OF FLIP BYTE       U007 13200000
+         BR    R14                      return to caller           U007 13210000
+         SPACE 2                                                        13220000
+*********************************************************************** 13230000
+*                                                                     * 13240000
+*  CONVERT PAGE COUNT                                                 * 13250000
+*                                                                     * 13260000
+*********************************************************************** 13270000
+PAGES    CVD   R1,DWD                   CONVERT TO PACKED               13280000
+         MVC   EDWORK(8),=X'4020202020202120'                           13290000
+         C     R1,=F'99999'             DID IT FIT?                     13300000
+         BNH   PAGES$OK                 YES - GO EDIT                   13310000
+         ED    EDWORK(7),DWD+3                                          13320000
+         MVI   EDWORK+7,C'K'            CHANGE TO THOUSANDS             13330000
+         BR    R14                      RETURN TO CALLER                13340000
+         SPACE 1                                                        13350000
+PAGES$OK ED    EDWORK(8),DWD+4          MAKE IT PRINTABLE               13360000
+         BR    R14                      RETURN TO CALLER                13370000
+         SPACE 2                                                        13380000
+*********************************************************************** 13390000
+*                                                                     * 13400000
+*  CLOCK CONVERSION ROUTINE: CONVERTS BINARY TO CHARACTER OUTPUT      * 13410000
+*        INPUT   R1 HAS FIRST TIME                                    * 13420000
+*                R0 HAS SECOND TIME                                   * 13430000
+*        OUTPUT  DWD COUNTAINS CHARACTER OUTPUT FIELD                 * 13440000
+*                                                                     * 13450000
+*********************************************************************** 13460000
+PCLOCK   EQU   *                                                        13470000
+         QSNAP 'iefactrt @pclock'                                  U006 13480000
+         QSNAP (R1,R14)                                            U006 13490000
+                                                                        13500000
+         C     R1,=A(100*100)           LESS THAN 100 SECONDS?     U006 13510000
+         BL    SECONDS                  yes - format as seconds    U006 13520000
+         SR    R0,R0                    clear for divide           U009 13530000
+         D     R0,=A(100)               convert to seconds         U009 13540000
+         SR    R0,R0                    clear for divide           U006 13550000
+         D     R0,=A(60)                r1 = minutes, r0 = seconds U009 13560000
+         ICM   R15,B'0011',=C'ms'       get indicators             U006 13570000
+         C     R1,=A(100)               LESS THAN 100 MINUTES?     U006 13580000
+         BL    PCLOCKXY                 yes - format 2 numbers     U006 13590000
+         SR    R0,R0                    clear for divide           U006 13600000
+         D     R0,=A(60)                convert to hours           U006 13610000
+         ICM   R15,B'0011',=C'hm'       get indicators             U006 13620000
+         C     R1,=A(100)               LESS THAN 100 HOURS?       U009 13630000
+         BL    PCLOCKXY                 YES - OK                        13640000
+         SR    R0,R0                    clear for divide           U006 13650000
+         D     R0,=A(24)                convert to days            U006 13660000
+         ICM   R15,B'0011',=C'dh'       get indicators             U006 13670000
+                                                                        13680000
+*---  Format 2 numbers:  dd,hh or hh,mm or mm,ss                   U006 13690000
+PCLOCKXY CVD   R1,DWD                   convert first number       U008 13700000
+         OI    DWD+7,X'0F'              fix flip byte              U006 13710000
+         UNPK  EDWORK(2),DWD                                       U006 13720000
+         STCM  R15,B'0010',EDWORK+2     first indicator            U006 13730000
+         CVD   R0,DWD                   convert second number      U008 13740000
+         OI    DWD+7,X'0F'              fix flip byte              U006 13750000
+         UNPK  EDWORK+3(2),DWD                                     U006 13760000
+         STCM  R15,B'0001',EDWORK+5     second indicator           U006 13770000
+         QSNAP 'iefactrt pclock done'   %%%%                       U006 13780000
+         BR    R14                      return to caller           U006 13790000
+                                                                        13800000
+SECONDS  CVD   R1,DWD                   CONVERT TIME TO DECIMAL         13810000
+         OI    DWD+7,X'0F'              FIX SIGN                        13820000
+         MVC   EDWORK(7),=X'402020214B2020'                        U006 13830000
+         ED    EDWORK(7),DWD+5                                     U006 13840000
+         MVC   EDWORK(6),EDWORK+2       return 6 character value   U006 13850000
+         MVI   EDWORK+5,C's'            mark it seconds            U006 13860000
+         BR    R14                      RETURN TO CALLER                13870000
+         SPACE 2                                                        13880000
+*********************************************************************** 13890000
+*                                                                     * 13900000
+*  Subroutine to compute elapsed time for step or job              U008 13910000
+*                                                                     * 13920000
+*********************************************************************** 13930000
+ELAPSED  SR    R0,R0                    assume same year           U008 13940000
+*U010    CLC   CPY30STD(2),SMF30DTE     is it?                     U008 13950000
+         CLC   CPY30STD(2),CPY_DATE     is it?                     U010 13951000
+         BE    YEAROK                   yes - ok                   U008 13960000
+         LA    R0,365                   no - get adjustment factor U008 13970000
+         TM    CPY30STD+1,X'01'         was start year odd?        U008 13980000
+         BNZ   YEAROK                   yes - not leap year        U008 13990000
+         TM    CPY30STD+1,X'12'         start year divisible by 4? U008 14000000
+         BM    YEAROK                   no - not leap year         U008 14010000
+         LA    R0,366                   use leap adjustment factor U008 14020000
+                                                                        14030000
+*YEAROK  ZAP   DWD,SMF30DTE+2(2)        copy end date dddf         U008 14040000
+YEAROK   ZAP   DWD,CPY_DATE+2(2)        copy end date dddf         U010 14041000
+         SP    DWD,CPY30STD+2(2)        subtract start date dddf   U008 14050000
+         CVB   R1,DWD                   get ddd elapsed            U008 14060000
+         AR    R1,R0                    account for diff. years    U008 14070000
+         M     R1-1,=A(24*60*60*100)    scale to time units        U008 14080000
+*  The above overflows 31 bits at 248.55 days.  Oh well...         U008 14090000
+         A     R1,SMF30TME              add end time               U008 14100000
+         S     R1,CPY30SIT              subtract start time        U008 14110000
+*  Now have elapsed time in .01 seconds                            U008 14120000
+         BR    R14                                                 U008 14130000
+         SPACE 2                                                        14140000
+*********************************************************************** 14150000
+*                                                                     * 14160000
+*  CONDITION CODE CONVERSION ROUTINE: CHARACTER OUTPUT INTO RC FIELD  * 14170000
+*        OUTPUT: FIELD RC OF OUTPUT LINE CONTAINS RETURN CODE         * 14180000
+*                                                                     * 14190000
+*********************************************************************** 14200000
+PRETCDE  LH    R0,CPY30SCC              GET COND CODE              U006 14210000
+         TM    CPY30STI,SMF30FLH        WAS STEP FLUSHED?          U006 14220000
+         BNO   NOFLUSH                  NO,BRANCH PAST                  14230000
+         MVC   RCAB(7),=C'*FLUSH*'      MOVE IN FLUSHED MESSAGE         14240000
+         B     PRETEXT                  ALL DONE HERE                   14250000
+NOFLUSH  TM    CPY30STI,SMF30ABD        DID IT ABEND?              U006 14260000
+         BO    STPABEND                 YES, GO CONVERT ABEND CODE      14270000
+         N     R0,=A(X'FFF')            ZERO UNUSED PORTION             14280000
+         CVD   R0,RWORK                 GET ADDRESS OF COND FIELD       14290000
+         OI    RWORK+7,X'0F'            FIX SIGN                        14300000
+         UNPK  RC(4),RWORK+5(3)         CONVERT RET CODE TO CHAR        14310000
+         CLC   =C'0000',RC              IS IT ZERO?                     14320000
+         BNE   *+10                     NO - SKIP                       14330000
+         MVC   RC(4),=C'Zero'           YES - BE FANCY                  14340000
+         B     PRETEXT                  BR TO RETURN                    14350000
+STPABEND TM    CPY30SCC,X'80'           WAS IT A USER ABEND CODE?  U006 14360000
+         BZ    SYSABND                  NO - process system abend  U006 14370000
+         N     R0,=A(X'FFF')            TURN OFF X'80' BIT              14380000
+         CVD   R0,RWORK                 CONVERT FOR OUTPUT              14390000
+         OI    RWORK+7,X'0F'            FIX SIGN                        14400000
+         UNPK  RC(4),RWORK+5(3)         CONVERT TO CHARACTER            14410000
+         MVC   RCAB(3),=C'AB=S'  'AB='! MOVE IN (USER) ABEND INDICATOR  14420000
+         B     PRETEXT                  BR TO RETURN                    14430000
+SYSABND  STH   R0,RWORK                 STORE ABEND CODE                14440000
+         UNPK  RWORK+3(5),RWORK(3)      ADD ZONES TO CC FIELD           14450000
+         TR    RWORK+4(3),HEXTAB        TRANSLATE TO CHARACTERS         14460000
+         MVC   RC+1(3),RWORK+4          MOVE TO OUTPUT LINE             14470000
+         MVC   RCAB(4),=C'AB=S'         MOVE IN SYSTEM ABEND INDICATOR  14480000
+PRETEXT  BR    R14                      RETURN TO CALLER                14490000
+                                                                        14500000
+                                                                        14510000
+*********************************************************************** 14520000
+*  Locate execution block name/factor entry                           * 14530000
+*********************************************************************** 14540000
+GETBLOCK SR    R1,R1                                                    14550000
+         CLI   CPY30JPT+1,5-1           too high?                  U006 14560000
+         BH    *+8                      yes - default to Day block U006 14570000
+         IC    R1,CPY30JPT+1  (JCTBLKX) get execution time block   U006 14580000
+         SLL   R1,4                     *16                        U006 14590000
+         LA    R1,BLOCKTBL(R1)          -> time block name         U006 14600000
+         MVC   BLKFACT,0(R1)            save time block factor     U006 14610000
+         BR    R14                      return                     U006 14620000
+                                                                        14630000
+                                                                        14640000
+*********************************************************************** 14650000
+*  Locate execution priority name/factor entry                        * 14660000
+*********************************************************************** 14670000
+GETPRTY  SR    R1,R1                                                    14680000
+         CLI   CPY30JPT,4-1             too high?                  U006 14690000
+         BH    *+8                      yes - default to Standard  U006 14700000
+         IC    R1,CPY30JPT   (JCTXPRTY) get execution prty code    U006 14710000
+         SLL   R1,4                     *16                        U006 14720000
+         LA    R1,PRTYTBL(R1)           -> priority name           U006 14730000
+         MVC   PRTYFACT,0(R1)           save priority factor       U006 14740000
+         BR    R14                      return                     U006 14750000
+                                                                        14760000
+                                                                        14770000
+*********************************************************************** 14780000
+*                                                                     * 14790000
+*  Compute and format CPU time in 3081D equivalent seconds (SPUs).    * 14800000
+*  (This code ripped lock, stock, and barrel from old grungy ACTRT,   * 14810000
+*  with adjustments for new version of IEFACTRT.)                     * 14820000
+*  Input:                                                             * 14830000
+*    R15 -> output area                                               * 14840000
+*  Output:                                                            * 14850000
+*    R0  =  SPUs*100                                                  * 14860000
+*    F2  =  0                                                         * 14870000
+*                                                                     * 14880000
+*********************************************************************** 14890000
+CPU3081D LD    F2,=X'4E00000000000000'  RIGHT NORMALIZED ZERO TO TOTAL  14900000
+         STD   F2,FLOATWRK              init floating conversion        14910000
+         MVC   FLOATWRK+4(4),CPY30CPT   CPU TIME SSS..HH SECS      U006 14920000
+         LD    F0,FLOATWRK              float it                        14930000
+         AD    F0,=D'0.05'              ADD ROUNDING FACTOR             14940000
+         MD    F0,KFACTOR               MODEL K UPGRADE FUDGE FACTOR    14950000
+         AW    F0,=X'4E00000000000000'  ADD UN-NORMALIZED TO TRUNCATE   14960000
+         STD   F0,DWD                   PUT IT WHERE WE CAN PLAY        14970000
+         L     R0,DWD+4                 get the integer part            14980000
+*                                          in hundredths of a sec       14990000
+                                                                        15000000
+         CVD   R0,DWD                   convert to print SSS.HH SECS    15010000
+         MVC   0(13,R15),=X'40206B2020206B2021204B2020'            U006 15020000
+         ED    0(13,R15),DWD+3          EDIT CPU SECONDS           U006 15030000
+                                                                        15040000
+         CLI   CPY30CLS,C'L'            class L?                   U009 15050000
+         BE    L_RATE                   yes - special handling     U009 15060000
+         LD    F0,CPURATE               GET BASE CPU RATE (CENTS/SEC)   15070000
+         MD    F0,BLKFACT               * CPU block factor         U009 15080000
+         MD    F0,PRTYFACT              * priority factor          U009 15090000
+         BR    R10                      return to caller           U009 15100000
+                                                                        15110000
+L_RATE   LD    F0,CPURATEL              GET BASE L RATE            U009 15120000
+         BR    R10                      return to caller           U009 15130000
+                                                                        15140000
+                                                                        15150000
+*  CALCULATE COMPUTER UNIT CHARGE AND CONVERT FOR PRINTING              15160000
+*    Entry:                                                        U006 15170000
+*      R0     - integer units to be charged                        U006 15180000
+*      F0     - charging factor                                         15190000
+*    Exit:                                                         U006 15200000
+*      R0     - RETURNS WITH INTEGER PART OF COST                       15210000
+*    FLOATWRK - FLOATING NUMBER FOR CALC AND CONVERSION                 15220000
+*    DWD      - CONVERTED PACKED DEC NUMBER FOR EDITING                 15230000
+*    F2       - TOTAL JOB STEP COST                                     15240000
+*                                                                       15250000
+CNVTCHG  EQU   *                                                        15260000
+         ST    R0,FLOATWRK+4            SAVE IN FLOATING NORM      U006 15270000
+         MD    F0,FLOATWRK              UNITS TIMES CHARGE FACTOR       15280000
+         AD    F0,=D'0.05'              ROUND UP TO NEAREST CENT        15290000
+         AW    F0,=X'4E00000000000000'  TRUNCATE FRACTIONS OF CENTS     15300000
+         ADR   F2,F0                    ADD TO TOTAL COST               15310000
+         AW    F2,=X'4E00000000000000'  ADD UN-NORMALIZED FOR TRUNC     15320000
+CNVTCHGT EQU   *                                                   U006 15330000
+         AW    F0,=X'4E00000000000000'  unnormalize for CNVTCHGT   U009 15340000
+         STD   F0,DWD                   SAVE COST UN-NORMALIZED         15350000
+         L     R0,DWD+4                 GET INT. PART OF COST (CENTS)   15360000
+         CVD   R0,DWD                   CONVERT FOR PRINTING            15370000
+         MVC   0(13,R15),=X'40206B2020206B2021204B2020'            U007 15380000
+         LA    R1,13-4(,R15)            init for EDMK              U007 15390000
+         EDMK  0(13,R15),DWD+3          EDIT CPU CHARGES           U007 15400000
+         BCTR  R1,0                     BACK UP POINTER            U006 15410000
+         MVI   0(R1),C'$'               ADD '$'                    U006 15420000
+         BR    R10                      return to caller           U006 15430000
+                                                                        15440000
+                                                                        15450000
+*                        *                                              15460000
+*---  CHARGE FACTORS  ---*                                              15470000
+*                        *                                              15480000
+CPURATEL DC    D'0.13'                  CLASS L RATE PER SEC            15490000
+CPURATE  DC    D'0.62'                  CPU RATE/SEC  11-1-85           15500000
+*FACTOR  DC    D'3.6500'       *pjg*    FACTOR FOR 3090-300E UPGRADE    15510000
+KFACTOR  DC    D'7.8000'       *pjg*    FACTOR FOR 9000-600  UPGRADE    15520000
+TAPEMOUN DC    D'225.0'                 TAPE MOUNT CHARGE 6-1-84        15530000
+LMINCHG  DC    D'3000'                  class L min charge $30.00  U009 15540000
+LMINCPU  DC    A(1*100)                 class L min CPU            U009 15550000
+                                                                        15560000
+                                                                        15570000
+         DROP  R9                       SMFRCD30                        15580000
+         SPACE 2                                                        15590000
+*********************************************************************** 15600000
+*                                                                     * 15610000
+*  ROUTINE TO WRITE 'MSGAREA' TO JOBMSG DATASET                       * 15620000
+*                                                                     * 15630000
+*  Main entry:  PUTMSG - writes the line in 'MSGAREA'                 * 15640000
+*  Alternate:   PUTSTARS - builds line of stars in 'MSGAREA' & writes * 15650000
+*                                                                     * 15660000
+*********************************************************************** 15670000
+PUTSTARS MVI   MSGAREA,C'*'             START                      U006 15680000
+         MVC   MSGAREA+1(L'MSGAREA-1),MSGAREA    FINISH            U006 15690000
+                                                                        15700000
+                                                                        15710000
+PUTMSG   EQU   *                                                        15720000
+          AIF   (NOT &DEBUG).DEBUG32                               U006 15730000
+         L     R1,=A(PRINTER)           -> PRINT DCB               U006 15740000
+         PUT   (1),MSGAREA-1                                       U006 15750000
+          AGO   .DEBUG33                                           U006 15760000
+.DEBUG32  ANOP                                                          15770000
+         LA    R1,MSGAREA               GET MESSAGE ADDR                15780000
+*U006    ST    R1,36(,R12)              TELL IEFYS WHERE IT IS     U001 15790000
+*U006    MVC   42(2,R12),=AL2(L'MSGAREA)  AND HOW LONG IT IS       U001 15800000
+         L     R14,IEFYS_R12            get original R12           U006 15810000
+         ST    R1,36(,R14)              TELL IEFYS WHERE IT IS     U006 15820000
+         MVC   42(2,R14),=AL2(L'MSGAREA)  AND HOW LONG IT IS       U006 15830000
+         L     R15,=V(IEFYS)            FIND ROUTINE                    15840000
+         QSNAP 'iefactrt calling IEFYS'                            U006 15850000
+         LR    R12,R14                  restore R12 for IEFYS      U006 15860000
+         PUSH  USING                                               U006 15870000
+         DROP  R12                                                 U006 15880000
+*  WHAT A HOKEY WAY TO DO THAT.                                         15890000
+         BALR  R14,R15                  CALL IT                         15900000
+         L     R12,ACTRT_R12            reload my R12              U006 15910000
+         POP   USING                                               U006 15920000
+.DEBUG33  ANOP                                                          15930000
+         MVC   MSGAREA+1(L'MSGAREA-2),BLANKS   RESET THE BUFFER         15940000
+         BR    R10                      RETURN TO CALLER                15950000
+         EJECT                                                          15960000
+*********************************************************************** 15970000
+*                                                                     * 15980000
+*  ESTAE EXIT ROUTINE                                                 * 15990000
+*                                                                     * 16000000
+*********************************************************************** 16010000
+         PUSH  USING                                               U006 16020000
+         DROP  ,                                                   U006 16030000
+         USING RECOVERY,R15             SET UP ADDRESSABILITY           16040000
+RECOVERY LA    R4,4                     PUT 4 IN REGISTER FOR COMPARE   16050000
+         CR    R0,R4                    IS SDWA PRESENT?                16060000
+         BNE   HAVESDWA                 YES, BR TO PROCESS WITH SDWA    16070000
+         L     R0,0(,R2)                LOAD RETRY ADDR FROM PARM LIST  16080000
+         LA    R15,4                    SET RC TO RETRY ADDR IN R0      16090000
+         BR    R14                      RETURN TO PROCESSOR WITH RETRY  16100000
+         SPACE 2                                                        16110000
+HAVESDWA DC    0H'0'                    ENTER HERE IF SDWA PRESENT      16120000
+         ST    R14,12(,R13)             SAVE RETURN ADDRESS             16130000
+         L     R2,0(,R1)                GET PARM LIST ADDR FROM SDWA    16140000
+         L     R2,4(,R2)                GET RETRY ADDRESS               16150000
+         SETRP RC=4,,RETADDR=(2),RETREGS=YES,FRESDWA=YES,REGS=(14)      16160000
+         SPACE 3                                                        16170000
+         POP   USING                                               U006 16180000
+         SPACE 3                                                        16190000
+*********************************************************************** 16200000
+*                                                                     * 16210000
+*  ESTAE RETRY ROUTINE WHEN NO SDWA WAS PRESENT                       * 16220000
+*                                                                     * 16230000
+*********************************************************************** 16240000
+RTRYRTN1 DC    0H'0'                    RETRY ROUTINE WITH NO SDWA      16250000
+         L     R11,8(,R1)               LOAD BASE REG FROM ESTAE PARM   16260000
+         L     R13,12(,R1)              LOAD DATA REG FROM ESTAE PARM   16270000
+         B     RTRYRTN2                 AND GET OUT                     16280000
+         EJECT                                                          16290000
+*                                                                       16300000
+HEXTAB   EQU   *-C'0'                                                   16310000
+         DC    C'0123456789ABCDEF'                                      16320000
+                                                                        16330000
+***  Note:  entries in the following table are in accounting       U006 16340000
+***         order, not JES2 order.  See HASPHSRV.SRVSTERM .        U006 16350000
+BLOCKTBL DC    D'1.0000',CL8'Day'       JES2: 1                    U006 16360000
+         DC    D'0.4355',CL8'Evening'         2                    U006 16370000
+         DC    D'0.4355',CL8'Night'           3                    U006 16380000
+         DC    D'0.4355',CL8'Weekend'         4                    U006 16390000
+         DC    D'1.0000',CL8'Peak'            0                    U006 16400000
+                                                                        16410000
+PRTYTBL  DC    D'1.0',CL8'Standard'                                U006 16420000
+         DC    D'2.0',CL8'Express'                                 U006 16430000
+         DC    D'2.0',CL8'Urgent'                                  U006 16440000
+         DC    D'1.0',CL8'Low'                                     U006 16450000
+                                                                        16460000
+*                                                                       16470000
+* DEFINE ESTAE LIST FORM                                                16480000
+*                                                                       16490000
+ESTAEL   ESTAE MF=L                     CREATE MODEL ESTAE PARM LIST    16500000
+LESTAEL  EQU   *-ESTAEL                 NAME ITS LENGTH                 16510000
+                                                                        16520000
+                                                                        16530000
+                                                                        16540000
+SU_ACTRT DSECT ,                        pointed to by JMRUCOM      U006 16550000
+         DC    C'SU_ACTRT'              eyecatcher                 U006 16560000
+CNTTMNTS DS    F                        tape mounts accumulator    U006 16570000
+SU_ACTLN EQU   *-SU_ACTRT               length to getmain          U006 16580000
+                                                                        16590000
+                                                                        16600000
+DATA     DSECT                                                          16610000
+         DS    18F                      save area                       16620000
+*                                                                       16630000
+BLKFACT  DS    D                        factor from BLOCKTBL       U006 16640000
+PRTYFACT DS    D                        factor from PRTYTBL        U006 16650000
+DWD      DS    D                                                        16660000
+FLOATWRK DS    D                                                   U006 16670000
+RWORK    DS    D                                                        16680000
+DATEWORK DS    PL4                      date to be formatted       U007 16690000
+TAPEIO   DS    F                        total tape I/O             U006 16700000
+DISKIO   DS    F                        total disk I/O             U006 16710000
+IEFYS_R12 DS   F                        caller's R12 (IEFYS)       U006 16720000
+ACTRT_R12 DS   F                        my R12 for reload          U006 16730000
+                                                                        16740000
+BLNKSTRT EQU   *                        start of area to blank     U006 16750000
+CPY30JBN DS    CL8    copy of SMF30JBN  jobname                    U006 16760000
+CPY30STM DS    CL8    copy of SMF30STM  stepname                   U006 16770000
+CPY30PSN DS    CL8    copy of SMF30PSN  procstep                   U006 16780000
+CPY30USR DS    CL20   copy of SMF30USR  programmer name            U006 16790000
+CPY30JPT DS    XL2    copy of SMF30JPT  priority                   U006 16800000
+CPY30CLS DS    C      copy of SMF30CLS  job class                  U006 16810000
+BLNKLEN  EQU   *-BLNKSTRT               length of area to blank    U006 16820000
+                                                                        16830000
+ZEROSTRT EQU   *                        start of area to zero      U006 16840000
+CPY_DATE DS    F    TIME DEC            job end date               U010 16841000
+CPY30SIT DS    F    copy of SMF30SIT    step or job init time      U006 16850000
+CPY30STD DS    F    copy of SMF30STD    step or job init date      U007 16860000
+CPY30RST DS    F    copy of SMF30RST    reader start time          U006 16870000
+CPY30RSD DS    F    copy of SMF30RSD    reader start date          U008 16880000
+CPY30CPT DS    F    copy of SMF30CPT    TCB CPU TIME               U006 16890000
+CPY30CPS DS    F    copy of SMF30CPS    SRB CPU TIME               U006 16900000
+CPY30ARB DS    F    copy of SMF30ARB    LSQA + SWA size used       U006 16910000
+CPY30URB DS    F    copy of SMF30URB    user       size used       U006 16920000
+CPY30EAR DS    F    copy of SMF30EAR    LSQA + SWA ext size used   U006 16930000
+CPY30EUR DS    F    copy of SMF30EUR    user       ext size used   U006 16940000
+CPY30DSV DS    F    copy of SMF30DSV    dataspace used             U006 16950000
+CPY30PGI DS    F    copy of SMF30PGI    pages in from aux          U006 16960000
+CPY30PGO DS    F    copy of SMF30PGO    pages out to  aux          U006 16970000
+CPY30PIE DS    F    copy of SMF30PIE    pages in from exp          U006 16980000
+CPY30BIE DS    F    copy of SMF30BIE    ... blocked                U006 16990000
+CPY30POE DS    F    copy of SMF30POE    pages out to  exp          U006 17000000
+CPY30BOE DS    F    copy of SMF30BOE    ... blocked                U006 17010000
+CPY30VPI DS    F    copy of SMF30VPI    VIO page in                U006 17020000
+CPY30VPO DS    F    copy of SMF30VPO    VIO page out               U006 17030000
+CPY30CPI DS    F    copy of SMF30CPI    CSA+LPA page in            U006 17040000
+CPY30TM  DS    F    SMF30PTM + SMF30TPR tape mounts                U006 17050000
+CPY30SCC DS    H    copy of SMF30SCC    step completion code       U006 17060000
+CPY30TFL DS    B    copy of SMF30TFL    cpu/srb invalid flags      U006 17070000
+CPY30STI DS    B    copy of SMF30STI    abend indicators           U006 17080000
+                                                                        17090000
+EXITFLGS DS    B                        flags for IEFACTRT         U007 17100000
+EF@FIRST  EQU   X'80'                    this is the first record  U008 17110000
+EF@IO     EQU   X'40'                    we printed some I/O       U007 17120000
+EF@LLOW   EQU   X'20'                    class L below threshold   U009 17130000
+EF@LMIN   EQU   X'10'                    use min class L CPU charg U009 17140000
+ZEROLEN  EQU   *-ZEROSTRT               length of area to zero     U006 17150000
+                                                                        17160000
+*                                                                       17170000
+ESTAEW   DS    XL(LESTAEL)              ESTAE PARM LIST AREA            17180000
+ESTAPARM DS    4F                       PARM LIST PASSED TO RETRY RTN   17190000
+*              RETRY ROUTINE ADDRESS    NO SWDA OBTAINED                17200000
+*              RETRY ROUTINE ADDRESS    SWDA OBTAINED                   17210000
+*              BASE REGISTER R11                                   U001 17220000
+*              DATA REGISTER R13                                        17230000
+*                                                                       17240000
+PARMS    DS    0F                       PARMS POINTED TO BY R1 @ ENTRY  17250000
+PARMEPRM DS    A                        -> COMMON EXIT PARAMETER AREA   17260000
+PARMSTEP DS    A                        -> STEPNAME FIELD               17270000
+PARMPROG DS    A                        -> PROGRAMMER NAME FIELD        17280000
+PARMJOBC DS    A                        -> JOB CPU TIME FIELD           17290000
+PARMACCT DS    A                        -> JOB ACCOUNTING FIELDS        17300000
+PARMSTPC DS    A                        -> STEP CPU TIME FIELD          17310000
+PARMSACT DS    A                        -> STEP ACCOUNTING FIELDS       17320000
+PARMINDC DS    A                        -> CANCEL FLAG & STEP NUMBER    17330000
+PARMCOND DS    A                        -> CONDITION CODE FIELD         17340000
+PARMRECD DS    A                        -> SMF RECORD TO BE WRITTEN     17350000
+LPARMS   EQU   *-PARMS                                                  17360000
+*                                                                       17370000
+EDWORK   DC    XL13'00'                                            U007 17380000
+*                                                                       17390000
+WTOAREA  DS    0F,XL(100)               WTO WORK AREA                   17400000
+*                                                                       17410000
+          AIF   (NOT &DEBUG).DEBUG96                               U006 17420000
+         DS    C                        carriage control           U006 17430000
+.DEBUG96  ANOP                                                     U006 17440000
+MSGAREA  DS    CL81                     WORK AREA FOR JOBMSG       U006 17450000
+*                                                                       17460000
+BLANKS   DS    CL120                                               U006 17470000
+*                                                                       17480000
+ARRAY    DS    0D                                                  U006 17490000
+*  Array lines don't include the star at each end which is         U006 17500000
+*  accomplished by not blanking them from the line of stars.       U006 17510000
+                                                                        17520000
+*---  print lines for step end box (except I/O cells)              U006 17530000
+SLINE01  DS    CL79                                                U006 17540000
+S@JST     EQU   SLINE01+COL1            jobname/stepname/procstep  U006 17550000
+S@RC      EQU   SLINE01+COL2            return code                U006 17560000
+SLINE02  DS    CL79                                                U006 17570000
+S@RGN     EQU   SLINE02+COL1            region                     U006 17580000
+SLINE03  DS    CL79                                                U006 17590000
+S@ERGN    EQU   SLINE03+COL1            extended region            U006 17600000
+SLINE04  DS    CL79                                                U006 17610000
+S@DSPC    EQU   SLINE04+COL2            dataspace                  U006 17620000
+SLINE05  DS    CL79                                                U006 17630000
+S@PHDR    EQU   SLINE05+COL1            paging counts header       U006 17640000
+SLINE06  DS    CL79                                                U006 17650000
+S@PPVTA   EQU   SLINE06+COL1            private area paging (aux)  U006 17660000
+S@TCB     EQU   SLINE06+COL2            tcb time                   U006 17670000
+SLINE07  DS    CL79                                                U006 17680000
+S@PPVTE   EQU   SLINE07+COL1            private area paging (exp)  U006 17690000
+S@SRB     EQU   SLINE07+COL2            srb time                   U006 17700000
+SLINE08  DS    CL79                                                U006 17710000
+S@PVIO    EQU   SLINE08+COL1            vio paging                 U006 17720000
+S@ELAP    EQU   SLINE08+COL2            elapsed time               U006 17730000
+SLINE09  DS    CL79                                                U006 17740000
+S@PCMN    EQU   SLINE09+COL1            common paging              U006 17750000
+SLINE10  DS    CL79                                                U006 17760000
+SLINE11  DS    CL79                                                U006 17770000
+S@MOUNTS  EQU   SLINE11+COL1            tape mounts                U006 17780000
+S@MOUNTC  EQU   SLINE11+COL1+24         tape mount cost            U007 17790000
+SLINE12  DS    CL79                                                U006 17800000
+S@SPUS    EQU   SLINE12+COL1            spu                        U006 17810000
+S@SPUC    EQU   SLINE12+COL1+24         spu cost                   U007 17820000
+SLINE13  DS    CL79                                                U006 17830000
+S@TOTAL   EQU   SLINE13+COL1+24         total step dollar cost     U007 17840000
+SLINENUM  EQU  (*-ARRAY)/L'SLINE01      number of step lines       U006 17850000
+                                                                        17860000
+*---  print lines for job  end box                                 U006 17870000
+         ORG   ARRAY                                               U006 17880000
+JLINE01  DS    CL79                                                U006 17890000
+JLINE02  DS    CL79                                                U006 17900000
+J@NAME    EQU   JLINE02+22              S t a n f o r d   U n i... U006 17910000
+JLINE03  DS    CL79                                                U006 17920000
+JLINE04  DS    CL79                                                U006 17930000
+J@SUMM    EQU   JLINE04+30              *** Job Summary ***        U006 17940000
+JLINE05  DS    CL79                                                U006 17950000
+JLINE06  DS    CL79                                                U006 17960000
+J@SYSID   EQU   JLINE06+COL1            system id                  U006 17970000
+J@INTIME  EQU   JLINE06+COL2            input time and date        U008 17980000
+JLINE07  DS    CL79                                                U006 17990000
+JLINE08  DS    CL79                                                U006 18000000
+J@SYSREL  EQU   JLINE08+COL1            system release             U006 18010000
+J@START   EQU   JLINE08+COL2            start time and date        U007 18020000
+JLINE09  DS    CL79                                                U006 18030000
+JLINE10  DS    CL79                                                U006 18040000
+J@JOBNM   EQU   JLINE10+COL1            jobname                    U006 18050000
+J@STOP    EQU   JLINE10+COL2            stop time and date         U007 18060000
+JLINE11  DS    CL79                                                U006 18070000
+JLINE12  DS    CL79                                                U006 18080000
+J@ACCT    EQU   JLINE12+COL1            account                    U006 18090000
+J@ELAP    EQU   JLINE12+COL2            elapsed time               U006 18100000
+JLINE13  DS    CL79                                                U006 18110000
+JLINE14  DS    CL79                                                U006 18120000
+J@USER    EQU   JLINE14+COL1            user name                  U006 18130000
+J@CPU     EQU   JLINE14+COL2            CPU time                   U007 18140000
+JLINE15  DS    CL79                                                U006 18150000
+JLINE16  DS    CL79                                                U006 18160000
+J@CLASS   EQU   JLINE16+COL1            job class                  U006 18170000
+J@SRB     EQU   JLINE16+COL2            SRB time                   U007 18180000
+JLINE17  DS    CL79                                                U006 18190000
+JLINENUM EQU   (*-ARRAY)/L'JLINE01      number of job  lines       U006 18200000
+         ORG   ,                                                   U006 18210000
+ARRAYLEN EQU   *-ARRAY                  length to blank            U006 18220000
+                                                                        18230000
+LDATA    EQU   *-DATA                                                   18240000
+         SPACE 3                                                        18250000
+IEFACTRT CSECT                                                          18260000
+*                                                                       18270000
+*  WTO FOR STEP TERMINATION                                             18280000
+*                                                                       18290000
+WTO1     WTO   'JJJJJJJJ.        .         RC=NNNN TapeIO=NNNN DiskIO=N$18300000
+               NNN CPU=nnnnnS Elapsed=nnnnnH',                     U006$18310000
+               MF=L,ROUTCDE=11                                          18320000
+         SPACE 2                                                        18330000
+WTO1L    EQU   *-WTO1                                                   18340000
+DATA     DSECT                                                     U001 18350000
+         ORG   WTOAREA+4                OVERLY WTO DATA AREA       U001 18360000
+WTOTEXT  DS  0C'JJJJJJJJ.        .         RC=NNNN TapeIO=NNNN DiskIO=N$18370000
+               NNN CPU=nnnnnS Elapsed=nnnnnH'                      U006 18380000
+JOBNAME  DS    CL8'JOBNAME '            JOB NAME                   U001 18390000
+         DS    C'.'                                                U001 18400000
+STEPNAME DS    CL8'STEPNAME'            STEPNAME                   U001 18410000
+         DS    C'.'                                                U001 18420000
+PROCSTEP DS    CL8'PROCSTEP'            PROCEDURE STEP NAME        U001 18430000
+         DS    C' '                                                U001 18440000
+RCAB     DS    C'RC='                   'RC=' OR 'AB='             U001 18450000
+RC       DS    CL4'NNNN'                RETURN/ABEND CODE          U001 18460000
+         DS    C' TapeIO='                                         U001 18470000
+EXCPTAPE DS    CL4'NNNN'                TAPE EXCP COUNT            U001 18480000
+         DS    C' DiskIO='                                         U001 18490000
+EXCPDISK DS    CL4'NNNN'                DISK EXCP COUNT            U001 18500000
+         DS    C' CPU='                                            U001 18510000
+WTO_CPU  DS    C'nnnnnS'                TOTAL CPU TIME             U006 18520000
+         DS    C' Elapsed='                                        U001 18530000
+WTO_ELAP DS    C'nnnnnH'                TOTAL ELAPSED TIME         U006 18540000
+WTOTEXTL EQU   *-WTOTEXT                max text length to clear   U006 18550000
+         ORG   ,                        LEAVE WTO DATA OVERLAY     U001 18560000
+*                                                                       18570000
+*  WTO FOR JOB TERMINATION                                              18580000
+*                                                                       18590000
+*WTO2    WTO   'JJJJJJJJ Ended                                      Tot$18600000
+               al  CPU=nnnnnS Elapsed=nnnnnH',                     U006$18610000
+               MF=L,ROUTCDE=11                                          18620000
+         ORG   JOBNAME+L'JOBNAME        OVERLAY WTO DATA AREA      U001 18630000
+         DS    C' Ended.  Name='                                   U006 18640000
+PGMR     DS    CL20                                                     18650000
+*                                                                       18660000
+*  WTO FOR JOB charge stats                                        U006 18670000
+*                                                                       18680000
+         ORG   WTOTEXT                                             U006 18690000
+SEOJDESC DS    CL11                                                U006 18700000
+SEOJCNT  DS    CL13,CL3                 COUNT                      U006 18710000
+SEOJCHG  DS    CL13                     CHARGE                          18720000
+         DS    CL3                                                 U007 18730000
+SEOJTEXT DS    CL44                     TEXT FIELD                      18740000
+         ORG   ,                        LEAVE WTO DATA OVERLAY     U001 18750000
+                                                                        18760000
+                                                                        18770000
+*U009    $RATES XEQ                                                     18780000
+         EJECT                                                          18790000
+         IFASMFR  30                                               U006 18800000
+SMF30EXP DSECT ,                        resume                     U006 18810000
+SMF30EXCPLEN  EQU  *-SMF30EXP           length of an EXCP segment  U006 18820000
+         EJECT                                                          18830000
+         IEFJMR                         JMR MAPS COMMON PARAMETER AREA  18840000
+         EJECT                                                          18850000
+         IHASDWA DSECT=YES              SDWA FOR ESTAE/SETRP MACRO      18860000
+         EJECT                                                          18870000
+*        IHAPSA                                                    U001 18880000
+PSA      DSECT                                                     U001 18890000
+PSAAOLD  EQU   PSA+X'224',4             ADDRESS OF CURRENT ASCB    U001 18900000
+         SPACE 2                                                        18910000
+*        IHAASCB                                                   U001 18920000
+ASCB     DSECT                                                     U001 18930000
+ASCBJBNI EQU   ASCB+X'AC',4             ADDRESS OF JOBNAME         U001 18940000
+         SPACE 2                                                        18950000
+CSCB     DSECT                                                     U001 18960000
+*        IEECHAIN                                                  U001 18970000
+CHAIN    DC    0D'0'                                               U001 18980000
+CHKEY    EQU   CHAIN+X'8',8             JOB OR STARTED TASK NAME   U001 18990000
+CHPROCSN EQU   CHAIN+X'20',8            PROC STEP NAME             U001 19000000
+CHSTEP   EQU   CHAIN+X'40',8            STEP NAME                  U001 19010000
+                                                                        19020000
+IEFACTRT CSECT                                                          19030000
+         LTORG ,                                                        19040000
+DATALEN  DC    0F'0',AL1(&SUBPOOL),AL3(LDATA)                      U006 19050000
+MODLEN   EQU   *-IEFACTRT                                               19060000
+LPATCH   EQU   (MODLEN+9)/10/8+1        ADD 10% FOR PATCH AREA          19070000
+         DC    AL2(LPATCH*8)                                            19080000
+         DC    S(PATCH)                                                 19090000
+PATCH    DC    (LPATCH)D'00'                                            19100000
+         END   IEFACTRT                                                 19110000

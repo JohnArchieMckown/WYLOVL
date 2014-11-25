@@ -1,0 +1,184 @@
+RTX0     TITLE 'ICHRTX00  SAF Router Exit -- RACF Pre-Processing'       00001000
+ICHRTX00 CSECT ,                                                        00002000
+ICHRTX00 AMODE ANY                 ACCEPT ANY AMODE ENTRY               00003000
+ICHRTX00 RMODE 24                  RESIDE BELOW 16MB LINE               00004000
+         SAVE  (14,12),,ICHRTX00_&SYSDATC._&SYSTIME                     00005000
+         LR    RC,15                                                    00006000
+         USING ICHRTX00,RC         addressing for this module           00007000
+                                                                        00008000
+*********************************************************************   00009000
+*                                                                   *   00010000
+*  SAF Router Exit ICHRTX00 -- RACF pre-processing                  *   00011000
+*                                                                   *   00012000
+*  rev. 1997/04/09 MCL:  Do not call TLMS (now called from volume   *   00013000
+*                        mount exit IFG019VM)                       *   00014000
+*                                                                   *   00015000
+*  On entry:                                                        *   00016000
+*                                                                   *   00017000
+*  R1 -> A(SAFP), A(workarea)                                       *   00018000
+*        SAFP mapped by ICHSAFP macro                               *   00019000
+*        workarea is 152 bytes                                      *   00020000
+*                                                                   *   00021000
+*********************************************************************   00022000
+                                                                        00023000
+         L     R3,0(,R1)           POINT TO SAF PARAMETER LIST          00024000
+         USING SAFP,R3                                                  00025000
+         L     R6,4(,R1)           POINT TO WORK/REG SAVE AREA          00026000
+         ST    RD,4(,R6)           CHAIN SAVE AREAS                     00027000
+         ST    R6,8(,RD)                                                00028000
+         LR    RD,R6                                                    00029000
+         USING ICHRWA,RD                                                00030000
+         USING PSA,0                                                    00031000
+                                                                        00032000
+* FIRST CHECK IF WE GOT ENTERED IN SRB MODE WHICH IS ALLOWABLE AFTER    00033000
+* RACF 1.9.  IF SO, BYPASS EXIT PROCESSING.  WE DO NOT WANT TO GET      00034000
+* AN 0F8 ABEND WHEN WE ISSUE AN SVC IN THIS ROUTINE.  WHOEVER CALLED    00035000
+* US IN SRB MODE MUST KNOW WHAT HE IS DOING.                            00036000
+                                                                        00037000
+         TM    PSAMODE,PSASRBM    IS IT SRB MODE                        00038000
+         BO    RC0                YES, BYPASS EXIT PROCESSING           00039000
+         B     NOPE  ***********  branch around debugging code          00040000
+         QSNAP (0,1,14,15)                                              00041000
+         QSNAP 0(3),31            SAF parmlist                          00042000
+NOPE     EQU   *     ***********                                        00043000
+                                                                        00044000
+* LOCATE INFORMATION ABOUT OUR CALLER WHICH WILL BE NEEDED LATER        00045000
+                                                                        00046000
+         L     R5,PSATOLD         LOAD CURRENT TCB INTO R5              00047000
+         L     R5,TCBRBP-TCB(,R5)    FIND INT CODE OF CALLER SVC        00048000
+         SLL   R5,8                  CLEAR RB PTR HIGH ORDER BYTE       00049000
+         SRL   R5,8                    IN CASE WE'RE AMODE 31           00050000
+         ICM   R5,7,RBLINKB-RBBASIC(R5) IC WE WANT IS IN NEXT RB        00051000
+         BCTR  R5,0               POSITION TO IC FOR USE LATER          00052000
+         L     RB,4(,RD)          CHAIN THRU PREVIOUS SAVE AREAS        00053000
+         L     RB,4(,RB)          TO GET SAF CALLER S/A FOR USE LATER   00054000
+         EJECT                                                          00055000
+*                                                                       00056000
+* DIFFERENT FUNCTION-DEPENDENT EXIT ROUTINES CAN BE CALLED FROM         00057000
+* ICHRTX00 DEPENDING ON THE PROCESSING TO BE PERFORMED.  THE            00058000
+* FOLLOWING ROUTINE FILTERS RACROUTE REQUESTS FOR WHICH SPECIAL         00059000
+* EXIT ROUTINES ARE REQUIRED.  FUNCTIONS MAY BE BASED ON THE SVC        00060000
+* INTERRUPT CODE, THE SAF REQUEST PARAMETER OR THE CALLING MODULE       00061000
+* NAME.  NOW LET US DETERMINE WHAT KIND OF RACROUTE REQUEST WE HAVE     00062000
+* BEEN ENTERED FOR.                                                     00063000
+                                                                        00064000
+         CLI   SAFPREQT+1,SAFPVER IS IT VERIFY (RACINIT)?               00065000
+         BE    INITCALL           YES, GO TO ICHRTXIN                   00066000
+         CLI   SAFPREQT+1,SAFPDEF IS IT DEFINE (RACDEF)?                00067000
+         BE    DEFRTNE            YES, GO TO DEFINE PROCESSING          00068000
+         CLI   SAFPREQT+1,SAFPAU  IS IT AUTH (RACHECK)?                 00069000
+         BNE   RC0                NO, SKIP EXIT, GO BACK TO ICHSFR00    00070000
+*                                                                       00071000
+*  PROCESS RACROUTE REQUEST=AUTH (RACHECK) REQUESTS                     00072000
+*                                                                       00073000
+         LR    R2,R3               COPY SAF PARM LIST ADDRESS           00074000
+         AL    R2,36(,R3)          POINT TO RACF PARM LIST              00075000
+         L     R1,40(,R2)          LOAD CLASS POINTER                   00076000
+         CLI   0(R1),X'07'         CORRECT LENGTH?                      00077000
+         BNE   OPENCHK             No, not tape open                    00078000
+         CLC   TAPEVOL,1(R1)       TAPE CLASS?                          00079000
+         BNE   OPENCHK             No, not tape open                    00080000
+         B     RC0                 for tape, let SAV issue RACHECK      00081000
+*                                  ml 1997/04/09                        00082000
+TAPEVOL  DC    C'TAPEVOL'                                               00083000
+         TITLE 'RACDEF Processing'                                      00084000
+*                                                                       00085000
+* RACDEF PROCESSING IS LIMITED TO TURNING OFF THE DISCRETE OPTION       00086000
+* IF ON AND BYPASSING RACF LOGGING FOR TEMPORARY DATA SETS              00087000
+*                                                                       00088000
+DEFRTNE  NI    SAFP+79,B'10111111' TURN OFF RACFIND=YES                 00089000
+         B     RC0                ORDINARY DATASETS GO THROUGH RACF     00090000
+*                                                                       00091000
+* THIS ROUTINE INVOKES SUBROUTINE ICHRTXIN FOR RACINIT PROCESSING       00092000
+*                                                                       00093000
+INITCALL L     RF,INITRTNE        GET ICHRTXIN ADDRESS                  00094000
+         BALR  RET,RF                                                   00095000
+         B     *+4(RF)                                                  00096000
+         B     RC200         RC0 ICHRTXIN OK'D THIS REQUEST             00097000
+         B     RC0           RC4 ICHRTXIN COULD NOT HANDLE THE REQUEST  00098000
+         B     RC208         RC8 ICHRTXIN REJECTED THIS REQUEST         00099000
+         TITLE 'RACHECK OPEN Processing'                                00100000
+* THIS ROUTINE IS INVOKED FOR DASD OPEN, OPEN TYPE=J AND EOV.           00101000
+* OTHER CHECKS MUST ONLY BE PERFORMED FOR O/C/EOV RACHECKS TO ENSURE    00102000
+* THAT THE JFCB HAS BEEN PASSED TO THIS ROUTINE.                        00103000
+                                                                        00104000
+OPENCHK  CLI   0(R5),OPENSVC      IS IT A CALL FROM OPEN                00105000
+         BE    WYLCHK             IT IS                                 00106000
+         CLI   0(R5),OPENJSVC     IS IT OPEN TYPE=J                     00107000
+         BE    WYLCHK             SAME THING                            00108000
+         CLI   0(R5),EOVSVC       IS IT EOV                             00109000
+         BE    WYLCHK             SAME THING                            00110000
+         B     RC0                ELSE LET SAF ISSUE RACHECK            00111000
+                                                                        00112000
+*  IF THE DATA SET IS WYL FORMAT, WE CAN CHECK FOR ACCESS MADE BY       00113000
+*  THE OWNER AND GRANT ACCESS UNCONDITIONALLY.                          00114000
+                                                                        00115000
+WYLCHK   CLC   =C'WYL.',0(R5)          IS IT WYL FORMAT                 00116000
+         BNE   RC0                     NO, RESUME NORMAL RACF CHECK     00117000
+         HASPSERV JOBACCT,ICHACCWA                                      00118000
+         LTR   RF,RF                   DID JES RETURN USER ID?          00119000
+         BNZ   RC0                     NO, RESUME NORMAL PROCESS        00120000
+         MVC   ICHPUSER(2),ICHACCWA+3  MOVE IN GG                       00121000
+         MVC   ICHPUSER+3(3),ICHACCWA  MOVE IN UUU                      00122000
+         CLC   ICHPUSER(2),4(R5)       IS GROUP CODE THE SAME           00123000
+         BNE   RC0                     NO, RESUME NORMAL PROCESS        00124000
+         CLC   ICHPUSER+3(3),7(R5)     IS USER CODE THE SAME            00125000
+         BNE   RC0                     NO, RESUME NORMAL PROCESS        00126000
+         B     RC200                   ELSE OWNER CAN DO NO WRONG       00127000
+         TITLE 'Return to Caller'                                       00128000
+                                                                        00129000
+* ISSUE A RETURN CODE OF ZERO WHICH WILL CAUSE ICHSFR00 TO REISSUE      00130000
+* THE RACF CALL AND RETURN TO THE CALLER WITH THE RACF RETURN AND       00131000
+* REASON CODE.                                                          00132000
+                                                                        00133000
+RC0      SR    RF,RF              NO RACF AND NOT HANDLED BY ACS        00134000
+         B     RETURN             ICHSFR00 WILL FIGURE RETURN CODE      00135000
+                                                                        00136000
+* ACS DOES NOT UPDATE SAFPRRET WITH RETURN CODE SO WE MUST UPDATE       00137000
+* IT HERE OURSELVES.                                                    00138000
+                                                                        00139000
+RC200    SR    RF,RF             UPDATE SAFPRRET WITH                   00140000
+         STCM  RF,15,SAFPRRET        A RETURN CODE OF 0                 00141000
+         LA    RF,200            RETURN TO ICHSFR00 BYPASSING RACF      00142000
+         B     RETURN                WITH RC 200 TO BE CONVERTED TO 0   00143000
+                                                                        00144000
+* ACS DOES NOT UPDATE SAFPRRET SO WE MUST DO IT HERE OURSELVES.         00145000
+                                                                        00146000
+RC208    LA    RF,8              PLACE RC 8 IN SAFPRRET AND RETURN TO   00147000
+         STCM  RF,15,SAFPRRET        ICHSFR00 BYPASSING RACF WITH       00148000
+         LA    RF,208                RC 208 TO BE CONVERTED TO 8        00149000
+                                                                        00150000
+* WE ARE ALL DONE.                                                      00151000
+                                                                        00152000
+RETURN   L     RD,4(,RD)                                                00153000
+         L     RET,12(,RD)                                              00154000
+         LM    R2,RC,28(RD)                                             00155000
+         BR    RET                                                      00156000
+         TITLE 'ICHRTX00 -- Data Areas'                                 00157000
+INITRTNE DC    V(ICHRTXIN)                                              00158000
+PATCH    DC    200X'00'                                                 00159000
+         PRINT NOGEN                                                    00160000
+         IECDSECS CVT,UCB,PSA,TCB,RB,EXPAND=YES                         00161000
+         IECEQU AOS=YES                                                 00162000
+         PRINT GEN                                                      00163000
+         ICHSAFP                                                        00164000
+         ICHSAFV                                                        00165000
+         ICHSAFW                                                        00166000
+         IEFJFCBN                                                       00167000
+ICHRWA   DSECT ,                   Work/Save area (passed by caller)    00168000
+ICHRSAV  DS    18F                                                      00169000
+ICHRWBAS DS    F                                                        00170000
+ICHRPRM  DS    0F                                                       00171000
+ICHRPRM1 DS    F                                                        00172000
+ICHRPRM2 DS    F                                                        00173000
+ICHPUSRL DS    CL1                     USERID LENGTH                    00174000
+ICHPUSER DS    CL6                     USERID                           00175000
+ICHWYLFL DS    CL1                                                      00176000
+ICHACCWA DS    CL9                                                      00177000
+         DS    0F                                                       00178000
+TAPEREGS DS    10A(0)              REGISTER SAVE AREA                   00179000
+ICHREND  EQU   *                                                        00180000
+OPENSVC  EQU   X'13'                                                    00181000
+OPENJSVC EQU   X'16'                                                    00182000
+EOVSVC   EQU   X'37'                                                    00183000
+         END                                                            00184000

@@ -1,0 +1,230 @@
+;
+;;  TO -- TO command.
+;;
+;;  Created, 12/05/91, Jim Nisbet
+;;
+;;  Modifications:
+;;     12/13/91  Niz   Add check for three character initials.
+;;     12/05/91  Niz   Initial version.
+;
+
+xproc () begin
+   x.origact = actno
+   x.attn = 0                      ; attn counter (see attnexit)
+
+   x.pgm = 'TO'                    ; program name
+   x.maint = '(gg.jdn gg.sch)'     ; maintenance people
+
+   on error cmd 'pcall errorexit'
+   on attn  cmd 'pcall attnexit' int
+
+   set exec over                   ; see Niz for details
+
+   dcl string rc, dummystr
+
+   options = strip(parm_string)
+
+   ;
+   ;  Execute _TO command.
+   ;
+
+   open TO title 'TO completions' temp
+
+   ;
+   ;  Do special checking if the user has used just the three
+   ;    character initials.
+   ;
+
+   token = scan_token(options)
+   if (size(token) eq 3 and verify(token,'0123456789') ne 0) begin
+      message = strip(scan_skip(options))
+      pcall check_initials(token, message)
+   end
+
+   ;
+   ;  Execute _TO command.
+   ;
+
+   try cdump _to &(options)
+   if (tryerr) begin
+      try quietly delete '+'1 nolist
+      try quietly change 1/14 to '' in '-'1 nolist
+      if (lines ne 0) try list unn mixed
+   end
+   else begin
+      pcall reformat_display
+      if (lines ne 0) try list unn mixed
+   end
+
+   ;
+   ;  Finish up.
+   ;
+
+   close
+
+   pcall cleanup('')
+end
+
+; <.page>
+;
+;  check_initials -- Routine to check the initials to see if it
+;    will match people from different groups.
+;
+;  NOTE:  This routine assumes that it can delete the current
+;    Active file.
+;
+
+proc check_initials(initials, message) begin
+   try quietly delete f/l nolist
+   try quietly dump _lines &(initials)
+   try quietly delete ~'+'1 nolist
+   if (lines gt 1) begin
+      clno = first
+      while (clno ge 0) begin
+         cline = line(clno)
+         try quietly delete '&(substr(cline,7,6))'7 \
+            in 0/&(clno-.001) &(clno+.001)/99999.999 nolist
+         clno = lno_next(clno)
+      end
+      if (lines gt 1) begin
+
+         ;
+         ;  Ambiguous request.
+         ;
+
+         write upper(initials) \
+            || ': ambiguous, please specify full account.'
+         try show lines &(initials)
+         repeat begin
+            new_initials = input('Select? ', 'attn')
+            if (ioresult eq 'ATTN') begin
+               write 'No message sent.'
+               pcall cleanup('')
+            end
+         end
+         until (scan_token(new_initials) ne '')
+
+         ;
+         ;  Recursive call to the TO command.
+         ;
+
+         to &(new_initials) &(message)
+
+         pcall cleanup('')
+      end
+   end
+
+   try quietly delete f/l nolist
+   return
+end
+
+
+; <.page>
+;
+;  reformat_display -- Routine to reformat the output display.
+;
+
+proc reformat_display() begin
+   ;
+   ;  When we have sucessfully sent to an account, but failed
+   ;    to send to another instance of that account (which had
+   ;    NOCOMM or NOBREAK set) then do not bother to report that.
+   ;
+   clno = first
+   while (clno ge 0) begin
+      cline = line(clno)
+      if (left(cline,1) eq '+') begin
+         try quietly delete '-'1 and '&(substr(cline,7,6))'7 nolist
+         try quietly delete &(clno)
+      end
+      clno = lno_next(clno)
+   end
+
+   ;
+   ;  Get rid of prefix on remaining error messages.
+   ;
+   try quietly change 1/14 to '' in '-'1 nolist
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles cleanup and restoring the user state.
+;
+
+proc cleanup(opt) begin
+   pick &(x.origact)
+
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   if (opt eq 'attn') \
+      opt = "attn attnid=ATTN"
+   xreturn &(opt)
+end
+
+
+
+;<.page>
+;
+;  attnexit -- Attention exit routine.
+;
+
+proc attnexit() begin
+   pcall cleanup('attn')
+end
+
+
+
+;
+;  errorexit -- Routine to handle an error in the exec.
+;    We write out some brief diagnostic information to the
+;    terminal and then send mail to the maintenance people.
+;
+
+proc errorexit() begin
+   write ''
+   write '-----'
+   write 'An error occurred in the ' || x.pgm || ' command.'
+   write 'The programming staff will be notified.'
+   write ''
+   write 'Debugging information:'
+   write '   errmsg: '||errmsg
+   write '  errinfo: '||errinfo
+
+;  Mail debugging information to maintenance people.
+
+   open errors title '&(x.pgm) dump'
+   putend An error occurred in the &(x.pgm) command.
+   putend
+   putend Debugging information:
+   putend
+   dump xdate
+   dump account
+   putend errid = &(errid)
+   putend errmsg = &(errmsg)
+   putend errinfo = &(errinfo)
+   putend
+   putend ---
+   putend
+   putend >>> show vars type ses
+   dump vars type ses
+   putend
+   putend >>> show vars type x
+   dump vars type x
+   putend
+   putend >>> show vars type error  ; local vars at time of error
+   dump vars type error
+   putend
+   putend End of dump.
+
+   if (xaccount eq 'GG.JDN') \
+      comment &(s'2f')Look at active file &(actno) for error log.
+   else begin
+      try quietly mail to &(x.maint) title '&(x.pgm) error'
+      close
+   end
+
+   pcall cleanup('error')
+end

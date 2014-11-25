@@ -1,0 +1,153 @@
+XPROC (program,profile,group,user,notify) BEGIN
+
+;*******************************************************************
+;                                                                  *
+;                                                                  *
+;  notify -- This routine finds the account to ship log records to *
+;     whenever a log record is generated against for the given     *
+;     profile.                                                     *
+;                                                                  *
+;     Parameters are as follows:                                   *
+;                                                                  *
+;     program - program which calls this routine (e.g. SET PROTECT)*
+;     profile - fully expanded profile or dataset name             *
+;     group   - gg part of profile name if it exists else logon gg *
+;     user    - uuu part of profile name if exists, else logon uuu *
+;     notify  - account to notify from wyl.gb.sec.comm.logtble or  *
+;               comm.notifytb.                                     *
+;     ses.racf_network - network ID used for ONCALL notification   *
+;                                                                  *
+;                                                                  *
+;*******************************************************************
+
+;********** Set ses.racf_network
+
+   ses.racf_network = 'dummy ' ; default
+
+;********** Set default for notify based on which command is executed
+
+   IF (program EQ 'SHOW PROTECT') BEGIN
+      notify = group||'.'||user ; from XPROC editprof
+   END
+
+   IF (program EQ 'SET PROTECT') BEGIN
+      notify = SUB(ACCOUNT,5,2)||'.'||SUB(ACCOUNT,1,3) ; logged on acct.
+   END
+
+;********** Check against notifytb to see if profile recently added
+
+   COUNT '&(profile)'1 FROM wyl.gb.sec.comm.notifytb QUIET ; newly added today?
+   IF (COUNT GT 0) BEGIN
+      notify_end = END
+      COPY '&(profile)'1 FROM wyl.gb.sec.comm.notifytb TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55
+      DEL &(notify_end)/LAST
+      XRETURN (notify)
+   END
+
+;********** Check against comm.logtble for exact match
+
+   COUNT '&(profile) '1 FROM wyl.gb.sec.comm.logtble QUIET ; newly added today?
+   IF (COUNT EQ 1) BEGIN
+      COPY '&(profile) '1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55 DEL
+      XRETURN (notify)
+   END
+
+;********** Check for single level matches in comm.logtble
+;********** If level_one is in form gg$uuu then convert to gg.uuu
+
+   level_one = '' ;initialize for scan
+   type = '' ; initialize for SCAN
+   SYSCALL SCAN(level_one,profile,type,'.','.') ; scan off high level
+   IF (FIND(level_one,'$') EQ 3) level_one = SUB(level_one,1,2)||'.'||SUB(level_one,4)
+;---------- WYL. and some Vxxx and SYSx will have a count greater than 1
+   COUNT '&(level_one)'1 FROM wyl.gb.sec.comm.logtble QUIET
+   IF (COUNT EQ 0) XRETURN (notify)
+   IF (COUNT EQ 1) BEGIN
+      COPY '&(level_one)'1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55 DEL
+      XRETURN (notify)
+   END
+
+;********** Check for gg.uuu entry in comm.logtble
+
+   IF ((SUB(level_one,1,3) NE 'SYS') AND (SUB(level_one,1,3) NE 'IPO') \
+         AND (SUB(level_one,1,3) NE 'CAT') AND (SUB(level_one,1,3) NE 'SMP')) BEGIN
+      COUNT '&(notify)'1 FROM wyl.gb.sec.comm.logtble QUIET ; is account in logtble?
+      IF (COUNT EQ 1) BEGIN
+         COPY '&(notify)'1 FROM wyl.gb.sec.comm.logtble TO END
+         READ STR ses.racf_network USING LAST COL 85/90
+         READ STR notify USING LAST COL 50/55 DEL
+         XRETURN (notify)
+      END
+   END
+
+;********** Check for two level matches (eg. WYL.GR) from comm.logtble
+
+   level_two = '' ;initialize for scan
+   SYSCALL SCAN(level_two,profile,type,'.','.') ; scan off second level
+;---------- Test for WYL.gg entries. (E.g. entire group of accounts)
+   COUNT '&(level_one).&(level_two). '1 FROM wyl.gb.sec.comm.logtble QUIET
+;---------- If count = 0 then backup and get previous notification
+;---------- for level_one.  E.g. 'SYS1'1 may have count of 3,
+;---------- 'SYS1.level_two' may have count of 0 and we then go get
+;---------- 'SYS1. ' entry which has a count of 1.
+   IF (COUNT EQ 0) BEGIN
+      COUNT '&(level_one). ' 1 FROM wyl.gb.sec.comm.logtble QUIET
+      IF (COUNT NE 1) XRETURN (notify)
+      COPY '&(level_one). '1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55 DEL
+      XRETURN (notify)
+   END
+   IF (COUNT EQ 1) BEGIN
+      COPY '&(level_one).&(level_two). '1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55 DEL
+      XRETURN (notify)
+   END
+
+;********** More than one match at level 2. Now set 'notify' to
+;           the one with only two levels if one exists.
+   COUNT '&(level_one).&(level_two). '1 FROM wyl.gb.sec.comm.logtble QUIET
+   IF (COUNT EQ 1) BEGIN
+      COPY '&(level_one).&(level_two). '1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55 DEL
+      XRETURN (notify)
+   END
+
+;********** No three level matches, so try four levels.
+
+   level_three = '' ;initialize for scan
+   SYSCALL SCAN(level_three,profile,type,'.','.') ; scan off third level
+   level_last = '' ; max. levels for scan = 4
+   SYSCALL SCAN(level_last,profile,type,'.','.') ; scan off fourth level
+   match = level_one||'.'||level_two||'.'||level_three||'.'||level_last
+   IF (FIND(match,'%*') GT 0) match = SUB(match,1,FIND(match,'%*')-1)
+
+;---------- Test for four level match (E.g. WYL.GP.OPR.LIB)
+;---------- If count ge 2 then may get wrong notification account
+
+   COUNT '&(match)'1 FROM wyl.gb.sec.comm.logtble QUIET
+   IF (COUNT EQ 0) XRETURN (notify)
+   IF (COUNT GE 1) BEGIN
+      notify_end = END
+      COPY '&(match)'1 FROM wyl.gb.sec.comm.logtble TO END
+      READ STR ses.racf_network USING LAST COL 85/90
+      READ STR notify USING LAST COL 50/55
+      DEL &(notify_end)/LAST
+      XRETURN (notify)
+   END
+
+;********** If all above tests fail (should never happen)
+
+   QUIET TRY SHOW NAME &(notify)
+   IF (TRYID NE 'OK') notify = 'GB.SEC'
+   XRETURN (notify)
+
+END

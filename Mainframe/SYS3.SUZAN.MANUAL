@@ -1,0 +1,1489 @@
+0
+0
+0
+0
+0
+0
+                       User's Guide to SVCCOM
+
+                          Carol A. Farlow
+1
+                         Table of Contents
++                        _________________
+
+ 1.  Why an interregion communication SVC?
+
+ 2.  SVCCOM control blocks and path definition.
+
+ 3.  Initializing a path.
+
+      3.1  Establishing conventions with other communicators.
+
+          3.1.1  Criteria for choosing the password, MYTAG, and YOURTAG.
+          3.1.2  Conflicting symbolic tags
+          3.1.3  Internal protocols
+
+      3.2  Coding the PATH macro.
+
+      3.3  Calling the SVC.
+
+      3.4  Returns.
+
+ 4.  Using the path.
+
+      4.1  SVCCOM management of the communications area.
+
+      4.2  The Path Command Word.
+
+      4.3  Calling the SVC.
+
+      4.4  Command functions.
+
+ 5.  Special considerations.
+
+      5.1  Posting.
+
+      5.2  Asynchronous exit routines.
+
+      5.3  Termination processing.
+
+ 6.  The purge call.
+
+ Appendix A:  Storage Protection Summary
+
+ Appendix B:  Macros and DSECTs
+
+      B.1  The PATH macro.
+
+          B.1.1  DSECT expansion
+          B.1.2  Expansion with a different prefix
+          B.1.3  Expansion without mnemonics
+
+      B.2  SVCCOM internal control block DSECTs.
+
+          B.2.1  PCB
+          B.2.2  PCBX
+          B.2.3  COMB
+
+1     B.3  Macros used in coding command calls.
+
+          B.3.1  The PCW DSECT (includes command and return code
+                 mnemonics)
+          B.3.2  PCW used to generate a command list.
+          B.3.3  The RDW macro
+          B.3.4  The SCOMSTAT macro
+
+ Appendix C:  Example - Using Locate Mode Retrieval
+
+ Appendix D:  SVCCOM System Dependencies
+
+ Figures:
+
+      1.  Example of control block linkages.
+
+      2.  PATH operand summary.
+
+      3.  Command operand summary.
+
+      4.  CA format.
+
+      5(a).  Logical format of a  buffer with five transactions.
+
+      5(b).  Physical format of a buffer with five transactions.
+
+11.  Why an interregion communications SVC?
++    ______________________________________
+
+      It is essential that one job running in a multiprogramming
+ environment not damage other simultaneously executing jobs or
+ access privileged information residing in another job's storage.
+ Employing several "storage protection" mechanisms, 370 hardware and
+ VS2 prevent one problem program from altering or examining the
+ storage locations belonging to another problem program.  (See
+ Appendix A.)  Sometimes, however, a job must be able to  pass
+ information about its status to another executing job or, for some
+ other legitimate purpose, access information in another job's
+ region.  No direct mechanism for interregion communication exists
+ under VS2 Release 1.6 which provides the benefits of "storage
+ protection".
+
+      Rather than allowing each system task to run under a key of
+ zero while communicating, a Type One SVC called SVCCOM has been
+ written.  SVCCOM provides a method by which two tasks within the
+ same or different jobs may establish communications, send and
+ receive information or posts, close communications, or be notified
+ of one party's termination in a well-defined manner.  SVCCOM
+ includes safeguards against unintentional or unauthorized
+ modification of or access to another job's storage.
+
+ 2.  SVCCOM control blocks and path definition.
++    __________________________________________
+
+      The term "path" refers to those control blocks and buffers
+ maintained by SVCCOM which allow two callers with matching
+ identifiers to communicate.  A path has two  symmetrical sides
+ which correspond to the two callers.  In this document a path will
+ be termed "open" if only one side has been initialized, "busy" if
+ both sides have been initialized and neither has then been closed
+ or terminated, and "terminating" if the closure of one side has
+ ended communication over the path.
+
+      An initial call, which provides the address of a PATH control
+ block, establishes an open path.  This control block is assembled
+ in the caller's program and is somewhat analogous to the DCB
+ provided to OS when an I/O path is opened.  Details of the initial
+ call and other calls will be enumerated later.  The PATH block is
+ composed of a symbolic identifier naming the caller, an identifier
+ naming the answerer, a password, the address of an ECB (used by
+ SVCCOM to post communication status), assorted mode flags, and a
+ buffer size.  The buffer size informs SVCCOM how large the holding
+ area that will contain information sent by the other side must be.
+ This holding area is called the communications area (CA).  Since it
+ has no fixed fields, it is not really a control block; however, its
+ length must be a doubleword multiple, and it must always start on a
+ doubleword boundary.
+
+      Within the SVC the path is represented  by a PCB (path control
+ block).  The PCB contains two symmetrical segments or "extents"
+ (PCBXs) with information about each side. The last control block
+ used by SVCCOM  represents a single communicating task and is
+ called the COMB (communicator block).  This control block is used
+ to head a chain which links all PCBXs that belong to a single task,
+ such that its paths may be closed properly if the task terminates
+ and neglects to explicitly issue close calls.  A modification to
+ SVC 3 (IEAVET00) at the point at which TCBs are released causes a
+ special purge call to be issued to SVCCOM, ensuring that such
+ unclosed paths are cleaned up.
+
+      Paths come in two flavors, depending on the action desired by
+ the initiator when his partner closes.  With one, the initiator may
+ require control of the path at termination.  This mechanism is
+ analogous to a sales counter at a store.  The clerk (the initiator
+ who requests control) sets up his cash register at the start of a
+ business day and provides his service to many customers (partners)
+ before closing.  In the case of a path, when control has been
+ requested by the initiator, the path becomes "open" should the
+ partner close or terminate.  An end-of-file entry is then built in
+ the initiator's CA, and some other task may initialize as the new
+ partner.  Applications such as MILTEN and HASP, which provide a
+ fixed number of channels by which other tasks obtain system
+ resources, might use this type of path control.
+
+      If control has not been specified or the initiator himself
+ terminates, the path remains in a "terminating" state, a state
+ which allows the partner to perform clean-up processing, but does
+ not allow the partner to participate in subsequent initializations.
+ Two sides of a path may not both request control.
+
+
+ Example.  To provide an overview of the SVC's behavior, the
++_______
+ following paragraphs step through a hypothetical period in which
+ HASP, MILTEN and WYLBUR establish communications.  (Refer to Figure
+ 1.  In this example, PCB chain ordering is not taken into account.)
+ HASP issues the first initialization call, stating that it wishes
+ the following paths established:
+
+      PATH MYTAG=HASPCONS,YOURTAG=MILCONS,BUFSIZE=value,CONTROL=YES...
+      PATH MYTAG=HASPCONS,YOURTAG=WYLCONS,BUFSIZE=value,CONTROL=YES...
+      PATH MYTAG=HASPRDR,YOURTAG=WYLRDR,BUFSIZE=value,CONTROL=YES...
+
+ The SVC allocates a COMB for HASP and a PCB for each of the three
+ paths.  Assuming that no other communications yet exist, the PCBs
+ are simply chained via PCB link fields, path symbolic names are
+ filled in, and the PCB originator fields are filled in.  HASP
+ provides a buffer size for each path which is used to allocate a CA
+ to hold information received via each PCB.  A flag is set for each
+ path which requests termination control for HASP.  Finally the SVC
+ uses the COMB PCB link field and the PCB originator link fields to
+ chain together the paths participated in by HASP. This linkage is
+ shown by the blue dotted line in Figure 1.  At this point, none of
+ the answerer fields are filled in, and there is only one CA for
+ each PCB.  The SVC returns a path identifier for each PCB and
+ exits.
+
+      Now assume that MILTEN is loaded and issues an initialization
+ call for the following paths:
+
+      PATH MYTAG=TERMNALS,YOURTAG=WYLTERM,BUFSIZE=value,CONTROL=YES...
+      PATH MYTAG=MILCONS,YOURTAG=HASPCONS,BUFSIZE=value,CONTROL=NO...
+
+ The SVC sees that MILTEN has not communicated before and allocates
+ COMB2.  Examining the first initialization request and chaining
+ through existing PCBs, the SVC finds no path with symbolic names
+ TERMNALS and WYLTERMS.  It therefore allocates PCB4 and chains it
+ to PCB3 via PCB3's PCB link field.  As in the HASP call, the SVC
+ fills in the originator fields of the new PCB and allocates a CA of
+ the size specified in MILTEN's parameter list.  Looking at the
+ second request and the PCB chain, the SVC finds that PCB1 matches
+ the request.  MILTEN becomes the answerer for that path, and a
+ second CA is built for the MILTEN side of the HASP-MILTEN path.  As
+ shown by the red dotted line in Figure 1, the two paths associated
+ with MILTEN are chained to MILTEN's COMB.  The SVC returns
+ appropriate path identifiers and exits.
+
+      Finally, WYLBUR is loaded and calls the SVC with requests for
+ three paths:
+
+      PATH MYTAG=WYLCONS,YOURTAG=HASPCONS,BUFSIZE=value,CONTROL=NO...
+      PATH MYTAG=WYLRDR,YOURTAG=HASPRDR,BUFSIZE=value,CONTROL=NO...
+      PATH MYTAG=WYLTERM,YOURTAG=TERMNALS,BUFSIZE=value,CONTROL=NO...
+
+ WYLBUR has not previously communicated.  A new COMB is needed, but
+ all requested paths exist.  The SVC then fills in the answerer
+ fields in PCBs 2, 3 and 4 and allocates WYLBUR's CAs for these
+ paths.  Returning three path identifiers, the SVC exits.  WYLBUR
+ path linkages are shown by the green dotted line in Figure 1.
+
+      If MILTEN should abend, the modification to IEAVET00 issues a
+ purge call with MILTEN's TCB as its argument.  The SVC chains
+ through the COMBs and finds that COMB2 contains the address.  After
+ picking up the PCB link field, the SVC dequeues MILTEN's COMB and
+ chains through MILTEN's paths to clean them up.  In the case of the
+ HASPCONS-MILCONS path, HASP has termination control, causing the
+ SVC to free MILTEN's CA, clear the PCB answerer fields, build an
+ "end of file" entry in HASP's CA, and post the answerer that his
+ partner has closed.  The path still exists and now awaits a new
+ MILCONS.  For the TERMINALS-WYLTERM path, MILTEN is in control.
+ Here the MILTEN CA is deallocated, the originator fields are
+ cleared, and WYLBUR is posted.  But instead of leaving the PCB in a
+ "waiting for initiation" state, a flag will be set so that the PCB
+ does participate in future initializations.  (WYLBUR may still
+ retrieve information, and the path remains in a "terminating" state
+ until WYLBUR issues a close call or goes away.)
+
+ 3.  Initializing a path.
+
+      To initialize a path, the initiator establishes communications
+ with its partners, codes a PATH macro to produce  PATH blocks for
+ each path to be opened, constructs a list of PATH block addresses,
+ and codes the proper SVC calling sequence.
+
+ 3.1  Establishing conventions with other communicators.
+
+      Before using SVCCOM, a protocol must be established between
+ communicators.  First and most important, they must agree upon
+ symbolic tags.  To do so, users must understand how these tags are
+ employed.
+
+ 3.1.1  Criteria for choosing the password, MYTAG, and YOURTAG.
+
+      Assume that the first initializer of the day has specified its
+ PATH macro as follows:
+
+ FRSTPATH PATH
+ MYTAG=MILDRED,YOURTAG=HORTENSE,PASS=#123,CONTROL=NO...
+
+ Since MILDRED is the first caller, we know that there is no open
+ path waiting for her.  SVCCOM builds the following open PATH block:
+
+          PCBOTAG contains 'MILDRED'  (MILDRED is this caller, the originator)
+          PCBATAG contains 'HORTENSE' (HORTENSE will eventually answer)
+          PCBPASS contains XL4'123'   (HORTENSE must supply this password)
+
+      Now another caller comes along, with a PATH block generated by
+ the following macro call:
+
+ NEXTGUY PATH MYTAG=JOE,YOURTAG=FRED,PASS=#123,CONTROL=NO...
+
+ SVCCOM looks through the PCB chain for a PCB whose PCBPASS field
+ contains XL4'123' and finds MILDRED.  However, the caller has
+ specified that he wishes to speak with FRED, so the symbolic tags
+ do not match.  (YOURTAG is not identical to PCBOTAG.)  We have
+ assumed that only one PCB is present; therefore, since "JOE" is
+ alphabetically less than "MILDRED", SVCCOM builds a second PCB and
+ inserts it ahead of MILDRED's PCB.  The second PCB looks like this:
+
+          PCBOTAG contains 'JOE'      (JOE is the originator)
+          PCBATAG contains 'FRED'     (FRED will eventually answer)
+          PCBPASS contains XL4'123'   (FRED must supply this password)
+
+      Finally, HORTENSE comes along.  Her PATH macro was coded as
+ follows:
+
+ HORTPATH PATH
+ MYTAG=HORTENSE,YOURTAG=MILDRED,PASS=#123,CONTROL=NO...
+
+ SVCCOM searches the PCB chain and finds JOE because their
+ passwords match.  But upon comparing PCBOTAG with YOURTAG an
+ inequality results, and the open slot is rejected.  Next SVCCOM
+ finds HORTENSE's PCB.  MYTAG compares identically to PCBATAG, and
+ the SVC compares YOURTAG with PCBATAG.  These also match, and the
+ empty slot is filled.
+
+      Suppose that HORTENSE specified CONTROL=YES instead of
+ CONTROL=NO.  CONTROL=YES implies that she will be around after
+ MILDRED closes, and, furthermore, that another MILDRED may be along
+ later.  In this case SVCCOM switches MILDRED to the PCBA side of
+ the block, inserts HORTENSE in PCBO, and re-collates the PCB.
+ Since "HORTENSE" is alphabetically less than "JOE"; her PCB will
+ precede his.  When MILDRED goes away, HORTENSE's PCB will be in the
+ proper position in the chain such that a second MILDRED can find
+ the open slot.
+
+      Now, to introduce one further complexity, consider an
+ application which opens several identical paths representing
+ equivalent services.  Just as a bank customer does not care which
+ teller cashes his check, a job using the services of this
+ hypothetical multi-path application will be served equally well by
+ any of these paths.  Furthermore, if PATH1 is the free path at the
+ time his job runs, the user does not want to have to  pick "PATH2"
+ in place of "PATH1".
+
+      For this reason, SVCCOM permits YOURTAG to be left unspecified
+ by one side of a path.  Using this feature, any answerer
+ (MYTAG=anything) who specifies the proper password and YOURTAG will
+ match any of the equivalent paths.  When YOURTAG is omitted from
+ the PATH macro, the value 8X'FF' is supplied.  Since 8X'FF' is
+ alphabetically greater than any other possible tag, SVCCOM inserts
+ the PCB with a specific PCBATAG after any other path with the same
+ password and PCBOTAG.  Thus, an answerer whose name matches the
+ specific path will always occupy the specific rather than the
+ general path unless the specific path is already in use.
+
+ 3.1.2  Conflicting symbolic tags
+
+      VS2 associates only one predictable, unique, externally
+ accessible attribute with a job: the jobname.  Since a design
+ criterion required that jobname not be associated in any way with
+ path symbolic tags, SVCCOM cannot guarantee that path symbolic tags
+ will not conflict.  Two sets of communicators may happen upon the
+ same set of symbolic tags or two tasks may deliberately choose
+ identical tags for equivalent paths.  For this reason, SVCCOM does
+ not reject a caller who tries to initialize a path whose tags
+ duplicate those of a preexisting path.  Instead the SVC returns
+ information notifying the caller of a possible unintentional
+ conflict.  (See Section 3.4, Returns, for a description of this
+ information.)  As use of SVCCOM increases, a convention for
+ choosing passwords may need to be adopted.
+
+ 3.1.3  Internal protocols
+
+      Once a path is established, communicators may send virtually
+ anything to each other.  Applications must establish their own
+ internal protocols to define acceptable data transmissions.  Such a
+ protocol should ensure that a communicator will detect a respondent
+ who answers mistakenly due to duplicate symbolic tags.
+
+ 3.2  Coding the PATH macro.
+
+      The PATH macro used to generate PATH blocks, passed as
+ arguments during initial calls, or used to produce a DSECT to
+ address such blocks.  Table 2 explains how each operand of the
+ macro is specified and describes its function;  Appendix B contains
+ various expansions of the macro.  One operand may require further
+ amplification, however.
+
+     The PFX (prefix) operand permits mnemonics for the assorted fields to
+ be prefixed by a string other than the default "PATH".  This
+ feature is useful for integrating the PATH block into some larger
+ user control block.  (For an example, see Appendix B.1.2.)
+
+      PATH tries to make an educated guess about the purpose to
+ which it is being put.  Specifically, if all operands (except PFX)
+ are omitted, it assumes that a DSECT is being generated and
+ supplies dummy values for all control block fields.  However, if
+ any required SVCCOM initialization parameters are provided, PATH
+ assumes that a real control block is being generated.  Missing
+ parameters may cause errors when the SVC is called, so an MNOTE is
+ written as a warning.
+
+ 3.3  Calling the SVC.
+
+      To issue an initial call, two register arguments must be
+ provided:
+
+             .  R0 must contain zero.
+
+             .  R1 contains the address of a list of one or more
+             PATH block addresses.  The last address in this list
+             is signified by setting the high order bit.
+
+ 3.4  Returns.
+
+      Normal returns from the SVC result in a condition code of zero
+ and a value of zero in register 15.  Information is also returned
+ in those PATH blocks which participated in the initial call.
+
+             .  The PATHMGC field will contain a "magic word"
+             (actually the PCB address).  The "magic word" must
+             be supplied in all future calls to the SVC for that
+             path.
+
+             .  The PATHMFL field may have one or two bits set to
+             indicate that duplicate path symbolics were found.
+             If either  of these bits  are set, the PATHDJNM
+             field contains the address of PCBO's jobname for the
+             last conflicting path.
+
+      "Duplicate symbolic tags" occur under either of the following
+ two conditions:
+
+             .  PATHPASS=PCBPASS, MYTAG=PCBOTAG,
+             YOURTAG=PCBATAG,or both YOURTAG and PCBATAG are
+             unspecified.  (This condition is not reported if the
+             PCB's job step TCB is identical to the caller's.) In
+             this case PATHMDP1 will be set in the mode flag.
+
+             .  For a busy path, PATHPASS=PCBPASS, either MYTAG=
+             PCBATAG or PCBATAG is unspecified, or either
+             YOURTAG=PCBOTAG or YOURTAG is unspecified.  In this
+             case PATHMDP2 will be set in the mode flag.
+
+      The following conditions result in an abnormal return or abend
+ from an initialization call:
+
+          .  If R0 is not zero, the call will be processed as a
+             command or purge call and errors will be detected
+             accordingly.
+
+          .  If R1 or any address in the list to which it points
+             is zero, the caller will be abended (via ABTERM) with
+             a system completion code of Fxx, where xx is the SVC
+             number assigned to SVCCOM.
+
+          .  The VS address validity checking routine (CVT0VL00)
+             is invoked to verify the value in R1 and all addresses
+             in the list to which it points.  Abnormal termination
+             will be scheduled if the address would cause a
+             protection or alignment error.
+
+          .  ECB and flag byte addresses are also checked with the
+             VS validity check routine.
+
+          .  The high order byte of all addresses is cleared before
+             validity checking occurs.
+
+      The following conditions cause return with a positive
+ condition code, a return code in register 15, and the offending
+ PATH block address in register 1.  (Return code values and
+ mnemonics may be found in the DSECT expansion of the PCW macro,
+ Appendix B.3.1.)
+
+          .  MYTAG and YOURTAG are compared and may not be identical.
+
+          .  The buffer must be between 8 and 32K bytes, and must be
+             an even number of double words.
+
+          .  All control blocks are dynamically allocated via a
+             branch entry to the GET/FREE Quickcell routine.  While
+             a lack of quick cells will not cause abnormal termination,
+             an inability to GETMAIN storage will cause the caller
+             to be scheduled for abnormal termination.
+
+14.  Using the path.
+
+      Once a path has been established, numerous commands may be
+ issued to the SVC.  These commands send and retrieve in the CA,
+ request pointers to unretrieved transactions in the CA, free CA
+ segments, send and request discretionary posts, and retrieve
+ statistics about SVCCOM's use.  To understand many of these
+ commands, it is first necessary to learn how SVCCOM manages its
+ communications areas.
+
+ 4.1  SVCCOM management of the communications area.
+
+      Each SVCCOM communications area is managed as a circular
+ buffer is which data is processed on a first-in/first-out order.
+ Logically, the buffer consists of three parts:
+
+         1)  an area containing "located" data (data being
+         examined by the receiver within the buffer),
+
+         2)  an area containing unexamined data, and
+
+         3)  an area which is free to receive new data.
+
+ The relationship between logical and physical buffer format (and
+ the meaning of PCBX fields describing offsets within the buffer) is
+ shown in Figure 4.
+
+      Data sent to and retrieved from SVCCOM is always associated
+ with a "record descriptor word" (RDW) describing the data length,
+ segmentation, and other attributes.  (See Appendix B.3.3 for an
+ expansion of the RDW macro.)  In this document the data, together
+ with its RDW, is called a "transaction".  When a send call is
+ processed, SVCCOM places a transaction in the communications area
+ located in the receiver's subpool 252.
+
+      In the SEND TRANSACTION call, the user RDW immediately
+ precedes the data, while in the SEND DATA call the RDW is
+ constructed in the second word of the PCW.  When chaining disjoint
+ segments of data into a single transaction, the user constructs
+ multi-segment transactions, indicated by setting appropriate flags
+ in RDWUFL.  SEND TRANSACTION and SEND DATA calls may be
+ interspersed during data chaining.
+
+      Although users may send transactions of any length, including
+ a length of four, (that is, only the RDW), the SVC maintains
+ transactions in its buffer as multiples of a halfword.  This allows
+ the RDWSZ field to be accessed directly in the buffer via a load
+ halfword instruction.  Should the length of a transaction sent to
+ the SVC contain an odd number of bytes, the SVC increments the
+ RDWSZ field by one and marks the RDWSPAD flag.  This increment is
+ reflected in the transactions returned to a user on a retrieve
+ transaction(s) call.  Thus if a receiver provides a properly
+ aligned receiving area on such a call, he may also depend upon the
+ proper alignment of RDWSZ fields.  But he must always check the
+ RDWSPAD flags to determine whether the last byte in each
+ transaction is valid data.
+
+      Each transaction within one of the SVC's buffers has one and
+ only one RDW, including transactions sent by data-chaining.  Even
+ if a transaction wraps around the end of the physical buffer, only
+ one RDW will be built.  The RDW itself may be split at this wrap
+ point.  Beware when processing the CA with locate-mode retrieval.
+ (See Appendix C.)  Note that the "halfword multiple" assumption and
+ the requirement that SVCCOM's buffers be a doubleword multiple and
+ start on a doubleword ensure that the RDW can only be split after
+ two bytes.
+
+      A diagram of the logical and physical formats of a CA
+ containing five transactions are shown in Figures 5(a) and 5(b).
+
+ 4.2  The Path Command Word
+
+      A single call to SVCCOM can cause many different commands to
+ be issued.  These commands share a common format, called a "path
+ command word", and are analogous to the CCW's used to perform I/O.
+ The PCW macro can be used to generate particular PCWs or may be
+ invoked with no arguments to produce a PCW DSECT, opcode mnemonics,
+ flag and return code mnemonics, and comments which summarize
+ operand meanings.  Appendix B contains expansions of the PCW macro.
+ (See B.3.1 for the DSECT expansion.)
+
+ Like the CCW, each PCW is a doubleword in length.  Unlike the CCW,
+ however, it need only be aligned on a fullword boundary.  Its first
+ word contains a one-byte operation code and a three-byte address;
+ its second word is identical in format to an RDW.  (In fact, this
+ second word serves as a "remote-control" RDW for the send data
+ commandand is used when descriptive information cannot be adjacent
+ to the data it describes.)
+
+ 4.3  Calling the SVC.
+
+     After both sides of a path have been initialized, either party may issue
+ a number of commands to communicate with the other.  Command calls
+ must provide two register arguments:
+
+             .  R0 must contain the "path magic word" returned
+             in the first word of the PATH block at initialization.
+
+             .  R1 contains the address of a list of one or more
+             path command words (PCWs).  The last PCW in the list
+             is signified by setting the high order bit.
+
+      A normal return results in a zero condition code, zero in
+ register 15, and performance of all actions requested in the
+ command list.
+
+      Abnormal return results in a positive condition code, a return
+ code signifying the error condition in register 15, and the address
+ of the offending command in register 1.  SVCCOM detects two general
+ error conditions:  "invalid command" and "illegal address operand".
+ All other return codes are command specific.  Return code values
+ and mnemonics may be found in Appendix B.3.1, the PCW DSECT
+ expansion.)
+
+14.4  Command functions.
+
+      Send transaction - The address operand points to a transaction
++     ________________
+ which SVCCOM moves to the receiver's CA.  Two abnormal conditions
+ may result from this command:
+
+             .  There may be insufficient room in the receiver's
+             CA.  An overflow condition is returned and the
+             number of bytes by which the transaction exceeds the
+             CA is returned in register 0.
+
+             .  The command may have been issued before the other
+             party is present.  A "no partner" condition is
+             returned.
+
+      Send data - Some applications may find "send transaction"
++     _________
+ undesirable because it requires the RDW to be adjacent to the data
+ it describes.  "Send data" locates the RDW in the path command
+ word; the command's address operand points to the data.  (The count
+ in this removed RDW does not include the four bytes ordinarily
+ added for RDW size.)  "Send transaction" abnormal returns also
+ apply to "send data".  Both types of send may describe transactions
+ with null data; SVCCOM builds an RDW with a count of four in the
+ CA.
+
+      Data chaining - As many send commands as desired, of either
++     _____________
+ type and in any order, may be chained by turning on the proper
+ flags in the RDWUFL field.   SVCCOM creates a single composite
+ transaction in the CA.  Component RDWs do not appear in the CA;
+ they are used only to determine chaining and total length.
+
+      Chained send commands may produce both of the abnormal
+ conditions which occur for individual sends.  (In actuality, all
+ send commands are treated as chains, some of which have only one
+ link.)  Overflow is detected before any data is moved and applies
+ to the composite transaction.
+
+      One additional abnormal condition may occur through incorrect
+ use of the chaining flags:  "attempt to chain to a non-send
+ command."
+
+      Retrieve transaction - The PCW address and length fields
++     ____________________
+ describe an area in the caller's program to which SVCCOM will move
+ the next unexamined transaction from the caller's CA.  If no
+ transactions are present in the CA,  a fullword zero will be stored
+ at the start of the receive area.  Should the area be too small to
+ hold the transaction, an overflow condition is returned, with the
+ overflow count in register zero.  No data is returned on overflows.
+
+      Retrieve multiple transactions - This command is very similar
++     ______________________________
+ to "retrieve transaction".  The difference, of course, is that
+ SVCCOM moves as many transactions as will fit in to the receive
+ area.  The SVC also stores a halfword "total length moved" and a
+ halfword "number of transactions moved" in the first word of the
+ receive area.  An overflow condition occurs only if the first
+ transaction to be moved overflows the receive area.
+
+      Retrieve-locate after free - Some users may wish to examine
++     __________________________
+ and move data from their CA directly.  Locate-mode retrieval
+ returns addresses and lengths permitting examination of all
+ transactions currently waiting for retrieval.  The PCW address
+ operand points to a sixteen-byte area aligned on a fullword.
+ SVCCOM stores the starting address and length of that portion of
+ the CA containing unretrieved transactions.  As Section 4.1
+ explains, this area may "wrap" around the end of the CA to the CA
+ start.  Thus, the third word returned contains the CA starting
+ address and the fourth word contains the length of the wrap area or
+ zero if no wrap occurred.
+
+      Unlike "retrieve transaction(s)", locate mode retrieval does
+ not free the CA area reflected in the pointers returned to the
+ user.  The caller must issue a second "retrieve-locate after free"
+ to free the area located by the first call.  (Either type of
+ "retrieve transaction" call will also free an outstanding locate.)
+
+      There are no abnormal returns specific to locate-mode
+ retrieval.
+
+      Retrieve-locate  - This command differs from the preceding one
++     _______________
+ in that it does not release portions of the CA previously located.
+ The pointers returned reflect any transactions received since the
+ last locate retrieval, but do not include transactions already
+ located.  "Retrieve-locate" is useful in applications where
+ transactions cannot be processed in the order in which they appear
+ in the CA.
+
+      Free transaction - This command complements "retrieve-locate"
++     ________________
+ by allowing the caller to selectively free located transactions.
+ The PCW address field points to a transaction  which SVCCOM will
+ mark free in its RDWSFL field.  The area occupied by the freed
+ transaction is actually released for reuse only if it is the first
+ transaction in the located area.  Once one transaction  is
+ released, the new "first transaction" is checked to see if it is
+ marked free and should be released.  This process continues until a
+ transaction not marked free reaches the head of the line, or until
+ no more located transactions exist.
+
+      "Free transaction" returns an abnormal condition if the PCW
+ address does not point to the start of a located transaction.
+
+      ECB and discretionary post commands - These commands
++     ___________________________________
+ complement each other.  They allow a sender to post a receiver if
+ he has provided an ECB for the purpose.  The discretionary post
+ command asks the SVC to post the other side; the ECB command call
+ provides an ECB address so that the sender can be sent the
+ discretionary post.  If SVCCOM receives a discretionary post
+ request for which no ECB has arrived, the request is remembered
+ until an ECB is sent.  A new ECB must be provided for each
+ discretionary post.
+
+      "Discretionary post" has no operands.  "ECB" provides the
+ address of an ECB.
+
+      An abnormal "no partner" return occurs if a discretionary post
+ is sent to a terminated path side.
+
+      Statistics call -  The PCW address field points to an area in
++     _______________
+ the caller's region into which SVCCOM will move various counters
+ and statistical values which reflect SVCCOM activity since the last
+ IPL.  The format of this information may be obtained by issuing the
+ SCOMSTAT macro. (See Appendix B.3.4.)  The statistics call is
+ intended for system use, and the format of SCOMSTAT may change with
+ no notice outside the Systems Group.
+
+      General command modifiers - The last command in a PCW list is
++     _________________________
+ signified by setting its high order bit.  Two other masks may be
+ or'ed with the last PCW in the list:  one requests that the
+ caller's side of the path be closed and one, which may be used only
+ by the controller, requests that the controllee be closed.
+ Termination processing is described in section 5.3.
+
+15.  Special considerations.
+
+ 5.1  Posting.
+
+     The ECB whose address was provided at initialization will be posted (and the ECB
+ "reason for post" flag or'ed) during communication for the
+ following reasons:
+
+     1.  Other party has initialized.
+     2.  Other party has placed new information in my buffer.
+     3.  Previously I tried to send to the other party and was
+         rejected because his buffer was full.  Space in that
+         buffer has now been freed.
+     4.  The partner has terminated.
+     5.  The partner, who controls this path, has closed me.
+     6.  My discretionary post ECB has been posted.
+
+      Callers will be posted that "the other party has initialized"
+ or "my discretionary post ECB has been posted" even if the reason
+ for the post is detected during their own call to the SVC.  The
+ second party to initialize will find himself posted upon return
+ from the SVC, as will the caller who sends an ECB command after its
+ partner has sent a POST command.
+
+      Each call to the SVC can produce no more than one post of any
+ of the four possible path ECBs.  For example, a call which includes
+ two send commands will result in a single post of the receiver.
+
+ 5.2  Asynchronous exit routines.  (not yet implemented)
+
+15.3  Termination processing.
+
+      When a communicating task issues a close command, processing
+ depends upon whether one of the partners controls the path.  If the
+ terminator is in control or if neither side controls the path,
+ SVCCOM marks the path "terminating".  The remaining partner will be
+ posted that his counterpart has closed and may issue any command
+ except "send" and "discretionary post".  Eventually SVCCOM
+ deallocates the path when the second partner also closes.
+
+      Should a controlled side close, SVCCOM clears out its PCBX,
+ releases its CA, and builds an end-of-file entry in the remaining
+ communicator's CA.  The path is now "open" again, and another
+ communicator can initialize.  Should the controller's CA be full
+ (preventing the SVC from building an end-of-file), SVCCOM remembers
+ the condition and does not post the remaining partner that a close
+ has occurred.  As soon as he frees space in his CA, the end-of-file
+ is built and he is posted.  An end-of-file consists of an RDW with
+ no data.  Its RDWSFL flag is marked with RDWSEOF.
+
+      If a controller closes its partner, the partner is posted and
+ processed as though it had closed itself.
+
+      If no explicit close is issued, a communicator's paths will
+ none the less be closed when the task abends or exits.  A
+ modification to VS2 issues a purge call which effectively does a
+ close for each of the task's paths.
+
+16.  The purge call.
+
+     This call is designed as an entry to be used during VS termination
+ processing but may also be used by a calling task to close all its
+ own paths.  The caller provides two register arguments:
+
+          .  R0 must be negative.
+          .  R1 must contain the calling task's TCB address.
+
+ The caller will be scheduled for abnormal termination if the TCB
+ address is not his own TCB.
+
+1Appendix A:  Storage Protection Summary
++_______________________________________
+
+      Storage protection under VS2 Release 1.6 is composed of
+ several hardware and software mechanisms:
+
+          .  Storage key-protection hardware and that portion of
+          the dynamic address translation hardware which
+          generates invalid segment or invalid page exceptions.
+
+          .  Portions of the initiators, GETMAIN/FREEMAIN, the
+          paging supervisor, and the dispatcher which request a
+          region, obtain virtual storage, establish the
+          correspondence between virtual, external, and real
+          storage, and modify the protection environment as task
+          switches occur, respectively.
+
+      The hardware mechanisms ensure that, as each instruction is
+ fetched and executed, storage is accessed according to the
+ following rules:
+
+          1)  When the 370 operates in extended control mode with
+          appropriate control register bits set, storage is
+          logically divided into 64K segments and each segment
+          into 4K pages.  The dynamic address translation
+          hardware uses a "segment table" (pointed to by a
+          control register) and a corresponding set of "page
+          tables" (pointed to  by the segment table entries) to
+          map the virtual addresses contained in the instruction
+          into addresses corresponding to real storage.  During
+          translation the hardware generates an "invalid segment"
+          or "invalid page" exception if the invalid bit is set
+          in the relevant segment or page table entry.
+
+          2)  Once the real address is obtained, the instruction
+          may alter the contents of a location if the access
+          control bits of the storage key match the protection
+          key of the PSW, or if the PSW key is zero.
+
+          3)  If the fetch-protection bit in the storage key is
+          zero, the instruction may examine the contents of the
+          location.
+
+          4)  If the fetch-protection bit in the storage key is
+          one, the instruction may examine the contents of the
+          location only when the access control bits of the
+          storage key match the protection key in the PSW, or if
+          the PSW key is zero.
+
+ Violation of these three rules results in a protection exception.
+
+      The hardware features just described use a PSW, control
+ register values, storage keys, and segment and page tables, all of
+ which are established for the problem program by VS2 and which may
+ be described as the "storage protection environment".  An
+ independent PSW and register status is maintained for each task.
+ Protection keys are assigned as follows:  key zero is assigned to
+ VS2 (and therefore to SVCs), all V=V tasks are assigned the same
+ key, and each V=R task is assigned a different key from among those
+ remaining.
+
+      Two segment tables are maintained:  one for key zero and V=R
+ tasks (the system segment table) and one for V=V tasks.  Only one
+ set of page tables is maintained; both segment tables point to
+ portions of it.  The format of a page table entry reserves one bit
+ (the programmable bit) for use by the operating system.
+
+      Supervisor and V=R tasks' storage is protected primarily by
+ the key-checking hardware.  But V=V tasks would be unprotected from
+ each other if keys were the only storage protection mechanism.  For
+ this reason, when a V=V task is dispatched, the dispatcher sets the
+ invalid bits in the V=V segment table to protect segments
+ corresponding to other V=V tasks' regions.  It knows which segments
+ to mark through a table built by GETMAIN when the region is
+ acquired by the initiator.  When an "invalid segment" exception is
+ processed, the interrupt handler changes it to a protection
+ exception condition to be passed to the problem program.
+
+      That subset of the page tables corresponding to a given region
+ resides in that region's LSQA and is maintained jointly by the
+ paging supervisor and GETMAIN/FREEMAIN.  The system segment table
+ points to all page tables, but the V=V segment table points only to
+ page tables describing common areas and the dynamic (paged) area.
+ GETMAIN sets the programmable bit in the page table entry as
+ successive pages within a region are allocated.  The paging
+ supervisor maintains page table entry invalid bits to show whether
+ the page is in real storage.  When an invalid page exception is
+ processed the paging supervisor checks the programmable bit to
+ ascertain if the required page has been allocated.  If it has not,
+ the exception is changed to a protection exception condition and
+ passed on to the problem program.
+
+      The paging supervisor maintains a record of the storage key
+ assigned to each virtual page in its external page table.  It sets
+ this key for the assigned real page when the external page is read
+ in.  Thus the final step in storage protection for a V=V task is
+ examination of the storage key when the instruction which caused
+ the page-in is finally executed.  With this method, fetch
+ protection exceptions and exceptions due to attempts to access an
+ operating system area within a user region are recognized.
+
+1Appendix B:  Macros and DSECTS
++______________________________
+
+ B.1  The PATH macro.
+
+ B.1.1  DSECT expansion
+
+  PATHD    DSECT
+           PATH
+ +PATH     DC    0F'0'
+ +PATHMGC  DC    AL4(0)
+ +PATHDJNM DC    AL4(0)
+ +PATHMY   DC    XL8'0'
+ +PATHYOU  DC    XL8'FFFFFFFFFFFFFFFF'
+ +PATHECB  DC    AL4(0)
+ +         ORG   *-4
+ +PATHMFL  DC    AL1(0*X'40'+0*X'20')
+ +         ORG
+ +*
+ +PATHMCTL EQU   X'40' .    CALLER ASKS TERMINATION CONTROL
+ +PATHMNAM EQU   X'20' .    CALLER PROVIDES CALLEE NAME
+ +PATHMDP1 EQU   X'10' .     DUPLICATE TAGS FOUND: MY=PCBO, YIU=PCBA
+ +PATHMDP2 EQU   X'08' .     DUPLICATE TAGS FOUND: MY=PCBA, YOU=PCBO
+ +*
+ +PATHBUF  DC    AL4(0)
+ +PATHECBF DC    AL4(0)
+ +*
+ +PATHFCLS EQU   X'80' .       I AM POSTED BECAUSE HE CLOSED
+ +PATHFFQE EQU   X'40' .       I AM POSTED BECAUSE HIS FULL Q EMPTIED
+ +PATHFNI  EQU   X'20' .       I AM POSTED BECAUSE NEW INFO IN MY Q
+ +PATHFDP  EQU   X'10' .       I AM POSTED AT HIS DISCRETION
+ +PATHFOPN EQU   X'08' .       I AM POSTED BECAUSE HE OPENED
+ +*
+ +PATHPASS DC    XL4'0'
+ +*
+ +PATHSIZE EQU   *-PATH .      LENGTH OF PATH BLOCK
+
+1B.1.2  Expansion with a different prefix.
+
+  BIGBD    DSECT
+  BIGBSTRT DC    0F'0' .       START OF BIG CONTROL BLOCK
+  BIGBMISC DC    5F'0' .       MISCELLANEOUS BIGB FIELDS
+  * NOW INCLUDE THE PATH BLOCK WITHIN THE LARGER BIGB BLOCK.
+  BIGBPATH PATH PFX=BIGB
+ +BIGBPATH DC    0F'0'
+ +BIGB     DC    0F'0'
+ +BIGBMGC  DC    AL4(0)
+ +BIGBDJNM DC    AL4(0)
+ +BIGBMY   DC    XL8'0'
+ +BIGBYOU  DC    XL8'FFFFFFFFFFFFFFFF'
+ +BIGBECB  DC    AL4(0)
+ +         ORG   *-4
+ +BIGBMFL  DC    AL1(0*X'40'+0*X'20')
+ +         ORG
+ +*
+ +BIGBMCTL EQU   X'40' .    CALLER ASKS TERMINATION CONTROL
+ +BIGBMNAM EQU   X'20' .    CALLER PROVIDES CALLEE NAME
+ +BIGBMDP1 EQU   X'10' .     DUPLICATE TAGS FOUND: MY=PCBO, YIU=PCBA
+ +BIGBMDP2 EQU   X'08' .     DUPLICATE TAGS FOUND: MY=PCBA, YOU=PCBO
+ +*
+ +BIGBBUF  DC    AL4(0)
+ +BIGBECBF DC    AL4(0)
+ +*
+ +BIGBFCLS EQU   X'80' .       I AM POSTED BECAUSE HE CLOSED
+ +BIGBFFQE EQU   X'40' .       I AM POSTED BECAUSE HIS FULL Q EMPTIED
+ +BIGBFNI  EQU   X'20' .       I AM POSTED BECAUSE NEW INFO IN MY Q
+ +BIGBFDP  EQU   X'10' .       I AM POSTED AT HIS DISCRETION
+ +BIGBFOPN EQU   X'08' .       I AM POSTED BECAUSE HE OPENED
+ +*
+ +BIGBPASS DC    XL4'0'
+ +*
+ +BIGBSIZE EQU   *-BIGB .      LENGTH OF PATH BLOCK
+  BIGBLEN  EQU   *-BIGBSTRT .  SIZE OF BIGB CONTROL BLOCK
+
+1B.1.3  Expansion without mnemonics
+
+  HASPWYL  PATH  MYTAG=HASP,YOURTAG=WYLBUR,ECB=HSECB,FLAG=HASPWYL,       *
+                 BUFSIZE=256,PASS=ELLO,CONTROL=YES
+ +HASPWYL  DC    0F'0'
+ +         DC    0F'0'
+ +         DC    AL4(0)
+ +         DC    AL4(0)
+ +         DC    CL8'HASP'
+ +         DC    CL8'WYLBUR'
+ +         DC    AL4(HSECB)
+ +         ORG   *-4
+ +         DC    AL1(1*X'40'+1*X'20')
+ +         ORG
+ +         DC    AL4(256)
+ +         DC    AL4(HASPWYL)
+ +         DC    CL4'ELLO'
+
+1B.2  SVCCOM internal control block DSECTs.
+
+ B.2.1  PCB
+
+  PCBD     DSECT
+           PCB
+ +PCB      DS    0F .          START OF PATH CONTROL BLOCK
+                 *,START OF ORIG PCB EXTENT.
+ +PCBO     DS    0F .          START OF PCB EXTENT
+ +PCBOTAG  DS    CL8 .              SYMBOLIC NAME
+ +PCBOCOMB DS    A .                COMB ADDRESS
+ +PCBOCA   DS    A .                CA ADDRESS
+ +PCBOCASZ DC    A(0) .             CA SIZE
+ +PCBORCA  DC    A(0) .             RELATIVE CA DISPLACEMENT
+ +PCBORLU  DC    A(0) .             LOCATE-USEDCOUNT
+ +PCBORUF  DC    A(0) .             USED-FREE COUNT
+ +PCBOQECB DC    A(0) .             Q MANAGEMENT ECB @
+ +PCBODECB DC    A(0) .             DISCRETIONARY POST ECB @
+ +PCBOECBF DC    A(0) .             FLAGS TO TELL WHY POSTED
+ +PCBOX    DC    A(0) .             POINTER TO OTHER PCBX
+ +PCBOFL1  DC    AL1(0) .       FLAG AREA TO REMEMBER TO POST
+ +PCBOFL2  DC    AL1(0) .       FLAG BYTE FOR MVI TO USER FLAG
+ +         DC    H'0' .        UNUSED HALFWORD
+ +PCBOLINK DS    A .                NEXT LINK IN PATHID CHAIN
+ +PCBOSIZE EQU   *-PCBO .     LENGTH OF PCB EXTENT
+                 *,START OF ANS PCB EXTENT.
+ +PCBA     DS    0F .          START OF PCB EXTENT
+ +PCBATAG  DS    CL8 .              SYMBOLIC NAME
+ +PCBACOMB DS    A .                COMB ADDRESS
+ +PCBACA   DS    A .                CA ADDRESS
+ +PCBACASZ DC    A(0) .             CA SIZE
+ +PCBARCA  DC    A(0) .             RELATIVE CA DISPLACEMENT
+ +PCBARLU  DC    A(0) .             LOCATE-USEDCOUNT
+ +PCBARUF  DC    A(0) .             USED-FREE COUNT
+ +PCBAQECB DC    A(0) .             Q MANAGEMENT ECB @
+ +PCBADECB DC    A(0) .             DISCRETIONARY POST ECB @
+ +PCBAECBF DC    A(0) .             FLAGS TO TELL WHY POSTED
+ +PCBAX    DC    A(0) .             POINTER TO OTHER PCBX
+ +PCBAFL1  DC    AL1(0) .       FLAG AREA TO REMEMBER TO POST
+ +PCBAFL2  DC    AL1(0) .       FLAG BYTE FOR MVI TO USER FLAG
+ +         DC    H'0' .        UNUSED HALFWORD
+ +PCBALINK DS    A .                NEXT LINK IN PATHID CHAIN
+ +PCBASIZE EQU   *-PCBA .     LENGTH OF PCB EXTENT
+ +PCBFL    DS    0AL1 .             FLAGS
+ +*
+ +PCBFTERM EQU   X'80' .                 PATH TERMINATED
+ +PCBFCTL  EQU   X'40' .                 CONTROLLER PRESENT
+ +PCBFNAM  EQU   X'20' .                 CONT. GAVE YOURTAG
+ +PCBFEXC  EQU   X'10' .                 EXCLUSIVE USE OF TAGS
+ +*        EQU   X'08' .                 UNUSED
+ +PCBFCG   EQU   X'04' .                 CONTROLLEE GONE
+ +PCBFBSY  EQU   X'02' .                 BOTH SIDES ACTIVE
+ +PCBFDLNK EQU   X'01' .                 PATH DELINKABLE
+ +*
+ +PCBPCB   DC    A(0) .             NEXT PCB IN GLOBAL CHAIN
+ +PCBPASS  DC    A(0) .             PATH PASSWORD
+ +PCBSIZE  EQU   *-PCB .      LENGTH OF PCB
+1B.2.2  PCBX
+
+  PCBXD    DSECT
+           PCBX
+ +PCBX     DS    0F .          START OF PCB EXTENT
+ +PCBXTAG  DS    CL8 .              SYMBOLIC NAME
+ +PCBXCOMB DS    A .                COMB ADDRESS
+ +PCBXCA   DS    A .                CA ADDRESS
+ +PCBXCASZ DC    A(0) .             CA SIZE
+ +PCBXRCA  DC    A(0) .             RELATIVE CA DISPLACEMENT
+ +PCBXRLU  DC    A(0) .             LOCATE-USEDCOUNT
+ +PCBXRUF  DC    A(0) .             USED-FREE COUNT
+ +PCBXQECB DC    A(0) .             Q MANAGEMENT ECB @
+ +PCBXDECB DC    A(0) .             DISCRETIONARY POST ECB @
+ +PCBXECBF DC    A(0) .             FLAGS TO TELL WHY POSTED
+ +PCBXX    DC    A(0) .             POINTER TO OTHER PCBX
+ +PCBXFL1  DC    AL1(0) .       FLAG AREA TO REMEMBER TO POST
+ +*
+ +PCBXFTRM EQU   X'80' .       I HAVE CLOSED
+ +PCBXFFQ  EQU   X'40' .       MY FULL Q PREVENTED HIS SEND
+ +PCBXFECB EQU   X'20' .       I HAVE SENT A DP ECB
+ +PCBXFDPR EQU   X'10' .       I HAVE BEEN ASKED FOR DPOST W/NO ECB
+ +PCBXFREE EQU   X'08' .       THIS CALL FREED SPACE IN MY Q
+ +*
+ +PCBXFL2  DC    AL1(0) .       FLAG BYTE FOR MVI TO USER FLAG
+ +*
+ +PCBXFCLS EQU   X'80' .       I AM POSTED BECAUSE HE CLOSED
+ +PCBXFFQE EQU   X'40' .       I AM POSTED BECAUSE HIS FULL Q EMPTIED
+ +PCBXFNI  EQU   X'20' .       I AM POSTED BECAUSE NEW INFO IN MY Q
+ +PCBXFDP  EQU   X'10' .       I AM POSTED AT HIS DISCRETION
+ +PCBXFOPN EQU   X'08' .       I AM POSTED BECAUSE HE OPENED
+ +*
+ +         DC    H'0' .        UNUSED HALFWORD
+ +PCBXLINK DS    A .                NEXT LINK IN PATHID CHAIN
+ +PCBXSIZE EQU   *-PCBX .     LENGTH OF PCB EXTENT
+ +*
+ +*                     |<-----------PCBXRUF------------>|       |
+ +*                     |             |                  |       |
+ +*        |<--PCBXRCA->|<--PCBXRLU-->|                  |       |
+ +*        |            |             |                  | FREE  |
+ +*        ##########################################    |       |
+ +*        #                                        #    | AREA  |
+ +*        #<---------------  PCBXCASZ  ----------->#    |       |
+ +*        #    PHYSICAL BUFFER                     #    |       |
+ +*        ##########################################    |       |
+ +*        |     LOGICAL|             |                  |       |
+ +*        |      BUFFER|  LOCATED    |  UNRETRIEVED     |       |
+ +*        P       START     AREA     |  TRANSACTIONS    |       |
+ +*        C            ..........................................
+ +*        B            .                                        .
+ +*        X            .<------------  PCBXCASZ  -------------->.
+ +*        C            .   LOGICAL BUFFER                       .
+ +*        A            ..........................................
+
+1B.2.3  COMB
+
+           COMB
+ +COMB     DS    0F .          START OF COMMUNICATIONS BLOCK
+ +COMBTCB  DS    A .                TCB ADDRESS, THIS COMMUNICATOR
+ +COMBJSTC DS    A .                JOB STEP TCB, THIS COMMUNICATOR
+ +COMBPATH DS    A .                HEAD OF THIS COMM'S PATHID CHAIN
+ +COMBCOMB DS    A .                ADDRESS OF NEXT COMB OR ZERO.
+ +COMBUSE  DS    H .                USE COUNT (PATHS, THIS COMMUNICATOR)
+ +COMBTOT  DS    H .                TOTAL PATHS THIS COMMUNICATOR
+ +         DS    A .                UNUSED TO FORCE DOUBLEWORD
+ +COMBSIZE EQU   *-COMB .      LENGTH OF COMB
+
+1B.3  Macros used in coding command calls.
+
+ B.3.1  The PCW DSECT
+
+  PCWD     DSECT
+           PCW
+ +*  PATH COMMAND WORD                    OPERAND REQUIRED FOR:
+ +*                                  SNDD  RETMX,RETX  POST  STAT  OTHER
+ +*                               --------------------------------------
+ +PCW      DC    0F'0'
+ +PCWCMD   DS    0AL1 . . COMMAND       *        *       -     *     *
+ +PCWADDR  DC    AL4(0) . ADDRESS       *        *       -     -     *
+ +PCWLEN   DC    AL2(0) . LENGTH        *        *       -     -     -
+ +PCWFLG   DC    AL1(0) . FLAGS         *        -       -     -     -
+ +         DC    AL1(0) . RESRVD
+ +*                               --------------------------------------
+ +PCWSIZE  EQU   *-PCW
+ +*
+ +*  COMMAND MNEMONICS                       MEANING OF OPERANDS:
+ +*                                      PCWADDR       PCWLEN    PCWFLG
+ +*                                    ----------------------------------
+ +CMDSNDX  EQU   X'01' . SEND           TRANSACTION      --        --
+ +*                      TRANSACTION    ADDRESS
+ +*
+ +CMDSNDD  EQU   X'02' . SEND           DATA ADDRESS  DATA       CHAIN
+ +*                      DATA                         LENGTH     FLAGS
+ +*
+ +CMDRETLF EQU   X'03' . LOCATE-FREE    ADDRESS OF       --        --
+ +*                      RETRIEVE       4 WORD AREA
+ +*
+ +CMDRETL  EQU   X'04' . LOCATE         ADDRESS OF       --        --
+ +*                      RETRIEVE       4 WORD AREA
+ +*
+ +CMDRETMX EQU   X'05' . RETRIEVE       ADDRESS OF    LENGTH OF    --
+ +*                      MULTIPLE       RECEIVE AREA  RECEIVE AREA
+ +*
+ +CMDRETX  EQU   X'06' . RETRIEVE       ADDRESS OF    LENGTH OF    --
+ +*                      SINGLE         RECEIVE AREA  RECEIVE AREA
+ +*
+ +CMDFREEX EQU   X'07' . FREE           RDW ADDRESS      --        --
+ +*                      TRANSACTION
+ +*
+ +CMDECB   EQU   X'08' . ECB FOR        ECB ADDRESS      --        --
+ +*                      POST
+ +*
+ +CMDPOST  EQU   X'09' . POST HIM            --          --        --
+ +*
+ +CMDSTAT  EQU   X'10' . STATISTICS     ADDRESS OF       --        --
+ +*                                     RECEIVE AREA
+ +*                                     --------------------------------
+ +CMDMAX   EQU   CMDSTAT
+ +*
+ +*  MASKS WHICH MAY BE ORED WITH PCWCMD:
+ +*
+ +CMDEND   EQU   X'80' .       END OF PCWLIST
+ +CMDCLOS  EQU   X'C0' .       CLOSE ME AFTER THIS COMMAND
+ +CMDCLOSC EQU   X'A0' .       CLOSE MY CONTROLLEE AFTER THIS COMMAND
+ +*
+ +*  RETURN CODES
+ +*
+ +RCBDCMD  EQU   4 BAD COMMAND RETURN CODE.
+ +RCBADPID EQU   8 BAD PATHID ON CMD CALL
+ +RCSNDOVF EQU   12 OVERFLOW ON SEND COMMAND(S)
+ +RCNOPART EQU   16 PARTNER ISN'T THERE
+ +RCDCHNER EQU   20 DATACHAIN PAST SEND COMMANDS
+ +RCMOFLO  EQU   24 RETRIEVE-MOVE BUFFER TOO SMALL.
+ +RCFREXBD EQU   28 FREEX RECEIVED WITH NO LOCATE OUT
+
+1B.3.2  PCW used to generate a command list
+
+  MRDLIST  PCW   CMDRETMX,MBUF,MBUFSZ
+ +MRDLIST  DC    0F'0',AL1(CMDRETMX),AL3(MBUF),AL2(MBUFSZ),AL1(0),AL1(0)
+
+1B.3.3  The RDW macro
+
+  RDWD     DSECT
+           RDW
+ +RDW      DS    0F .          START OF RDW
+ +RDWSZ    DS    H .                LENGTH
+ +RDWUFL   DS    X .                USER FLAGS
+ +*
+ +RDWONLY  EQU   X'00' .                 ONLY SEGMENT
+ +RDWFRST  EQU   X'01' .                 FIRST OF >1 SEGMENTS
+ +RDWLAST  EQU   X'02' .                 LAST OF >1 SEGMENTS
+ +RDWMIDL  EQU   X'03' .                 MIDDLE OF >1 SEGMENTS (UNUSED)
+ +*
+ +RDWSFL   DS    X .                SVC FLAGS
+ +*
+ +RDWSFREE EQU   X'80' .                 LOCATED, CMDFREEX FREED IT
+ +RDWSPAD  EQU   X'40' .                 PADDED TO HALFWORD MULTIPLE
+ +RDWSEOF  EQU   X'20' .                 END OF FILE, THIS CONTROLLEE
+ +*
+ +RDWSIZE  EQU   *-RDW SIZE OF RDW
+
+1B.3.4  The SCOMSTAT macro
+
+  STATD    DSECT
+           SCOMSTAT
+ +SCOMSTAT DC    0F'0' .       SVCCOM STATISTICS AREA
+ +DATAIN   DC    F'0' .       BYTES OF DATA SENT VIA SNDX, SNDD
+ +DATAOUT  DC    F'0' .       BYTES OF DATA RETRIEVED
+ +DATAFREE DC    F'0' .       BYTES OF DATA FREED FROM LOCATE
+ +CMDCOUNT DC    (CMDMAX+3)H'0' . COUNT OF COMMANDS RECEIVED
+ +* (CMDMAX+1 = INITIAL CALLS, CMDMAX+2 = PURGE CALLS)
+ +TOTPCB   DC    H'0' .        TOTAL PCB'S ALLOCATED
+ +TOTPCBX  DC    H'0' .        TOTAL HALF PATHS OPENED
+ +TOTCOMB  DC    H'0' .        TOTAL COMB'S ALLOCATED
+ +CURPCB   DC    H'0' .        CURRENT PCB'S ALLOCATED
+ +CURPCBX  DC    H'0' .        CURRENT PCBX'S OCCUPIED
+ +CURCOMB  DC    H'0' .        CURRENT COMB'S ALLOCATED
+ +*
+ +STATSIZE EQU   *-SCOMSTAT .  SIZE OF STATISTICS AREA
+1Figures:
+
+ Figure 1.  Example of control block linkages.
+
+1Figure 2.  PATH operand summary.
+
+ _______________________________________________________________________________________________________________________________
+
+ Operand        Required?    Default     What to specify                 Becomes field    Function.                Example
+                                                                         value?
+ _______________________________________________________________________________________________________________________________
+
+ &MYTAG         YES          8X'00'      <1-8 characters not             YES              symbolic indentifier     MYTAG=MILTEN
+                                          starting with #>                                of caller                MYTAG=#A181C1
+                                               or
+                                         #<1-16 hexadecimal digits>
+
+ &YOURTAG       NO (2)       8X'FF'      <1-8 characters not             YES              symbolic identifier     YOURTAG=WYLBUR
+                                          starting with #>                                of caller. (1)          YOURTAG=#0011
+                                               or
+                                         #<1-16 hexadecimal digits>
+
+ &CONTROL       NO           control     YES                             YES              YES specifies termi-    CONTROL=YES
+                             not         or                                               nation control and      CONTROL=NO
+                             requested   NO                                               says that the path
+                                                                                          remains open even if
+                                                                                          the controllee closes.
+
+ &BUFSIZE       YES          minimum     an integer between 8 and        YES              Size of receiving area  BUFSIZE=1000
+                             buffer      32768                                            for information sent to
+                             size                                                         this initializer over
+                                                                                          this path. (4)
+
+ &ECB           YES          0           the address of an ECB           YES              Address of ECB to be    ECB=ECBAD
+                                                                                          posted upon other       ECB=FRSTECB+4
+                                                                                          party's initialization,
+                                                                                          closure or full buffer
+                                                                                          emptied; or when new
+                                                                                          information is placed in
+                                                                                          this party's buffer. (5)
+
+ &FLAG          YES          0           the address of a flag byte      YES              Flag byte provided by   FLAG=PATH1FL
+                                                                                          initializer where bits
+                                                                                          will be ordered showing
+                                                                                          the reason why the ECB
+                                                                                          was posted. (5)
+
+ &PASS          NO           4X'00'      <1-4 characters not             YES              Password to ensure,     PASS=AABBCCDD
+                                          starting with #>                                along with MYTAG and    PASS=D00
+                                             or                                           YOURTAG, that the
+                                         $<1-8 hexadecimal digits>                        proper two communi-
+                                                                                          cators are connected
+                                                                                          through a path.
+
+ &PFX           NO           'PATH'      1-4 alphanumerics appropriate   NO               String used as prefix   PFX=SSB
+                                         as the leading part of an                        for all mnemonics gen-
+                                         assembler label.                                 erated by the macro
+                                                                                          "PFX=" causes nmemonics
+                                                                                          to be omitted.
+
+ &LBL           NO           none        Any valid assembler label.      NO               Label generated at      LBL PATH ...
+                                                                                          start of PATH block,
+                                                                                          for example to be
+                                                                                          used in generating
+1
+_________________________________________________________________________________________________________________________________
+
+ Notes:
+
+ (1) If any of the operands marked "YES" in this column are specified in the macro call, all marked "YES" must be
+     specified, or a warning MNOTE (severity 4) will be generated.  If all operands are omitted, a set of mnemonics
+     with the prefix "PATH" will be generated (suitable for DSECT definition.)
+
+ (2) If YOURTAG is omitted by two callers, no path match occurs even when their passwords match.
+
+ (3) An omitted YOURTAG means that a respondent with any symbolic tag will be allowed to initialize the other
+     half path.
+
+ (4) Value will be rounded to next highest double word.
+
+ (5) The ECB specified in the ECB operand need not be exclusively used for this path.  If used for other purposes
+     the post code may be lost by a later post, and the flag byte preserves reason for post.  FLAG is marked with
+     posting in only one instance: if initialization finds the other party present, "other party initialized" will
+     be marked in this byte before return.
+1Figure 3.  Command operand summary.
+
+ ________________________________________________________________________________________________________________________
+
+ Command            Use and function              PCWCMD    PCWADDR        PCWLEN      PCWFLG  Format of area pointed
+                                                  Mnemonic                                     To by PCWADDR
+ ________________________________________________________________________________________________________________________
+
+ Send transaction   User provides an area         CMDSNDX   Transaction    --          --      Data len Chain  00  Data
+                    containing an RDW followed              address                             + 4     flags
+                    by data.  The SVC builds
+                    its own RDW and copies the
+                    data described by the user
+                    RDW into the receiver's
+                    buffer.
+
+ Send data          Same as CMDSNDX except        CMDSNDD   Data address   Data len    Chain   | ...Data.......
+                    the user RDW forms the                                             flags
+                    second half of the PCW
+                    instead of preceding the
+                    data.
+
+ Retrieve locate    The user provides the         CMDRETL   Address of     --          --      word1: address of logical
+                    address of a 4-word area                a 4-word                           start of waiting transac-
+                    in which the SVC places                 area                               tions.
+                    the address and length                                                     word 2: length of first
+                    of one or two areas in                                                     area.
+                    its buffer (See Table 6b.)                                                 word 3: address of wrap
+                    The area located is not                                                    area.
+                    released for reuse until                                                   word 4: length of wrap
+                    another retrieve call or                                                   area or zero if no wrap.
+                    a CMDFREEX is received.
+
+ Retrieve locate    Same as retrieve locate, but  CMDRETL   Address of     --          --      Same as retrieve locate.
+ and free           frees outstanding prior                 a 4-word
+                    locates before processing.              area
+
+ Retrieve multiple  The user provides the         CMDRETMX  Address of     Length of   --      Len of   Halfword  Data
+ transactions       address and length of an                area           area                area used # of
+                    area into which the SVC                                                             xacts
+                    a descriptor word and as
+                    many whole transactions
+                    as will fit in the user area.
+
+ Retrieve one       The user provides the         CMDRETX   Address of     Length of   --      RDW                Data
+ transaction        address and length of an                area           area
+                    area into which a
+                    single transaction will
+                    be moved.
+
+ Free transaction   The user provides the RDW     CMDFREEX  RDW address    --          --      --
+                    address of a transaction
+                    in SVCCOM's buffer.  The
+                    transaction is currently
+                    being RETRIEVE LOCATED.
+                    SVCCOM will mark the 4th
+                    byte in the RDW X'FF' and
+                    free the area when possible.
+
+ ECB (Request       The user provides the address CMDECB    ECB address    --          --      ECB to be posted.
+ discretionary      of an ECB to be posted when
+ post.)             his partner sends a CMDPOST.
+
+ Cause discre-
+ tionary post.      Post the other party's        CMDPOST   0              --          --      --
+                    discretionary post ECB if
+                    one is available, or hold
+                    the request pending until
+                    he sends a CMDECB call.
+
+ Statistics         Returns SVCCOM use statistics.CMDSTAT   Address of     --          --      See SCOMSTAT macro.
+                                                            area for return.
+ ________________________________________________________________________________________________________________________
+
+
+ Notes:
+
+      (1)  The last PCW in a list may have the following mask or'ed with PCWCMD:
+
+                   CMDEND (X'80') - Required. Indicates the last command.
+                   CMDCLOS (X'C0') - Signals "close my path-half after processing this command."
+                   CMDCLOSC (X'A0') - Signals "close my controllee's path-half after processing this command."
+
+           CMDCLOS and CMDCLOSC may appear as separate PCWs if it is not desired to include them with another command.
+
+1Figure 4.  CA format.
+
+                   |<-----------PCBXRUF------------>|       |
+                   |             |                  |       |
+      |<--PCBXRCA->|<--PCBXRLU-->|                  |       |
+      |            |             |                  | FREE  |
+      ##########################################    |       |
+      #                                        #    | AREA  |
+      #<---------------  PCBXCASZ  ----------->#    |       |
+      #    PHYSICAL BUFFER                     #    |       |
+      ##########################################    |       |
+      |     LOGICAL|             |                  |       |
+      |      BUFFER|  LOCATED    |  UNRETRIEVED     |       |
+      P       START     AREA     |  TRANSACTIONS    |       |
+      C            ..........................................
+      B            .                                        .
+      X            .<------------  PCBXCASZ  -------------->.
+      C            .   LOGICAL BUFFER                       .
+      A            ..........................................
+1Figure 5(a):  Logical format of a  buffer with five transactions.
+
+ ========================== Logical start of buffer.  Start of any data
+                            being LOCATE RETRIEVED.
+         Transaction 1
+               RDW
+               Data
+         Transaction 2
+               RDW
+               Data
+         Transaction 3
+               RDW
+               Data
+
+         __________________ Start of transactions which arrived after
+                            current LOCATE RETRIEVE
+         Transaction 4
+               RDW
+               Data
+         Transaction 5
+               RDW
+               Data
+
+         __________________ Start of free area.
+
+               .
+               .
+               .
+         Unused space
+               .
+               .
+               .
+ ========================== Logical end of buffer.
+1Figure 5(b):  Physical format of a buffer with five transactions.
+
+ ========================= Physical start of buffer.
+
+         Transaction 5 (second part)
+               Data (Second part)
+
+         _________________ Start of free area.
+
+               .
+               .
+               .
+         Unused space
+               .
+               .
+               .
+
+         _________________ Logical start of buffer.  Start of any data
+                            being LOCATE RETRIEVEd.
+         Transaction 1
+               RDW
+               Data
+         Transaction 2
+               RDW
+               Data
+         Transaction 3
+               RDW
+               Data
+
+         __________________ Start of transactions which arrived after
+                            current LOCATE RETRIEVE.
+         Transaction 4
+               RDW
+               Data
+         Transaction 5 (first part)
+               RDW
+               Data (First part)
+
+ ========================== Physical end of buffer.
+1

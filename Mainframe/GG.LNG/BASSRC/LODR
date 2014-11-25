@@ -1,0 +1,300 @@
+LODR     TITLE  'LOADER ROUTINE'
+LODR     CSECT
+*
+*        DEFINITION OF ENTRY POINTS:
+*
+*        1)LODR  - FROM CONTROL PROGRAM TO ALLOCATE CORE FOR ALL
+*                  ARRAYS WHICH WERE DIMENSIONED OR USED IN
+*                  ARITHMETIC EXPRESSIONS AS DEFAULT ARRAYS.
+*  WK4=0           THIS ENTRY WILL ALSO INITIALIZE ANY CORE
+*                  ALLOCATED TO X'80000000'.
+*                  ALSO THE PRINT BUFFER WILL BE SET TO ZERO.
+*
+*        2)LODR1 - FROM THE EXECUTOR (EXEC) TO DYNAMICALLY ALLOCATE
+*                  1 ARRAY AND INITIALIZE IT.
+*  WK4>0           REG 1 WILL CONTAIN THE ADDRESS OF THE DOPE
+*                  VECTOR FOR THIS ARRAY IN USER AREA.
+*
+*        3)LODR2 - FROM THE CONTROL PROGRAM TO RE-INITIALIZE
+*                  ALL ARRAYS (INCLUDING STRINGS) TO X'80000000'.
+*  WK4<0           ALSO, A0-Z9 WILL BE SET TO X'80000000',
+*                  EXCEPT E1 AND P1.
+*                  FROM THE EXECUTOR IN RESPONSE TO THE
+*                  'CLEAR DATA' STATEMENT.
+*
+*
+*        EXITS FROM THIS ROUTINE:
+*
+*        R0=0 - SUCCESSFUL ALLOCATION
+*        R0=1 - NO MORE ROOM FOR ARRAYS
+*
+         USING *,R15
+         SAVE  (14,12),,*         GENERAL ENTRY
+         SR    WK4,WK4                 -WK4 = 0 - ALLOCATE ALL ENTRY
+         B     COMMON
+*
+*
+         ENTRY LODR1
+         USING *,R15
+LODR1    SAVE  (14,12),,*         ENTRY FOR EXEC
+         LA    WK4,1                   -WK4 > 0 - ALLOCATE ONE ARRAY
+         B     COMMON
+*
+         ENTRY LODR2
+         USING *,R15
+LODR2    SAVE  (14,12),,*
+         LA    WK4,1
+         LNR   WK4,WK4                 -WK4 < 0 - INITIALIZE ENTRY
+*
+*
+COMMON   EQU   *
+         DROP  R15
+         BALR  BASE,0
+         USING *,BASE
+*
+         LA    SV,72(13)
+         ST    R13,4(SV)
+         ST    SV,8(R13)
+         LR    R13,SV
+         USING AREA,USER
+         L     PTR,ARRAYPTR
+         LTR   PTR,PTR                 -HAS CORE EVER BEEN ALLOCATED?
+         BNE   CTUE
+         LA    PTR,4(PTR)
+CTUE     EQU   *
+         SR    ZERO,ZERO
+         SR    INC,INC
+         SR    MAX,MAX
+         USING ATOZDSCT,DSCR
+         LTR   WK4,WK4                 -IS THIS THE CALL FROM EXEC?
+         BNP   LODRENT                  NO.
+         LR    DSCR,R1            PICK UP ARRAY TO ALLOC.
+         B     LODR1ENT
+*
+*
+************** ALLOCATE CORE FOR ARRAYS A-Z ***************************
+*
+LODRENT  LA    DSCR,ATOZ
+         LA    INC,16
+         LA    MAX,400(DSCR)           -FOR BXLE
+*
+LOOP1    EQU   *
+         CH    ZERO,ARRAYIDX           -HAS ARRAY BEEN ALLOCATED?
+         BZ    INLOOP1                  NO.
+*
+         LTR   WK4,WK4                 -ARRAY EXISTS.  IS THIS JUST
+*                                       AN INITIALIZE CALL?
+         BNL   LOOPEND1                 NO.  DONE WITH THIS ARRAY.
+*
+         LH    R1,ATOZALOC+2           -YES.  SET UP R1 TO BE THE
+*                                       NUMBER OF WORDS IN THE ARRAY.
+         LH    R15,ARRAYIDX             SET UP R15 TO BE THE INDEX.
+         B     INITATOZ
+*
+INLOOP1  CH    ZERO,ARRAYDIM
+         BNE   SETUP
+         CLI   ATOZALOC,X'00'
+         BNE   LODR1ENT                -DEFAULT ALLOC
+         LTR   WK4,WK4                 -CLEAR CALL?
+         BNL   LOOPEND1                 NO.
+         L     WK1,INIT                -YES. SET LETTER
+         ST    WK1,ARRAYRGT             BACK TO '80000000'
+         B     LOOPEND1
+*
+LODR1ENT LA    WK1,10                 -DEFAULT DIMENSION
+         LR    WK2,WK1
+         CLI   ATOZALOC,X'01'
+         BE    JUST1
+         LA    WK2,100                -DEFAULT ALLOCATION
+         ST    WK1,ARRAYRGT
+JUST1    ST    WK1,ARRAYLFT
+         B     SETP
+SETUP    L     WK2,ARRAYLFT
+         C     ZERO,ARRAYRGT
+         BZ    SETP
+         M     WK22,ARRAYRGT
+SETP     STH   WK2,ATOZALOC+2
+         STH   PTR,ARRAYIDX
+*
+*        SET UP TO HAVE THIS ARRAY INITIALIZED.
+*
+         LR    R1,WK2                  -R1- NUMBER OF WORDS
+         LR    R15,PTR                 -R15-INDEX
+*
+         SLL   WK2,2
+         AR    PTR,WK2
+         C     PTR,ARRAYSIZ
+         BH    ERROR1
+*
+INITATOZ EQU   *
+*
+*        CALL INITROUT WITH:
+*              R1  - NUMBER OF WORDS IN ARRAY
+*              R15 - INDEX
+*              R14 - RETURN
+*              WK22- WORK
+*
+         BAL   R14,INITROUT
+*
+LOOPEND1 BXLE  DSCR,INC,LOOP1
+         LTR   WK4,WK4                 -SINGLE CALL ONLY?
+         BP    OUT                      YES. EXIT.
+*
+************** ALLOCATE CORE FOR ARRAYS A$-Z$ *************************
+*
+         USING ASTGDSCT,DSCR
+         LA    DSCR,ATOZSTRG
+         LA    INC,8
+         LA    MAX,200(DSCR)
+*
+LOOP2    EQU   *
+         CH    ZERO,ASTRGIDX           -HAS ARRAY BEEN ALLOCATED?
+         BZ    INLOOP2                  NO.
+         LTR   WK4,WK4                 -SHOULD IT BE INITIALIZED?
+         BNL   LOOPEND2                 NO.  DONE WITH ARRAY
+*
+         LH    R15,ASTRGIDX
+         LA    R1,1                    -YES. SET UP R1 TO BE THE
+         CLI   ASTRGLFT,X'80'           NUMBER OF WORDS IN THE ARRAY.
+         BE    INITSTG                  (STRING HASN'T BEEN DIMED).
+         LH    R1,ASTRGLFT+2           -PICK UP DIMENSION
+         B     INITSTG
+*
+INLOOP2  CH    ZERO,ASTRGDIM
+         BNZ   IN
+         LA    WK2,4
+         B     PUT
+IN       L     WK2,ASTRGLFT
+         SLL   WK2,2
+PUT      STH   PTR,ASTRGIDX
+*
+         LR    R1,WK2
+         SRL   R1,2                    -R1 -NUMBER OF WORDS IN ARRAY
+         LR    R15,PTR                 -R15 - INDEX
+         AR    PTR,WK2
+         C     PTR,ARRAYSIZ
+         BH    ERROR1
+*
+INITSTG  EQU   *
+         BAL   R14,INITROUT
+LOOPEND2 BXLE  DSCR,INC,LOOP2
+*
+*
+*        IF THIS IS THE CALL FROM LODR2 (WK4<0) TO CLEAR USER
+*        AREA, SET A0-Z9 UP AGAIN.
+*
+         LTR   WK4,WK4
+         BZ    INITPBUF                -INITIAL CALL
+*
+         L     WK22,INIT
+         LA    WK2,A0TOZ9
+         LA    R1,260
+         SR    R15,R15
+INITA0Z9 EQU   *
+         ST    WK22,0(WK2,R15)
+         LA    R15,4(R15)
+         BCT   R1,INITA0Z9
+*
+         USING A0Z9DSCT,WK2
+         L     R1,E1CON
+         ST    R1,E1
+         L     R1,P1CON
+         ST    R1,P1
+         B     OUT
+*
+INITPBUF EQU   *
+*
+*        IF THIS IS THE CALL FROM LODR, SET THE PRINT BUFFER = 0.
+*
+         L     R15,APBUF               -DISP IN AREA OF BUFFER
+         L     R1,APBUFSIZ             -NUMBER OF BYTES
+         SRL   R1,2                    -NUMBER OF WORDS
+         SR    WK22,WK22               -INITIALIZER
+         BAL   R14,INITLOOP
+*
+OUT      ST    PTR,ARRAYPTR
+         SR    R0,R0
+RETURN   EQU   *
+*
+*        RETURN TO CALLER AFTER RESTORING ALL REGISTERS
+*        EXCEPT R0.
+*
+         L     R13,4(R13)
+         LM    R14,R15,12(R13)
+         LM    R1,R12,24(R13)
+         BR    14
+*
+***********************************************************************
+INITROUT EQU   *
+*
+*        LOCAL ROUTINE TO SET R1 WORDS, STARTING AT
+*        R15+USER+ARRAYBEG = X'80000000'.
+*        USES WK22 AS A WORK REGISTER
+*        RETURNS TO R14.
+*
+         L     WK22,INIT
+         A     R15,ARRAYBEG
+INITLOOP EQU   *
+         ST    WK22,0(USER,R15)
+         LA    R15,4(R15)
+         BCT   R1,INITLOOP
+         BR    R14
+*
+***********************************************************************
+*
+ERROR1   ST    ZERO,ARRAYPTR
+*
+*        SET ALL INDEXES BACK TO ZERO
+         USING ATOZDSCT,WK1
+         USING ASTGDSCT,WK2
+         LA    WK1,ATOZ
+         LA    WK2,ATOZSTRG
+         LA    R1,26
+RESET    EQU   *
+         STH   ZERO,ARRAYIDX
+         STH   ZERO,ASTRGIDX
+         LA    WK1,16(WK1)
+         LA    WK2,8(WK2)
+         BCT   R1,RESET
+*
+         LA    1,3001
+         L     15,VRUNERR
+         BALR  R14,R15
+         LA    R0,1
+         B     RETURN
+*
+VRUNERR  DC    V(RUNERR)
+INIT     DC    X'80000000'
+E1CON    DC    E'2.718282'
+P1CON    DC    E'3.141593'
+*
+R0       EQU   0
+R1       EQU   1
+WK4      EQU   2
+BASE     EQU   3
+WK22     EQU   4
+WK2      EQU   5
+SV       EQU   5
+ZERO     EQU   6
+PTR      EQU   7
+INC      EQU   8
+MAX      EQU   9
+WK1      EQU   10
+USER     EQU   11
+R12      EQU   12
+DSCR     EQU   12
+R13      EQU   13
+R14      EQU   14
+R15      EQU   15
+*
+A0Z9DSCT DSECT
+         DS    41F                     A0-E0
+E1       DS    F                       E1
+         DS    109F                    E2-P0
+P1       DS    F                       P1
+         DS    108F                    P2-Z9
+         EJECT
+AREA     DSECT
+         COPY  AREA
+*
+         END

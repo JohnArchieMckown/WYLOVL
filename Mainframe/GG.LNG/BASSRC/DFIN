@@ -1,0 +1,321 @@
+DFIN     TITLE   'DEFINE FILE INPUT 9/26/69'
+*
+DFIN     CSECT
+*
+*  ROUTINE TO INTERPERT DEFINE FILE STATEMENT AND PREPARE FILE CONTROL
+*  BLOCKS.
+*
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0                  LOCAL WORK ONLY..USED BY SVC
+R1       EQU   1                  LOCAL WORK ONLY..USED BY SVC
+R2       EQU   2
+R3       EQU   3
+R4       EQU   4                  LOCAL WORK WHEN NOT INTERNAL BRANCH
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9
+R10      EQU   10                 BASE FOR 'CONTROLS' WORK AREA
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'DFIN'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14                 LOCAL WORK ONLY..USED BY SVC
+R15      EQU   15                 LOCAL WORK ONLY..USED BY SVC
+*
+BASER    EQU   12                 BASE FOR 'DFIN'
+*
+         XAVE  DFIN
+*
+         USING TWORK,R10
+         USING AREA,R11
+*
+**GET SET UP FOR DEFINE FILE STATEMENT
+*
+*  THIS ROUTINE MAKES ONE ASSUMPTION (OTHER THAN REG CONVENTIONS)
+*  THAT IS THAT IT WILL FIND A DEFINE FILE STATEMENT AT PRESDBUF
+*  IN THE FORM THAT IT WAS IDENTIFIED AS A DEFINE FILE STATEMENT
+*  THAT ALL BLANKS HAVE BEEN REMOVED FROM THE AREA OF SCAN AND
+*  THAT THERE IS A BLANK AT THE END OF THE STATEMENT TO STOP THE
+*  SCAN AND INTERPRETATION OF THE STATEMENT.
+*
+         LA    R2,PRESDBUF        ADDR OF DEFINE FILE STATEMENT
+*
+**POSITION TO = SIGN
+*
+DFIN0    CLI   0(R2),C'='
+         BE    DFIN1
+         CLI   0(R2),C' '
+         BE    ERR1               = SIGN MISSING IN DEF FILE STAT
+         LA    R2,1(R0,R2)
+         B     DFIN0              CONTINUE LOOP
+*
+**POSITION TO FILE NUMBER CONVERT TO BINARY IN REG 1
+*
+DFIN1    LR    R15,R2             SAVE ADDR OF = SIGN
+         SR    R14,R14            TO COUNT CHAR IN FILE NUMBER
+DFIN2    BCTR  R15,R0             BACK OFF ADDR BY 1
+         CLI   0(R15),C'0'        TEST NUMBER LOW
+         BL    DFIN3
+         CLI   0(R15),C'9'        TEST NUMBER HIGH
+         BH    DFIN3
+         LA    R14,1(R0,R14)      COUNT NUMBER OF DIGITS
+         B     DFIN2              BACK AGAIN
+DFIN3    LA    R15,1(R0,R15)      BACK FOR OVERSHOOT
+         LTR   R14,R14            DO WE HAVE ANY
+         BZ    ERR2               FILE NUMBER MISSING
+         BAL   R4,DTB             ARG IN R15 RETURN IN R1
+*
+**WE HAVE TWO THINGS TO DO AT THIS POINT:
+*
+*  1. FIND AN OPEN SLOT IN THE FCBT (DEFINED AT 24 BITS OF ZERO)
+*       A. STORE USER FILE NUMBER IN FCBT (BINARY)
+*       B. IF ODD SLOT MOVE IN HIGH BYTE FROM EVEN ENTRY
+*  2. MAKE SURE USER HAS NOT DEFINED TWO FILES WITH SAME NUMBER
+*
+         LCR   R0,R10             TEMP OPEN SLOT INDEX IF FOUND
+         L     R3,AFCB            GET ADDR OF FILE CONTROL BLOCK TABLE
+         LA    R14,16(R0,R0)      TO COUNT LENGTH OF SEARCH
+S1       L     R15,0(R0,R3)       GET ELEMENT
+         LA    R15,0(R0,R15)      CLEAR OUT HIGH BYTE
+         LTR   R15,R15            TEST FOR OPEN SLOT
+         BZ    S3                 GO SET OPEN SLOT IF FIRST ONE
+         CLR   R15,R1             SEE IF FILE ALREADY DEFINED
+         BE    S4                 DEFINED, DELETE NEW ENTRY IF ANY
+S2       LA    R3,4(R0,R3)        KICK TO NEXT ENTRY
+         BCT   R14,S1             KEEP LOOKING
+         LTR   R3,R0              MOVE AND TEST FOR OPEN SLOT
+         BM    ERR3               ATTEMPT TO DEFINE MORE THAN 16 FILES
+         B     S5                 R3 HOLDS INDEX ON NORMAL FALL THRU
+S3       LTR   R0,R0              SEE IF STILL NEGATIVE
+         BNM   S2                 BACK IF OPEN SLOT ALREADY FOUND
+         STH   R1,2(R0,R3)        STORE FILE NUMBER IN TABLE
+         LA    R4,16(R0,R0)       COMPUTE INDEX
+         SR    R4,R14             NOW WE HAVE INDEX
+         LR    R0,R4              TEMP STORE OF IT
+         SLL   R4,31              SEE IF IT IS EVEN OR ODD INDEX
+         LTR   R4,R4              WHICH IS IT
+         BNM   S2                 IF EVEN DO NOT COPY PAGE STATUS
+         LR    R4,R3              GET ADDR OF CURRENT SLOT
+         S     R4,=F'4'           BACK OFF TO PRIOR EVEN SLOT
+         MVC   0(1,R3),0(R4)      MOVE PAGE STATUS TO ODD SLOT
+         B     S2                 NOW GO BACK AND CHECK FOR DOUBLE
+S4       LTR   R3,R0              DID WE ADD DEFINE FILE ?
+         BM    ERR4               FILE NUMBER ALREADY DEFINED
+         BAL   R4,DELOUT          GO TAKE OUT ENTRY JUST MADE
+         B     ERR4               FILE NUMBER ALREADY DEFINED
+S5       EQU   *
+*
+**COMPUTE ADDRESS OF CURRENT FCB ENTRY
+*
+         LR    R5,R3              COPY INDEX
+         MH    R5,=H'108'         DISPLACEMENT FROM FIRST ONE
+         L     R4,AFCB            ADDRESS OF TOP
+         LA    R5,64(R5,R4)       ADDRESS OF CURRENT FCB
+         USING FCB,R5             TELL ASSEMBLER
+         XC    FCBOID(4),FCBOID   ZAB FILE ID
+*
+**********************************************************
+*
+*  THREE UNLABLED REGS ARE IN USE AT THIS POINT
+*
+*    R2 = ADDR OF = SIGN  (SCAN POINTER)
+*    R3 = INDEX TO OPEN CURRENT SLOT
+*    R5 = ADDRESS OF CURRENT FCB SLOT AT THIS POINT
+*
+**********************************************************
+*
+**NOW COLLECT DATA SET NAME
+*
+         LA    R2,1(R0,R2)        MOVE OVER = SIGN
+         LA    R4,FCBFNM          LOAD ADDRESS OF TARGET
+         XC    FCBFNM(44),FCBFNM  ZAP OUT FULL TARGET AREA
+         SR    R14,R14            CLEAR OUT FOR COUNT
+C1       CLI   0(R2),C' '         CHECK FOR TERMINAL BLANK
+         BE    C2                 OUT ON TERMINAL BLANK
+         CLI   0(R2),C'('         CHECK FOR TERMINAL (
+         BE    C2                 OUT ON TERMINAL (
+         MVC   0(1,R4),0(R2)      MOVE OVER CHARACTER
+         LA    R14,1(R0,R14)      INCREASE COUNT
+         LA    R4,1(R0,R4)        KICK UP TARGET
+         LA    R2,1(R0,R2)        KICK UP NAME FIELD
+         B     C1                 CONTINUE LOOP
+C2       LTR   R14,R14            DID WE HAVE ANY FILE NAME
+         BZ    ERR5               NO FILE NAME
+         ST    R14,FCBFNL         STORE NAME LENGTH IN FCB
+*
+**NOW WE HAVE TO MAKE SURE THAT WE DO NOT HAVE DUPLICATE FILE NAME
+* (WE DO NOT PERMIT THE SAME FILE TO BE ATTACHED UNDER DIFFERENT
+*  LOGICAL FILE NUMBERS)
+*
+*   REGS 6,7,8,9 ARE USED HERE AS TEMPORARY WORK REGS
+*
+         L     R6,AFCB            GET TOP OF FBCT AGAIN
+         LA    R7,16(R0,R0)       TO COUNT DOWN FCBT AND FCB
+         LA    R8,84(R0,R6)       ADDRESS OF 1ST FCB FCBFNM
+         LA    R9,FCBFNM          ADDRESS OF NEW FCBFNM ENTRY
+D1       CLC   0(2,R6),=H'0'      DO WE HAVE ENTRY
+         BE    D2                 IF NOT SKIP CHECKING
+         CR    R9,R8              IS IT THE ONE WE JUST PUT IN
+         BE    D2                 IF SO SKIP CHECK FOR DUPLICATE
+         CLC   0(44,R8),0(R9)     SAME NAME ?
+         BE    ERR13              WE DO NOT ALLOW IT
+D2       LA    R6,4(R0,R6)        KICK TO NEXT FCBT
+         LA    R8,108(R0,R8)      KICK TO NEXT FCB
+         BCT   R7,D1              LOOP ON BACK
+*
+*     STORE BASIC LINE NO.
+*
+         XC    FCBUFN(4),FCBUFN   TO REMEMBER 1/2 STORED IN FULL
+         MVC   FCBUFN+2(2),PREST1ST
+*
+*********************************************************
+*
+*  R2 = ADDR OF BL OR (
+*
+*********************************************************
+*
+**WE NOW FAKE THE OPTIONS BEFORE ATTEMPTING MORE OF SCAN
+*
+         MVI   FCBFLG,X'00'       NOSHARE
+         MVC   FCBLRL,=F'4'       FAKE LRECL=1
+         MVC   FCBLPP,=F'512'
+         CLI   0(R2),C' '         DID WE HAVE A TERMINAL BLANK
+         BE    DONE
+*
+**NOW WE TRY TO OVERRIDE THE DEFAULTS
+*
+OPTION   LA    R2,1(R0,R2)        KICK OVER DELIMITER
+         CLI   0(R2),C')'         ARE WE TERMINATING
+         BE    DONE
+         CLI   0(R2),C' '         OUT OF WORK?
+         BE    ERR6               INCORRECTLY FORMED OPTION STRING
+         CLI   0(R2),C'S'
+         BE    SHARE
+         CLI   0(R2),C'N'         NOSHARE
+         BE    NOSHARE
+         CLI   0(R2),C'0'         CHECK DIGIT LOW
+         BL    ERR7               BAD OPTION SPEC
+         CLI   0(R2),C'9'         CHECK DIGIT HIGH
+         BH    ERR7               BAD OPTION SPEC
+         LR    R15,R2             SET ADDR FOR CONVERT
+         BAL   R4,DTB             GO COLLECT LRECL
+         SLL   R1,2               CHANGE FROM WORDS TO BYTES
+         ST    R1,FCBLRL          STORE LRECL OPTION
+         LA    R6,2048            COMPUTE FCBLPP
+         SRDA  R6,32
+         DR    R6,R1
+         ST    R7,FCBLPP          STORE IT
+NOSHARE  EQU   *
+KEEP     EQU   *
+COMMA    CLI   0(R2),C' '         TERMINAL BLANK
+         BE    ERR6               INCORRECTLY FORMED OPTION STRING
+         CLI   0(R2),C')'         TERMINAL )
+         BE    DONE               DONE
+         CLI   0(R2),C','         DELIMETER
+         BE    OPTION             FOUND OPTION DELIMITER
+         LA    R2,1(R0,R2)        KICK TO NEXT CHAR
+         B     COMMA
+SHARE    MVI   FCBFLG,X'04'        PUT IN SHARE CODE
+         B     COMMA              GO SCAN FORWARD
+DONE     EQU   *
+*
+**PREVENT SHARE/TEMP AND PREFIX/TEMP
+*
+         TM    FCBFLG,X'02'       DO WE HAVE SHARE
+         BZ    BADO               IF NOT SKIP REST
+         CLI   FCBFNM,C'*'        UNPREFIXED TEMPORARY ?
+         BE    ERR9               PROHIBIT SHARE/TEMP
+         CLI   FCBFNM,C'&&'       PREFIXED FILE
+         BNE   BAD1               IF NOT SKIP LOOKING
+         CLI   FCBFNM+6,C'*'      PREFIXED TEMP FILE ?
+         BE    ERR11              PROHIBIT PREFIX/TEMP
+BADO     CLI   FCBFNM,C'&&'       PREFIXED FILE
+         BNE   BAD1               SKIP TEST
+         CLI   FCBFNM+6,C'*'      IS IT MARKED TEMP
+         BE    ERR11              CAN NOT HAVE PREFIX/TEMP
+BAD1     EQU   *
+         B     HOME
+*
+**ROUTINE TO CONVERT HEX STRING CHARACTERS TO BINARY
+*
+*  ENTERED WITH RETURN VIA CONTENTS OF REG 4
+*  R15 POINTS TO STRING
+*  R1 CONTAINS BINARY NUMBER AFTER CONVERSION
+*  USES REG 14 AS WORK REGISTER
+*
+DTB      SR    R1,R1              CLEAR RESULT WORK REG
+DTBA     CLI   0(R15),C'0'        LOOK FOR DIGIT LOW
+         BL    DTBB               IF IT IS GET OUT
+         CLI   0(R15),C'9'        LOOK FOR DIGIT HIGH
+         BH    DTBB               IF IT IS GET OUT
+         SR    R14,R14            CLEAR TEMP WORK REG
+         IC    R14,0(R0,R15)       SELECT CHARACTER
+         SL    R14,=A(C'0')       SUBTRACT OUT THE F
+         MH    R1,=H'10'          SCALE UP OLD CONTENTS
+         ALR   R1,R14             ADD IN NEW DIGIT
+         LA    R15,1(R0,R15)      KICK UP SOURCE POINTER
+         B     DTBA               LOOP FOR =  ETC.
+DTBB     BR    R4                 BACK TO CALL POINT
+         LTORG
+*
+**ROUTINE TO DELETE AN ENTRY FROM FCBT
+*
+*  ASSUMES THAT INDEX TO SLOT TO BE DELETED IN IS IN R3
+*
+DELOUT   LR    R14,R3             GET INDEX JUST COMPUTED
+         SLL   R14,2              MAKE DISPLACMENT
+         L     R15,AFCB           GET TOP OF FCTB
+         LA    R15,0(R14,R15)     GET ADDRESS OF SLOT JUST SET UP
+         MVC   1(3,R15),=X'000000' SET TO ZERO AGAIN
+         BR    R4                 BACK TO CALL POINT
+         LTORG
+*
+**SET UP CODES FOR ERROR MESSAGE HANDLER, DELETE FCBT ENTRY
+*
+ERR1     LA    R1,1(R0,R0) = SIGN MISSING IN DEF FILE STATEMENT
+         B     ERRCALL
+ERR2     LA    R1,2(R0,R0) FILE NO. MISSING IN DEF FILE STATEMENT
+         B     ERRCALL
+ERR3     LA    R1,3(R0,R0) ATTEMPT TO DEFINE MORE THAN 16 FILES
+         B     ERRCALL
+ERR4     LA    R1,4(R0,R0) FILE NUMBER OF THIS DEF FILE ALREADY DEFINED
+         B     ERRCALL
+ERR5     LA    R1,5(R0,R0) NO FILE NAME ON DEF FILE STATEMENT
+         B     ERRDLT
+ERR6     LA    R1,6(R0,R0) DEF FILE OPTIONS INCORRECTLY SPECIFIED
+         B     ERRDLT
+ERR7     LA    R1,7(R0,R0) UNRECOGNIZED OPTION SPECIFIED IN DEF FILE
+         B     ERRDLT
+ERR8     LA    R1,8(R0,R0) UNUSED***********************************
+         B     ERRDLT
+ERR9     LA    R1,9(R0,R0) TEMPORARY FILE MAY NOT SPECIFY SHARE OPTION
+         B     ERRDLT
+ERR10    LA    R1,10(R0,R0) UNUSED***********************************
+         B     ERRDLT
+ERR11    LA    R1,11(R0,R0) &ANNN FILE NAME MAY NOT BE TEMPORARY (*)
+         B     ERRDLT
+ERR12    LA    R1,12(R0,R0) UNUSED********************************
+         B     ERRDLT
+ERR13    LA    R1,13(R0,R0) DUPLICATE FILE NAME NOT PERMITTED
+         B     ERRDLT
+ERRDLT   BAL   R4,DELOUT
+         B     ERRCALL
+ERRCALL  LH    R0,PREST1ST        GET STATEMENT NUMBER
+         A     R1,=F'7029'        ADJUST ERROR CODE
+         L     R15,=V(RUNERR)     GET ADDR OF ERR MSG HANDLER
+         BALR  R14,R15            GO SEND MESSAGE TO USER
+*
+**RETURN TO CALLER
+*
+HOME     L     13,4(0,13)         PUT ADDR OF CALLER SAVE AREA BACK
+         LM    14,15,12(13)       RESTORE CALLER REGISTERS
+         LM    1,12,24(13)        EXCEPT REGISTER 0
+         BCR   15,14              RETURN TO CALLER
+AREA     DSECT
+         COPY  AREA
+TWORK    DSECT
+         COPY  TWORK
+         END

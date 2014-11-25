@@ -1,0 +1,1622 @@
+;
+;  This is WYL.GG.PJG.SUNSET#MIGRATE
+;
+;        Forsythe Mainframe Sunset Data Migration Tool
+;
+;        /
+;        / (NO)Debug
+;        / (No)Pause
+;        /     Report              - Generate migration report only
+;        /     Account=gg.uuu      - Set migration account
+;        /     Default             - Latch default switches
+;        /                           Debug Dest=d:\Testing
+;        /     PC | MAC            - Set migration environment to PC or Macintosh
+;        /     Destination=<d:\>   - set migration destination drive:directory
+;        /
+;
+xproc () begin
+
+   declare bool   X.DebugSW        ; Debugging mode switch
+   declare bool   X.PauseSW        ; Debugging pause mode switch
+   declare bool   X.VerboseSW
+   declare bool   X.ReportSW       ; Generate migration reports only
+   declare bool   X.CatDmpSW       ; Dump catalog
+   declare bool   X.Mig_PC         ; Migrating files to Windows PC
+   declare bool   X.Mig_MAC        ; Migrating files to Macintosh
+   declare bool   X.AttnFlag       ; <Attn> has been requested
+   declare bool   X.OldMove
+   declare bool   X.Retry
+
+   declare number X.Sav_Actno      ; Original active file
+   declare number X.Dsn_Actno      ; Active file for data set listing
+   declare number X.Cat_Actno      ; Active file for catalog listing
+   declare number X.Wrk_Actno      ; Working active file
+   declare number X.Ind_Actno      ; Active file for PO directory
+   declare number X.Byp_Actno      ; Bypassed data set report
+   declare number X.Mig_Actno      ; Migration move report
+   declare number X.HSM_Actno      ; HSM ML1 migration data
+   declare number x.MOV_Actno
+   declare number X.BAT_Actno      ; Active for PC folder .BAT
+
+   declare string X.IncludeLib     ; Base library for includes
+   declare string X.MaintAcct      ; Maintenance account to notify
+   declare string X.LogAcct        ; Account to receive status logs
+
+   declare string X.Mig_acct       ; Migration account (GG.UUU)
+   declare string X.TSO_acct       ; Migration account (GG$UUU)
+
+   declare string X.ToBase         ; Destination to migrate files
+   declare string X.Suffix         ; ".txt" for PC, null for Mac
+   declare string X.Version
+
+   declare string Image, token
+   declare string Status, WrkStr
+   declare string LastStr, LastDir
+
+   declare number Flno, Llno, Clno
+   declare number Fil_Tot, Fil_byp, Fil_mig, Fil_Err
+
+   set exec llimit=20000           ; Set local exec-limit
+   set delta 1
+
+   X.Version = '.903 (Beta version wanna-be)'
+   X.IncludeLIb = 'WYL.GS.WWW.SUNSET.MIGRATE.MSGS'
+   x.MaintAcct = 'GG.PJG'
+   x.LogAcct   = 'GG.PJG'
+
+   X.AttnFlag = false              ; Clear attention request switch
+   X.DebugSW = false               ; Default debugging mode switch
+   X.pauseSW = false               ; Default debugging pause mode switch
+   X.CatDmpSW = false              ; So far I don't need the catalog information
+   X.VerboseSW = true
+   X.ReportSW = false
+   X.OldMove = false
+
+   Fil_Tot = 0                     ; Total data sets processed
+   Fil_byp = 0                     ;       data sets bypassed
+   Fil_mig = 0                     ;       data sets to be migrated
+
+   X.Sav_Actno = actno             ; Save original active file
+   X.Dsn_Actno = -1                ; Set no DSN active yet
+   X.Cat_Actno = -1                ; Set no catalog active yet
+   X.Wrk_Actno = -1                ; Set no working active yet
+   X.Ind_Actno = -1                ; Set no directory index active yet
+   X.Byp_Actno = -1                ; Set no bypassed data set active
+   X.Mig_Actno = -1                ; Set no migration report active yet
+   X.HSM_Actno = -1                ; Set no HSM ML1 report active yet
+   X.BAT_Actno = -1                ; Set no PC BAT active yet
+
+   X.ToBase = ''
+   X.Suffix = ''
+   X.TSO_Acct = ''
+   X.Mig_acct = ''
+
+   ;
+   ; Set global error recovery routine
+   ; Scan migration parameters
+   ;
+
+   ;on error cmd 'pcall err_routine'    ; Set global recovery routine
+   on attn cmd='pcall attn_routine("Global")' nointerruptible
+   pcall scan_parms(parm_string)
+
+   ;
+   ; Write welcome message
+   ;
+   if (X.VerboseSW) list from &(X.IncludeLib)#Welcome unn
+
+   ;
+   ; Set default migration account to logged on user
+   ;
+   if (size(X.Mig_Acct) le 0) begin
+      write 'Setting default migration account to logged on user &(group).&(user)'
+      X.Mig_Acct = group || '.' || user
+   end
+   X.TSO_acct = substr(X.Mig_acct,1,2) || '$' || substr(X.Mig_acct,4,3)
+
+   ;
+   ; Set default migration environment if not already set
+   ;
+   if (~X.Mig_PC and ~X.Mig_Mac) begin
+      write ' '
+      write 'Please select your destination platform.'
+      read string image prompt='Either PC or MAC '
+      image = upper(strip(image, 'b'))
+      cases begin
+         case (image eq 'PC') begin
+            X.Mig_PC = true
+            X.Mig_Mac = false
+            X.Suffix = '.txt'
+         end
+         case (image eq 'MAC') begin
+            X.Mig_PC = false
+            X.Mig_Mac = true
+            X.Suffix = ''
+         end
+         case (true) begin
+            write 'Setting default migration path to Windows PC environment'
+            X.Mig_PC = true
+            X.Mig_Mac = false
+            X.Suffix = '.txt'
+         end
+      end
+   end
+
+
+
+   ;
+   ; Set default migration destination if not already set
+   ;
+   if (size(X.ToBase) le 0) begin
+      write ' '
+      write 'Please enter a destination folder on your desktop where'
+      write 'you would like to migrate your files.  The folder you specify'
+      write 'must already exist and be empty.'
+      while (size(X.Tobase) le 0) begin
+         cases begin
+            case (X.Mig_PC) begin
+               write 'Example: c:\Wylbur'
+               read string image prompt='Destination? '
+               X.ToBase = strip(Image, 'b')
+               if (size(X.Tobase) gt 0) begin
+                  if (sub(X.Tobase, size(X.Tobase), 1) ne '\') \
+                     X.Tobase = X.Tobase || '\'
+                  if (index(X.Tobase, ' ') gt 0) begin
+                     write 'Blanks will not work, sorry.'
+                     X.Tobase = ''
+                  end
+               end
+            end
+            case (X.Mig_MAC) begin
+               write 'Example: c:MacDisk:Wylbur'
+               read string image prompt='Destination? '
+               X.ToBase = strip(Image, 'b')
+               if (size(X.Tobase) gt 0) begin
+                  if (sub(X.Tobase, size(X.Tobase), 1) ne ':') \
+                     X.Tobase = X.Tobase || ':'
+                  if (index(X.Tobase, ' ') gt 0) begin
+                     write 'Blanks will not work, sorry.'
+                     X.Tobase = ''
+                  end
+               end
+            end
+         end                       ; End of CASES
+      end                          ; End of WHILE
+   end
+
+
+   if (X.Ind_Actno le 0) begin
+      open Index title='PDS directory'
+      X.Ind_Actno = actno
+   end
+
+
+   open Bypass tit='Bypassed files'
+   X.byp_Actno = actno
+
+   open Report tit='Migration Report'
+   X.Mig_Actno = actno
+
+
+   Token = sub(account,5,2) || '.' || sub(account,1,3)
+   if (Token ne 'xx.PJG') begin
+      WrkStr = '#migrate started by &(Token) at &(date)'
+      putend X.Version = &(X.Version)
+      if (X.Mig_PC) putend Migrating to a PC environment.'
+      if (X.Mig_MAC) putend Migrating to a MAC environment.'
+      putend X.IncludeLib = &(X.IncludeLib)
+      putend X.Mig_Acct = &(X.Mig_Acct)
+      putend X.ToBase = &(X.ToBase)
+      quietly mail to  &(X.LogAcct) title='&(WrkStr)'
+   end
+   if (lines gt 0) delete first/last
+
+   ;
+   ; Build active file of cataloged data sets, if required
+   ;
+   if (X.CatDmpSW) begin
+      if (X.VerboseSW) begin
+         write 'Inspect ICF catalog for all data sets belonging to &(X.Mig_Acct).'
+         write '(If you have a large number of data sets this may take several minutes)'
+         write ' '
+      end
+      write 'Building list of catalog entries...' nonl
+      open catalog title='Catalog Entries'
+      X.Cat_Actno = actno
+      show catalog internal account &(X.Mig_Acct) collect
+      show catalog internal lik &('$' || X.TSO_Acct) collect
+      write 'DONE!'
+   end
+
+   ;
+   ; Build active file of DASD data sets
+   ;
+   if (X.VerboseSW) begin
+      write ' '
+      write 'Gathering information for all data sets belonging to &(X.Mig_Acct).'
+      write '(If you have a large number of data sets this may take several minutes)'
+      write ' '
+   end
+   write 'Building list of DASD data sets...' nonl
+   open dsns title'DASD data sets'
+   X.Dsn_Actno = actno
+   show dsn internal account &(X.Mig_Acct) collect
+   show dsn internal lik &('$' || X.TSO_Acct) collect
+   delete '$CATALOG.'1             ; SHOW DSN workaround for 0 files
+   write 'DONE!'
+   if (X.VerboseSW) write ''
+
+   ;
+   ; Check for any data sets which have been migrated to ML1
+   ;
+   point c'migrat'1 (1) nolist
+   if (* gt 0) begin
+      if (X.VerboseSW) begin
+         write 'We have found files belonging to &(X.Mig_Acct) which have been'
+         write 'migrated to ML1 storage due to inactivity.  These files will be'
+         write 'recalled and included in your migration request.'
+      end
+      open HSMDATA title='HSMLIST report'
+      X.HSM_Actno = actno
+      pick &(X.Sav_Actno)
+      pcall Hsm_Status(X.Mig_acct, X.HSM_Actno)   ; Obtain HSM ML1 data
+      pcall Hsm_Merge(X.Dsn_Actno, X.HSM_Actno)   ; Merge ML0 & ML1 data
+      if (X.VerboseSW) write ''
+   end
+
+   ;<.page>
+   ;
+   ; Process each DASD data set
+   ;
+   open Working title='Working active'
+   X.Wrk_actno = actno
+   pick &(X.Dsn_Actno)
+   write ''
+   Flno = first
+   while (Flno le last) begin
+      read string Image using &(Flno)
+      Fil_Tot = Fil_Tot + 1
+      pcall Filter_dsn(Image, Status)
+      if (lower(Status) ne lower('Okay')) begin
+         delete &(Flno)
+         Fil_Byp = fil_Byp + 1
+      end
+      Flno = Flno + 1
+   end
+
+;
+; rewrite this ...
+;
+   Fil_Mig = Fil_Tot - Fil_byp
+   write '&(format(Fil_Tot,6,0)) Data sets were located.'
+   write '&(format(Fil_Mig,6,0)) Data sets were eligible for migration.'
+   write '&(format(Fil_Byp,6,0)) Data sets were not eligible.'
+   if (lines lt 1) begin
+      write 'No files were eligible for migration to PC/Mac'
+      pcall global_return('No files were eligible')
+   end
+   number from 1 by 1
+   write ''
+
+   ;
+   ; Edit and merge Wylbur/TSO data set names into sequential order
+   ;
+   change 114/230 to '' nolist
+   Flno = first
+   while (Flno le last) begin
+      read string Image using &(Flno)
+      cases begin
+         case (sub(Image, 8, 4) eq 'WYL.') begin
+            WrkStr = sub(Image, 19, 33)
+            WrkStr = sub(WrkStr, 1, 44) || ' W ' || Image
+            Status = Line_Put(Flno, WrkStr)
+         end
+         case (Sub(Image, 8, 6) eq X.TSO_Acct) begin
+            WrkStr = sub(Image, 15, 37)
+            WrkStr = sub(WrkStr, 1, 44) || ' T ' || Image
+            Status = Line_Put(Flno, WrkStr)
+         end
+         case (true) begin
+            write 'An impossible error has occurred.'
+            xpause msg='Impossible...'
+         end
+      end
+      Flno = Flno + 1
+   end
+   quietly sort first/last
+
+   ;<.page>
+   ;
+   ; Scan data set names to insure there were no duplicates after merging
+   ; the Wylbur and TSO format names.  Additionally, let's build an
+   ; MS-DOS .bat file to create a directory structure.
+   ;
+   number from 1 by 1
+   LastStr = ''                    ; Retain last data set for seq check
+   Flno = first
+   while (Flno le last) begin
+      read string Image using &(Flno)
+      if (sub(Image, 1, 44) eq LastStr) begin
+         write 'Warning: &(strip(LastStr, 'b')) is duplicated.'
+         Wrkstr = strip(substr(Image,1,44)) || '.wyl'
+         status = Line_put(Flno, substr(Wrkstr,1,44) || sub(Image,45))
+         read string Image using &(Flno-1)
+         Wrkstr = strip(substr(Image,1,44)) || '.tso'
+         status = Line_put(Flno-1, substr(Wrkstr,1,44) || sub(Image,45))
+      end
+      LastStr = sub(Image, 1, 44)
+      flno = Flno + 1
+   end
+   number from 1 by 1
+
+   ;
+   ; Build move command file
+   ;
+   number from 1 by 1
+   Flno = first
+   write 'Building file movement commands.'
+   write 'Files processed=xxxxxx' nonl
+   while (flno le last) begin
+      read string Image using &(Flno)
+      Image = Image || ' '
+      pcall Mk_List(Image, Fil_Tot)
+      flno = Flno + 1
+   end
+   write ' Complete.'
+
+   ;
+   ; At this time we should have a the unique folder hierarchy to represent
+   ; the migrated data set tree ... go have the user execute it
+   ;
+   if (X.Mig_PC) begin
+      number from 1 by 1               ; Insure monotonically increasing numbers
+      LastDir = ''                     ; Retain last MKDIR directory name
+      Flno = first                     ; Start with first line in file
+      open BATfile title='PC Folder creation'
+      X.BAT_Actno = actno
+      pick &(X.DSN_Actno)
+      while (Flno le last) begin
+         read string Image using &(Flno)
+         pcall Mk_dir(Image, LastDir)
+         flno = flno + 1
+      end
+      Status = Line_append('exit', X.BAT_Actno)
+      pcall Build_dir(X.BAT_Actno)
+   end
+
+
+   ;
+   ; Main loop to process each mainframe data set and transmit the
+   ; the file to the proper folder on the destination machine
+   ;
+
+   if (~X.OldMove) begin
+      pick &(X.MOV_Actno)
+      number from 1 by 1
+      Flno = first
+      while (Flno le last) begin
+         read string Image using &(Flno)
+         pcall Move_Files(Image)
+         Flno = Flno + 1
+      end
+   end
+
+   if (X.OldMove) begin
+      number from 1 by 1
+      Flno = first
+      while (Flno le last) begin
+         read string Image using &(Flno)
+         Image = Image || ' '         ; Insure following INDEX matches function
+         cases begin
+            case (index(Image, ' PS ') gt 0) begin
+               pcall Move_PS(Image)
+            end
+            case (index(Image, ' PO ') gt 0) begin
+               pcall Move_PO(Image)
+            end
+            case (true) begin
+               xpause msg='Shazbat!'
+            end
+         end
+         Flno = Flno + 1
+      end
+   end
+
+
+;
+;  We have completed the request file moves.  Report on number of files
+;  processed, the number of errors, and whether we should now scratch the
+;  source data.
+;
+   pick &(X.Mig_Actno)
+   Fil_Tot = lines
+   count c' ok ' quiet
+   Fil_Mig = count
+   write ' '
+   Write '&(format(Fil_tot,6,0)) Files to be migrated.'
+   Write '&(format(fil_Mig,6,0))   Were migrated successfully.'
+   write '&(format(Fil_tot-fil_Mig,6,0))   Encountered errors.'
+   write ' '
+   write 'Would you like to permenantly scratch those files which have been'
+   write 'moved successfully to your desktop?  ' nonl
+   read string Image prompt='(Yes, No) '
+   if (index('YES OKAY', upper(Image)) gt 0) begin
+      write 'My -- we are a brave soul!'
+      Write 'Confirm request to scratch files.  ' nonl
+      read string Image prompt='(Yes, No) '
+      if (index('YES OKAY', upper(Image)) gt 0) begin
+         pcall Scr_Files
+      end
+   end
+
+;
+;  Optionally write out a "cleanup" .bat script file for the PC
+;  environment migrate.
+;
+   if (x.Mig_PC) begin
+      write ' '
+      Write 'Do you want to cleanup the empty folders on your desktop'
+      write 'that had no files migrated to them?  ' nonl
+      read string Image prompt='(Yes, No) '
+      if (index('YES OKAY', upper(Image)) gt 0) begin
+         pick &(X.BAT_Actno)
+         change c'mkdir '1 to 'rmdir ' in all nolist
+         delete last               ; Ditch "Exit" command
+         quietly sort f/l d
+         putend erase CrtFldrs.bat
+         putend erase RemFldrs.bat
+         putend exit
+         quietly try save &(X.ToBase)\RemFldrs.bat
+         write ' '
+         write 'Navigate to your &(X.ToBase) folder and launch the '
+         write 'RemFldrs.bat script.  This will remove any empty folders'
+         write 'in the folder hierarchy.'
+         write ' '
+         xpause msg='Type XGO to continue'
+      end
+   end
+
+
+;
+;  Create migration report and optionally Save/MAIL report
+;
+   Write ' '
+   Write 'Would you like to create a migration report listing the files'
+   write 'that were successfully migrated to &(X.ToBase)?'
+   read string Image prompt='(Yes, No) '
+   if (index('YES OKAY', upper(Image)) gt 0) X.ReportSW = true
+
+   if (X.ReportSW) pcall Do_Report()
+
+
+   if (X.DebugSW) begin
+      write ''
+      show vars type X
+      xpause msg='(Xpause) Ending check'
+   end
+
+   pcall Global_return('Normal end of EXEC')
+   xreturn
+
+end
+
+;<.page>
+;
+;
+; Generate HSM ML1 report
+;
+proc Hsm_Status(UsrAcct, RptActno) begin
+
+   declare number Sav_Actno, Wrk_Actno
+   declare number Flno
+   declare number ML1_Cnt, ML1_Trk
+   declare string TsoAcct, WrkTime
+   declare string LogAcct
+   declare string Image
+   declare bool   WaitingSW
+
+   Sav_Actno = actno               ; Remember current active
+   ML1_Cnt = 0
+   ML1_Trk = 0
+
+   write 'Retrieving HSM ML1 data...' nonl
+   UsrAcct = upper(UsrAcct)        ; Insure account is upper case
+   LogAcct = sub(account,5,2) || '.' || sub(account,1,3)
+   TsoAcct = sub(UsrAcct,1,2) || '$' || sub(UsrAcct,4,3)
+
+   open Working title='HSMSTATUS working active'
+   Wrk_Actno = actno
+   use &(X.IncludeLib)#hsmdata     ; Get model HSMLIST protocol
+
+   WrkTime = date
+   WrkTime = 'T' || sub(WrkTime,1,2) || sub(WrkTime,4,2) || substr(WrkTime,7,2)
+   change c'%Stamp' to '&(WrkTime)' nolist
+   change c'%Account' to '&(UsrAcct)' in c' LEVEL(' nolist
+   change c'%TsoAcct' to '&(TsoAcct)' in c' LEVEL(' nolist
+   change c'%Account' to '&(LogAcct)' nolist
+
+   WaitingSW = true
+   run unn h nonotify quiet cla b  ; Submit TSO HSEND LIST request
+   while (WaitingSW) begin
+      sync * wait=30               ; Wait for TSO inquiry to complete
+      if (lines gt 0) delete first/last
+      locate * collect end
+      if (index(line(first), 'AWAITING PRINT') le 0) begin
+         write 'Still waiting for job!'
+         write 'Retrieving HSM ML1 data...' nonl
+      end
+      else begin
+         ; check return code for submitted job
+         purge * quiet                   ; Get rid of batch job
+         close                           ; No longer need Wrk_Actno
+         Wrk_Actno = -1                  ; Work active file to longer exists
+         WaitingSW = false
+      end
+   end
+
+   pick &(RptActno)
+   quietly try delete first/last
+   use wyl.&(LogAcct).&(WrkTime).HSMWORK
+   if (~X.DebugSW) begin
+      quietly scratch * quiet
+   end
+   change 1/1 to '' nolist
+
+   ; Locate first ML1 file in report (just delete non-header lines)
+   quietly try point c'wyl.&(UsrAcct).'1 or c'&(TsoAcct).'1 (1) nolist
+   delete  ~c'wyl.&(UsrAcct).'1 and ~c'&(TsoAcct).'
+
+   if (lines gt 0) begin
+      number from 1 by 1
+      Flno = first
+      while (Flno le last) begin
+         read string Image using &(Flno)
+         ML1_Cnt = ML1_Cnt + 1
+         ML1_Trk = ML1_Trk + substr(Image, 74, 6)
+         Flno = Flno + 1
+      end
+   end
+
+   write 'DONE!'
+   pick &(Sav_Actno)
+   return (RptActno)
+
+end
+
+
+;<.page>
+;
+;
+;  Merge HSM ML1 data into SHOW DSN INTERNAL data
+;
+proc HSM_Merge(Dsn_Actno, Hsm_Actno) begin
+
+   declare number Sav_Actno
+   declare number Wlno, Mlno
+   declare string Mdata
+   declare string Idata
+   declare string Ndata            ; Updated DSN/HSM data
+   declare string Cok              ; Function status return variable
+   declare string Mdsn, Idsn
+
+   Sav_Actno = actno
+
+   pick &(Dsn_Actno)
+   quietly sort first/last
+
+   pick &(Hsm_Actno)
+   quietly sort first/last
+
+   pick &(Dsn_Actno)
+   Mlno = 0
+   Mdsn = ''
+   point c'migrat'1 (1) nolist
+   while (* gt 0) begin
+      Wlno = *
+      Idata = line(Wlno, Dsn_Actno)
+      Idsn = strip(sub(Idata,8,44), 'b')
+      while (Mdsn lt Idsn) begin
+         Mlno = Mlno + 1
+         Mdata = line(Mlno, Hsm_Actno)
+         Mdsn = strip(sub(Mdata,1,44),'b')
+         ; write 'Mdsn=&(Mdsn) - Idsn=&(Idsn)'
+         if (size(Mdata) eq 0) begin
+            write 'ML1 data exhausted.'
+            Mdsn = copies('9', 44)
+         end
+      end
+      cases begin
+         case (Mdsn eq Idsn) begin
+            Ndata = ''
+            Ndata = Ndata || sub(Mdata,48,6)  || ' '  ; Set HSM volser
+            Ndata = Ndata || sub(Idata,8,44)  || ' '  ; Set DSN
+            Ndata = Ndata || sub(Mdata,75,5)          ; Set Migrated tracks
+            Ndata = Ndata || sub(Idata,58,10) || ' '  ; Set Used/Exts
+            Ndata = Ndata || sub(Mdata,95,3)          ; Set Migrated DSORG
+            Ndata = Ndata || sub(Idata,73)            ; Complete line
+            Cok = line_put(Wlno, Ndata, Dsn_Actno)
+         end
+         case (true) begin
+            Cok = line_delete(Wlno, Wlno)
+            write 'Warning: &(sub(Idata,1,6+44+1)) will be bypassed.'
+         end
+      end
+      point c'migrat'1 (1) in &(Wlno)+.001/last nolist
+   end
+   number from 1 by 1
+
+   pick &(Sav_Actno)
+   return
+
+end
+
+
+
+;<.page>
+;
+;  Build move command list
+;
+proc Mk_List(Image, Fil_Tot) begin
+
+   declare number Sav_Actno, Wrk_Actno
+   declare string Ctype, Cskip
+   declare string ToName, Fromname, Member, WylTSO, Volume
+   declare string WrkStr
+
+   Wrk_Actno = -1
+   Ctype = ''
+   Cskip = ' '
+
+   Sav_Actno = actno
+   if (X.MOV_Actno le 0) begin
+      open MOVEFILE title='Migrate move command file'
+      X.Mov_Actno = actno
+   end
+
+   pick &(X.Mov_Actno)
+
+   syscall scan(ToName, Image, Ctype)
+   syscall scan(WylTSO, Image, Ctype)
+   syscall scan(Volume, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   cases begin
+      case (index(Image, ' PS ') gt 0) begin
+         pcall Edit_Name(ToName)
+         WrkStr = substr(ToName, 1, 54) || ' '
+         WrkStr = WrkStr || '$' || substr(FromName, 1, 54)
+         pcall Set_File(WrkStr, Fil_tot)
+      end
+      case (index(Image, ' PO ') gt 0) begin
+         pick &(X.Ind_Actno)
+         if (lines gt 0) delete first/last
+         try show directory in &(FromName) all collect
+         if (error) begin
+            write 'Error processing directory in: &(FromName)'
+            write '    &(ErrID) - &(Errmsg)'
+            pick &(Sav_Actno)
+            return
+         end
+         WrkStr = Toname || '.$$$Index'
+         pcall Edit_Name(WrkStr)
+         WrkStr = Substr(WrkStr, 1, 54) || ' '
+         wrkStr = WrkStr || '$' || substr(FromName, 1, 54)
+         Ctype = line_Append(WrkStr, X.Mov_Actno)
+         Flno = 4
+         while (Flno le last) begin
+            Member = line(Flno, x.Ind_Actno)
+            Member = substr(Member, 1, 8)
+            Member = strip(Member, 'b')
+            EditMember = Member
+            pcall Edit_Member(EditMember)
+            if (X.Mig_PC) WrkStr = Toname || '.' || Editmember
+            else          WrkStr = Toname || '_' || Editmember
+            pcall Edit_Name(WrkStr)
+            WrkStr = Substr(WrkStr, 1, 54) || ' '
+            WrkStr = WrkStr || '$' || FromName || '#' || Member
+            pcall Set_File(WrkStr, Fil_Tot)
+            Flno = Flno + 1
+         end
+      end
+      case (true) begin
+         write 'The impossible has happened.'
+         xpause msg='Impossible'
+         xreturn
+      end
+   end
+   pick &(Sav_Actno)
+   return (Fil_tot)
+end
+
+
+;
+;  Set file movement line into active
+;
+proc Set_File(LineImage, Fil_Cnt) begin
+
+   declare string Ctype, bs
+
+   Fil_Cnt = Fil_Cnt + 1
+   bs = copies(s'16', 6)
+   bs = bs || format(fil_cnt, 6, 0)
+   Ctype = line_append(LineImage, X.MOV_Actno)
+   write bs nonl
+   return (Fil_Cnt)
+end
+
+
+
+;
+;  Edit name to final saved format
+;
+proc Edit_Name(Name) begin
+
+   declare number Offset
+
+   if (X.Mig_PC) begin
+      Offset = index(Name, '.')
+      while (Offset gt 0) begin
+         Name = sub(Name, 1, Offset-1) || '\' || sub(Name, Offset+1)
+         Offset = index(Name, '.')
+      end
+   end
+   return (Name)
+end
+
+
+
+proc Edit_Member(Member) begin
+
+   declare number Offset
+
+   Offset = find(Member, '.*?/\')
+   while (Offset gt 0) begin
+      Member = sub(Member, 1,  Offset-1) || '@' || sub(Member,Offset+1)
+      Offset = find(Member, '*?/\')
+   end
+   return (Member)
+end
+
+
+;<.page>
+;
+;  Create migration move report for user
+;
+proc Do_Report() begin
+
+   declare number Flno
+   declare number SavActno
+   declare string Image
+   declare string STime, SDate, SJulian, Status, Message
+   declare string FromName, ToName
+   declare string Ctype, Quote
+
+   SavActno = actno
+   pick &(X.Mig_Actno)
+   number from 1 by 1
+   Flno = first
+   while (Flno le last) begin
+
+      read string Image using &(Flno)
+      syscall scan(Stime,    Image, Ctype, ' ', ' ')
+      syscall scan(SDate,    Image, Ctype, ' ', ' ')
+      syscall scan(SJulian,  Image, Ctype, ' ', ' ')
+      syscall scan(Status,   Image, Ctype, ' ', ' ')
+      syscall scan(Quote,    Image, Ctype, ' ', '"')
+      syscall scan(quote,    Image, Ctype, '"', ' ')
+      syscall scan(Message,  Image, Ctype, ' ', '"')
+      Message = Quote ||  ' ' || Message
+      Message = strip(Message, 'b', '"')
+      syscall scan(quote,    Image, Ctype, '"', ' ')
+      syscall scan(FromName, Image, Ctype, ' ', ' ')
+      syscall scan(ToName,   Image, Ctype, ' ', ' ')
+
+      Image = ''
+      Image = Sdate || ' ' || Stime || ' '
+      Image = Image || substr(Status,1,12) || ' '
+      if (substr(FromName,1,1) eq '$') FromName = substr(FromName,2)
+      Image = Image || substr(FromName,1,46)
+      if (Status eq 'OK') begin
+         Image = Image || ToName
+      end
+      else begin
+         Image = Image || '   --->' || Message || '<---'
+      end
+      Ctype = line_put(Flno, Image, X.Mig_Actno)
+      Flno = Flno + 1
+   end
+
+   Write 'Would you like to save the migration report?'
+   read string Image promp='(Yes, No) '
+   if (index('YES OKAY', upper(Image)) gt 0) begin
+      save &(X.ToBase)$$$MigrateReport.txt
+   end
+   pick &(SavActno)
+   return
+end
+
+
+
+;<.page>
+;
+;  Scratch files which have been successfully moved to the desktop
+;
+proc scr_files() begin
+
+   declare number Flno
+   declare number SavActno
+   declare string Image
+   declare string STime, SDate, SJulian, Status, Message
+   declare string FromName, ToName
+   declare string Ctype, Quote
+
+   move '$$$Index' to end
+   number from 1 by 1
+   Flno = first
+   while (Flno le last) begin
+      read string Image using &(Flno)
+      syscall scan(Stime, Image, Ctype, ' ', ' ')
+      syscall scan(SDate, Image, Ctype, ' ', ' ')
+      syscall scan(SJulian, Image, Ctype, ' ', ' ')
+      syscall scan(Status, Image, Ctype, ' ', ' ')
+      syscall scan(Quote, Image, Ctype, ' ', '"')
+      syscall scan(quote, Image, Ctype, '"', ' ')
+      syscall scan(Message, Image, Ctype, ' ', '"')
+      syscall scan(quote, Image, Ctype, '"', ' ')
+      Message = strip(Message, 'b', '"')
+      syscall scan(FromName, Image, Ctype, ' ', ' ')
+      syscall scan(ToName, Image, Ctype, ' ', ' ')
+      if (index(ToName, '$$$Index') gt 0) begin
+         SavActno = actno
+         pick &(X.Wrk_Actno)
+         if (lines gt 0) delete first/last
+         show dir all in &(FromName) collect
+         if (lines gt 3) begin
+            write 'Library &(FromName) still contains active data, scratch bypassed.'
+         end
+         else begin
+            scratch &(Fromname) pds
+         end
+         pick &(SavActno)
+      end
+      else begin
+         if (Status eq 'OK') begin
+            scratch &(FromName)
+         end
+         if (Status eq 'Empty') begin
+            scratch &(FromName)
+         end
+      end
+
+      Stime = ''
+      Sdate = ''
+      Sjulian = ''
+      Message = ''
+      Fromname = ''
+      toname = ''
+      Flno = Flno + 1
+   end
+
+   return
+end
+
+
+
+;<.page>
+;
+;  Move DSORG=PS file
+;
+proc Move_PS(Image) begin
+
+   declare number Sav_Actno
+   declare number Offset
+   declare string Ctype, Status
+   declare string FromName, ToName
+   declare boolean Valid
+
+   syscall scan(ToName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   pcall Edit_Name(ToName)
+   ToName = X.ToBase || ToName || X.Suffix
+   write 'From=&(Fromname) To=&(ToName)'
+
+   Sav_Actno = actno
+   pick &(X.Wrk_Actno)
+   quietly try delete first/last
+
+   try use $&(FromName)
+   if (tryerror) begin
+      Status = date
+      status = status || ' ' || substr(tryid, 1, 9)
+      status = status || '" ' || strip(trymsg,'b') || '" '
+      Status = Status || sub(FromName, 1, 54)
+      Status = Status
+      Status = Line_Append(Status, X.Mig_Actno)
+      pick &(Sav_Actno)
+      return
+   end
+   if (tryattn) pcall Attn_routine("Try")
+
+   if (lines lt 1) begin
+      status = date || ' Empty "Zero lines" '
+      status = status || FromName
+      Status = Line_Append(Status, X.Mig_Actno)
+      pick &(Sav_Actno)
+      return
+   end
+
+   pcall Chk_Ebcdic(Valid)
+   if (~Valid) begin
+      status = date || ' NotText "Unprintable Data" '
+      status = status || FromName
+      Status = Line_Append(Status, X.Mig_Actno)
+      pick &(Sav_Actno)
+      return
+   end
+
+   try save &(ToName)
+   if (tryattn) pcall Attn_routine("Try")
+   Status = date
+   Status = status || ' ' || substr(tryid, 1, 9)
+   status = status || '" ' || strip(trymsg,'b') || '" '
+   Status = Status || sub(FromName, 1,54)
+   Status = Status || ToName
+   Status = Line_append(Status, X.Mig_Actno)
+
+   pick &(Sav_Actno)
+   return
+
+end
+
+
+;<.page>
+;
+;  Move DSORG=PO file
+;
+proc Move_PO(Image) begin
+
+   declare number Sav_Actno
+   declare number Offset
+   declare number Flno, Llno
+   declare string Ctype, Status
+   declare string FromName, ToName
+   declare string Member
+   declare boolean Valid
+
+   Sav_Actno = actno
+
+   pick &(X.Wrk_Actno)
+   quietly try delete first/last
+
+   syscall scan(ToName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+   syscall scan(FromName, Image, Ctype)
+
+   pcall Edit_Name(ToName)
+
+   ToName = X.ToBase || ToName || '\'
+   write 'From=&(Fromname) To=&(ToName)'
+
+   pick &(X.Ind_Actno)
+   if (lines gt 0) delete first/last
+   try show directory in &(FromName) all collect
+   if (error) begin
+      write 'Error processing directory in: &(FromName)'
+      write '    &(ErrID) - &(Errmsg)'
+      pick &(Sav_Actno)
+      return
+   end
+
+   save &(ToName || '$$$Index' || X.Suffix)
+   Flno = 4
+   Llno = last
+
+   pick &(X.Wrk_Actno)
+   while (Flno le Llno) begin
+      Member = line(Flno, X.Ind_Actno)
+      Member = substr(Member, 1, 8)
+      Member = strip(Member, 'B')
+      if (Lines gt 0) delete first/last
+      quietly try Use &(FromName)#&(Member)
+      if (tryattn) pcall Attn_routine("Try")
+      if (tryerror) begin
+         Write 'Error: &(TryMsg) in &(FromName)#&(Member)'
+         Status = date
+         Status = status || ' ' || sub(TryID,1,9)
+         status = status || '" ' || strip(trymsg,'b') || '" '
+         Status = Status || sub(FromName || '#' || Member, 1,54)
+         Status = line_append(Status, X.Mig_Actno)
+      end
+      else begin
+         if (lines lt 1) begin
+            write 'Warning: &(FromName)#&(Member) contains no data and was not migrated.'
+         end
+         else begin
+            pcall Chk_Ebcdic(Valid)
+            if (~Valid) begin
+               status = date || ' NotText "Unprintable Data" '
+               status = status || FromName
+               Status = Line_Append(Status, X.Mig_Actno)
+            end
+            else begin
+               Offset = find(Member, '*?')
+               while (Offset gt 0) begin
+                  Member = sub(Member, 1,  Offset-1) || '@' || sub(Member,Offset+1)
+                  Offset = find(Member, '*?')
+               end
+               try save &(ToName)&(Member)&(X.Suffix)
+               if (tryattn) pcall Attn_routine("Try")
+               Status = date
+               Status = status || ' ' || sub(TryID,1,9)
+               status = status || '" ' || strip(trymsg,'b') || '" '
+               Status = Status || sub(FromName || '#' || Member, 1,54)
+               Status = Status || ToName || Member || X.Suffix
+               Status = line_append(Status, X.Mig_Actno)
+            end
+         end
+      end
+      Flno = Flno + 1
+   end
+
+   pick &(Sav_Actno)
+   return
+
+end
+
+
+;<.page>
+;
+;  Move passed file from movement list
+;
+proc Move_Files(Image) begin
+
+   declare string Ctype
+   declare string Status
+   declare string ToName
+   declare string FromName
+
+   declare number Sav_Actno
+
+   Sav_Actno = actno
+   syscall scan(ToName, Image, Ctype)
+   syscall scan(Fromname, Image, Ctype)
+   pcall Edit_name(ToName)
+   ToName = X.ToBase || ToName || X.Suffix
+
+
+   pick &(X.Wrk_Actno)
+   if (index(ToName, '$$$Index') gt 0) begin
+      write 'Building PDS directory information for file &(FromName)'
+      if (lines gt 0) delete first/last
+      try show directory in &(FromName) all collect
+      if (error) begin
+         write 'Error processing directory in: &(FromName)'
+         write '    &(ErrID) - &(Errmsg)'
+         pick &(Sav_Actno)
+         return
+      end
+      pcall Put_file(ToName, Status)
+      Status = date
+      Status = status || ' ' || substr(tryid, 1, 9)
+      status = status || '" ' || strip(trymsg,'b') || '" '
+      Status = Status || sub(FromName, 1,54)
+      Status = Status || ToName
+      Status = Line_append(Status, X.Mig_Actno)
+   end
+   else begin
+      pcall Use_File(FromName, Status)
+      if (size(Status) le 0) begin
+         pcall Put_file(ToName, Status)
+         Status = date
+         Status = status || ' ' || substr(tryid, 1, 9)
+         status = status || '" ' || strip(trymsg,'b') || '" '
+         Status = Status || sub(FromName, 1,54)
+         Status = Status || ToName
+         Status = Line_append(Status, X.Mig_Actno)
+      end
+   end
+   pick &(Sav_Actno)
+   return
+end
+
+
+;<.page>
+;
+;  Use a single file/member
+;
+proc Use_File(FromName, Status) begin
+
+   declare boolean Valid
+
+   status = ''
+
+   if (lines gt 0) quietly delete first/last
+
+   if (X.Mig_Mac) begin
+      if (size(FromName) gt 42) begin
+      status = date || ' TooLong "Name Too Long"    '
+      status = status || FromName
+      Status = Line_Append(Status, X.Mig_Actno)
+      return (status)
+      end
+   end
+
+   try use  &(FromName)
+
+   if (tryattn) pcall Attn_routine("Try")
+   if (tryerror) begin
+      Status = date
+      status = status || ' ' || substr(tryid, 1, 9)
+      status = status || '" ' || strip(trymsg,'b') || '" '
+      Status = Status || sub(FromName, 1, 54)
+      Status = Status
+      Status = Line_Append(Status, X.Mig_Actno)
+      return (Status)
+   end
+
+   if (lines lt 1) begin
+      status = date || ' Empty "Zero lines" '
+      status = status || FromName
+      Status = Line_Append(Status, X.Mig_Actno)
+      return (Status)
+   end
+
+   pcall Chk_Ebcdic(Valid)
+   if (~Valid) begin
+      status = date || ' NotText "Unprintable Data" '
+      status = status || FromName
+      Status = Line_Append(Status, X.Mig_Actno)
+      return (status)
+   end
+
+   return
+end
+
+
+;
+;  Save file on laptape
+;
+proc Put_file(ToName, Status) begin
+
+   Status = ''
+   try save &(ToName)
+   if (tryattn) pcall Attn_routine("Try")
+
+   return (Status)
+
+end
+
+
+;<.page>
+;
+;  Examine current active file to insure all data is printable
+;  EBCDIC
+;
+proc Chk_Ebcdic(Valid) begin
+
+   Valid = true
+   point p'<c>' (1) nolist
+   if (* gt 0) begin
+      Valid = false
+   end
+   return (Valid)
+
+end
+
+
+;<.page>
+;
+;  Ask user to build receiving folder hierarchy for us
+;
+proc Build_dir(Dir_actno) begin
+
+   declare number Sav_actno
+   declare string WrkStr
+
+   Sav_actno = actno
+   pick &(Dir_actno)
+   quietly change '.' to '\' nolist
+   if (x.VerboseSW) begin
+      write ' '
+      write 'Please insure that the destination directory (&(X.ToBase)) is empty.'
+      write 'The data migration tool requires that we migrate to an empty directory.'
+      write 'Insure that &(x.Tobase) folder is empty.'
+      write ''
+      xpause msg='Type XGO to continue.'
+   end
+   X.Retry = true
+   while (X.Retry) begin
+      quietly try save &(X.ToBase)CrtFldrs.bat
+      if (tryerror) begin
+         write 'Unable to save CrtFldrs.bat'
+         write '&(tryid) - &(TryMsg)'
+         write ''
+         write 'Some common causes for this error is that the'
+         write '&(X.ToBase) does not exist or that the folder is not empty.'
+         read string WrkStr prompt='Do you wish to check your desktop? (Y or N) '
+         if (index('YES OKAY', upper(WrkStr)) gt 0) begin
+            xpause msg='Check desktop then XGO to continue.'
+         end
+         else  pcall global_return('CrtFldrs.bat create failure')
+      end
+      else X.Retry = false
+   end
+
+   write ' '
+   write 'Navigate to the &(X.ToBase) directory on your laptop'
+   write 'and launch the CrtFldrs.bat batch file.  This will build'
+   write 'the required folder hierarchy to receive your mainframe files.'
+   write ''
+   xpause msg='Type XGO to continue when done.'
+
+   pick &(Sav_Actno)
+   return
+
+end
+
+
+;
+;  Add MKDIR command to batch file
+;
+proc Mk_dir(Image,  LastDir) begin
+
+   declare string Directory, Filename
+   declare number NextDot
+
+   Directory = ''
+   Image = Image || ' '            ; Insure PO check works for migrated files
+   Filename = substr(Image, 1, 44)
+   filename = strip(Filename, "b")
+   NextDot = index(filename, '.')
+   while (NextDot gt 0) begin
+      Directory = Directory || '.' || sub(filename, 1, NextDot-1)
+      if (Directory gt Lastdir) begin
+         Status = Line_Append('mkdir &(X.ToBase)&(sub(Directory,2))', X.BAT_Actno)
+         LastDir = Directory
+      end
+      Filename = substr(Filename, NextDot+1)
+      Nextdot = index(Filename, '.')
+   end
+   if (index(Image, ' PO ') gt 0) begin
+      Directory = Directory || '.' || Filename
+      if (Directory gt Lastdir) begin
+         Status = Line_Append('mkdir &(X.ToBase)&(sub(Directory,2))', X.BAT_Actno)
+         LastDir = Directory
+      end
+   end
+   return (LastDir)
+end
+
+
+;<.page>
+;
+;
+;  Filter out files not eligible for migration to PC/Mac
+;
+proc Filter_dsn(Image, Status) begin
+
+   declare string Cret
+   declare string Volume
+   declare string Dsname
+   declare string dsorg
+   declare string recfm
+   declare string Flag
+   declare number TrkAlc, TrkUsd
+   declare string CrtDate, RefDate, Change
+   declare number Extnts, Keylen
+   declare number Lrecl, Blksize
+
+   Status  = 'Bypass'
+   Volume  = substr(Image,   1,  6)
+   dsname  = substr(Image,   8, 44)
+   TrkUsd  = substr(Image,  53,  5)
+   Flag    = substr(Image,  58,  1)
+   TrkAlc  = substr(Image,  59,  5)
+   Extnts  = substr(Image,  65,  3)
+   Dsorg   = substr(Image,  69,  3)
+   Recfm   = substr(Image,  73,  5)
+   Lrecl   = substr(Image,  79,  5)
+   Blksize = substr(Image,  85,  5)
+   Keylen  = substr(Image,  91,  3)
+   CrtDate = substr(Image,  95,  8)
+   RefDate = substr(Image, 104,  8)
+   Change  = substr(Image, 113,  1)
+
+   ;
+   ; Prime Status message in the event we decide this file won't move
+   ;
+   Status = date || ' Bypassed '
+
+   ;
+   ; Eliminate unsupported data set organizations
+   ;
+
+   if (Volume eq 'MIGRAT') begin
+      Status = Status || '"Still Migrated"  ' || Dsname
+      Cret = line_append(Status, X.Byp_Actno)
+      Cret = line_append(Status, X.MIG_Actno)
+      return (status)
+   end
+
+   ; We don't support direct access organization
+   if (index(Dsorg, 'DA') gt 0) begin
+      status = Status || '"Invalid DSORG"  ' || Dsname
+      Cret = line_append(Status, X.Byp_Actno)
+      Cret = line_append(Status, X.MIG_Actno)
+      return (Status)
+   end
+
+   ; We don't support VSAM access organization
+   if (index(dsorg, 'AM') gt 0) begin
+      Status = Status || '"Invalid DSORG"  ' || Dsname
+      Cret = line_append(Status, X.Byp_Actno)
+      Cret = line_append(Status, X.MIG_Actno)
+      return (Status)
+   end
+
+   ; We don't support VSAM access which has been migrated organization
+   if (index(dsorg, 'VS') gt 0) begin
+      Status = Status || '"Invalid DSORG"  ' || Dsname
+      Cret = line_append(Status, X.Byp_Actno)
+      Cret = line_append(Status, X.MIG_Actno)
+      return (Status)
+   end
+
+   ; We don't support keyed records
+   if (keylen gt 0) begin
+      Status = Status || '"Keylen > 0"  ' || Dsname
+      Cret = line_append(Status, X.Byp_Actno)
+      Cret = line_append(Status, X.MIG_Actno)
+      return (Status)
+   end
+
+   ;
+   ; We don't support line lengths over 235 characters
+   ;
+   if (lrecl gt 235) begin
+      if (index(recfm, 'F') gt 0) begin
+         Status = Status || '"LRECL too large"  ' || Dsname
+         Cret = line_append(Status, X.Byp_Actno)
+         Cret = line_append(Status, X.MIG_Actno)
+         return (Status)
+      end
+      if (index(recfm, 'V') gt 0) begin
+         Status = Status || '"LRECL too large"  ' || Dsname
+         Cret = line_append(Status, X.Byp_Actno)
+         Cret = line_append(Status, X.MIG_Actno)
+         return (Status)
+      end
+   end
+
+   ; We can't move PS files over 250 tracks
+   if (index(dsorg, 'PS') gt 0) begin
+      if (TrkUsd gt 250) begin
+         Status = Status || '"File too large" ' || Dsname
+         Cret = line_append(Status, X.Byp_Actno)
+         Cret = line_append(Status, X.MIG_Actno)
+         return (Status)
+      end
+   end
+
+
+   Status = 'Okay'
+   return (Status)
+
+end
+
+
+;<.page>
+;
+;  Error abort recovery routine
+;
+proc err_routine() begin
+
+   write '*** Entering err_routine ***'
+   write '    Err=&(ERR) Errid=&(errid) '
+   write '    ErrInfo=&(errinfo)  '
+   write '    ErrMsg=&(Errmsg)    '
+   xpause msg='Go fix it!'
+   pcall global_return('Err_routine called')
+
+end
+
+
+;
+; Attention processing routine
+;
+proc Attn_routine(Where) begin
+
+   declare string Response
+
+   X.AttnFlag = true
+   write 'Whoah ... &(Where) what was that all about?  ' nonl
+   read string Response prompt='Quit? '
+   Response = lower(Response)
+   if (index('yes ok yep', Response) gt 0) begin
+      xpause msg='Exit forced by attention'
+      xreturn
+   end
+
+   on attn reenable
+   return
+
+end
+
+
+;
+;  Global return
+;
+proc global_return(EndMsg) begin
+
+   ; Close general work active file
+   if (X.Wrk_Actno gt 0) begin
+      pick &(X.Wrk_Actno)
+      if (lines gt 0) delete first/last
+      send &(X.LogAcct) Complete: &(EndMsg)
+      close
+   end
+
+   ; Close possible PC .BAT active file
+   if (X.BAT_Actno gt 0) begin
+      pick &(X.BAT_Actno)
+      close
+   end
+
+   ; Close HSM ML1 listing active file
+   if (X.HSM_Actno gt 0) begin
+      pick &(X.HSM_Actno)
+      close
+   end
+
+   ; Close "Show directory" receive active file
+   if (X.Ind_Actno gt 0) begin
+      pick &(X.Ind_Actno)
+      close
+   end
+
+   ; Close movement file list
+   if (X.Mov_Actno gt 0) begin
+      pick  &(X.Mov_Actno)
+      close
+   end
+
+   ; Close migration report active file
+   if (X.MIG_Actno gt 0) begin
+      pick &(X.MIG_Actno)
+      if (lines le 0) close        ; Leave active if it contains data
+   end
+
+   ; Close bypassed data set name report active file
+   if (X.Byp_Actno gt 0) begin
+      pick &(X.Byp_Actno)
+      if (lines le 0) close        ; Leave active if it contains data
+   end
+
+   ; Close and release catalog listing active file
+   if (X.Cat_Actno gt 0) begin
+      pick &(X.Cat_Actno)
+      close
+   end
+
+   ; Close and release data set name active file
+   if (X.Dsn_Actno gt 0) begin
+      pick &(X.Dsn_Actno)
+      close
+   end
+
+   pick &(X.Sav_Actno)
+   xreturn
+end
+
+
+;<.page>
+;
+;  Scan X-Exec passed parameters
+;
+;    Account=gg.uuu                ; Migrate GG.UUU data
+;        PC | MAC                  ; Migrate to either PC or Mac environment
+;        Report                    ; Provide migration report only
+;        Default                   ; Set "Default" migration options
+;        Destination=<folder>      ; Migration destination folder
+;    (No)Debug                     ; Debugging messages
+;    (No)Pause                     ; Pause mode for debugging
+;
+proc scan_parms(pstr) begin
+
+   declare string Ctype, Cskip, Cstop
+   declare string Token
+
+   Ctype = ''
+   Cskip = ' ='
+   Cstop = ' ='
+
+   while (size(pstr) gt 0) begin
+      syscall scan(Token, pstr, Ctype, Cskip, Cstop)
+      cases begin
+
+         case (abbrev('REPORT', upper(Token), 3) eq true) begin
+            X.ReportSW = true
+         end
+
+         case (abbrev('DEBUG', upper(Token), 3) eq true) begin
+            X.DebugSW = true
+         end
+
+         case (abbrev('NODEBUG', upper(Token), 3) eq true) begin
+            X.DebugSW = false
+         end
+
+         case (abbrev('PAUSE', upper(Token), 3) eq true) begin
+            X.PauseSW = true
+         end
+
+         case (abbrev('NOPAUSE', upper(Token), 3) eq true) begin
+            X.PauseSW = false
+         end
+
+         case (abbrev('VERBOSE', upper(Token), 3) eq true) begin
+            X.VerboseSW = true
+         end
+
+         case (abbrev('TERSE', upper(Token), 3) eq true) begin
+            X.VerboseSW = false
+         end
+
+         case (abbrev('PC', upper(Token), 2) eq true) begin
+            X.Mig_PC  = True
+            X.Mig_Mac = False
+            X.Suffix = '.txt'
+         end
+
+         case (abbrev('MAC', upper(Token), 3) eq true) begin
+            X.Mig_MAC =  true
+            X.Mig_PC  =  false
+            X.Suffix = ''
+         end
+
+         case (abbrev('DEFAULT', upper(token), 3) eq true) begin
+            if (size(X.Mig_acct) eq 0) X.Mig_Acct = group || '.' || user
+            if (size(X.ToBase) eq 0) X.ToBase = 'd:\Testing\'
+            x.VerboseSW = false
+            X.ReportSW = false
+            X.DebugSW = true
+            X.PauseSW = false
+            X.Mig_PC = true
+            X.Mig_Mac = false
+            X.Suffix = '.txt'
+         end
+
+         case (abbrev('DESTINATION', upper(Token), 3) eq true) begin
+            syscall scan(Token, pstr, Ctype, Cskip, Cstop)
+            if (size(Token) lt 2) begin
+               write 'DESTINATION: Badly formed of missing (&(Token)).'
+               pcall global_return('Parameter error')
+            end
+            X.ToBase = strip(Token, 'B')
+         end
+
+         case (abbrev('ACCOUNT', upper(Token), 3) eq true) begin
+            syscall scan(Token, pstr, Ctype, Cskip, Cstop)
+            if (size(Token) lt 6) begin
+               write 'ACCOUNT: Badly formed or missing (&(token)).'
+               pcall global_return('Parameter error')
+            end
+            if (size(Token) gt 6) begin
+               write 'ACCOUNT: Badly formed or missing (&(token)).'
+               pcall global_return('Parameter error')
+            end
+            X.Mig_Acct = upper(Token)
+         end
+
+         case (true) begin
+            write '&(token): Unrecognized parameter'
+            pcall global_return('Parameter error')
+         end
+
+      end
+   end
+   return
+
+end

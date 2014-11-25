@@ -1,0 +1,551 @@
+VEV      TITLE 'ORVYL''S EXPRESSION EVALUATOR'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 2
+         HIBAL ,
+         SPACE 2
+* MODIFICATIONS
+*
+         EJECT ,
+VEV      CSECT
+         IDENT 00
+         SPACE 2
+         COPY  ORVDEFN
+         SPACE 3
+         REGS  ,,SR,TR,QR,RR,OPR,BR,WAR,RAR,CLWR,LCBR,CTR
+         EJECT ,
+         MACRO
+&L       OP    &P,&R
+         GBLA  &OPS
+&L       EQU   &OPS
+&OPS     SETA  &OPS+6
+         DC    Y(&P)
+         B     &R
+         MEND
+         SPACE 2
+         MACRO
+         VSECT &P
+         DC    CL4'&P'
+         DC    V(&P)
+         MEND
+         EJECT ,
+*GEN
+         COPY  CLW
+         EJECT ,
+LNKPAGE  RECORD BEGIN
+         COPY  LCB
+         END   ,
+         EJECT ,
+*  WORK AREA
+*
+WA       RECORD BEGIN
+         VSA   SR,RAR
+*
+STKSIZE  EQU   10                      STACK SIZE
+*
+NUMSTK   DS    (STKSIZE)F
+OPSTK    DS    (STKSIZE)X
+         SCANCB PFX=EVKW               SECOND SCANNER WORK AREA
+*
+WASIZE   EQU   *-WA
+         END   ,
+         EJECT ,
+*NOGEN
+VEV      CSECT ,                       RESUME CONTROL SECTION
+         USING WA,WAR                  ##
+         USING CLW,CLWR                ##
+         SPACE 2
+EVAL     VENTER SR,RAR,WASIZE
+BASE     EQU   *
+         SCTYPE 1,CLWKWCB              SET EXPRESSION SCAN
+         LR    SR,R1                   SAVE OLD SCTYPE
+         SCAN  ,CLWKWCB                GET EXPRESSION
+         LR    TR,0                    SAVE LENGTH
+         SCINIT (1),(0),EVKWCB          SET UP SECONDARY SCAN
+         SCTYPE (SR),CLWKWCB            RESET PRIMARY SCAN
+         SCTYPE 2,EVKWCB               DO EXPRESSION SCAN
+         LTR   R0,TR                   TEST TOKEN
+         BM    ERROR                   BR IF BAD STRING
+         BZ    NULL                    BR IF NULL
+         SR    OPR,OPR                 INIT OPERATOR STACK
+         MVI   OPSTK,EOSCODE           SET START OF STRING IN STACK
+         L     RR,=F'-4'               INIT NUMBER STACK
+         EJECT ,
+*  SCAN FOR NUMBERS AND UNARY OPERATORS
+*
+NUMSCAN  SCAN  NUMTBL,EVKWCB
+         B     ERROR                   BR IF NONE PRESENT
+*
+*  PROCESS LEFT PARENTHESIS
+*
+LPAREN   LA    SR,LPCODE
+         B     STACKOP
+*
+*  PROCESS UNARY MINUS
+*
+UMINUS   LA    SR,NEGCODE
+         B     STACKOP
+*
+*  PROCESS REGISTER OPERATOR
+*
+REGOP    LA    SR,REGCODE
+         B     STACKOP
+*
+* PROCESS POINTER OPERATOR
+*
+PTROP    LA    SR,PTRCODE
+         B     STACKOP
+*
+*  OBTAIN LOCATION COUNTER
+*
+LCTR     L     R15,CLWSBPSW+4          GET SESSION BREAK IA
+         LA    R15,@R15                CLEAR PSW CRAP
+         B     STACKNUM
+*
+*  PROCESS NUMBERS
+*
+NAMENUM  LA    TR,1                    DEFAULT SCALE
+         LR    SR,R1
+         AR    SR,0
+         LR    QR,0                    SAVE LENGTH
+         BCTR  SR,0                    POINT AT LAST CHAR
+         CLI   @SR,C'M'                MEGABYTES?
+         BNE   NAME1
+         L     TR,=X'00100000'
+         BCTR  R0,0
+         B     NAME3
+NAME1    CLI   @SR,C'K'                KILO BYTES?
+         BNE   NAME3
+         LA    TR,1024
+         BCTR  R0,0
+NAME3    DS    0H
+         CLI   @R1,C''''
+         BE    QSTR
+         CLI   @R1,C'"'
+         BE    QSTR
+*
+         CLI   @R1,C'0'                HEX NUMBER?
+         BE    HEX                     BR IF SO
+*
+         IF    (@R1,EQ,'#'),BEGIN  Getmained memory...
+         IF    ((R0,LT,2),OR,(@R1,NE,'##')),LOC
+         LA    R1,@R1+1
+         DECR  R0
+         MVC   EVKWKW(7),EVKWKW+1
+         MVI   EVKWKW+7,C' '
+         B     SYM
+         END
+*
+         IF    (@R1,EQ,'$'),BEGIN  Program memory...
+         IF    ((R0,LT,2),OR,(@R1,NE,'$$')),SLOC
+         LA    R1,@R1+1
+         DECR  R0
+         MVC   EVKWKW(7),EVKWKW+1
+         MVI   EVKWKW+7,C' '
+         B     SYM
+         END
+*
+         IF    (@R1,EQ,'@'),BEGIN  Register...
+         IF    ((R0,LT,2),OR,(@R1,NE,'@@')),REGLOC
+         LA    R1,@R1+1
+         DECR  R0
+         MVC   EVKWKW(7),EVKWKW+1
+         MVI   EVKWKW+7,C' '
+         B     SYM
+         END
+*
+         CLI   @R1,C'1'                DECIMAL NUMBER?
+         BNL   DEC                     BR IF SO
+         LR    R0,QR                   RESTORE LENGTH
+         B     SYM
+DEC      XCALL DTB                     CONVERT DECIMAL NUMBER
+NUMGO    LTR   R0,R0                   ANY RESIDUE?
+         BNZ   ERROR                   BR IF SO
+         SR    R14,R14
+         MR    R14,TR                  GET MEG OR KILO
+STACKNUM DS    0H
+         LA    RR,@RR+4                BUMP STACK
+         CL    RR,=A(STKSIZE*4)
+         BNL   OVERFLOW                BR IF TOO BIG
+         ST    R15,NUMSTK(RR)          PLANT NUMBER IN STACK
+         B     OPSCAN                  GO GET BINARY OPERATOR
+*
+QSTR     SR    R15,R15
+         XCALL DQSCAN
+         BNP   NUMGO
+         C     R0,=A(4)
+         BNH   QSLP
+         AR    R1,0                    POINT TO STRING END
+         LA    R0,4
+         SR    R1,0                    BACK UP BY STRING LEN
+QSLP     SLL   R15,8
+         IC    R15,@R1
+         LA    R1,@R1+1
+         BCT   R0,QSLP
+         B     NUMGO
+HEX      XCALL XTB                     CONVERT HEXADECIMAL NUMBER
+         B     NUMGO
+*
+SLOC     IF    (CLWPFPL+CLWPFPIC,Z),$UNDEF
+         L     LCBR,CLWLNKP            LOADER CONTROL
+         USING LCB,LCBR                ##
+         L     SR,LCBCORE              PROGRAM START
+         DROP  LCBR                    ##
+         B     CLOC
+*
+LOC      IF    ^CLWPFPIC,#UNDEF        ONLY DEFINED IF PROG ENTRD
+         L     SR,CLWUWST              GET START OF USER CORE
+*
+CLOC     LA    R1,@R1+1
+         BCTR  R0,0
+         XCALL XTB
+         ALR   R15,SR
+         B     NUMGO
+*
+REGLOC   LA    R1,@R1+1
+         L     R0,EVKWLOC              LOC OF NEXT TOKEN
+         ST    R1,EVKWLOC              BACKUP SCAN
+         SR    R0,R1                   BACKUP LENGTH
+         AL    R0,EVKWLEN
+         ST    R0,EVKWLEN
+         B     REGOP
+*
+*  PROCESS SYMBOLS
+*
+SYM      LR    SR,0
+         LR    TR,R1
+         IF    CLWFOSC,BEGIN           SYMBOL IN OS CORE
+         CLPSERV REGION,(1),(SR)       OBTAIN REGION ADDRESS
+         B     SYMFND
+         END   ,
+SYMORV   IF    (CLWPFPL+CLWPFPIC,Z),SYMCLP
+         L     LCBR,CLWLNKP
+         LA    R1,EVKWKW               CLEANED UP KEYWORD
+         VCALL LDFIND                  GO LOOK UP SYMBOL
+         BZ    SYMCLP                  NOT POUND
+         LTR   R1,R1
+         BM    UNDEF                   NOT DEFINED
+SYMFND   LTR   R15,R1                  FOUND. DEFINED?
+         BNZ   STACKNUM                BR IF DEFINED
+UNDEF    SEG   (TR),(SR)
+         SEG   ': Undefined'
+         B     ERRORX
+         SPACE ,
+$UNDEF   SYSQS (TR),(SR),'$'
+         B     UNDEF
+#UNDEF   SYSQS (TR),(SR),'#'
+         B     UNDEF
+         SPACE ,
+SYMCLP   IF    ^CLWSSP,UNDEF
+         CLPSERV  GETMAP
+         AR    R15,R1                  END OF TABLE
+*
+         IF    (SR,GT,8),UNDEF         CHECK LENGTH
+         WHILE (R1,LT,R15),BEGIN
+         CLC   EVKWKW(8),@R1           COMPARE NAMES
+         BE    SYMMATCH
+         LA    R1,@R1+16
+         END   ,
+         B     UNDEF
+*
+SYMMATCH L     R15,@R1+8               ADDRESS
+         B     STACKNUM
+         EJECT ,
+*  SCAN FOR BINARY OPERATORS
+*
+OPSCAN   SCAN  OPTBL,EVKWCB
+         BM    ERROR
+*
+*  PROCESS END OF STRING
+*
+         LA    SR,EOSCODE
+         B     PRECTEST
+*
+*  PROCESS PLUS SIGN
+*
+PLUS     LA    SR,ADDCODE
+         B     PRECTEST
+*
+*  PROCESS MINUS SIGN
+*
+MINUS    LA    SR,SUBCODE
+         B     PRECTEST
+*
+*  PROCESS TIMES SIGN
+*
+TIMES    LA    SR,MULCODE
+         B     PRECTEST
+*
+*  PROCESS DIVIDE SIGN
+*
+DIVIDE   LA    SR,DIVCODE
+         B     PRECTEST
+*
+*  PROCESS RIGHT PAREN
+*
+RPAREN   LA    SR,RPCODE
+*
+*  COMPARE PRECEDENCE OF OPERATOR AND TOP OF STACK
+*
+PRECTEST DS    0H
+         SR    TR,TR                   PICK UP TOP OF STACK
+         IC    TR,OPSTK(OPR)
+         LH    R15,OPTABLE(TR)         PRECEDENCE
+         CH    R15,OPTABLE(SR)
+         BL    STACKOP
+         BCTR  OPR,0                   POP UP STACK
+         B     OPTABLE+2(TR)           GO DO THE OPERATION
+*
+*  PLACE OPERATOR ON TOP OF STACK
+*
+STACKOP  DS    0H
+         LA    OPR,@OPR+1
+         CL    OPR,=A(STKSIZE)
+         BNL   OVERFLOW
+         STC   SR,OPSTK(OPR)           PLACE OPERATOR INTO STACK
+         B     NUMSCAN                 GO GET OPERAND
+         EJECT ,
+*  PERFORM ADDITION
+*
+ADDDO    SL    RR,=F'4'
+         L     R0,NUMSTK(RR)
+         AL    R0,NUMSTK+4(RR)
+         ST    R0,NUMSTK(RR)
+         B     PRECTEST
+*
+*  PERFORM SUBTRACTION
+*
+SUBDO    SL    RR,=F'4'
+         L     R0,NUMSTK(RR)
+         SL    R0,NUMSTK+4(RR)
+         ST    R0,NUMSTK(RR)
+         B     PRECTEST
+*
+*  PERFORM MULTIPICATION
+*
+MULDO    SL    RR,=F'4'
+         L     R1,NUMSTK(RR)
+         M     R0,NUMSTK+4(RR)
+         ST    R1,NUMSTK(RR)
+         B     PRECTEST
+*
+*  PERFORM DIVISION
+*
+DIVDO    SL    RR,=F'4'
+         L     R0,NUMSTK(RR)
+         SRDA  R0,32                   SMEAR SIGN ACROSS REG 0
+         L     R15,NUMSTK+4(RR)
+         SR    R14,R14
+         ST    R14,NUMSTK(RR)
+         LTR   R15,R15
+         BZ    *+10
+         DR    R0,R15
+         ST    R1,NUMSTK(RR)
+         B     PRECTEST
+*
+*  PERFORM NEGATION
+*
+NEGDO    L     R0,NUMSTK(RR)
+         LCR   R0,0
+         ST    R0,NUMSTK(RR)
+         B     PRECTEST
+*
+*  FETCH REGISTER VALUE
+*
+REGDO    L     R1,NUMSTK(RR)
+         CL    R1,=F'16'
+         BNL   ILLGPR
+         SLL   R1,2
+         L     R1,CLWSBGPR(1)
+*        LA    R1,@R1
+         ST    R1,NUMSTK(RR)
+         B     PRECTEST
+*
+*   FETCH MEMORY FOR POINTER OPERATION
+*
+PTRDO    L     R1,NUMSTK(RR)           ARGUMENT
+         LA    R0,NUMSTK(RR)
+         LA    R15,4
+         VCALL READCORE
+         C     R15,=A(4)               READ OK?
+         BNH   PRECTEST
+         SEG   'Invalid pointer address'
+         B     ERRORX
+*
+*  MATCH PARENTHESES
+*
+LPDO     CL    SR,=A(RPCODE)
+         BE    OPSCAN
+         B     ERROR
+*
+*  TERMINAL PROCESSING
+*
+EOSDO    CL    SR,=A(EOSCODE)
+         BNE   ERROR
+         L     R0,NUMSTK               RESULT
+         LA    R15,4
+EXIT     VEXIT SR,RAR,LTR
+*
+ERROR    DS    0H
+         SEG   'Invalid syntax in expression'
+ERRORX   DS    0H
+         SR    R0,0
+         L     R15,=F'-4'
+         B     EXIT
+*
+OVERFLOW SEG   'Expression too complicated'
+         B     ERRORX
+*
+ILLGPR   SEG   'Invalid GPR'
+         B     ERRORX
+*
+NULL     SR    R15,R15
+         LR    R0,R15
+         B     EXIT
+         EJECT ,
+*  SCAN TABLES
+*
+*    FOR UNARY OPERATORS
+*
+NUMTBL   SCKW  +,NUMSCAN
+         SCKW  -,UMINUS
+         SCKW  @,REGOP
+         SCKW  '(',LPAREN
+         SCKW  >,PTROP
+         SCKW  *,LCTR
+         SCKW  ,NAMENUM
+*
+*    FOR BINARY OPERATORS
+*
+OPTBL    SCKW  +,PLUS
+         SCKW  -,MINUS
+         SCKW  *,TIMES
+         SCKW  /,DIVIDE
+         SCKW  ')',RPAREN
+         SCKW  ,ERROR
+         EJECT ,
+*  TABLE OF OPERATOR PRECENDENCE AND EXECUTION ROUTINES
+*
+OPTABLE  DS    0F
+EOSCODE  OP    R0,EOSDO
+LPCODE   OP    R0,LPDO
+RPCODE   OP    R0,0
+ADDCODE  OP    R1,ADDDO
+SUBCODE  OP    R1,SUBDO
+MULCODE  OP    2,MULDO
+DIVCODE  OP    2,DIVDO
+NEGCODE  OP    3,NEGDO
+REGCODE  OP    3,REGDO
+PTRCODE  OP    3,PTRDO
+         DROP  WAR,BR                  ##
+         EJECT ,
+* LIST OF CLP CSECTS
+*
+         ENTRY CLPCSECT,CLPCSEND
+CLPCSECT DS    0F
+         VSECT VCLP
+         VSECT VPM
+         VSECT VSD
+         VSECT VSTC
+         VSECT VGP
+         VSECT VSUB
+         VSECT VP
+         VSECT VEV
+         VSECT VSCN
+         VSECT VLDR
+         VSECT VUNP
+         VSECT VCR
+         VSECT VPS
+         VSECT VFSH
+         VSECT VSSV
+CLPCSEND DS    0F
+         EJECT ,
+*  EVALUATE HEXADECIMAL STRING
+*     (STRING MAY BE A QUOTED CHARACTER STRING)
+*        - R1: ADDRESS OF CONVERSION RESULT
+*        - R0: MAXIMUM LENGTH OF CONVERSION RESULT
+*
+*        RETURNS R0 WITH LENGTH OF RESULT
+*
+EVHEX    VENTER R1,RAR,WASIZE
+         L     BR,=A(BASE)             COMMON ADDRESSABILITY FOR SEG
+         USING BASE,BR                 ##
+         LR    SR,0                    MAXIMUM LENGTH
+         LR    TR,R1                   RESULT BUFFER
+         SCAN  ,CLWKWCB                BREAK OUT STRING
+         LR    QR,R1                   SAVE TOKEN POINTER
+         LR    RR,R0                   AND TOKEN LENGTH
+         BM    ILLSTR
+         BZ    MISSHEX
+         CLI   @R1,C''''               QUOTED STRING?
+         BE    EVQUOT
+         CLI   @R1,C'"'
+         BE    EVQUOT
+         XCALL XTB                     TEST FOR INVALID CHAR
+         LTR   R0,R0
+         BNZ   ILLSTR
+         LA    R1,@RR+1                TEST FOR MAX LENGTH
+         SRL   R1,1
+         CLR   R1,SR
+         BH    LONGSTR
+         SR    SR,SR
+         LR    R1,QR
+HEXLOOP  CL    RR,=F'1'                DONE?
+         BL    HEXOK                   BR IF SO
+         LA    SR,@SR+1                BUMP LENGTH
+         BE    HEXODD                  BR IF SINGLE DIGIT
+         LA    R0,2
+         XCALL XTB                     CONVERT THE BYTE
+         STC   R15,@TR                 PLANT INTO AREA
+         LA    TR,@TR+1
+         BCTR  RR,0
+         BCTR  RR,0
+         B     HEXLOOP
+*
+HEXODD   LA    R0,1
+         XCALL XTB                     CONVERT ODD DIGIT
+         SLL   R15,4
+         STC   R15,@TR
+*
+HEXOK    SR    R15,R15                 INDICATE NO ERROR
+         LR    R0,SR                   RETURN LENGTH
+HEXEX    VEXIT R1,RAR,LTR
+*
+ILLSTR   LPR   R0,RR                   GET POSITIVE LENGTH
+         SEG   (QR),(0)
+         SEG   ': Invalid hexadecimal string'
+HEXER    DS    0H
+         L     R15,=F'-4'
+         B     HEXEX
+*
+LONGSTR  SEG   'Hexadecimal string too long'
+         B     HEXER
+MISSHEX  SEG   'Missing hexadecimal string'
+         B     HEXER
+*
+* HEX STRING IS QUOTED CHARACTER STRING
+EVQUOT   XCALL DQSCAN                  CLEAR OUT QUOTES
+         BNP   ILLSTR
+         IF    (R0,GT,SR),LONGSTR      STRING WITHIN BOUNDS
+         LR    SR,0                    RETURN LENGTH
+         LR    RR,0                    MOVE STRING TO BUFFER
+         BCTR  RR,0
+         EX    RR,EVQMOV               MOVE STRING
+         B     HEXOK
+*
+EVQMOV   MVC   @TR(*-*),@R1
+         EJECT ,
+*  SPECIAL SEG ROUTINE
+*
+SEG      DS    0H
+         VPUSH RAR,,*
+         VSEG  (1),(0)
+         VPOP  RAR,,*
+         BR    RAR
+         SPACE 5
+         GENMSGS
+         SPACE 2
+         END   .

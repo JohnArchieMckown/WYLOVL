@@ -1,0 +1,155 @@
+FTCHKCMD TITLE '-----  FTP Server Command Exit  -----'
+*---------------------------------------------------------------------*
+*                                                                     *
+*   Program name:  FTCHKCMD                                           *
+*                                                                     *
+*   Purpose:       Check incoming FTP commands and disallow DIR 'WYL' *
+*                                                                     *
+*   Author:        Leonard D. Woren                                   *
+*                                                                     *
+*   Date:          September 27, 1994                                 *
+*                                                                     *
+*   Attributes:    RENT                                               *
+*                                                                     *
+*   Installation:  Stanford University                                *
+*                                                                     *
+*   Updates:                                                          *
+*      20Nov96  U001 LDW - Fix bugs                                   *
+*      27Sep94  U000 LDW - Written                                    *
+*                                                                     *
+*---------------------------------------------------------------------*
+         EJECT
+FTCHKCMD OSENTER  SAVE=,AMODE=31,RMODE=24,EXIT=LEAVE
+&XDBG    SETB  0
+          AIF  (NOT &XDBG).ndbg01
+         LR    R9,R1
+         WTO   'ftchkcmd - entry',ROUTCDE=11
+         LR    R1,R9
+.NDBG01   ANOP
+         LM    R2,R6,0(R1)              get parm pointers
+          AIF  (NOT &XDBG).ndbg02
+         GETMAIN  RU,LV=WORKLEN,SP=98
+         LR    R11,R1
+         USING WORKD,R11
+         WTO   'ftchkcmd - a',ROUTCDE=11
+         MVC   WTO1(WTO1LEN),WTO1DC
+         WTO   'ftchkcmd - b',ROUTCDE=11
+         MVC   WTO1+24(8),0(R5)         command
+         WTO   'ftchkcmd - c',ROUTCDE=11
+         LH    R15,0(,R6)               arg length
+         CVD   R15,DWD
+         OI    DWD+7,X'0F'
+         UNPK  WTO1+40(3),DWD
+         LTR   R15,R15
+         BNP   SKIP_ARG
+         CH    R15,=H'60'
+         BNH   *+8
+         LH    R15,=H'60'
+         CLC   =C'PASS',0(R5)           sensitive?
+         BE    SKIP_ARG                 yes
+         BCTR  R15,0
+         MVC   WTO1+48(*-*),2(R6)       << executed >>
+         EX    R15,*-6
+SKIP_ARG EQU   *
+         WTO   'ftchkcmd - d',ROUTCDE=11
+         WTO   MF=(E,WTO1)
+         FREEMAIN  R,LV=WORKLEN,SP=98,A=(R11)
+.NDBG02   ANOP
+         LH    R14,0(,R6)               get arg length
+         LA    R15,2(,R6)               -> arg value
+         CLC   =C'LIST',0(R5)           "dir" command?
+         BE    CMD_LIST                 yes
+         CLC   =C'CWD',0(R5)            "cd" command?
+         BE    CMD_CWD                  yes
+*---  all other commands are not interesting, just exit, leaving the
+*---  rc set to the initial entry value of 0.
+         B     LEAVE
+
+*---  Process ftp "LIST" command ("DIR")
+*  Disallow DIR WYL, DIR 'WYL', and DIR with any operand beginning
+*  WYL.*, with or without quotes.  It needs to be done this way
+*  because we don't know the current working directory and the user
+*  may have done a "CD ''" first.  If the user has gg.uuu.WYL.xxx
+*  datasets, he'll have a problem, and will need to use DIR
+*  'gg.uuu.WYL.*' to see them.  Them's the breaks...
+CMD_LIST BAL   R10,SKIP_Q               skip leading quote, if any
+         CH    R14,=H'3'                arg len right for 'WYL'?   U001
+         BE    DIR_WYL                  yes - see if it's 'WYL'    U001
+         BL    LEAVE                    too short for dangerous    U001
+*  Operand length is > 3                                           U001
+         ICM   R0,B'1111',0(R15)        get the argument
+         O     R0,=X'40404040'          upper case it
+         CL    R0,=C'WYL.'              dangerous?
+         BNE   LEAVE                    no - allow the command
+*  Operand starts with 'WYL.' .  Disallow anything starting with
+*  'WYL.*', allow all else.  We don't need to reject 'WYL.' because
+*  the IBM ftpserver code will do so.
+         CLI   4(R15),C'*'              is it "WYL.*"?             U001
+         BNE   LEAVE                    no - allow the command     U001
+
+FAIL     MVI   3(R2),16                 set rc ~= 0 to fail the command
+         B     LEAVE                    return to server
+
+*  Operand length is exactly 3.  Reject if it's 'WYL'              U001
+DIR_WYL  SR    R0,R0                    clear for icm              U001
+         ICM   R0,B'1110',0(R15)        get the argument           U001
+         O     R0,=X'40404040'          upper case it              U001
+         CL    R0,=C'WYL '              dangerous?                 U001
+         BNE   LEAVE                    no - allow the command     U001
+         B     FAIL                     yes - fail the command     U001
+
+
+*---  Process ftp "CWD" command ("CD")
+*  Disallow CD WYL and CD 'WYL'.  It needs to be done this way because
+*  we don't know the current working directory.  If the user has
+*  gg.uuu.WYL.xxx datasets, he'll have a problem, and will need to
+*  use CD 'gg.uuu.WYL' to get there.  Them's the breaks...
+
+CMD_CWD  BAL   R10,SKIP_Q               skip leading quote, if any
+         CH    R14,=H'3'                arg correct length to be 'WYL'?
+         BL    LEAVE                    no - short is ok           U001
+         BE    CD_CHK3                  yes - check for 'WYL'      U001
+         CH    R14,=H'4'                correct len to be 'WYL.'?  U001
+         BH    LEAVE                    longer is ok               U001
+         SR    R0,R0                    clear for icm              U001
+         ICM   R0,B'1111',0(R15)        get the argument           U001
+         O     R0,=X'40404040'          upper case it              U001
+         CL    R0,=C'WYL.'              dangerous?                 U001
+         BNE   LEAVE                    no - allow the command     U001
+         B     FAIL                     yes - fail the command     U001
+
+CD_CHK3  SR    R0,R0                    clear for icm
+         ICM   R0,B'1110',0(R15)        get the argument
+         O     R0,=X'40404040'          upper case it
+         CL    R0,=C'WYL '              dangerous?
+         BE    FAIL                     yes - fail the command     U001
+         B     LEAVE                    no - ok                    U001
+
+
+
+*---  subroutine to skip over a leading quote (apostrophe) if any
+SKIP_Q   LTR   R14,R14                  any arg?
+         BNP   LEAVE                    no - allow the command
+         CLI   0(R15),C''''             start with quote?
+         BNER  R10                      no - return to caller
+         LA    R15,1(,R15)              yes - skip over the quote
+         BCTR  R14,0                    ... and adjust remaing arg len
+         BCTR  R14,0                    ... for both quotes        U001
+         BR    R10                      return to caller
+
+         LTORG ,
+
+          AIF  (NOT &XDBG).ndbg03
+WTO1DC   WTO   'FTPSERVE debug: cmd=xxxxxxxx arglen=xxx arg=           $
+                                                                     ',$
+               ROUTCDE=11,MF=L
+
+WTO1LEN  EQU   *-WTO1DC
+
+
+WORKD    DSECT
+DWD      DS    D
+WTO1     DS    (WTO1LEN)X
+WORKLEN  EQU   *-WORKD
+.NDBG03   ANOP
+         END

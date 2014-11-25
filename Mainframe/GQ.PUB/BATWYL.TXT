@@ -1,0 +1,454 @@
+$TITLE   BATWYL
+$STITLE  PROGRAM DEFINITION
+$ON
+$3
+$BASE=12
+$XREF 1
+ BEGIN  |-- PROGRAM TO SEND COMMANDS TO WYLBUR --|
+  |* * * * * * * * * * * * * * * * * * * * * * * * * * * * * *|
+  |*                                                         *|
+  |*  SPIRES/370 - CLASS I Stanford University Proprietary.  *|
+  |*                                                         *|
+  |* * * * * * * * * * * * * * * * * * * * * * * * * * * * * *|
+  |   THIS PROGRAM READS FROM THE SYSIN DATA SET AND          |
+  |   SENDS THOSE LINES (1ST 72 CHARACTERS) TO MILTEN THRU    |
+  |   A VIRTUAL TERMINAL PATH.  ANY LINES SENT OUT BY MILTEN  |
+  |   ARE WRITTEN TO SYSPRINT.  ANY PROMPTS FROM MILTEN CAUSE |
+  |   SYSIN DATA TO BE ASSUMED AS THE RESPONSE.  BOTH THE     |
+  |   PROMPT AND RESPONSE ARE WRITTEN TO SYSPRINT.  IF THE    |
+  |   SYSIN DATA STREAM ENDS WHEN A PROMPT IS OUTSTANDING,    |
+  |   THIS PROGRAM RESPONDS WITH "LOGOFF CLEAR" TO CAUSE THE  |
+  |   VIRTUAL TERMINAL PATH TO BE CLOSED.                     |
+  |* * * * * * * * * * * * * * * * * * * * * * * * * * * * * *|
+$COPY SVCCOM.TXT
+$STITLE  DEFINE LOCAL AREAS
+     EQUATE STILOPEN SYN PATHOPN + PATHNI;
+     EQUATE BUFSIZE SYN 8192+RQSTHDR;
+     ARRAY 16 BYTE TSTMSG;  |-- TEST MESSAGES --|
+     INTEGER OURECB = 0;  |-- OUR ECB --|
+     INTEGER OSRETCD = 0; |-- OS RETURN CODE --|
+     INTEGER OSSAVE, ATTNFLDS = 0;
+        SHORT INTEGER ATTNCNTR SYN ATTNFLDS;
+        BYTE ATTNCHAR SYN ATTNFLDS(2), ESCHAR SYN ATTNFLDS(3);
+     ARRAY 2 INTEGER PARMS;  |-- FIRST COMMAND IS PARM --|
+     INTEGER SLEEPER = 3000;  |-- SLEEP 30 SECONDS --|
+     ARRAY 2 SHORT INTEGER MSGCOUNT = 2(0);
+     ARRAY 256 BYTE MSGTEXT = 256(" ");
+$IFF P P   |*** Font selection printer like 3800 ***|
+        BYTE MSGCNTRL SYN MSGCOUNT(2);
+$END P
+$IFT P P   |*** Impact printer like 1403 ***|
+        BYTE MSGCNTRL SYN MSGCOUNT(3);
+$END P
+     ARRAY 0 LONG REAL;  |-- ALIGNMENT --|
+     ARRAY RQSTHDR BYTE MILOUBUF = RQSTHDR(0);
+     ARRAY 256 BYTE INPUTBUF;
+     ARRAY 4 LONG REAL CONWORK;
+     ARRAY 0 INTEGER SUZNMGC;  |-- START OF SUZAN BLOCK --|
+     ARRAY PATHSIZE BYTE SUZN = PATHSIZE(0);
+     INTEGER SUZINIT = @@SUZNMGC(0/CMDEND);
+     INTEGER SENDPCW = @@MILOUBUF(0/CMDSNDX+CMDEND);
+     ARRAY 2 SHORT INTEGER SENDLEN = 2(0);
+     INTEGER READPCW = 0;  |-- Dynamically assigned --|
+     ARRAY 2 SHORT INTEGER READLEN = (BUFSIZE,0);
+     ARRAY 2 INTEGER SAVEPRMT;  |-- PROMPT INFORMATION --|
+     ARRAY 9 BYTE IDDNAME = 9(0);
+     ARRAY 9 BYTE ODDNAME = 9(0);
+     SHORT INTEGER ODDCNTR = 0;  |-- Special output cntr --|
+     ARRAY 2 INTEGER SAVEREGS;
+  |-- DATA SET CONTROL INFORMATION --|
+     ARRAY 25 INTEGER DCBO = 25(0); |-- OS CONTROL BLOCK --|
+       SHORT INTEGER LRECLO SYN DCBO(#52);
+       BYTE OPFLAG SYN DCBO(#30),
+            RECFMO SYN DCBO(#24);
+     ARRAY 25 INTEGER DCBI = 25(0); |-- OS CONTROL BLOCK --|
+       SHORT INTEGER LRECL SYN DCBI(#52);
+       BYTE OPENFLAG SYN DCBI(#30),
+            RECFM SYN DCBI(#24),
+            CARD SYN DCBI(99);
+     INTEGER NXTLINE = 0, ENDLINE = 0;
+     INTEGER LINEHEAD = 0, LINENUM = 0;
+     SHORT INTEGER LINELEN = 0;
+     ARRAY 240 BYTE LINE;  ARRAY 36 BYTE LINEND;
+     SHORT INTEGER LENFLD SYN LINEHEAD;  |-- FOR EDIT FORMAT --|
+     ARRAY 256 BYTE NEWLTABL = ( 13(0), 2, 7(0), 4, 234(0) );
+     BYTE SUZNFLAG = 0,   |-- SUZAN CONTROL FLAG --|
+          FLAGS = 0;      |-- INTERNAL CONTROL FLAG --|
+     EQUATE LASTIME  SYN #80, STOPFG SYN #40,
+            PARMNUM  SYN #20, PARMFL  SYN #10, LOGF  SYN #08,
+            READFLAG SYN #04, ATTNBIT SYN #02, CNTRL SYN #01;
+     BYTE ASAFLAG = 0;  |-- FLAG: ASA HANDLING FROM WYLBUR --|
+     EQUATE OVERPRT SYN #80;  |-- CNTRL BIT USED IN ASAFLAG--|
+     BYTE OUTCHAR = 0;  |-- OUTPUT ESCAPE CHARACTER --|
+     ARRAY 0 LONG REAL;  |-- ALIGNMENT --|
+     ARRAY BUFSIZE BYTE MILINBUF = RQSTHDR(0);
+     FUNCTION REDUCE(6,#0600),  DEVTYPE(0,#0A18),
+              SETB(4,#9600), RESETB(4,#94FF),
+              WTL(0,#0AFE);  |-- WRITE TO HASPLOG --|
+$PAGE
+  PROCEDURE WAITECB (R10);
+  BEGIN  IF TM(PATHCLS,SUZNFLAG); ~ON THEN
+     BEGIN  R1 := @OURECB;  R0 := 1;  SVCWAIT;
+     END ELSE SETB(STOPFG,FLAGS);  |-- Indicate stop --|
+     OURECB := OURECB XOR OURECB;  |-- CLEAR ECB --|
+  END;  |--- proc-end:  WAITECB ---|
+
+  PROCEDURE SLEEP (R11);
+  BEGIN  R1 := @SLEEPER;  R0 := 17 SHLL 24;  STIMER;
+  END;  |--- proc-end:  SLEEP ---|
+
+  PROCEDURE MOVEMSG (R10);  IF R1 > 0 THEN
+  BEGIN  R4 := MSGCOUNT;  R1 := R1 + R4;  R3 := 256;
+     IF R1 > R3 THEN R1 := R3;  MSGCOUNT := R1;  R1 := R1-R4;
+     IF R1 > 0 THEN  |-- OK, SOMETHING THERE --|
+     BEGIN  R4 := @MSGTEXT(R4);  REDUCE(R1);
+        EX(R1,MVC(0,B4,B2));  |-- MOVE THE MESSAGE --|
+     END;
+  END;  |--- proc-end:  MOVEMSG ---|
+
+  PROCEDURE WRIT (R10);  IF TM(LOGF,FLAGS); ON THEN
+  BEGIN  R0 := 4 + MSGCOUNT =: MSGCOUNT;  R0 := 13;
+     R15--R15;  R1 := @MSGCOUNT;  WTL;  |-- WRITE TO LOG --|
+  END ELSE IF OPFLAG ~= 0 THEN  |-- Write to supplied file --|
+  BEGIN  STM(R2,R3,SAVEREGS);  R1 := @DCBO;  PUT;
+     R2 := LRECLO;  R3 := 256;  IF R2 < R3 THEN R3 := R2;
+     REDUCE(R3);  IF R3 >= 0 THEN  |-- Text to output --|
+        IF TM(4,RECFMO); ON THEN EX(R3,MVC(0,C1,MSGTEXT(_1)))
+        |-- No controls --| ELSE EX(R3,MVC(0,C1,MSGTEXT));
+     R2 := R2 - R3;  R1 := @B1(R3+1);  |-- Pad --|
+     WHILE REDUCE(R2); R2 > 0 DO  |-- Blank fill --|
+     BEGIN  C1 := " ";  R1 := @B1(1);
+     END;  IF MSGTEXT(_1) ~= " " THEN R0--R0 =: ODDCNTR;
+     MSGTEXT(_1) := " ";  R1 := 1 + ODDCNTR;  IF R1 > 60 THEN
+     BEGIN  R1--R1;  MSGTEXT(_1) := "1";  |-- Eject --|
+     END;  ODDCNTR := R1;  LM(R2,R3,SAVEREGS);
+  END ELSE  |-- WRITE TO SYSPRINT --|
+  BEGIN  R0 := @MSGTEXT;  IF TM(CNTRL,FLAGS); ON THEN
+     BEGIN  R0 := @MSGCNTRL;  PRINT;  MSGCOUNT(2) := "  ";
+     END ELSE IF TM(CNTRL,ASAFLAG); ON THEN
+     BEGIN  R0 := @MSGTEXT(_1);  PRINT;  MSGTEXT(_1) := " ";
+     END ELSE WRITE;
+  END;  |--- proc-end:  WRIT ---|
+
+  PROCEDURE PUTOUT (R11);
+  BEGIN  R5 := R1;  R6 := R2;  WHILE R5 > 0 DO
+     BEGIN  IF TM(OVERPRT,ASAFLAG); ON THEN
+        BEGIN  IF TM(CNTRL,FLAGS); ON THEN MSGCNTRL := "+" ELSE
+           BEGIN  MSGTEXT(_1) := "+";  SETB(CNTRL,ASAFLAG);
+           END;  RESETB(OVERPRT,ASAFLAG);
+        END;  R1 := R6 + R5;  R2-R2;  REDUCE(R5);
+        R10 := 255;  IF R5 < R10 THEN R10 := R5;
+        EX(R10,TRT(0,B6,NEWLTABL));
+        IF R2 = 2 THEN SETB(OVERPRT,ASAFLAG);
+        R1 := R1 - R6;  R5 := R5 - R1;
+        R2 := R6;  R6 := @B6(R1+1);
+        MOVEMSG;  WRIT;  RESETB(CNTRL,ASAFLAG);
+        MSGTEXT := " ";  MSGTEXT(1/255) := MSGTEXT;
+        R0-R0;  IF R5 > 0 AND TM(PARMNUM,FLAGS); ON THEN R0 := 10;
+        MSGCOUNT := R0;  |-- READY FOR NEXT PIECE --|
+     END;  R1 := MSGCOUNT;  IF R1 > 0 THEN
+     BEGIN  WRIT;  R0-R0 =: MSGCOUNT;
+        MSGTEXT := " ";  MSGTEXT(1/255) := MSGTEXT;
+     END;
+  END;  |--- proc-end:  PUTOUT ---|
+$PAGE
+  PROCEDURE CNVNUM (R11);
+  BEGIN  R2 := 1;  BCDTOVAL(R2);
+     IF ~= OR R0 < 0 THEN R0-R0;  LTR(R1,R0);
+  END;  |--- proc-end:  CNVNUM ---|
+
+  PROCEDURE BATCMD (R10);  |-- Process BATWYL command --|
+  BEGIN  LINE(120) := " ";  LINE(121/120) := LINE(120);
+     LINE(0/120) := LINE OR LINE(121);  |-- FORCE UPPER --|
+     LINE(120) := "0";  R1 := @LINE(9);  IF OPFLAG = 0 THEN
+     IF TM(LOGF,FLAGS); OFF THEN  |-- CHECK LISTING OPTIONS --|
+     BEGIN  IF LINE(3) = "EJECT" THEN  |-- EJECT --|
+        IF TM(CNTRL,FLAGS); ON THEN MSGCNTRL := "1" ELSE PAGE;
+        IF LINE(3) = "CNTRL" THEN  |-- GET CNTRL OPTION --|
+        IF CNVNUM; = THEN RESETB(CNTRL,FLAGS) ELSE
+        BEGIN  SETB(CNTRL,FLAGS);  MSGCOUNT(2) := "  ";
+        END;  IF LINE(3) = "SPACE" AND CNVNUM; ~= THEN
+        BEGIN  R0 := @LINE(121);  |-- Output blanks --|
+           WHILE REDUCE(R1); R1 >= 0 DO
+           IF TM(CNTRL,FLAGS); ON THEN PRINT ELSE WRITE;
+        END;
+     END;  IF LINE(3) = "ESC=" THEN
+     BEGIN  ESCHAR(0/1) := LINE(STRING+3);
+        IF ESCHAR = " " THEN ESCHAR := 0;
+     END;  IF LINE(3) = "OUT=" THEN
+     BEGIN  OUTCHAR(0/1) := LINE(STRING+3);
+        IF OUTCHAR = " " THEN OUTCHAR := 0;
+     END;  IF LINE(3) = "COND" THEN
+     BEGIN  REDUCE(R1);  CNVNUM;  OSRETCD := R1;
+     END;  IF LINE(3) = "PAUSE" AND CNVNUM; ~= THEN
+     BEGIN  R1 := R1 * 100S =: SLEEPER;  SLEEP;
+     END;  R0 := R0-R0;  |-- Register reset --|
+  END;  |--- proc-end:  BATCMD ---|
+$STITLE  MAIN CODE
+
+  |-- MAIN CODE --|   OSSAVE := R14;
+     R4 := @SUZNMGC;  PATHMY(R4) := "VFEPATHX";
+     PATHYOU(R4) := "MILTEN  ";  PATHPASS(R4) := "PVFE";
+     R3 := B1;  R2 := H3;  R3 := @B3(2);  R0-R0;
+     IF TM(#80,B1); OFF THEN R0 := 2;  R2 := R2 - R0;
+     LINE(120) := " ";  LINE(121/5) := LINE(120);
+  PICKPARM:   IF R2 > 0 THEN  |-- PARM --|
+     BEGIN  IF C3 = "," OR C3 = " " THEN  |-- Strip --|
+        BEGIN  REDUCE(R2);  R3 := @B3(1);  GOTO PICKPARM;
+        END;  LINE(0/5) := C3 OR LINE(120);
+        IF LINE = "NUM" AND R2 >= STRING THEN
+        BEGIN  SETB(PARMNUM,FLAGS);  R3 := @B3(STRING);
+           R2 := R2 - STRING;  GOTO PICKPARM;
+        END;  IF LINE = "ESC=" AND R2 > STRING THEN
+        BEGIN  ESCHAR(0/1) := B3(STRING);  REDUCE(R2);
+           R3 := @B3(STRING+1);  R2 := R2 - STRING;
+           IF ESCHAR = " " THEN ESCHAR := 0;
+           GOTO PICKPARM;  |-- Pick another parm --|
+        END;  IF LINE = "OUT=" AND R2 > STRING THEN
+        BEGIN  OUTCHAR(0/1) := B3(STRING);  REDUCE(R2);
+           R3 := @B3(STRING+1);  R2 := R2 - STRING;
+           IF OUTCHAR = " " THEN OUTCHAR := 0;
+           GOTO PICKPARM;  |-- Pick another parm --|
+        END;  IF LINE = "ATTN=" AND R2 > STRING THEN
+        BEGIN  ATTNCHAR(0/1) := B3(STRING);  REDUCE(R2);
+           R3 := @B3(STRING+1);  R2 := R2 - STRING;
+           IF ATTNCHAR = " " THEN ATTNCHAR := 0;
+           GOTO PICKPARM;  |-- Pick another parm --|
+        END;  IF LINE = "PATH=" AND R2 > STRING THEN
+        BEGIN  R3 := @B3(STRING);  R2 := R2 - STRING;
+           R5 := @PATHMY(R4);  B5 := " ";  B5(1/7) := B5;
+           R1 := @B3(R2);  R6 := 8;  |-- Move name --|
+           WHILE R3 < R1 AND C3 ~= "," DO
+           BEGIN  REDUCE(R6);  IF R6 >= 0 THEN
+              BEGIN  C5 := C5 OR C3;  R5 := @B5(1);
+              END;  REDUCE(R2);  R3 := @B3(1);
+           END;  GOTO PICKPARM;
+        END;  IF LINE = "IDD=" AND R2 > STRING THEN
+        BEGIN  R3 := @B3(STRING);  R2 := R2 - STRING;
+           R5 := @IDDNAME;  B5 := " ";  B5(1/7) := B5;
+           R1 := @B3(R2);  R6 := 8;  |-- Move name --|
+           WHILE R3 < R1 AND C3 ~= "," DO
+           BEGIN  REDUCE(R6);  IF R6 >= 0 THEN
+              BEGIN  C5 := C5 OR C3;  R5 := @B5(1);
+              END;  REDUCE(R2);  R3 := @B3(1);
+           END;  GOTO PICKPARM;
+        END;  IF LINE = "ODD=" AND R2 > STRING THEN
+        BEGIN  R3 := @B3(STRING);  R2 := R2 - STRING;
+           R5 := @ODDNAME;  B5 := " ";  B5(1/7) := B5;
+           R1 := @B3(R2);  R6 := 8;  |-- Move name --|
+           WHILE R3 < R1 AND C3 ~= "," DO
+           BEGIN  REDUCE(R6);  IF R6 >= 0 THEN
+              BEGIN  C5 := C5 OR C3;  R5 := @B5(1);
+              END;  REDUCE(R2);  R3 := @B3(1);
+           END;  MSGTEXT(_1) := "1";  GOTO PICKPARM;
+        END;   |-- COMMAND SUPPLIED --|
+        PARMS := R3;  PARMS(4) := R2;  SETB(PARMFL,FLAGS);
+     END;  |-- PARMS PROCESSED, NOW CHECK DATA SETS --|
+     IF ODDNAME ~= 0 THEN  |-- User supplied output DDNAME --|
+     BEGIN  R0--R0;  R1 := @DCBO;  R2 := @ODDNAME;  OPEN;
+     END;  IF OPFLAG = 0 THEN  |-- Use standard --|
+     BEGIN  LA(R1,"SYSPRINT");  R0 := @INPUTBUF;  DEVTYPE;
+        IF R15 ~= 0 THEN SETB(LOGF,FLAGS);
+     END;  IF IDDNAME ~= 0 THEN  |-- User supplied input --|
+     BEGIN  R2 := @IDDNAME;  R15-R15;  |-- Must exist --|
+     END ELSE  |-- Try standard files --|
+     BEGIN  LA(R1,"COMMANDS");  R2 := R1;  R0 := @INPUTBUF;
+        DEVTYPE;  IF R15 ~= 0 THEN  |-- TRY SYSIN --|
+        BEGIN  LA(R1,"SYSIN   ");  R2 := R1;  R0 := @INPUTBUF;
+           DEVTYPE;  |-- CHECK IF SYSIN EXISTS --|
+        END;
+     END;  IF R15 = 0 THEN  |-- OPEN THE FILE --|
+     BEGIN  R1 := @DCBI =: R0;  OPEN;
+     END;  IF TM(#10,OPENFLAG); OFF AND TM(PARMFL,FLAGS); OFF THEN
+     BEGIN  LA(R2,"NO INPUT.");  R1 := STRING;  PUTOUT;  GOTO LDEOF4;
+     END;  R3 := @SUZNMGC;  R4 := @OURECB =: PATHECB(R3);
+     R4 := @SUZNFLAG =: PATHECBF(R3);  |-- MY FLAG --|
+     R4 := 16384 =: PATHBUF(R3); |-- MAXIMUM BUFFER SIZE. --|
+     PATHMFL(R3) := PATHMNAM;    |-- I SUPPLIED THE NAMES --|
+  |-- OPEN MILTEN PATH --|
+     R0-R0;  R1 := @SUZINIT;  SVCCOM;  WAITECB;
+     IF TM(STILOPEN,SUZNFLAG); OFF THEN GOTO LDEOF2;
+     R9 := @MILINBUF;  R8 := @MILOUBUF;
+     R1 := @MEM(CMDRETX+CMDEND) SHLL 24 OR R9 =: READPCW;
+     R1--R1 =: R15;  RQSTCMD(R9) := TMILINIT;
+  PATHSTAT:  RQSTRDW(R8/RQSTHDR) := B9;
+     RQSTCPLN(R8) := RQSTCPLN(R8) XOR RQSTCPLN(R8);
+     IF TM(LASTIME,FLAGS); ON THEN SETB(CPLBFLGF,RQSTCPLB(R8));
+     IF TM(ATTNBIT,FLAGS); ON THEN  |-- INDICATE ATTN --|
+     BEGIN  RESETB(ATTNBIT,FLAGS);  SETB(CPLAATTN,RQSTCPLA(R8));
+     END;  RQSTOUCT(R8) := R1;   |-- RESPONSE LENGTH --|
+     R15 := @B1(RQSTHDR) =: RQSTRDW(R8);  |-- SEND TO MILTEN --|
+     R1 := @SENDPCW;  R0 := SUZNMGC;  SVCCOM;
+     IF R15 ~= 0 THEN GOTO LDEOF0;  |-- Susan path problem --|
+  WAITHERE:  WAITECB;  |-- Wait for request from Milten --|
+  READML:  |-- READ FROM MILTEN --|
+     RQSTTEXT(R9/256) := RQSTTEXT(R9) XOR RQSTTEXT(R9);
+     R1 := @READPCW;  R0 := SUZNMGC;  SVCCOM;
+     IF R15 ~= 0 THEN GOTO LDEOF1;  |-- Susan path problem --|
+     IF R15 = RDWSZ(R9) THEN  |-- Empty queue --|
+     IF TM(STOPFG,FLAGS); OFF THEN GOTO WAITHERE ELSE
+     BEGIN  R3 := NXTLINE;  IF R3 >= ENDLINE THEN  |-- READ --|
+        BEGIN  IF TM(#10,OPENFLAG); OFF THEN GOTO EOF;
+           R1 := @DCBI;  GET;  IF ~= THEN GOTO EOF;
+        END;  GOTO LDEOF3;
+     END;
+     IF RQSTCMD(R9) = TMILBRK THEN GOTO READML;
+     IF RQSTCMD(R9) = TMILWRIT THEN
+     BEGIN  |-- WRITE LINE SENT BY MILTEN --|
+        IF TM(PARMNUM,FLAGS); ON THEN  R1 := 10 =: MSGCOUNT;
+        R1 := RQSTOUCT(R9);  R2 := @RQSTTEXT(R9);
+        TSTMSG := " ";  TSTMSG(1/15) := TSTMSG;
+        TSTMSG(0/16) := TSTMSG OR B2;
+        IF TSTMSG = "ORVYL QUEUED`;" AND R1 = STRING THEN
+        BEGIN  R1 := 500 =: SLEEPER;  SLEEP;
+        END ELSE IF OUTCHAR ~= 0 AND R1 > 7S AND C2 = OUTCHAR
+            AND C2(0/2) = C2(1) THEN  |-- BATWYL command --|
+        BEGIN  LINE := " ";  LINE(1/120) := LINE;  REDUCE(R1);
+           REDUCE(R1);  EX(R1,OC(0,LINE,B2));  BATCMD;
+        END ELSE PUTOUT;  R1-R1;  GOTO PATHSTAT;
+     END;  |-- WASN'T WRITE, COULD IT BE CONVERSE --|
+     IF RQSTCMD(R9) = TMILCONV THEN
+     BEGIN  |-- YES, SO FIRST ADD PROMPT TO MESSAGE --|
+        INPUTBUF := " ";  INPUTBUF(1/71) := INPUTBUF;
+        R1 := RQSTOUCT(R9) - 4;  R2 := @RQSTTEXT(R9+4);
+        STM(R1,R2,SAVEPRMT);  SETB(READFLAG,FLAGS);
+        IF TM(PARMFL,FLAGS); ON THEN  |-- PASS PARM --|
+        BEGIN  RESETB(PARMFL,FLAGS);  LM(R1,R2,PARMS);
+           EX(R2,MVC(0,LINE,B1));  |-- MOVE PARM TO LINE --|
+           CONWORK(10) := "PARM:     ";  GOTO READEND;
+        END;  |-- READ LINE FROM INPUT STREAM --|
+  READLINE:  LINE := " ";  LINE(1/255) := LINE;
+        R3 := NXTLINE;  IF R3 >= ENDLINE THEN  |-- READ --|
+        BEGIN  IF TM(#10,OPENFLAG); OFF THEN GOTO FINISH;
+           R1 := @DCBI;  GET;  IF ~= THEN GOTO FINISH;
+           R3 := R1;  R1 := R1 + LRECL;
+           NXTLINE := R3;  ENDLINE := R1;
+           IF CARD > 1 THEN GOTO CARDIN;  IF ~= THEN
+           BEGIN  IF TM(#C0,RECFM); ~ON THEN  |-- NOT EDIT --|
+              BEGIN  CARD := 2;  GOTO CARDIN;
+              END;  CARD := 1;  |-- EDIT FORMAT --|
+           END;  LENFLD := H3;  R1 := R3 + LENFLD;
+           ENDLINE := R1;  R3 := @B3(2);  |-- FIRST LINE --|
+        END;  |-- EXTRACT EDIT FORMAT LINE --|
+        LINENUM := B3;  |-- LINE NUMBER --|
+  |-- NOW EXPAND LINE CONTENTS TO INCLUDE BLANKS --|
+        R2 := @LINE;  R6 := @LINEND;  |-- LIMITS --|
+        R1-R1 =: R5;  IC(R5,B3(4));  R3 := @B3(5);
+        WHILE R5 > 0 DO  |-- LENGTH IN R5 --|
+        BEGIN  IC(R1,B3);  REDUCE(R5);  R3 := @B3(1);
+           R4 := #F AND R1;  R1 := R1 SHRL 4;
+           R2 := R2 + R1;  IF R4 > 0 THEN
+           BEGIN  R5 := R5 - R4;  REDUCE(R4);
+              EX(R4,MVC(0,B2,B3));
+              R2 := @B2(R4+1);  R3 := @B3(R4+1);
+           END;  IF R2 > R6 THEN GOTO ERROR1;
+        END;  R1 := @LINE;  R2 := R2 - R1;  GOTO BOTH;
+
+  CARDIN:  |-- PROCESS FIXED IMAGE --|
+        R2 := LRECL;  IF R2 > 240S THEN GOTO ERROR2;
+        REDUCE(R2);  EX(R2,MVC(0,LINE,B3));
+        IF CARD >= 3 THEN GOTO X3;
+        IF R2 ~= 79S THEN GOTO X2;  |-- UNNUMBERED --|
+        IF B3(72) = " " AND B3(73/7) = B3(72) THEN GOTO X2;
+        IF B3(76) = "." THEN  |-- Possible NUMBER format --|
+        BEGIN  LINEND(1/4) := B3(72);  LINEND(5/3) := B3(77);
+        END ELSE  |-- Check for possible INTEGER format --|
+        BEGIN  IF B3(76) < "0" THEN GOTO X3;
+           LINEND(0/8) := B3(72);  |-- Full 8 digits --|
+        END;  R4 := @LINEND;  R5 := @B4(7);
+        WHILE R4 <= R5 AND B4 = " " DO R4 := @B4(1);
+        WHILE R4 <= R5 AND B5 = " " DO REDUCE(R5);
+        WHILE R4 < R5 AND B5 >= "0" DO REDUCE(R5);
+        IF R4 ~= R5 OR B4 < "0" THEN GOTO X3;
+        LINEND(5) := LINEND(5) OR "000";
+        R6 := R4;  R1--R1;
+    X1: R1 := @B1(1);  R4 := @B4(1);
+        IF B4 >= "0" THEN GOTO X1;
+        CONWORK(16) := "0";  CONWORK(17/14) := CONWORK(16);
+        R5 := 15 - R1;  R4 := @CONWORK(R5+16);  REDUCE(R1);
+        EX(R1,MVC(0,B4,B6));  NI(#CF,CONWORK(30));
+        PACK(7,14,CONWORK,CONWORK(16));  CVB(R1,CONWORK);
+        R2 := 71;  GOTO X4;  |-- LINE NUMBER IN R1 --|
+    X2: CARD := 3;  |-- INDICATE UNNUMBERED --|
+    X3: R1 := 1000 + LINENUM;  |-- UPDATE LINE NUMBER --|
+    X4: LINENUM := R1;  WHILE R2 >= 0 DO
+        BEGIN  R4 := @B3(R2);  IF B4 ~= " " THEN GOTO X5;
+           REDUCE(R2);  |-- STRIP TRAILING BLANKS --|
+        END;
+    X5: R2 := @B2(1);  R3 := ENDLINE;
+    BOTH:  NXTLINE := R3;  IF R2 < 0 THEN R2 := R2-R2;
+        IF TM(PARMNUM,FLAGS); ON THEN  |-- NEED LINE NUMBER --|
+        BEGIN  R4 := LINENUM;  CVD(R4,CONWORK);
+           CONWORK(8) := " `0`0`0`0`1`0.`0`0`0 ";  |-- EDIT MASK --|
+           ED(10,CONWORK(8),CONWORK(3));
+           R4 := @CONWORK(STRING+7);  |-- END OF NUM --|
+           WHILE REDUCE(R4); B4 = "0" DO B4 := " ";
+        END;  |-- TEXT READY, LENGTH IN R2 --|
+        IF ESCHAR = 0 OR R2 < 7S OR LINE(0/1) ~= ESCHAR
+           OR LINE(0/2) ~= LINE(1) THEN GOTO READEND;
+    |-- PROCESS BATWYL COMMAND, THEN READ NEXT COMMAND --|
+        BATCMD;  GOTO READLINE;  |-- READ NEXT INPUT LINE --|
+    ERROR1:  |-- NOT EDIT FORMAT --|
+        LA(R2,"-NOT EDIT FORMAT.");  GOTO ERRORX;
+    ERROR2:  |-- LRECL TOO LARGE --|
+        LA(R2,"-LRECL TOO LARGE.");
+    ERRORX:  R1 := STRING;  PUTOUT;
+    FINISH:  |-- FILE COMPLETED --|
+        R0-R0;  R1 := @DCBI;  IF TM(#10,OPENFLAG); ON THEN KLOSE;
+        R2 := NEG 1;  |-- INDICATE NO RESPONSE --|
+    READEND:  LTR(R1,R2);  IF >= THEN  |-- MOVE IMAGE --|
+        BEGIN  REDUCE(R2);  IF > THEN EX(R2,MVC(0,INPUTBUF,LINE));
+        END ELSE  |-- NO MORE INPUT --|
+        BEGIN  IF TM(LASTIME,FLAGS); ON THEN GOTO LDEOF4;
+           INPUTBUF := "LOGOFF CLEAR";  R1 := STRING;
+           CONWORK(10) := "SUPPLIED: ";  SETB(LASTIME,FLAGS);
+        END;  LINELEN := R1;  IF TM(PARMNUM,FLAGS); ON THEN
+        BEGIN  R1 := 10;  R2 := @CONWORK(10);  MOVEMSG;
+        END;  LM(R5,R6,SAVEPRMT);  WHILE R5 > 0 DO
+        BEGIN  R1 := R6 + R5;  R2-R2;  REDUCE(R5);
+           R10 := 255;  IF R5 < R10 THEN R10 := R5;
+           EX(R10,TRT(0,B6,NEWLTABL));
+           R1 := R1 - R6;  R5 := R5 - R1;
+           R2 := R6;  R6 := @B6(R1+1);  MOVEMSG;
+           IF R5 > 0 THEN  |-- More to come --|
+           BEGIN  WRIT;  R0-R0;  MSGTEXT := " ";
+              IF TM(PARMNUM,FLAGS); ON THEN R0 := 10;
+              MSGCOUNT := R0;  MSGTEXT(1/255) := MSGTEXT;
+           END;
+        END;  IF TM(CNTRL,FLAGS); ON THEN  |-- PROMPT/RESPONSE --|
+$IFF P P   |*** Font selection printer like 3800 ***|
+        BEGIN  CONWORK(0/2) := MSGCOUNT;  MSGCNTRL(1) := "0";
+           R1 := R1-R1;  PUTOUT;  |-- FLUSH PROMPT --|
+           MSGCOUNT(0/2) := CONWORK;  MSGCNTRL := "+1";
+$END P
+$IFT P P   |*** Impact printer like 1403 ***|
+        BEGIN  CONWORK(0/2) := MSGCOUNT;
+           R1 := R1-R1;  PUTOUT;  |-- FLUSH PROMPT --|
+           MSGCOUNT(0/2) := CONWORK;  MSGCNTRL := "+";
+           R1 := LINELEN;  R2 := @INPUTBUF;  PUTOUT;
+           MSGCOUNT(0/2) := CONWORK;  MSGCNTRL := "+";
+           R1 := LINELEN;  R2 := @INPUTBUF;  PUTOUT;
+           MSGCOUNT(0/2) := CONWORK;  MSGCNTRL := "+";
+$END P
+        END;  R1 := LINELEN;  R2 := @INPUTBUF;  PUTOUT;
+        R1 := LINELEN;  IF ATTNCHAR > 0 AND R1 >= 3 THEN
+        BEGIN  R2 := @INPUTBUF(R1-3);  |-- FIRST POSSIBLE --|
+           IF B2(0/1) = ATTNCHAR AND B2(0/2) = B2(1) THEN
+           BEGIN  R1 := R1 - 3;  SETB(ATTNBIT,FLAGS);
+           END;
+        END;  GOTO PATHSTAT;
+     END;  IF RQSTCMD(R9) = TMILSTOP THEN
+     IF TM(READFLAG,FLAGS); ON THEN GOTO EOF;
+     R1 := 20;  GOTO LDEOF;  |-- Virtual terminal problem --|
+  LDEOF0:  R1 := R15 + 100S;  GOTO LDEOF;
+  LDEOF1:  R1 := R15 + 200S;  GOTO LDEOF;
+  LDEOF2:  R1 := 28;  GOTO LDEOF;  |-- Early close --|
+  LDEOF3:  R1 := 24;  GOTO LDEOF;  |-- MILTEN path closed --|
+  LDEOF4:  R1 := 4;  |-- Input ran out --|
+  LDEOF:  |-- NON-ZERO TERMINATION --|
+     OSRETCD := R1;  |-- Store return code --|
+  EOF:  |-- END OF SESSION --|
+     R0-R0;  R1 := @DCBO;  IF TM(#10,OPFLAG); ON THEN KLOSE;
+     R0-R0;  R1 := @DCBI;  IF TM(#10,OPENFLAG); ON THEN KLOSE;
+     CANCEL;  R14 := OSSAVE;  B14(16) := OSRETCD;
+  END.

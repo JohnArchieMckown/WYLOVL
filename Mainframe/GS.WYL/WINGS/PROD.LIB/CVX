@@ -1,0 +1,234 @@
+//WINGCVA JOB
+// exec purgeold
+// EXEC ASMSCLG,
+// PARM.ASM=(TERM,XREF,ESD,XREF(SHORT),NODECK,OBJECT,NORLD),
+//  parm.go='WYL.GA.MCL.**'
+//ASM.SYSLIB DD DSN=WYL.GA.MCL.IOPROGM.MACLIB
+//ASM.SYSTERM DD SYSOUT=T
+WINGCV   CSECT
+         REGISTER
+CVTPTR   EQU   16                  Address of CVT pointer
+CVTTCBP  EQU   0                   TCB pointer in CVT
+TCBTIO   EQU   12                  TIOT pointer in TCB
+TIOELNGH EQU   0,1,C'X'            TIOT DD entry length
+TIOEDDNM EQU   4,8,C'C'            TIOT DD entry DDNAME
+TIOUCBAD EQU   16,4,C'A'           --> UCB
+UCBVOLI  EQU   28,6,C'C'           Volid in UCB
+         ENTER BASE=12
+         L     R11,0(R1)           ->parm
+         LA    R11,0(R11)          clear hi byte
+         SR    R1,R1
+         MCALL MSGOPEN             Open SYSPRINT
+         LTR   R11,R11             if any...
+         BNP   BADPARM
+         LH    R10,0(R11)          L'parm
+         MVI   BPRSN,C'1'
+         LTR   R10,R10
+         BNP   BADPARM
+         LA    R11,2(R11)          ->parm
+         MVI   BPRSN,C'2'
+         C     R10,=F'44'          MAX
+         BH    BADPARM
+         STC   R10,FXNLN           name length
+         EDIT  MSDSNL,(R10),DW     name length
+         MVI   MSDSNLX,C'['        overlay padding
+         BCTR  R10,0               -1 for ex-mvc
+         EX    R10,MVDSPARM
+         MVC   MSDSN0,DSNAME       Copy dsn
+         SPACE
+*  Find first DD entry in the TIOT.
+         SPACE
+         L     R9,CVTPTR           -->CVT
+         L     R9,CVTTCBP(R9)      -->TCBWORDS
+         L     R9,4(R9)            -->TCB
+         L     R9,TCBTIO(R9)       -->TIOT
+         LA    R9,24(R9)           -->first DD entry
+*  Scan the TIOT
+*  In this loop,  R9-->TIOT DD entry    R8=entry length
+         SPACE
+TIOTLOOP SR    R8,R8
+         IC    R8,TIOELNGH(R9)     Entry length
+         TBR   R8,Z,TIOTEND        Zero is end of TIOT
+         CLC   TIOEDDNM(,R9),=CL8'VOL' our DDNAME?
+         BE    DDONE               OK, got it
+         LA    R9,0(R9,R8)         -->next entry
+         B     TIOTLOOP            Loop back
+         SPACE
+*  fell thru scan
+         SPACE
+TIOTEND  LA    R15,16              RC
+         B     OUT
+         SPACE
+*  Found our DD
+DDONE    L     R9,TIOUCBAD(R9)     Get UCB ptr.
+         ST    R9,VUCB             Save ptr
+         UNPK  MSUCB(7),VUCB+1(4)
+         TR    MSUCB,$HEX
+         MVI   MSUCBX,C' '         hexdump ucb
+         MVC   MSVOL,UCBVOLI(R9)   volser
+         SPACE
+         SYSPRINT MSG1
+*  Initialize FCL (DSN and its length done above)
+         LA    R0,1
+         STH   R0,FCLCOUNT
+         MVC   FCLID,=C'FCL '      FCL ID
+         MVI   FCL1FLAG,0
+         MVI   FCL2FLAG,0
+         XC    FCLDRSV,FCLDRSV
+*  Initialize buffer list
+         LA    R2,BFLH$DEF         ->area
+         L     R3,=A(BFLE$N*DSCB$SIZ+BFL$SIZE) length
+         SR    R15,R15             no from, pad zero
+         MVCL  R2,R14              clear area
+         LA    R15,BFLH$DEF
+         USING BFL$MAP,R15
+         MVI   BFLHNOE,BFLE$N      no. entries
+         MVI   BFLHKEY,BFLHDSCB    we want DSCBs
+         DROP  R15
+         LA    R2,BFLE$DEF         ->buf list elements
+         USING BFLE,R2
+         LA    R3,DSCB$DEF         ->1st DSCB buffer
+         LA    R4,BFLE$N           no. buffers
+BFLP     OI    BFLEFL,BFLECHR      We want CCHHRs
+         MVI   BFLELTH,DSCB$SIZ    L'element=DSCB length
+         ST    R3,BFLEBUF          ->buffer
+         LA    R2,BFLELN(R2)       ->next element
+         LA    R3,DSCB$SIZ(R3)     ->next buffer
+         BCT   R4,BFLP             do next one
+         DROP  R2
+*  go get 'em
+         SPACE
+CVCALL   CVAFFILT ACCESS=READ,FCL=FCLIST,BUFLIST=BFLH$DEF,UCB=VUCB,    *
+               MF=(E,CVC#)
+         QSNAP FCLIST,32
+TESTRC   EDIT  MSRC,(R15),DW       Return code
+         UNPK  MSST(3),CVSTAT(2)   status code
+         TR    MSST,$HEX                to
+         MVI   MSSTX,C' '                 hex
+         LR    R11,R15             Save RC
+         SYSPRINT MSG1A
+         LA    R4,BFLH$DEF         ->returned data
+         L     R5,=A(BFLE$N*DSCB$SIZ+BFL$SIZE) length
+         ST    R4,DUMPARMS         ->dat for dumper
+         STA   R5,DUMLEN           L'dat (lo 3 bytes)
+         ST    R4,DUMOFF           show actual address
+         LTR   R4,R4               ->data if any
+         BZ    OUT
+         LA    R1,DUMPARMS
+         MCALL IOPDUMPR
+         SPACE
+*  Report buffer contents
+         LA    R2,BFLE$DEF         ->buf list elements
+         USING BFLE,R2
+         LA    R3,DSCB$DEF         ->1st DSCB buffer
+         LH    R4,FCLDSCBR         no. DSCBs returned
+dclp     L     R3,BFLEBUF          ->buffer
+         UNPK  MSCCH(11),BFLEARG(6)  get cchhr
+         TR    MSCCH(10),$HEX         convert
+         MVI   MSCCHX,C' '              to hex
+         MVC   MSFMT,44(R3)        DSCB type (format)
+         CLI   MSFMT,C'1'          FMT-1
+         BNE   PMSG                no, use dsn we have
+         MVC   MSDSN1,0(R3)        DSN from DSCB
+PMSG     SYSPRINT MSGDS            report it
+         LA    R2,BFLELN(R2)       ->next element
+         BCT   R4,dclp             do next one
+         DROP  R2
+OUT      EQU   *
+         C     R11,=F'4'
+         BH    EXIT                if errors, don't resume
+         CLI   CVSTAT,X'40'        OK to resume?
+         BNE   RLSE                if not
+         LA    R2,DSCB$DEF         ->area
+         L     R3,=A(BFLE$N*DSCB$SIZ) length
+         SR    R15,R15             no from, pad zero
+         MVCL  R2,R14              clear area
+         CVAFFILT ACCESS=RESUME,MF=(E,CVC#)      go get more
+         B     TESTRC
+
+RLSE     EQU   *
+         CVAFFILT ACCESS=RLSE,FCL=0,BUFLIST=0,FLTAREA=NOKEEP,          *
+               MF=(E,CVC#)
+
+EXIT     MCALL MSGCLOSE
+         EXIT  RC=(R11)
+         SPACE
+BADPARM  SYSPRINT MSGBPARM
+         EXIT  RC=16
+         SPACE
+MVDSPARM MVC   DSNAME(0),0(R11)    executed: copy dsn
+         SPACE 2
+*  Skeleton parameter lists
+
+CVC#     CVAFFILT ACCESS=READ,FCL=FCLIST,FLTAREA=KEEP,                 *
+               IOAREA=KEEP,BUFLIST=BFLH$DEF,MF=L
+CVSTAT   EQU   CVC#+7,1,C'X'       status code
+CVFUNC   EQU   CVC#+6,1,C'X'       function code
+         EJECT
+DW       DC    D'0'
+DSNAME   DC    CL44' '
+         SPACE
+MSG1     MSG   ' DSN='
+MSDSN0   DC    CL44' '
+msdsnl   dc    cl4' ',c']  Volume='
+MSDSNLX  EQU   MSDSNL+1,1,C'C'     just ahead of digits
+MSVOL    DC    CL6' ',C'  UCB='
+MSUCB    DC    CL6' '
+MSUCBX   DC    C' '                pad for unpk/tr
+         MSGEND
+MSG1A    MSG   ' RC was'
+MSRC     DC    CL4' ',C'  status='
+MSST     DC    C'  '
+MSSTX    DC    C' ',C' data follows:'
+         MSGEND
+
+MSGDS    MSG   ' FMT'
+MSFMT    DC    CL1'1',C' at '
+MSCCH    DC    CL10' '
+MSCCHX   DC    C' ',C' dsn '
+MSDSN1   DC    CL44' '
+         MSGEND
+
+MSGBPARM MSG   '0Missing or invalid parm ('
+BPRSN    DC    C'0',C')'
+         MSGEND
+         SPACE
+VUCB     DC    A(0)                ->UCB for volume
+FCLIST   DC    0A(0)
+         ICVFCL DSECT=NO
+WINGCV   CSECT ,                   resume
+FCNTRY   DC    F'0',A(DSNAME)
+FXNLN    EQU   FCNTRY+1            name length
+         SPACE
+*  Parms for dumper
+         SPACE
+DUMPARMS DC    A(0)                ->data
+DUMLEN   DC    F'16'               L'data
+DUMOFF   DC    A(0)                Offset for dump label
+DUMFLG   DC    AL1(2),AL3(132)     flags, line length
+DUM@PRT  DC    V(IOPSYSPR)         V(sysprint writer)
+DUM@TRN  DC    A(1)                ->translate table
+         SPACE
+$HEX     EQU   *-240
+         DC    C'0123456789ABCDEF'  For hex translate
+         SPACE
+         LTORG ,
+BLANKS   DC    CL44' '
+
+BFLE$N   EQU   20                  #DSCBs
+DSCB$SIZ EQU   140                 L'DSCB
+BFLH$DEF DC    (BFLHLN)X'00'
+BFLE$DEF DC    (BFLE$N*BFLELN)X'00' buffer list elements
+BFL$SIZE EQU   *-BFLH$DEF
+DSCB$DEF DS    (BFLE$N*DSCB$SIZ)X
+BFL$MAP  ICVAFBFL
+         END
+//LKED.SYSLMOD DD DSN=WYL.GA.MCL.LINKLIB(WINGCV),DISP=SHR,SPACE=
+//LKED.OBJECT DD DSN=WYL.GA.MCL.IOPROGM.OBJECT,DISP=SHR
+//LKED.SYSIN DD *
+ INCLUDE OBJECT(IOPSYSPR)
+ INCLUDE OBJECT(IOPDUMPR)
+ SETCODE AC(1)
+//GO.SYSPRINT DD SYSOUT=*
+//GO.SYSUDUMP DD SYSOUT=C
+//VOL DD UNIT=SYSALLDA,DISP=SHR,VOL=SER=INT001

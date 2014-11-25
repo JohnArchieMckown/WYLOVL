@@ -1,0 +1,115 @@
+         MACRO                                                                  
+.********************************************************************           
+.*  Input to the SYSCTL is in 3 registers:                                      
+.*    LOCREG   even/odd pair for location and length of the write               
+.*    PARMREG  options for the write                                            
+.*  Output from the SYSCTL is in 1 register:                                    
+.*    PARMREG  contains the WTO message ID (for later DOMs)                     
+.*                                                                              
+.*  Parameters:                                                                 
+.*    LOC      LA type parameter                                                
+.*    LEN      LA type parameter                                                
+.*             X'xxxx' and 'aaaa' can be used with an implicit or               
+.*             explicit length or LOC can be a memory location,                 
+.*             again with an implicit or explicit length                        
+.*    MODE=    [CONSOLE|SYSLOG|JOBLOG]                                          
+.*    DELETE=  [YES|NO]                                                         
+.*    LOCREG=  even register of even odd pair for location/len                  
+.*    PARMREG= register for parameter and for return value                      
+.*                                                                              
+.********************************************************************           
+&L       ORVWTO &LOC,&LEN,&MODE=CONSOLE,&DELETE=YES,                   *        
+               &LOCREG=R14,&PARMREG=R0                                          
+         GBLA  &$REG#                                                           
+         GBLB  &$OK                                                             
+         LCLA  &X,&N,&MPARM,&JLOG,&SLOG,&CON,&NDEL                              
+         LCLC  &C,&LQ,&R1,&R2                                                   
+&LQ      SETC  'L'''                                                            
+&JLOG    SETA  0                       Job log parm                             
+&SLOG    SETA  1                       System log parm                          
+&CON     SETA  2                       Console parm                             
+&NDEL    SETA  4                       Non-deletable parms                      
+         AIF   ('&LOC' NE '').NONULL            No string                       
+         MNOTE 8,'String not specified for WTO'                                 
+         MEXIT                                                                  
+.NONULL  ANOP  ,                                                                
+         AIF   ('&LOC'(1,2) EQ 'X''').HSTR      Hex string                      
+         AIF   ('&LOC'(1,1) EQ '''').STR        Ordinary string                 
+.*  Explicit address given                                                      
+&SPECAD  SETC  '&LOC'                                                           
+         AIF   ('&LEN' NE '').LGIVEN                                            
+&SPECLEN SETC  '&LQ.&LOC'              Implicit length                          
+         AGO   .SPECDON                                                         
+.LGIVEN  ANOP  ,                       Specified length                         
+&SPECLEN SETC  '&LEN'                                                           
+         AGO   .SPECDON                                                         
+.*  Hex string specified                                                        
+.HSTR    ANOP                                                                   
+&SPECAD  SETC  '=&LOC'                                                          
+         AIF   ('&LEN' NE '').HLGIV    Hex length given                         
+&N       SETA  (K'&LOC-2)/2            Implicit length                          
+&SPECLEN SETC  '&N'                    | 1/2 as many bytes as chars             
+         AGO   .SPECDON                                                         
+.HLGIV   ANOP  ,                       Specified length                         
+&SPECLEN SETC  '&LEN'                                                           
+         AGO   .SPECDON                                                         
+.*  Ordinary string specified                                                   
+.STR     ANOP  ,                                                                
+&SPECAD  SETC  '=C&LOC'                                                         
+         AIF   ('&LEN' NE '').OLGIV    Ordinary length given                    
+&N       SETA  0                                                                
+&X       SETA  1                                                                
+&C       SETC  '&&'                                                             
+.LOOP    ANOP                                                                   
+&X       SETA  &X+1                                                             
+         AIF   (&X GE K'&LOC).OLDONE                                            
+&N       SETA  &N+1                                                             
+    AIF ('&LOC'(&X,1) NE '''' AND '&LOC'(&X,1) NE '&C'(1,1)).LOOP               
+&X       SETA  &X+1                                                             
+         AGO   .LOOP                                                            
+.OLDONE  ANOP  ,                                                                
+&SPECLEN SETC  '&N'                                                             
+         AGO   .SPECDON                                                         
+.OLGIV   ANOP  ,                                                                
+&SPECLEN SETC  '&LEN'                                                           
+         AGO   .SPECDON                                                         
+.SPECDON ANOP  ,                                                                
+&R1      SETC  '&LOCREG'                                                        
+&R2      SETC  '&LOCREG+1'                                                      
+        $RGLKUP &LOCREG                                                         
+         AIF   (NOT &$OK).NOREG                                                 
+&R1      SETC  '&$REG#'                                                         
+&$REG#   SETA  &$REG#+1                                                         
+&R2      SETC  '&$REG#'                                                         
+.NOREG   ANOP                                                                   
+        $L     &R1,&SPECAD,OP=LA       Move in address                          
+        $L     &R2,&SPECLEN,OP=LA       and length                              
+.*                                                                              
+.*  Now figure out the parameters                                               
+.*                                                                              
+         AIF   ('&DELETE' EQ 'YES').DOK,('&DELETE' EQ 'NO').DOK                 
+         MNOTE 8,'WTO DELETE parameter must be YES, or NO'                      
+         MEXIT                                                                  
+.DOK     ANOP                                                                   
+         AIF   ('&MODE' EQ 'JOBLOG').JOB,('&MODE' EQ 'SYSLOG').SYS              
+         AIF   ('&MODE' EQ 'CONSOLE').CON                                       
+   MNOTE 8,'WTO mode parameter must be JOBLOG, SYSLOG, or CONSOLE'              
+         MEXIT                                                                  
+.JOB     ANOP                          Send to job log                          
+&MPARM   SETA  &JLOG                                                            
+         AGO   .DOWTO                                                           
+.SYS     ANOP                          Send to system log                       
+&MPARM   SETA  &SLOG                                                            
+         AGO   .DOWTO                                                           
+.CON     ANOP                          Send to console                          
+&MPARM   SETA  &CON                                                             
+         AIF   ('&DELETE' EQ 'YES').DELOK                                       
+&MPARM   SETA  &MPARM+&NDEL            Non-deletable                            
+.DELOK   AGO   .DOWTO                                                           
+.*                                                                              
+.*  Issue MVS write to operator (WTO)                                           
+.*                                                                              
+.DOWTO   ANOP                                                                   
+         LA    &PARMREG,&MPARM                                                  
+         SYSCTL &LOCREG,&PARMREG,TYPE=WTO                                       
+         MEND                                                                   

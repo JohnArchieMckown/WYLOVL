@@ -1,0 +1,168 @@
+;EXEC ID:  WYL.GA.PUB.RACF#RUNWAIT
+;
+;AUTHOR:   BILL BAURIEDEL
+;
+;DATE:     03/25/87
+;
+;VERSION:  1.0
+;
+;REMARKS:  This EXEC runs the JCL in the current active and waits
+;          until the job terminates.  Messages are issued periodically
+;          if the job hasn't yet finished.  If this EXEC program is
+;          executed interactively, then the user will see various
+;          wait messages and can hit BREAK to stop the program.  After
+;          about 30 seconds, the users is prompted to determine if
+;          he/she wants to continue to wait.  If not, the EXEC stops.
+;
+;          The messages and prompt will not appear if the EXEC
+;          executes from within a batch program.
+;
+;          The parameters passed to this program are as follows:
+;
+;             command   - Either SET/SHOW/DUMP PROTECT
+;             jobname   - name of job in active
+;             run       - full RUN command to be executed
+;             stop      - TRUE if user wants to stop; else FALSE
+;
+;CHANGE LOG:
+;          DATE   INITIALS  CHANGE
+;          03/25/87  WJB    Initial Installation.
+;
+;          12/02/87  WJB    Remove code which puts target account
+;                           into JOB card.  Now all jobs run from
+;                           submitting account.  Also remove code
+;                           which prompts user whether they want to
+;                           continue to wait.  These EXECs shouldn't
+;                           have any interactive prompts.
+
+XPROC (command,jobname,run,stop,usr,grp) BEGIN
+
+;********** Run the JCL now in active with run command pass to this XPROC
+
+   &(run) HOLD
+
+;********** Now set up variables to wait til job completes
+
+   interactive=TRUE
+   IF (FETYPE EQ 'VIRTUAL') interactive=FALSE
+   done='ON'
+   waitcount=0
+   WHILE (done EQ 'ON') BEGIN
+      PCALL wait(command,jobname,stop,done,waitcount,interactive)
+   END
+
+END
+
+;*******************************************************************
+;                                                                  *
+; wait -- This routine waits until either 10 sec. pass or the job  *
+;     completes whichever comes first.  Each 10 seconds, a "slight *
+;     delay" message appears on the screen and an opportunity to   *
+;     abort.                                                       *
+;                                                                  *
+;     The parameters used in this routine are the following:       *
+;        command  - Current command (SET/SHOW/DUMP PROTECT)        *
+;        jobname  - Name of job being run                          *
+;        stop     - If TRUE, then interactive user wants to stop.  *
+;        done     - While this parameter equals 'ON', the process  *
+;                   is repeated.  When the job completes, this     *
+;                   variable is set to 'OFF' thereby indicating    *
+;                   completion.                                    *
+;        waitcount- incremented each time through this routine.    *
+;                   As this value increases, different messages    *
+;                   are displayed.                                 *
+;        interactive - TRUE if interactive, FALSE if virtual       *
+;                                                                  *
+;*******************************************************************
+
+PROC wait(command,jobname,stop,done,waitcount,interactive) BEGIN
+
+   IF (ses.racf_debug) BEGIN
+      WRITE 'WAIT      command  : '||command
+      WRITE '          jobname  : '||jobname
+      WRITE '          usr      : '||usr
+      WRITE '          grp      : '||grp
+      WRITE '          stop     : '||stop
+      WRITE '          done     : '||done
+      WRITE '          waitcount: '||waitcount
+      WRITE '          interact : '||interactive
+   END
+
+   IF (waitcount EQ 0) TRY QUIET SYNC * WAIT 15 ; wait til job completes
+   IF (waitcount NE 0) TRY QUIET SYNC * WAIT 10 ; or waiting period expires
+;********** Test to see if job finished yet.
+
+   LOC * COL
+   P '(OUTPUT HOLD)' IN LAST N
+
+   IF (* GT 0) BEGIN
+      done='OFF'
+      DEL LAST
+      RETURN(done,waitcount)
+   END
+
+   DEL LAST
+
+;********** Force break to issue a termination prompt
+
+   IF (TRYATTN) BEGIN
+      quit = 'ATTN'
+      GOTO quit
+   END
+
+   waitcount=waitcount+1
+
+   IF (waitcount EQ 1) BEGIN
+      IF (interactive) COMM    Slight delay ....
+   END
+
+   IF (waitcount EQ 4) BEGIN
+      IF (interactive) COMM    This is taking longer than expected.
+      IF (interactive) COMM    Batch job running. Should be finished shortly.
+   END
+
+   IF (waitcount EQ 7) BEGIN
+      IF (interactive) COMM    Hit BREAK to cancel this command.
+      waitcount = 9
+   END
+
+;********** Give user opportunity to quit (again).
+
+;********** Continue to wait if virtual session
+   IF (NOT interactive) RETURN(done,waitcount)
+
+   IF (INT(waitcount/9) NE INT((waitcount-1)/9)) BEGIN
+      quit='NO'
+      COMM The status of the RACF batch job is:
+      LOC *
+      GOTO quit
+   END
+
+   RETURN (done, waitcount)
+
+
+;********** User wants to quit. (Either hit break or entered YES)
+
+quit:
+
+   notify = 'gb.sec@forsythe.stanford.edu'
+   IF (MACHINE EQ 'RLG') notify = 'bp.acc@rlg'
+
+   IF (quit EQ 'ATTN') MAIL TO &(notify) TIT '&(command) terminated by RUNWAIT for ATTN' QUIET
+   IF (quit EQ 'NO')  MAIL TO &(notify) TIT '&(command) terminated by RUNWAIT for timeout' QUIET
+
+   COMM   The &(command) command is being terminated.
+
+   IF (command EQ 'SET PROTECT') BEGIN
+      COMM   Issue SHOW PROTECT command at a later time to verify successful completion.
+   END
+
+   IF ((command EQ 'SHOW PROTECT') OR (command EQ 'DUMP PROTECT'))BEGIN
+      COMM   Reissue command at a later time.
+   END
+
+;********** User wants to stop.
+   stop=TRUE
+   XRETURN (stop)
+
+END

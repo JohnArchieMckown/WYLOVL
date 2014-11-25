@@ -1,0 +1,1682 @@
+XONT     TITLE  'CONTROL PROGRAM FOR STANFORD/BASIC TIME SHARING'
+*06/05/69 23:15:58 IS DATE AND TIME OF LAST UPDATE
+*
+CONTROL  CSECT
+***********************************************************************
+*                                                                     *
+*               STANFORD/BASIC CONTROL PROGRAM                        *
+*                    TIME SHARING VERSION                             *
+*                                                                     *
+***********************************************************************
+***********************************************************************
+******************************PROLOG***********************************
+***********************************************************************
+***********************************************************************
+*
+************************REGISTER USAGE*********************************
+*
+R0       EQU   0                  LOCAL WORK ONLY..USED BY SVC
+R1       EQU   1                  LOCAL WORK ONLY..USED BY SVC
+R2       EQU   2                  USED TO PASS LOCAL PARAMETERS
+R3       EQU   3                  LOCAL BRANCH REGISTER
+R4       EQU   4
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9                  SECOND 'CONTROL' BASE REG
+R10      EQU   10                 BASE FOR 'CONTROLS' WORK AREA
+R11      EQU   11                 BASE OF 'USERS' WORK AREA
+R12      EQU   12                 BASE FOR 'CONTROL'
+R13      EQU   13                 POINTER TO SAVE AREA
+R14      EQU   14                 LOCAL WORK ONLY..USED BY SVC
+R15      EQU   15                 LOCAL WORK ONLY..USED BY SVC
+*
+BASER    EQU   12                 BASE FOR 'CONTROL'
+*
+************************ORVYL ENTRY POINT******************************
+*
+         BALR  BASER,0            ESTABLISH ADDRESABILITY FOR 'CONTROL'
+         USING *,BASER,R9
+         LR    R9,R12
+         A     R9,=F'4096'
+         B     GO                 BRANCH AROUND ADDRESS CONSTANTS
+         LTORG
+*
+********ADDRESS CONSTANTS FOR EXTERNAL CONTROL SECTIONS****************
+*
+AINITIAL DC    V(INITIAL)
+ALODR2   DC    V(LODR2)
+ADUMP    DC    V(DUMP)
+ASCINIT  DC    V(SCINIT)
+ASCTELL  DC    V(SCTELL)
+ASCAN    DC    V(SCAN)
+ARUNERR  DC    V(RUNERR)
+AVPRESS  DC    V(VPRESS)
+ACONVERL DC    V(CONVERTL)
+AVEXPAN  DC    V(VEXPAN)
+AINLINE  DC    V(INLINE)
+APACKCON DC    V(PACKCON)
+ATRANS   DC    V(TRANS)
+ALODR    DC    V(LODR)
+AEXEC    DC    V(EXEC)
+ABINR    DC    V(BINR)
+AHDUMP   DC    V(HEXDUMP)
+ADFIN    DC    V(DFIN)
+ADFOT    DC    V(DFOT)
+AFLUSH   DC    V(FLUSH)
+ACLOSE   DC    V(CLOSE)
+*
+********SET UP FOR ADDRESSING CONTROL PROGRAM WORK AREA****************
+*
+GO       DS    0H                                                  N001
+         L     1,=F'200000'       MINLEN                           N001
+GOGO     SET 14,(1),0             RESERVE MEMORY                   N001
+*        BNZ   GOGOGO             BRANCH TO START USER AREA IF NOT N001
+*        AL    1,=F'4096'         KICK TO NEXT PAGE                N001
+*        B     GOGO               KEEP TRYING FOR NON-KEPT PAGE    N001
+GOGOGO   LR    R10,R1             SET UP BASE TO TWORK
+         USING TWORK,R10          *
+         ST    R10,TWORKADR       PUT ADDR OF TWORK IN CONTROL BLOCK
+*        SENSE 1                  TO STORE AT TOP OF CODE          N001
+*        ST    R10,0(R1)          IF LOAD TEXT, OR AGAIN IN        N001
+*                                 TWORKADR IF SUBPROCESSOR
+         MVC   TWORKSIZ,=F'4096'  PUT SIZE OF TWORK IN CONTROL BLOCK
+*
+****************SET UP FOR ADDRESSING USER AREA*********************
+*
+         L     R1,TWORKADR        GET STARTING ADDRES OF TWORK
+         A     R1,TWORKSIZ        ADD ITS LENGTH
+         LR    R11,R1             SET UP BASE REGISTER
+         ST    R11,UAREAADR       SET AREA STARTING ADDR IN CONTROL BLK
+         LR    R13,R11            POINT TO SAVE AREA STACK
+         L     R15,=F'262144'     AMOUNT OF SPACE FOR AREA
+*             NOTE: THIS IS END OF AREA+X'05000' FOR ADDED TABLES
+         ST    R15,UAREASIZ       SET AREA SIZE IN CONTROL BLK
+         USING AREA,R11           *
+*
+*******************COMPLETE CORE CONTROL TABLE**********************
+*
+         L     R1,=F'262144'
+*             NOTE: THIS IS END OF AREA+X'05000' FOR ADDED TABLES
+         LA    R1,0(R1,R11)       ADDR OF FIRST PAGE AFTER AREA
+         ST    R1,UFILEADR        ADDR OF FIRST FILE BUFFER
+         MVC   UFILESIZ,=F'0'
+*
+******************SET UP SYSTEM INTERRUPT STATUS***********************
+*
+         SR    R2,R2
+         SPM   R2  MASK F-P ORFLO;DEC ORFLO;EXPON UNDRFLO;SIGNIFICANCE
+         SET   11,0               MAST TIMER;ATTN;WAIT;PANIC EXITS
+*
+********************BLANK OUT CONTROL SWITCHES*************************
+*
+         XC    SW0(12),SW0    SW0 THRU SW11 = 0
+         XC    LASTTIME(8),LASTTIME  SET THE CLOCKS TO 0
+         L     R1,=F'192000'      LOAD 5 SECONDS AS DEFAULT VALUE
+         ST    R1,BREKTIME        AS THE DEFAULT TIMER VALUE
+*
+******************SET UP BLOCKING CONTROL***************************
+*
+         LA    R8,BIGBUF
+         ST    R8,BIGBUFP
+         XC    BIGBUFC(12),BIGBUFC
+*
+********************SET UP CONTROL AND USER AREA***********************
+*
+         MVI   SW4,X'01'       FIRST LEVEL WHERE AM I CODE
+         L     15,AINITIAL        ADDR OF ROUTINE TO SET UP USER AREA
+         BALR  14,15              GO SET UP USER AREA
+*
+****************ATTACH THE TERMINAL***********************************
+*
+         ATTACH 1,0               ATTACH USERS TERMINAL
+         ST    R0,TI              PUT TERMINAL IDENTIFIER AWAY
+         WAIT  TI
+*
+**********************SET WYLBUR MODE WORD*****************************
+*
+         LA    15,59        MASK                                   N001
+         ICM   15,8,=X'6E'  PROMPT CHARACTER                       N001
+         CONTROL TI,12,(15) PREST;ALL CHANGES;NO ALIGN, NUMBER, SIGN001
+         BZ    *+8                TEST OPERATION STARTED
+         BAL   R3,ERX1            GO DIE
+         WAIT  TI
+         BZ    *+8                TEST MODE WORD SET
+         BAL   R3,ERX1            GO DIE
+*
+*****************SET FOR WRITING WITHOUT CONTROL CHARACTER*************
+*
+         CONTROL TI,7             SINGLE SPACE ALL OUTPUT
+         BZ    *+8                TEST FOR OPERATION STARTED
+         BAL   R3,ERX1            GO DIE
+         WAIT  TI                 WAIT FOR COMPLETION
+         BZ    *+8                TEST SUCCESSFUL COMPLETION
+         BAL   R3,ERX1            GO DIE
+*
+***************SET ORDER OF SERVICE PRIORITY***************************
+*
+         SET   12,15              SET TO HIGHEST POSSIBLE
+*
+*************SET UP INTERRUPT EXITS WE ARE MASKED**********************
+*
+         SET   8,ATTNINT,L:TI     SET ATTENTION INTERRUPT EXIT
+         SET   7,PANICINT         SET PANIC INTERRUPT EXIT
+         SET   5,TIMERINT         SET TIMER INTERRUPT EXIT
+*
+*********************SEND GREETINGS************************************
+*
+         SYSQS 1,14,':ENTERING STANFORD/BASIC -- VERSION 1.0'      N005
+         BAL   R4,WRITEIT
+*
+***********************************************************************
+***********************************************************************
+***********************END OF PROLOG***********************************
+***********************************************************************
+***********************************************************************
+         EJECT
+*
+*******************CHECK FOR WORK FILE CONTAINS PROGRAM****************
+*
+RESTART  XC    SW0(8),SW0         CLEAR ALL SWITCHES
+         XC    LASTLINE,LASTLINE  SET POINTER TOP OF PROGRAM FOR START
+         MVI   SW4,X'01'          WHERE AM I
+         CONTROL TI,15            TRY FOR FIRST LINE
+         BZ    *+8                TEST FOR OPERATION STARTED
+         BAL   R3,ERX1            GO DIE
+         WAIT  TI                 WAIT FOR RESULT
+         BNZ   *+8                TEST (NO PRESTORED FILE ALLOWED)
+         B     ERX2               GO GET USER TO CLEAR FILE
+         EJECT
+*
+*****GET A CARD FROM THE FILE WITH A COMMAND PROMPT IF NECESSARY*******
+*
+         ENTRY GETACARD
+GETACARD SET   11,X'40'           ENABLE ATTENTION INTERRUPTS ONLY
+         SR    R2,R2              DISABLE ARITHMETIC INTERUPTS
+         SPM   R2                 *
+         XC    SW4(4),SW4         CLEAR WHERE AM I SWITCHES
+         MVI   SW4,X'02'          WHERE AM I
+*
+*     IMMEDIATE MODE POST PROCESSOR
+*
+         CLI   SW8,X'00'
+         BE    GETCARD1           IF SO SKIP DELET
+         MVI   SW8,X'00'          TURN OFF THE SWITCH
+         MVC   LASTLINE(2),LINESTAK  RESTORE STARTING PLACE FOR GO
+         SR    R3,R3              GET A CLEAN ONE
+         ST    R3,PREST1ST        CLEAN TARGET
+         LH    R3,=H'10000'       GET THE FAKE LINE NUMBER
+         STH   R3,PREST1ST        PUT IT DOWN
+         BAL   R3,MKDELT          GO MAKE THE DELET CODE
+         B     RTRANS             GO SEND IT THRU THE TRANSLATOR
+GETCARD1 CLI   SW2,X'00'          TEST FOR WORK LOAD
+         BNE   PREPREP            GO PROCESS EXISTING WORK LOAD
+GETCARD0 MVI   SW1,X'00'          CLEAR ATTENTION SWITCH
+         NI    AFLAGS,255-ASYNTAX TURN OF LOWER LEVEL ATTENTION SWITCH
+         LH    R15,=H'1024'       LOAD LENGTH OF BUFFER
+         READ  TI,BIGBUF,(15),MODE=EDIT
+         BZ    *+8                TEST FOR READ EDIT STARTED OR DIE
+         BAL   R3,ERX3            GO TELL USER WE ARE DYING
+         WAIT  TI
+         STM   R14,R1,PRESTNUM    STORE RETURN PARAMETERS
+         ST    R14,WORKLOAD
+         STC   R15,SW2            BUT CODE IN SWITCH BYTE
+         BC    15,READSORT(R15)   SORT OUT RETURN CODE
+READSORT B     COMPROC      USER ENTERED A COMMAND NOT REC BY WYLBUR
+         B     PREPREP            INSERTED A LINE (TYPED)
+         B     PREPREP            INSERTED A LINE (NOT TYPED)
+         B     PREPREP            REPLACED A LINE (TYPED)
+         B     PREPREP            REPLACED A LINE (NOT TYPED)
+         B     DELET2             DELETE COME BACK FOR INSERT
+         B     DELET              DELETED A LINE
+         B     CLEART             DID A CLEAR TEXT
+         EJECT
+*
+*********************GO TO INLINE FOR SYNTAX ANALYSIS******************
+*
+RINLINE  MVI   SW6,X'01'          WHERE AM I
+         MVI   SW7,X'00'          *
+         LA    R1,INFIXCON        TELL INLINE WHERE TO STORE
+         ST    R1,INLCNPTR        CONSTANTS FOR STATEMENT
+         LA    R1,INLINARG        SET UP POINTER TO ARG LIST
+         LH    R0,PREST1ST        STM NUMBER IN 0
+         MVC   PRESD1ST(4),PREST1ST INLINE GETS # FROM LIST
+         L     R15,AINLINE
+         BALR  14,15
+*
+********************TEST AND BRANCH ON TYPE OF RETURN******************
+*
+         LTR   R0,R0
+         BL    RPACKCON           -1 = GOOD LINE NOT CLASSIFIED BELOW
+         BNE   RINLINE1            0 = BAD SYNTAX TO BE PASSED TO TRANS
+         CLI   SW8,X'01'               IF NOT IMMEDIATE MODE
+         BNE   RTRANS             SEND TO TRANS FOR ENTRY
+         MVI   SW8,X'00'          TURN OFF IMMEDIATE MODE SWITCH
+         B     GETCARD1           BACK LIKE IT NEVER HAPPENDED
+RINLINE1 BALR  R3,R0              LOAD IN CASE OF ERROR
+         CH    R0,=H'8'           CHECK FOR UPPER RANGE OF RETURN CODE
+         BH    ERX3           UNSUPPORTED FEATURE OR ERROR FROM INLINE
+         SLL   R0,2(R0)           MAKE A *4 DISPLACEMENT
+         LR    R1,R0              PUT IN AN ADDRESSING REGISTER
+         LA    R3,ONANDON         LOAD START OF TRANSFER VECTOR
+ONANDON  BC    15,0(R1,R3)        BRANCH TO BRANCH
+         B     RTRANS              1 = 'END' LOGICAL END OF PROGRAM
+         B     RPACKCON            2 = 'DEF' NEEDS CALL TO PACKCON
+         B     RTRANS              3 = 'DIM'
+         B     RTRANS              4 = DELETE
+         B     RTRANS              5 = 'REM'.,OTHER NOT NEEDING PACKCON
+         B     RTRANS              6 = DEFINE FILE
+         B     ERX3                7 = (FUTURE IMPLEMENTATION)
+         B     ERX3                8 = (FUTURE IMPLEMENTATION)
+         EJECT
+*
+********************SET CONSTANTS IF ANY IN CONSTANT TABLES************
+*
+RPACKCON MVI   SW6,X'03'          WHERE AM I
+         MVI   SW7,X'00'          *
+         LH    R0,PREST1ST        STM NUMBER IN 0
+         L     R15,APACKCON
+         BALR  14,15
+*
+******************TEST AND BRANCH ON TYPE OF RETURN********************
+*
+         LTR   R0,R0              IS IT A GOOD RETURN?
+         BE    RTRANS             IF SO CONTINUE
+         BAL   R14,TABLOVL        GO PROCESS TABLE OVERFLOW
+         B     RPACKCON           BACK FROM TABLE OVERFLOW TRY AGAIN
+         EJECT
+*
+********************GO TO THE TRANSLATOR*******************************
+*
+RTRANS   MVI   SW6,X'02'          WHERE AM I
+         MVI   SW7,X'00'          *
+         LH    R0,PREST1ST        STM NUMBER IN 0
+         LA    R1,INFIXNO         TRANS WANTS POINT TO INFIX BUFFER
+         L     R15,ATRANS
+         BALR  14,15
+*
+********************TEST AND BRANCH ON TYPE OF RETURN******************
+*
+         B     RTRANS1 NOT DEFINE FILE OPERATION CHECK TABLE OVERFLOW
+         B     NOTYET1            DEFINE FILE ENTERED
+         B     NOTYET2            DEFINE FILE REPLACED
+         B     NOTYET3            DEFINE FILE DELETED
+RTRANS1  LTR   R0,R0              IS IT A GOOD RETURN ?
+         BE    RTRANS2            CHECK FOR TYPE OF CALL WE HADE
+         LR    R1,R0              KICK ERROR FROM TRANS OVER ERROR
+         LA    R0,1(R0,R1)         FROM PACKCON
+         BAL   R14,TABLOVL        GO PROCESS TABLE OVERFLOW
+         B     RTRANS             GO BACK AND TRY AGAIN
+*
+****************DEFINE FILE ENTERED PROCESSING*************************
+*
+NOTYET1  L     R15,ADFIN
+         BALR  R14,R15
+         B     GETACARD
+*
+****************DEFINE FILE STATEMENT REPLACED*************************
+*
+NOTYET2  L     R15,ADFOT
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+         L     R15,ADFIN
+         BALR  R14,R15
+         B     RTRANS3            GO GET ANOTHER INSTRUCTION
+*
+****************DEFINE FILE STATEMENT DELETED**************************
+*
+NOTYET3  L     R15,ADFOT
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+         B     RTRANS2            GO GET ANOTHER INSTRUCTION
+*
+*************CHECK FOR DELETE ON MOVE CALL*****************************
+*
+RTRANS2  CLI   SW5,X'05'          CHECK IF OFF OF DELET2
+         BE    PREPREP            IF SO GO PROCESS REPLACEMENT
+RTRANS3  CLI   SW8,X'00'          CHECK IMMEDIATE MODE SWITCH
+         BE    GETACARD           IF NOT ON SKIP IMMED MODE START
+*
+*      SET UP TO RUN UNDER IMMEDIATE MODE
+*
+         LH    R3,=H'10000'       MAKE FAKE LINE NUMBER
+         STH   R3,LINEREQS        MAKE IT THE USERS
+         B     RLODR              OFF TO THE RACES
+         EJECT
+*
+********************GO TO THE LOADER***********************************
+*
+RLODR    MVI   SW6,X'04'          WHERE AM I
+         MVI   SW7,X'00'          *
+         CLI   SW3,X'01'       LOADER EVER CALLED?  PRS  12/17/75       03451000
+         BE    *+8                                  PRS  12/17/75       03452000
+         MVI   SW10,X'01'      FIRST TIME "GO TO #" COMMAND USED.  PRS  03453000
+         MVI   SW3,X'01'          DISABLE LODR2 ENTRY INHIBIT
+         L     R15,ALODR
+         BALR  14,15
+*
+********************CHECK RETURN FROM LODER****************************
+*
+         LTR   R0,R0              IS IT A GOOD RETURN
+         BE    RLODR1             NORMAL RETURN CHECK NO GO
+         B     GETACARD           LET HIM GO FIX THINGS UP
+*
+*****************SEE IF EXECUTION IS POSSIBLE**************************
+*
+RLODR1   CLI   SW0,X'01'          TEST NO GO SWITCH
+         BNE   REXEC              SKIP HOME-WARD-BOUND IF NO GO OFF
+         SYSQS 1,14,':EXECUTION PHASE INHIBITED BECAUSE OF TABLE OVERFLX
+               OWS.'
+         BAL   R4,WRITEIT
+         B     GETACARD           RETURN HOME QUITELY
+         EJECT
+*
+******************EXECUTE THE PROGRAM**********************************
+*
+REXEC    XC    SW4(4),SW4         CLEAR SWITCHES
+         MVI   SW4,X'03'          WHERE AM I
+         SET   11,X'D0'           TIMER, ATTENTION, PANIC INTERRUPTS
+         LA    R1,254             SET PROGRAM MASK OVER,UNDER,DIVIDE
+         SLL   R1,24(R0)          *
+         SPM   R1                 *
+         SR    R0,R0              CLEAR FOR USE
+         L     R1,AINT            GET DISPL TO WORK ARE
+         ST    R0,0(R1,R11)       RESET LOWER LEVEL INTER ENTRY
+         SR    R1,R1              CLOBBER THE LAST LINE EXECUTED
+         STH   R1,LASTLINE        *
+         L     R1,INPUTLNE        GET ASSOCIATED INPUT LINE #
+         LTR   R1,R1              TEST FOR NONE
+         BM    REXEC0             IF NONE SKIP REST OF CHECK
+         LH    R0,LINEREQS        GET WHERE WE ARE GOING TO START
+         LTR   R0,R0              CHECK FOR A CONTINUE
+         BNM   *+6                SKIP COMPLEMENT IF NOT NEEDED
+         LCR   R0,R0              SET FOR COMPARE
+         CR    R0,R1              IS HE STARTING BELOW LOAD OF INPUT
+         BH    REXEC0             IF SO SKIP RESET OF INPUT #
+         LA    R0,1(R0,R0)        RESET INPUT LINE POINTER
+         LCR   R0,R0              *
+         ST    R0,INPUTLNE        *
+REXEC0   SENSE 4                  GET TIME
+         ST    R15,LASTTIME+4     STORE CURRENT ELAPSED TIME
+         L     R1,BREKTIME        GET TIMER INCREMENT
+         MVI   SW9,X'00'          TURN OFF TIMER INTERRUPT FLAG
+         LTR   R1,R1              TEST FOR ZERO
+         BZ    REXECO2            SKIP STARTING TIMER IF ZERO
+         SET   4,(1)              SET TIMER INTERVAL
+REXECO2  LH    R0,LINEREQS        LINE NUMBER WE WANT START ON
+         MVI   SW1,X'00'          CLEAR CONTROLS SOFT ATTN
+         NI    AFLAGS,255-ASYNTAX TURN OFF LOWER LEVEL SWITCH
+         L     R15,AEXEC
+         BALR  14,15              OFF TO THE EXECUTOR
+         B     HOME               STOP OR END
+         B     PAUSE              PAUSE
+         B     UERROR             USER ERROR 'WE CAN NOT RECOVER'
+         B     DEATH              SYSTEM ERROR - GO DIE
+         B     ATTN                UNDER TIME SHARING
+*
+*****************PROCESS THE PAUSE STATEMENT***************************
+*
+PAUSE    LCR   R0,R0              PAUSED AT STATMENT TURN TO CONTINUE
+         STH   R0,LASTLINE        BUTT DOWN EXECUTORS WORD
+         BAL   R4,SCLOCK          GO STOP THE CLOCK
+         L     R15,AFLUSH
+         BALR  R14,R15            FLUSH OUT ANY FILES
+         B     ERX3               BLOW IT
+         B     GETACARD
+*
+***************PROCESS STOP OR END STATEMENT***************************
+*
+HOME     SR    R0,R0              MAKE A ZERO
+         STH   R0,LASTLINE        MAKE CONTINUE SILLY
+         BAL   R4,SCLOCK          GO STOP THE CLOCK
+         L     R15,AFLUSH
+         BALR  R14,R15            FLUSH OUT ANY FILES
+         B     ERX3               BLOW IT
+         B     GETACARD
+*
+***************SYSTEM ERROR PROCESS FROM EXECUTOR**********************
+*
+DEATH    BALR  R3,R0              SET ERROR CODE
+         STH   R0,LASTLINE        IN CORE FOR LOOKING AT
+         BAL   R4,SCLOCK          GO STOP THE CLOCK
+         L     R15,ACLOSE
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+         B     ERX3               GO DIE WITH A MESSAGE
+*
+*****************USER ERROR TEST FOR DUMP SWITCH ON********************
+*
+UERROR   STH   R0,LASTLINE        PUT DOWN THE EXECUTORS WORD
+         BAL   R4,SCLOCK
+         L     R15,AFLUSH
+         BALR  R14,R15            FLUSH OUT ANY FILES
+         B     ERX3               BLOW IT
+         B     GETACARD
+*
+***********ATTENTION RETURN FROM EXECUTOR******************************
+*   (EXECUTOR IS POSTED ATTENTION ON TIMER INTERRUPT ALSO, SEE SW9)
+*
+         ENTRY ATTN
+ATTN     STH   R0,LASTLINE        PUT DOWN EXECUTORS WORD
+         BAL   R4,SCLOCK          GO STOP THE CLOCK
+         L     R15,AFLUSH
+         BALR  R14,R15            FLUSH OUT ANY FILES
+         B     ERX3               BLOW IT
+         CLI   SW9,X'01'          WAS REASON FOR INTERRUPT THE TIMER?
+         BNE   GETACARD           IF NOT SKIP WRITING TIMER MESSAGE
+         SYSQS 1,14,':TIME INTERVAL EXPIRED.'
+         BAL   R4,WRITEIT         GO WRITE TIME FIRED MESSAGE
+         B     GETACARD           GO SEE WHAT HE WANTS TO DO
+         EJECT
+*
+*********************COMMAND LANGUAGE PROCESSOR************************
+*
+COMPROC  MVI   SW5,X'04'          WHERE AM I
+         XC    SW6(2),SW6         *
+         LR    R0,R1              PUT LENGTH IN CALL REG
+         LA    R1,BIGBUF          PUT LOCATION IN CALL REG
+         SCINIT (1),(0)           INITIALIZE SCANNER
+         SCAN  STAB1              GO SCAN ON FIRST WORD
+         LTR   R0,R0              TEST FOR TYPE OF RETURN
+         BM    UNREC              BAD STRING
+         B     GETACARD           BLANK LINE GO BACK FOR COMMAND
+*
+*************SHOW2 SECOND LEVEL SHOW SCAN************************
+*
+SHOW2    SCAN  STAB2
+         B     UNREC
+*
+************CLEAR2 SECOND LEVEL CLEAR SCAN***********************
+*
+CLEAR2   SCAN  STAB3
+         B     UNREC
+*
+************START2 SECOND LEVEL START SCAN***********************
+*
+START2   SCAN  STAB4
+         LTR   R0,R0              CHECK FOR BAD STRING
+         BM    UNREC              IF SO BAD COMMAND
+         B     RSTART
+*
+************SET2 SECOND LEVEL SET SCAN***************************
+*
+SET2     SCAN  STAB6
+         B     UNREC
+*
+**************GO2 SECOND LEVEL GO SCAN*********************************
+*
+GO2      SCAN  STAB8
+         LTR   R0,R0
+         BM    UNREC
+         B     RSTART             JOIN WITH START
+         EJECT
+*
+*************SCAN TABLE FIRST LEVEL******************************
+*
+STAB1    SCKW  SHOW,SHOW2         SHOW
+         SCKW  SHO,SHOW2          SHO ALIAS FOR SHOW   PRS  11/12/75
+         SCKW  CLEAR,CLEAR2       CLEAR
+         SCKW  CGO,AT2C           CGO **SAME AS GO TO F   PRS 10/16/75
+         SCKW  GO,GO2             GO
+         SCKW  GOTO,AT2,P         GOTO
+         SCKW  EXIT,REXIT         EXIT ****
+         SCKW  ORVYL,RORVYL       ORVYL ****
+         SCKW  SET,SET2           SET
+         SCKW  DEBUG,RDEBUG       DEBUG ****
+         SCKW  BASIC,RBASIC       BASIC ***
+         SCKW  DO,RDO             DO ****
+         SCKW  PAUSE,GETACARD     PAUSE ***IGNORE PAUSE   PRS 10/31/75
+         SCKW  ,UNREC
+*
+************SCAN TABLE 'SHOW'************************************
+*
+STAB2    SCKW  DATA,RSDATA        SHOW DATA ****
+         SCKW  FILE,RFILE,P       SHOW FILE ****
+         SCKW  CLOCK,RCLOCK1      SHOW CLOCK ***
+         SCKW  HDATA,RHDATA       SHOW HDATA ****
+         SCKW  OVERFL,RSOVER      SHOW OVERFLOW ****   PRS  11/11/75
+         SCKW  OVER,RSOVER
+         SCKW  OVE,RSOVER
+         SCKW  DIVIDEZ,RSDIVID    SHOW DIVIDEZ ****   PRS  11/11/75
+         SCKW  DIVIDE,RSDIVID
+         SCKW  DIV,RSDIVID
+         SCKW  UNDERFL,RSUNDER    SHOW UNDERFLOW **** PRS  11/11/75
+         SCKW  UNDER,RSUNDER
+         SCKW  UND,RSUNDER
+*        SCKW  GAMES,RGAMES       SHOW GAMES ****                  N004
+         SCKW  ,UNREC
+*
+************SCAN TABLE 'CLEAR'************************************
+*
+STAB3    SCKW  DATA,RCDATA        CLEAR DATA ****
+         SCKW  ,UNREC
+*
+************SCAN TABLE 'START'************************************
+*
+STAB4    SCKW  AT,AT2,P
+         SCKW  ,UNREC
+*
+*
+************SCAN TABLE 'SET'**************************************
+*
+STAB6    SCKW  OVERFL,ROVERFL,P   SET OVERFLOW ****
+         SCKW  CLOCK,RCLOCK2,P    SET CLOCK ***
+         SCKW  OVER,ROVERFL,P
+         SCKW  OVE,ROVERFL,P                      PRS  11/12/75
+         SCKW  DIVIDEZ,RDIVIDEZ,P SET DIVIDEZ ****
+         SCKW  DIVIDE,RDIVIDEZ,P
+         SCKW  DIV,RDIVIDEZ,P                     PRS  11/12/75
+         SCKW  UNDERFL,RUNDERFL,P SET UNDERFLOW ****
+         SCKW  UNDER,RUNDERFL,P
+         SCKW  UND,RUNDERFL,P                     PRS  11/12/75
+         SCKW  RETYPE,RRETYPE     SET RETYPE
+         SCKW  NORETYPE,RNRETYPE  SET NORETYPE
+         SCKW  ,UNREC
+*
+**************SCAN TABLE 'TO'******************************************
+*
+STAB8    SCKW  TO,AT2,P           GO TO N
+         SCKW  ,UNREC
+         EJECT
+*
+**************'START' COMMAND PROCESSOR********************************
+*
+RSTART   LH    R1,LASTLINE        GET LAST LINE STARTING ARG
+         STH   R1,LINEREQS        MAKE IT THE USERS REQUEST
+         B     RLODR
+*
+*************UNRECOGNIZED COMMAND PROCESSOR****************************
+*
+UNREC    COMMAND 0,BIGBUF,L:PRESTLNG    PASS ON TO ORVYL
+         B     GETACARD
+*
+*************'EXIT' PROCESSOR******************************************
+*
+REXIT    SYSQS 1,14,':EXITING STANFORD/BASIC.'                     N005
+         BAL   R4,WRITEIT
+         L     R15,ACLOSE
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+ABORT    EXIT                     DO NOT EXPECT TO COME BACK
+         B     REXIT              JUST IN CASE
+*
+************'ORVYL' PROCESSOR***************************************
+*
+RORVYL  SYSQS 1,14,':ALL OF THE COMMANDS OF ORVYL ARE AVAILABLE TO YOU.X
+                 TO LEAVE STANFORD/BASIC TYPE "EXIT".'             N005
+         BAL   R4,WRITEIT
+         B     GETACARD           GO FOR ANOTHER COMMAND
+*
+******************'BASIC' PROCESSOR************************************
+*
+RBASIC   SYSQS 1,14,':YOU ARE IN STANFORD/BASIC.'                  N005
+         BAL   R4,WRITEIT
+         B     GETACARD
+*
+************'SHOW DATA' PROCESSOR***********************************
+*
+RSDATA   CLI   SW3,X'01'          TEST IF LOADER EVER CALLED
+         BE    RSDATA2            IF SO GO HONOR COMMAND
+         SYSQS 1,14,':DATA AREA NOT LOADED, COMMAND REJECTED.'
+         BAL   R4,WRITEIT
+         B     GETACARD
+RSDATA2  L     R15,ADUMP
+         BALR  R14,R15            OFF TO THE DUMP ROUTINE
+         B     GETACARD           GO FOR ANOTHER COMMAND
+*
+************'SHOW HDATA' PROCESSOR***********************************
+*
+RHDATA   CLI   SW3,X'01'          TEST IF LOADER EVER CALLED
+         BE    RHDATA2            IF SO GO HONOR COMMAND
+         SYSQS 1,14,':DATA AREA NOT LOADED, COMMAND REJECTED.'
+         BAL   R4,WRITEIT
+         B     GETACARD
+RHDATA2  L     R15,AHDUMP
+         BALR  R14,R15            OFF TO THE HEX DUMP ROUTINE
+         B     GETACARD           GO FOR ANOTHER COMMAND
+*
+************'SHOW FILE' PROCESSOR***********************************
+*
+RFILE    SYSQS 1,14,':SORRY "SHOW FILE" NOT SUPPORTED YET.'
+         BAL   R4,WRITEIT
+         B     GETACARD           GO FOR ANOTHER COMMAND
+*
+**************'CLEAR DATA' PROCESSOR***********************************
+*
+RCDATA   XC    OVERSCNT,OVERSCNT  CLEAR OVER COUNT
+         XC    UNDRSCNT,UNDRSCNT  CLEAR UNDER COUNT
+         XC    DIVDSCNT,DIVDSCNT  CLEAR DIVIDE COUNT
+         XC    ADATARUN,ADATARUN  RESET 'DATA' POINTER
+         CLI   SW3,X'01'          TEST IF LOADER EVER CALLED
+         BE    RCDATA2            IF SO GO HONOR COMMAND CLEAR DATA
+         SYSQS 1,14,':DATA AREA ALREADY CLEAR, COMMAND REJECTED'
+         BAL   R4,WRITEIT
+         B     GETACARD
+RCDATA2  L     R15,ALODR2         ADDR OF CLEAR DATA ENTRY
+         BALR  R14,R15            OFF TO CLEAR DATA
+         B     GETACARD
+*
+************'SET OVERFLOW N' PROCESSOR*******************************
+*
+ROVERFL  LTR   R0,R0              CHECK FOR PARM
+         BNP   UNREC              NO PARM MEANS BAD COMMAND
+         CH    R0,=H'3'           CHECK FOR NUMBER OF DIGITS
+         BH    UNREC              IF TOO MANY BAD COMMAND
+         BAL   R14,DTB            GO TRY TO CONVERT TO BINARY
+*
+         LTR   R0,R0              SEE HOW WE DID
+         BNZ   UNREC              IF NOT ZERO ILLEGAL COMMAND
+         STH   R1,OVERUCNT        STORE IT ON USERS OPTION LIST
+         B     GETACARD           BACK FOR ANOTHER COMMAND
+*
+************'SET DIVIDEZ N' PROCESSOR********************************
+*
+RDIVIDEZ LTR   R0,R0              CHECK FOR PARM
+         BNP   UNREC              NO PARM MEANS BAD COMMAND
+         CH    R0,=H'3'           CHECK FOR NUMBER OF DIGITS
+         BH    UNREC              IF TOO MANY BAD COMMAND
+         BAL   R14,DTB            GO TRY TO CONVERT TO BINARY
+*
+         LTR   R0,R0              SEE HOW WE DID
+         BNZ   UNREC              IF NOT ZERO ILLEGAL COMMAND
+         STH   R1,DIVDUCNT        STORE IT ON USERS OPTION LIST
+         B     GETACARD           BACK FOR ANOTHER COMMAND
+*
+************'SET UNDERFL N' PROCESSOR********************************
+*
+RUNDERFL MVI   SW7,X'0F'          WHERE AM I
+         LTR   R0,R0              CHECK FOR PARM
+         BNP   UNREC              NO PARM MEANS BAD COMMAND
+         CH    R0,=H'3'           CHECK FOR NUMBER OF DIGITS
+         BH    UNREC              IF TOO MANY BAD COMMAND
+         BAL   R14,DTB            GO TRY TO CONVERT TO BINARY
+*
+         LTR   R0,R0              SEE HOW WE DID
+         BNZ   UNREC              IF NOT ZERO ILLEGAL COMMAND
+         STH   R1,UNDRUCNT        STORE IT ON USERS OPTION LIST
+         B     GETACARD           BACK FOR ANOTHER COMMAND
+*
+************'SHOW UNDERFLOW/OVERFLOW/DIVIDE' PROCESSOR***************
+*                                                     PRS  11/11/75
+RSUNDER  LH    R5,UNDRUCNT            # SET BY SET UNDERFLOW
+         B     RSHOW
+RSOVER   LH    R5,OVERUCNT            # SET BY SET OVERFLOW
+         B     RSHOW
+RSDIVID  LH    R5,DIVDUCNT            # SET BY SET DIVIDE
+RSHOW    CVD   R5,CONTEMP
+         UNPK  EXPANBUF(4),CONTEMP(8)
+         OI    EXPANBUF+3,X'F0'          OVERWRITE SIGN
+         LA    R1,EXPANBUF
+         LA    R5,3                  FLAG FOR LOOP
+BLANK    CLI   0(R1),X'F0'           CHECK FOR CHARACTER ZERO
+         BNE   NOBLANK
+         MVI   0(R1),X'40'           CHANGE ZERO TO BLANK
+         LA    R1,1(,R1)
+         BCT   R5,BLANK
+NOBLANK  LA    R1,EXPANBUF
+         LA    R14,4
+         BAL   R4,WRITEIT
+         B     GETACARD
+*
+**************'START AT NN' PROCESSOR********************************
+*
+AT2      LTR   R0,R0              CHECK FOR PARM
+         BNP   UNREC              NO PARM NO PLAY THE GAME
+         CLC   0(1,R15),=C'F'     CHECK FOR F
+         BE    AT2C               GO SET IT UP
+         CLC   0(5,R15),=C'FIRST'
+         BE    AT2C
+         CLC   0(3,R15),=C'TOP'
+         BE    AT2C
+         CH    R0,=H'4'           CHECK FOR NUMER OF CHARACTERS
+         BNH   AT2B               IF TOO MANY BAD COMMAND               06870000
+*                                                                       06870100
+**********************************  LINE # OUT OF RANGE   PRS 12/16/75  06870200
+*                                                                       06870300
+         MVI   INLWORKB+4,C' '                                          06871000
+         MVC   INLWORKB+5(9),INLWORKB+4      BLANK OUT AREA             06872000
+         CH    R0,=H'9'                                                 06873000
+         BNH   AT2A                                                     06874000
+         LA    R0,9                                                     06875000
+AT2A     BCTR  R0,0                          CORRECT FOR EXECUTE INSTR  06876000
+         LR    R1,R0                                                    06876500
+         EX    R1,MOVELINE                   MOVE IN LINE #             06877000
+         B     BADLNE                        GO WRITE ERROR MSG         06878000
+MOVELINE MVC   INLWORKB+4(*-*),0(R15)        FOR EXECUTE INSTR ABOVE    06879000
+AT2B     BAL   R14,DTB            GO TRY TO CONVERT TO BINARY           06880000
+*
+         LTR   R0,R0              SEE HOW WE DID
+         BNZ   UNREC              BAD PARM
+         STH   R1,LINEREQS        STORE USERS REQUEST
+         B     RLODR              GO START WITH R1 = WHERE
+AT2C     SR    R1,R1              SET TOP IN REG
+         STH   R1,LINEREQS        STORE USERS REQUEST
+         XC    OVERSCNT,OVERSCNT  CLEAR OVER COUNT
+         XC    UNDRSCNT,UNDRSCNT  CLEAR UNDER COUNT
+         XC    DIVDSCNT,DIVDSCNT  CLEAR DIVIDE COUNT
+         MVC   ARETPTR,=F'-2'
+         MVC   AFORRPTR,=F'-12'
+         XC    ADEFNPTR,ADEFNPTR
+         XC    ADATARUN,ADATARUN  RESET 'DATA' POINTER
+         CLI   SW3,X'01'          TEST IF LOADER EVER CALLED
+         BNE   RLODR              IF NOT SKIP CLEAR CALL
+         L     R15,ALODR2         GET ADDR OF CLEAR ENTRY
+         BALR  R14,R15            GO DO THE CLEAR
+         L     R15,ACLOSE
+         BALR  R14,R15            GO CLOSE ALL OPEN FILES
+         B     ERX3               BYE BYE ERROR
+         SYSQS 1,14,':PROGRAM REINITIALIZED - STARTING EXECUTION.'
+         BAL   R4,WRITEIT
+         B     RLODR              NOW GO TO THE SET UP ENTRY
+*
+***********'SET RETYPE' PROCESSOR**************************************
+*
+RRETYPE  MVI   RETYPESW,X'01'     RETYPE LINE ON ERROR
+         B     GETACARD
+*
+**********'SET NORETYPE' PROCESSOR*************************************
+*
+RNRETYPE MVI   RETYPESW,X'00'     DO NOT TYPE ON ERROR
+         B     GETACARD
+*
+******************'DEBUG' PROCESSOR************************************
+*
+RDEBUG   PAUSE                    GO ON UP TO ORVYL
+         B     GETACARD           BACK TO WORK
+*
+*****************'SET CLOCK' PROCESSOR*********************************
+*
+RCLOCK2  LTR   R0,R0              CHECK FOR PRESENCE OF PARM
+         BNP   UNREC              NO PARM NO PLAY THE GAME
+         CH    R0,=H'4'           CHECK FOR NUMBER OF CHARACTERS
+         BH    UNREC              IF TOO MANY BAD COMMAND
+         BAL   R14,DTB            GO TRY TO CONVERT TO BINARY
+         LTR   R0,R0              SEE HOW WE DID
+         BNZ   UNREC              BAD PARM
+         M     R0,=F'38400'       CONVERT SECONDS TO TIMER UNITS
+         ST    R1,BREKTIME        STORE INTERVAL IN USERS CELL
+         B     GETACARD           GO BACK FOR MORE
+         B     GETACARD
+*
+***************'SHOW CLOCK' PROCESSOR**********************************
+*
+RCLOCK1  SENSE 4
+         ST    R1,REALTIME        STORE REAL TIME
+         ST    R15,ELAPTIME       STORE ELAPSED TIME
+         L     R1,REALTIME        SET UP IN PARM REG
+         BAL   R4,TIMEC
+         MVC   EXPANBUF+9(23),=C' SECONDS TERMINAL TIME.'
+         LA    R1,EXPANBUF
+         LA    R14,32(R0,R0)
+         BAL   R4,WRITEIT
+         L     R1,ELAPTIME        SET UP IN PARAMETER REG
+         BAL   R4,TIMEC           GO CONVERT TO TIME
+         MVC   EXPANBUF+9(24),=C' SECONDS TOTAL CPU TIME.'
+         LA    R1,EXPANBUF
+         LA    R14,33(R0,R0)      LENGTH
+         BAL   R4,WRITEIT
+         L     R1,LASTTIME        GET LAST RUN TIME
+         BAL   R4,TIMEC           GO CONVERT FOR OUTPUT
+         MVC   EXPANBUF+9(30),=C' SECONDS CPU TIME ON LAST RUN.'
+         LA    R1,EXPANBUF
+         LA    R14,39(R0,R0)
+         BAL   R4,WRITEIT
+         B     GETACARD
+*
+***************'SHOW GAMES' PROCESSOR**********************************
+*
+RGAMES   SYSQS 1,14,':STANFORD/BASIC GAMES..................'
+         BAL   R4,WRITEIT
+         CLI   SW1,X'00'
+         BNE   GETCARD0
+         SYSQS 1,14,' '
+         BAL   R4,WRITEIT
+         SYSQS 1,14,':SLOT      BLAKJACK  RACE      GOMOKU'
+         BAL   R4,WRITEIT
+         CLI   SW1,X'00'
+         BNE   GETCARD0
+         SYSQS 1,14,':HEXAPAWN  NIM       CHEKBOOK  QUBIC'
+         BAL   R4,WRITEIT
+         CLI   SW1,X'00'
+         BNE   GETCARD0
+         SYSQS 1,14,':BATNUM    GOLF      FOOTBALL'
+         BAL   R4,WRITEIT
+         CLI   SW1,X'00'
+         BNE   GETCARD0
+         SYSQS 1,14,':QUBIC.SCOPE       GOMOKU.SCOPE'
+         BAL   R4,WRITEIT
+         CLI   SW1,X'00'
+         BNE   GETCARD0
+         SYSQS 1,14,' '
+         BAL   R4,WRITEIT
+         SYSQS 1,14,':TO PLAY "USE &&T000.<GAMENAME> ON SYS10 CLEAR" THX
+               EN TYPE "GO"'
+         BAL   R4,WRITEIT
+         B     GETCARD0
+*
+*******************IMMEDIATE MODE PREPROCESSOR*************************
+*
+RDO      MVI   SW8,X'01'          TURN ON IMMEDIATE MODE SWITCH
+         L     R3,PRESTLNG        LOAD LENGTH OF COMMAND
+*****************  CODE INSERTED TO CHECK COMMAND LENGTH SO WHEN MOVED
+**  COMMAND DOES NOT OVERFLOW BEYOND BUFFER AND OVERWRITE OTHER DATA
+         C     R3,=F'133'         CHECK COMMAND LENGTH
+         BNH   LENOK
+         LA    R3,133         WILL ACCEPT ONLY 133 CHARS FROM COMMAND
+**************************************  PRS  10/27/75
+LENOK    BCTR  R3,R0              LOWER BY ONE FOR EXECUTE
+         EX    R3,DOMOVE          MOVE TO EXPANDED BUFFER
+         LA    R3,1(R0,R3)        KICK BACK UP
+         LA    R4,EXPANBUF        GET ADDRESS OF BUFFER
+RDO1     CLI   0(R4),C'D'         LOOP LOOKING FOR D
+         BE    RDO2               *
+         LA    R4,1(R0,R4)        *
+         BCT   R3,RDO1            *
+RDO2     CLI   0(R4),C'O'         LOOP LOOKING FOR O
+         BE    RDO3               *
+         LA    R4,1(R0,R4)        *
+         BCT   R3,RDO2            *
+*
+DOMOVE   MVC   EXPANBUF(0),BIGBUF MOVE TO EXPANDED BUFFER
+*
+RDO3     LA    R4,1(R0,R4)        KICK OVER O
+         BCTR  R3,R0              DROP COUNT FOR O
+         STH   R3,EXPANLNG        PUT NEW LENGTH DOWN ON LIST
+         BCTR  R3,R0              LOWER FOR MVC
+         LTR   R3,R3              TEST FOR NOTHING TO DO
+         BNP   RDO4               NO COMMAND
+         MVC   LINESTAK(2),LASTLINE  SAVE LINE NUM SO GO CAN GO
+*                       NOTE:   LASTLINE RESTORED IN DO POSTPROCESSOR
+         EX    R3,DOMOV2          EXECUTE MOVE COMMAND UP BUFFER
+         SR    R3,R3              CLEAR ONE
+         ST    R3,PREST1ST        CLEAR IT
+         LH    R3,=H'10000'       MAKE FAKE LINE NUMBER
+         STH   R3,PREST1ST        PUT IT DOWN ON LIST
+         BAL   R3,RVEXPAN3        GO GET A PRESD TYPE
+         BP    RINLINE            OFF WE GO
+         LCR   R1,R0
+         BC    15,*(R1)
+         B     BADSTG
+         B     BADLNE
+*
+DOMOV2   MVC   EXPANBUF(0),0(R4)  MOVE COMMAND UP BUFFER
+*
+RDO4     SYSQS 1,14,':INVLAID IMMEDIATE MODE COMMAND, PLEASE RETYPE.'
+         BAL   R4,WRITEIT
+         MVI   SW8,X'00'          TURN OFF THE SWITCH
+         B     GETACARD
+         EJECT
+*
+*****************DEBLOCK PROCESSING OFF READ EDIT**********************
+*
+PREPREP  CONTROL TI,20            TEST FOR ABORT
+         BNZ   ERX3               ERROR IN STARTING ABORT *DIE*
+         WAIT  TI                 WAIT FOR ABORT REPORT
+         BP    RESETBUF           IF ABORT GO RESET BUFFER CONTROL
+         L     R8,BIGBUFP         GET CURRENT BUFFER POINTER
+         SR    R1,R1              CLEAR
+         ST    R1,PREST1ST        CLEAN UP
+         IC    R1,4(R0,R8)        GET LENGTH                       N001
+         MVC   PREST1ST+0(4),0(R8) MOVE IN LINE NUMBER             N001
+         EX    R1,PREPMOVE        MOVE TEXT LINE OVER
+         LA    R1,5(R0,R1)        KICK TO FULL LENGTH              N001
+         AR    R8,R1              KICK UP BUFFER POINTER
+         ST    R8,BIGBUFP         PUT POINTER BACK UPDATED
+         L     R8,WORKLOAD        GET NUMBER OF LINES
+         BCTR  R8,R0              BACK OFF BY 1
+         ST    R8,WORKLOAD        PUT BACK
+         LTR   R8,R8              TEST FOR SOMETHING TO DO NEXT TIME
+         BP    PREPREP1           IF SO SKIP SWITCH TRUNOFF
+         MVI   SW2,X'00'          TURN OFF SWITCH
+         LA    R8,BIGBUF          GET STARTING ADDR OF BUFFER
+         ST    R8,BIGBUFP         RESET BUFFER POINTER
+PREPREP1 MVC   BIGBUFL(4),BIGBUFC SHIFT CURRENT TO LAST
+         MVC   BIGBUFC(4),PREST1ST MAKE NEW CURRENT
+         B     PREPARE            GO ON TO MAIN STREAM
+*
+PREPMOVE MVC   PRESTBUF(0),4(R8)  MOVE TEXT LINE OVER TO PRESTBUF  N001
+*
+*************PREPARE LINE FOR PROCESSING OFF READ EDIT*****************
+*
+PREPARE  MVI   SW5,X'03'          WHERE AM I
+         XC    SW6(2),SW6         *
+*
+**********************************************************************
+*
+         SR    R0,R0              CLEAR FOR CONVERSION
+         L     R1,PREST1ST        GET ORVYL TYPE NUMBER
+         D     R0,=F'1000'        BREAK OUT THE TWO HALFS
+         STH   R0,PREST2ND        STORE LOWER HALF
+         STH   R1,PREST1ST        STORE UPPER HALF
+         STH   R0,CONTEMP+4    LOWER HALF IN TEMP STORAGE  PRS 12/1/75
+         ST    R1,CONTEMP      UPPER HALF IN TEMP STORAGE  PRS 12/1/75
+         LR    R4,R1        SAVE 1ST PART OF LINE #   PRS 12/1/75
+*
+***********************************************************************
+*
+         BAL   R3,RVEXPAN         GO PREPARE INPUT
+         C     R4,=F'10000'       LINE # IN RANGE?  PRS 12/1/75
+         BH    BADLNE                               PRS 12/1/75
+         LTR   R0,R0                                PRS 12/1/75
+         BP    RINLINE            GO TRY FOR SYNTAX
+         LCR   R1,R0              INVERT RETURN CODE
+PREPARE2 BC    15,PREPARE2(R1)    BRANCH TO BRANCH
+         B     BADSTG             GO PROCESS BAD STRING
+         B     BADLNE             GO PROCESS BAD LINE NUMBER
+*
+*******************BAD STRING MAKE A SYNTAX ERROR**********************
+*
+BADSTG   BAL   R3,MKSNTXER        GO MAKE A SYNTAX ERROR
+         LH    R0,PREST1ST        GET STATEMENT NUMBER
+         LA    R1,2(R0,R0)        'INCORRECTLY FORMED QUOTE STRING'
+         L     R15,ARUNERR        ADDRESS OF DRIVER
+         BALR  R14,R15            OFF TO IT
+         B     RTRANS             GO SEND SYNTAX ERROR TO TRANSLATOR
+*
+****************BAD LINE NUMBER TELL USER AND FORGET*******************
+*
+BADLNEM  MVC   EXPANBUF,NOSTMER   MOVE IN ERROR MSG
+BADLNE   LA    R1,EXPANNUM        SET UP POINTER TO MESG
+         SR    R14,R14            CLEAR TO COMPUTE LENGTH
+         IC    R14,NOSTMERL       INSTERT LENGTH OF MESSAGE
+         BCTR  R14,R0             LOWER FOR MVC
+         EX    R14,BADLNEM        MOVE IN MES
+         MVC   EXPANNUM(10),INLWORKB+4  MOVE IN WHOLE LINE #.  PRS
+         LA    R14,11(R0,R14)     SET FOR ADDED PORTION+1
+         BAL   R4,WRITEIT         GO WRITE MESSAGE
+         B     GETACARD           GO GET ANOTHER LINE
+*
+*********OVERLAYED IN EXPANBUFF WHEN INVALID STATEMENT NUMBER FOUND****
+*
+NOSTMER  DC    C'INVALID STATEMENT NUMBER, STATEMENT WILL BE IGNORED.'
+NOSTMERL DC    AL1(L'NOSTMER)
+         EJECT
+*
+*************DELETE LINE FROM READ EDIT********************************
+*
+DELET    MVI   SW5,X'01'          WHERE AM I
+         XC    SW6(2),SW6         *
+         LR    R15,R1             PUT STARTING LINE # IN SAVE PLACE
+         SR    R0,R0              CLEAR TO CONVERT LINE NUMBER
+         LR    R1,R14             GET ENDING INTERNAL LINE NUMBER
+         D     R0,=F'1000'        SPLIT HAIRS
+         LR    R5,R1              THROW AWAY REMAINDER - SET ENDING #
+         SR    R0,R0              CLEAR TO GET LINE NUMBER
+         LR    R1,R15             GET INTERNAL STARTING LINE NUMBER
+         D     R0,=F'1000'        SPLIT HAIRS
+         LTR   R0,R0              TEST FOR FRACTIONAL PART
+         BZ    DELETB     SKIP KICK AND OVER SHOOT TEST IF NO FRACTION
+DELETA   LA    R1,1(R0,R1)        KICK UP TO GO BEYOND FRACTION (OR 0)
+         CLR   R1,R5              CHECK FOR OVER SHOOT
+         BH    DELETH             NOTHING TO DELETE GO HOME
+DELETB   LTR   R1,R1              CHECK FOR ZERO
+         BZ    DELETA             IF SO KICK AND TEST FOR OVER SHOOT
+         LR    R0,R1              - SET STARTING #
+*
+******R0 CONTAINS THE FIRST STATEMENT IN THE RANGE TO BE DELETED.
+******R5 CONTAINS THE LAST STATEMENT IN THE RANGE TO BE DELETED.
+*
+         LA    R1,ALINEBEG        PICK UP LINES TABLE BEGINNING FOR
+         L     R15,ABINR          BINARY SEARCH
+         BALR  R14,R15            CALL BINARY SEARCH
+         LTR   R1,R1              WAS THIS NUMBER IN TABLE?
+         BM    DELETG             NO
+DELETC   LA    R4,0(R1)           SAVE DISPLACEMENT PAST USER OF FIRST
+*                                 ENTRY IN LINES TO BE DELETED
+         L     R15,ATRANS         PICK UP LOC OF TRANS
+         LA    R1,INFIXNO         PICK UP LOC OF TRANS ARG
+DELETD   STH   R0,PREST1ST        SET DOWN STATEMENT # TO BE DELETED
+         LR    R8,R0              SAVE FOR END TEST
+         BAL   R3,MKDELT          GO MAKE A DELETE
+         BALR  R14,R15            GO TO TRANS TO DELETE
+         B     DELETF             NORMAL RETURN FROM TRANS
+         B     DELETF             DEFINE FILE ENTERED (CAN NOT HAPPEN)
+         B     NOTYET2A           DEFINE FILE REPLACED
+         B     NOTYET3A           DEFINE FILE DELETED
+DELETF   LH    R0,0(R4,R11)       PICK UP NEXT ST # IN LINES
+         CR    R0,R5              ARE WE FINISHED?
+         BH    DELETH             YES...GO HOME
+         CR    R8,R0              SEE IF WE DID THIS ONE LAST TIME
+         BE    DELETH             IF SO GET THE HELL OUT
+         B     DELETD             NO...GO DELETE NEXT LINE
+DELETG   LH    R4,0(R1,R11)       PICK UP FIRST ST # > FIRST # TO BE
+*                                 DELETED
+         CR    R4,R5              IS IT > LAST # TO BE DELETED
+         BH    DELETH             YES...THEN THERE IS NOTHING TO BE
+*                                 DELETED
+         B     DELETC             NO...THEN GO DELETE LINES
+DELETH   MVI   SW2,X'00'          TURN OFF THE SWITCH
+         LA    R8,BIGBUF          GET BUFFER ADDRESS
+         ST    R8,BIGBUFP         PUT IT DOWN FOR NEXT TIME
+         B     GETACARD           NOW WHAT DOES THE USER WANT TO DO
+*
+************REMEMBER TO PROCESS DELETION OF DEFINE FILE STATEMENTS*****
+*
+NOTYET2A L     R15,ADFOT
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+         L     R15,ADFIN
+         BALR  R14,R15
+         B     DELETF             A REMINDER
+NOTYET3A L     R15,ADFOT
+         BALR  R14,R15
+         B     ERX3               BLOW IT
+         B     DELETF             A REMINDER
+         EJECT
+*
+***************MOVE LINE FROM READ EDIT********************************
+*
+DELET2   MVI   SW5,X'05'          WHERE AM I
+         XC    SW6(2),SW6         *
+         SR    R0,R0              CLEAR TO GET LINE NUMBER
+         ST    R0,PREST1ST        CLEAN UP
+         L     R8,BIGBUFP         GET BUFFER POINTER
+         MVC   PREST1ST(4),0(R8) MOVE IN INTERNAL NUMBER           N001
+         LA    R8,4(R0,R8)        KICK BUFFER POINTER OVER DELETE  N001
+         ST    R8,BIGBUFP         PUT POINTER BACK
+         L     R1,PREST1ST        FETCH INTERNAL LINE NUMBER
+         D     R0,=F'1000'        SPLIT HAIRS
+         LTR   R0,R0              TEST FOR REMAINDER
+         BNZ   PREPREP            IF NOT ZERO IGNORE
+         STH   R0,PREST2ND        FOR NEATNESS
+         LTR   R1,R1              TEST UPPER HALF
+         BNP   PREPREP            IF NOT ZERO WE ARE OK
+         STH   R1,PREST1ST        FOR REAL
+         BAL   R3,MKDELT          GO MAKE A DELETE CODE
+         B     RTRANS             SEND IT ON
+         EJECT
+*
+*************CLEAR TEXT FROM READ EDIT*********************************
+*
+CLEART   MVI   SW5,X'02'          WHERE AM I
+         XC    SW6(2),SW6         *
+         L     R15,ACLOSE         SET TO CLOSE FILES
+         BALR  R14,R15            GO DO IT
+         B     ERX3               BLOW IT
+         L     R15,AINITIAL
+         BALR  R14,R15
+         B     RESTART
+         EJECT
+*
+******************MESSAGE WRITER RETURNS ON REG 4**********************
+*
+WRITEIT  WRITE TI,(1),(14)
+         BNZ   WRITEIT2           IF WRITE NOT STARTED ABORT
+         WAIT  TI                 WAIT FOR WRITE TO OCCUR
+         BM    WRITEIT            TRY AGAIN ON I/O ERROR
+         BCR   15,R4              BACK TO CALLER
+WRITEIT2 LR    R3,R4              PUT CALLERS RETURN IN R4
+         B     ERX1               AS AN ERROR CODE -BYE BYE-
+*
+*                                    REGISTER 15 CONTENTS ON RETURN:
+*                                        0 = WRITE COMPLETE NO ATTN
+*                                        4 = HIT ATTENTION DURING WRITE
+         EJECT
+*
+*************CONVERT TIME IN REG 1 FOR OUTPUT**************************
+*
+TIMEC    SRL   R1,1               MOVE OVER
+         SR    R0,R0              SET FOR DIVIDE
+         D     R0,=A(3*64)
+         MH    1,=H'10'
+         LR    R3,R1              MOVE TO SAFE PLACE
+         LR    R1,R0              MOVE REMAINDER
+         MH    R1,=H'10'
+         SR    R0,R0
+         D     R0,=A(3*64)
+         AR    R1,R3              GET THEM BACK TOGETHER
+         CVD   R1,PAREA           MAKE PACKED DECIMAL
+         UNPK  EXPANNUM(8),PAREA  AMAKE UNPACKED DECIMAL
+         OI    EXPANNUM+7,X'F0'   TAKE OUT THE SIGN
+         MVC   EXPANBUF(5),EXPANNUM         MOVE WHOLE SECOND PART OVER
+         MVI   EXPANBUF+5,X'4B'   MOVE IN DECIMAL
+         MVC   EXPANBUF+6(3),EXPANNUM+5       MOVE IN 1000S SECOND PART
+         CLI   EXPANBUF,X'F0'
+         BNE   TIMECA
+         MVI   EXPANBUF,X'40'
+         CLI   EXPANBUF+1,X'F0'
+         BNE   TIMECA
+         MVI   EXPANBUF+1,X'40'
+         CLI   EXPANBUF+2,X'F0'
+         BNE   TIMECA
+         MVI   EXPANBUF+2,X'40'
+         CLI   EXPANBUF+3,X'F0'
+         BNE   TIMECA
+         MVI   EXPANBUF+3,X'40'
+         CLI   EXPANBUF+4,X'F0'
+         BNE   TIMECA
+         MVI   EXPANBUF+4,X'40'
+TIMECA   BR    R4
+         EJECT
+*
+*******************STOP RUN TIME CLOCK ROUTINE*************************
+*
+SCLOCK   SET   4                  STOP THE TIMER
+         SENSE 4                  GET THE ELAPSED TIME
+         L     R1,LASTTIME+4      GET ELAPSED TIME AT START
+         SR    R15,R1             SUBTRACT FOR ELAPSED TIME
+         ST    R15,LASTTIME       STORE LAST RUN TIME ELAPSED
+         BR    R4                 BACK FOR WORK
+         EJECT
+*
+*******************RESET BUFFER CONTROL********************************
+*
+RESETBUF MVI   SW2,X'00'          TRUN OFF SWITCH
+         LA    R8,BIGBUF          GET STARTING ADDR OF BUFFER
+         ST    R8,BIGBUFP         RESET BUFFER POINTER
+         XC    BIGBUFC(12),BIGBUFC RESET STATEMENT TRACE
+         XC    WORKLOAD(4),WORKLOAD RESET WORK LOAD COUNT
+         B     GETACARD           OFF TO SEE WHAT HE WANTS
+         EJECT
+*
+************ERX1 ABORT USER FROM WYLBUR/BASIC WITHOUT MESSAGE**********
+*
+*  INSUFFICIENT DRUM SPACE
+*  CAN NOT ATTACH WUSER TERMINAL
+*  CAN NOT SET WYLBUR MODE WORD
+*  CAN NOT SET WRITE WITHOUT CONTROL
+*  CAN NOT TEST FOR FIRST LINE OF WORK FILE
+*  CAN NOT GET A WRITE TO THE TERMINAL STARTED
+*
+ERX1     SET   11,0               JUST TO BE SAFE
+         PANIC (3) ## CODE 1 SYSTEM ERROR BYE BYE BABY DO NOT COME BACK
+         B     ERX1               JUST IN CASE
+         EJECT
+*
+********ERX2***ENTERED WYLBUR/BASIC WITH WORKING DATA SET**************
+*
+ERX2     LA    R14,CLEPRT1        GET ADDRESS OF PROMPT ARGLIST
+ERX2Y    READ  TI,LINEIN,133,(14) WRITE WITH PROMPT
+         BZ    ERX2A
+         BAL   R3,ERX3            TROUBLE IN STARTING OPERATION
+ERX2A    WAIT  TI                 WAIT FOR USER RESPONSE
+         BM    ERX2B              I/O ERROR OR TAB TROUBLE
+         BZ    ERX2F              OK LENGTH IN REG 1
+         LTR   R1,R1              HIT ATTENTION
+         BNZ   ERX2D              IF ANY COUNT HE WANTS TO TRY AGAIN
+         B     REXIT              PROCESS LIKE AN 'EXIT'
+ERX2B    LCR   R15,R15            I/O OR TAB TROUBLE
+         BC    15,*(R15)          BRANCH TO ONE OR THE OTHER
+         B     ERX2C
+         SYSQS 1,14,':TERMINAL READ ERROR, PLEASE RETYPE.'
+         BAL   R4,WRITEIT
+ERX2D    LA    R14,CLEPRT2        LOAD THE SHORTER PROMPT
+         B     ERX2Y              TRY AGAIN FOR HIS RESPONSE
+ERX2C    SYSQS 1,14,':ILLEGAL USE OF TABS, PLEASE RETYPE.'
+         BAL   R4,WRITEIT
+         B     ERX2D
+ERX2F    LR    R0,R1              SET UP LENGTH ARGUMENT
+         LA    R1,LINEIN          SET UP LOCATION ARGUMENT
+         SCINIT (1),(0)           SET UP SCANNER
+         SCAN  SECTAB1            GO OFF TO SCAN FOR YES
+         B     REXIT              BAD STRING OR BLANK MSG
+ERX2G    CONTROL TI,17            REQUEST A CLEAR TEXT OF WYLBUR
+         BZ    ERX2H
+         BAL   R3,ERX3            TROBULE IN STARTING OPERATION
+ERX2H    WAIT  TI                 WAIT FOR CLEAR TEXT TO OCCUR
+         BZ    RESTART            BACK TO THE BEGINNING
+         BAL   R3,ERX3            FUNNY RETURN FROM ATTEMPT
+SECTAB1  SCKW  YES,ERX2G
+         SCKW  OK,ERX2G   'OK' ALSO CLRS TEXT ON ENTRY  PRS  10/27/75
+         SCKW  ,REXIT
+         DS    0F
+CLEPRT1  DC    AL2(L'CLEARMS1)
+         DC    AL2(L'CLEARMS2)
+CLEARMS1 DC    C':WORKING FILE MUST BE CLEAR AT START OF SESSION.'
+CLEARMS2 DC    C':TO "CLEAR TEXT" TYPE "YES" ? '
+         DS    0F
+CLEPRT2  DC    H'0'
+         DC    AL2(L'CLEARMS3)
+CLEARMS3 DC    C':TO "CLEAR TEXT" TYPE "YES" ? '
+         EJECT
+*
+***********ERX3 COULD NOT READ IN EDIT MODE TELL USER AND ABORT********
+*
+ERX3     SYSQS 1,14,':SYSTEM TROUBLE, YOU ARE BEING RETURNED TO ORVYL.'
+         BAL   4,WRITEIT          GO WRITE THE MESSAGE
+         B     ERX1               GO BYE BYE BABY
+         EJECT
+*
+*******************CONVERT PREST LINE TO PROPER BASIC FORMS************
+* COMES HERE ON A BAL R3,RVEXPAN  RETURNS BCR 15,R3
+* R0 CONTAINS RETURN CODE AS FOLLOWS:
+*      -4 = BAD STRING FOUND (NO PRESD PREPARED)
+*      -8 = BAD LINE NUMBER (NO PRESD PREPARED)
+*       + = EVERTHING OK THIS IS THE LENGTH OF PRESD BUFFER
+*
+*
+RVEXPAN  LA    R1,PRESTBUF        GET ADDR OF PREST BUFFER
+         ST    R1,ARG01           PUT ON ARG LIST
+         LA    R1,EXPANBUF        GET ADDR OF EXPAN BUFFER
+         ST    R1,ARG02           PUT IT ON ARG LIST
+         LA    R1,ARG01           SET ADDRESS OF ARG LIST
+         L     R15,AVEXPAN        ADDRESS OF EXPAND ROUTINE
+         BALR  R14,R15            GO OFF AND EXPAND LINE
+         STH   R0,EXPANLNG        SAVE LENGTH OF EXPANDED STRING
+         LA    R1,CONTEMP   ADDR OF LINE # IN TEMP STORAGE. PRS 12/1/75
+         ST    R1,ARG01           PUT IF ON ARGUMENT LIST
+         LA    R1,INLWORKB+4      TEMP BUFFER FOR LINE #. PRS 12/2/75
+         ST    R1,ARG02           PUT ON ARG LIST         PRS 12/2/75
+         LA    R1,EXPANNUM        GET ADDRESS OF OUTPUT BUFFER
+         ST    R1,ARG03           PUT ON ARGUMENT LIST.  PRS 12/2/75
+         LA    R1,ARG01           SET ADDRESS OF ARG LIST
+         L     R15,ACONVERL       ADDRESS OF CONVERT ROUTINE
+         BALR  R14,R15            GO OFF AND CONVERT
+         LH    R1,PREST1ST        GET FIRST HALF OF LINE NUMBER
+         LTR   R1,R1              TEST FOR POSITIVE NOT ZERO
+         BNP   RVEXPAN1           GO MAKE A ILLEGAL LINE NUMBER CODE
+         LH    R1,PREST2ND        GET SECOND HALF OF LINE NUMBER
+         LTR   R1,R1              NOW IT MUST BE Z
+         BNZ   RVEXPAN1           GO MAKE AN ILLEGAL LINE NUMBER CODE
+RVEXPAN3 LH    R1,EXPANLNG        GET LENGTH OF EXPANDED LINE
+         ST    R1,ARG01           PUT IN ARG LIST
+         LA    R1,EXPANBUF        GET ADDRESS OF EXPANDED LINE
+         ST    R1,ARG02           PUT IN ARG LIST
+         LA    R1,PRESDBUF        GET ADDRESS OF PRESD BUFFER
+         ST    R1,ARG03           PUT IN ARG LIST
+         LA    R1,ARG01           ADDR OF ARG LIST
+         L     R15,AVPRESS        ADDRESS OF VPRESS ROUTINE
+         BALR  R14,R15            OFF TO DO IT
+         LTR   R0,R0              TEST FOR BAD STRING
+         BNP   RVEXPAN2           GO MAKE BAD STRING CODE
+         STH   R0,PRESDLNG        STORE NUMBER OF CHAR IN PRESDBUF
+         BCR   15,R3              BACK FROM WHENCE WE CAME
+RVEXPAN1 LA    R0,8(R0,R0)        BAD LINE NUMBER CODE
+         LCR   R0,R0              WHEN NEGATIVE
+         STH   R0,PRESDLNG        PUT ERROR CODE IN CORE
+         BCR   15,R3              BACK FROM WHENCE WE CAME
+RVEXPAN2 LA    R0,4(R0,R0)        BAD STRING CODE
+         LCR   R0,R0              WHEN NEGATIVE
+         STH   R0,PRESDLNG        PUT ERROR CODE IN CORE
+         BCR   15,R3              BACK FROM WHENCE WE CAME
+         EJECT
+*
+**************HEX ALPHA TO BINARY CONVERSION ROUTINE*******************
+*
+* CALL BAL  R14,DTB
+*
+*  ENTERED WITH REG 0 = LENGTH OF THING TO BE CONVERTED
+*                  15 = ADDR OF THE THING TO BE CONVERTED
+*  RETURN WITH REG  0 = NUMBER OF CHARS LEFT AT STOP OF CONVERSION
+*                   1 = BINARY THING CONVERTED
+*                  15 = ADDR OF FIRST CHARACTER NOT CONVERTED
+*
+* CONVERSION STOPS ON NON-NUMERIC CHARACTER
+* REG 2 IS USED AS A WORK REGISTER BY THIS ROUTINE
+*
+DTB      SR    R1,R1              CLEAR RESULT REG
+DTBL     LTR   R0,R0              ANY COUNT
+         BNP   DTBX               IF NOT GO HOME
+         CLI   0(R15),C'0'        CHECK DIGIT LOW
+         BL    DTBX               IF IT IS LOWER GET OUT
+         CLI   0(R15),C'9'        CHECK DIGIT HIGH
+         BH    DTBX               IF IT IS HIGHER GET OUT
+         SR    R2,R2              CLEAR WORK REGISTER
+         IC    R2,0(R0,R15)       SELECT CHARACTER
+         SL    R2,=A(C'0')        TAKE OUT THE F
+         MH    R1,=H'10'          SCALE UP OLD CONTENTS
+         ALR   R1,R2              ADD IN NEW DIGIT
+         LA    R15,1(R0,R15)      KICK POINTER
+         BCTR  R0,R0              LOWER COUNT REMAINING
+         B     DTBL               TRY FOR MORE
+DTBX     BR    R14                BACK FROM WHENCE WE CAME
+         EJECT
+*
+***************MAKE A SYNTAX ERROR************************************
+*
+*  CALL BAL R3,MKSNTXER     RETURNS ON R3 NO RETURN CODES
+*
+MKSNTXER MVC   INFIXLEN(2),=H'6'  SET LENGTH
+         MVC   INFIXNO(2),PREST1ST  SET LINE NUMBER
+         MVC   INFIXTP(2),=X'0B16' SET SYNTAX ERROR
+         MVC   INFIX(2),=X'0D05'   SET TERMINAL CODE
+         BR    R3                  GO BACK FROM WHENCE WE CAME
+*
+**************MAKE A DELETE********************************************
+*
+*  CALL BAL R3,MKDELT      RETURNS ON R3 NO RETURN CODES
+*
+MKDELT   MVC   INFIXLEN(2),=H'6'   SET LENGTH
+         MVC   INFIXNO(2),PREST1ST SET IN LINE NUMBER
+         MVC   INFIXTP(2),=X'0B14' SET IN DELETE CODE
+         MVC   INFIX(2),=X'0D05'   SET IN TERMINAL CODE
+         BR    R3                 GO BACK FROM WHENCE WE CAME
+         EJECT
+*
+******ALL TABLE OVERFLOW ERRORS FROM PACKCON,TRANS AND LODR COME HERE**
+*
+*  CALL BAL R14,TABLOVL      DOES NOT RETURN IF ERROR
+*                            IF RETURNS NO ERRORS
+*
+*                                                                     *
+*        AT THIS WRITING ALL THAT IS DONE IS CHECKING FOR SYSTEM      *
+*        LOOP AND RESETING OF THE PARTICULAR TABLE THAT HAS           *
+*        OVERFLOWED SO THAT SYNTAX ANALYSIS CAN CONTINUE.             *
+*                                                                     *
+*        LATER IT IS HOPED TO PROVIDE CODE TO REALOCATE THE USER      *
+*        AREA AT THIS POINT.                                          *
+*                                                                     *
+*        THIS CODE IS ENTERED WITH REG 0 HOLDING THE TABLE CODE:      *
+*          1 = CONSTANT TABLE OVERFLOW             PACKCON = 1
+*          2 = CODE TABLE OVERFLOW                 TRANS   = 1
+*          3 = LINE TABLE OVERFLOW                         = 2
+*          4 = DATA TABLE OVERFLOW                         = 3
+*          5 = FORC TABLE OVERFLOW                         = 4
+*          6 = ARRAY TABLE OVERFLOW                LODR    = 1
+*                                                                     *
+***********************************************************************
+*
+******************SET NO GO SWITCH*************************************
+*
+TABLOVL  MVI   SW0,X'01'          PREVENT CALL TO EXECUTOR
+*
+***************CHECK FOR LOOPING***************************************
+*
+         LR    R1,R0              PUT ERROR CODE IN BETTER REG
+         LH    R0,PREST1ST        GET CURRENT LINE NUMBER
+         CH    R0,LNELOOP         CHECK LAST TIME STM NUMBER
+         BNE   TABLOVL1           HAVE NOT LOOPED GO SET UP FOR NEXT TM
+         CH    R1,TYPLOOP         CHECK LAST TIME ERROR TYPE
+         BNE   TABLOVL1           IF NOT SICK AND LOOPING - SKIP DIE
+TABLOVL0 SYSQS 1,14,':SYSTEM ERROR IN TABLE OVERFLOW RECOVERY.'
+         BAL   R4,WRITEIT
+         B     ERX3               GO DIE
+TABLOVL1 STH   R0,LNELOOP         LINE NUMBER TO ITS LOOP CELL
+         STH   R1,TYPLOOP         ERROR TYPE TO ITS LOOP CELL
+*
+*************BRANCH TO PROCESS TABLE OVERFLOW**************************
+*
+         CH    R1,=H'6'           SEE IF ERROR CODE IS IN RANGE
+         BNH   TABLOVL2           IF NOT OUT OF RANGE SKIP DIE
+         B     TABLOVL0           CODE OUT OF RANGE
+TABLOVL2 LA    R1,0(R1,R1)        MAKE ERROR CODE A *4 DISPLACEMENT
+         LA    R1,0(R1,R1)        *
+         LA    R3,TABLOVL3        SET UP FOR A BRANCH ADDRESS
+TABLOVL3 BC    15,0(R1,R3)        BRANCH TO THE BRANCH
+         B     NUMOVL             BRANCH TO PROCESS NUM TABLE OVERFLOW
+         B     CODOVL             BRANCH TO PROCESS CODE TABLE OVERFLOW
+         B     LNEOVL             BRANCH TO PROCESS LINE TABLE OVERFLOW
+         B     NUMOVL             BRANCH TO PROCESS DATA TABLE OVERFLOW
+         B     FRCOVL             BRANCH TO PROCESS FORC TABLE OVERFLOW
+*
+***************PROCESS THE ACTUAL TABLE OVERFLOW***********************
+*
+NUMOVL   LA    R3,11(R0,R0)       RESET NUMBER OF CONSTANTS COUNTER
+         ST    R3,NUMNUM          *
+         XC    ADATAPTR,ADATAPTR  RESET DATA AND CONSTANT TABLE
+         L     R3,ADATASIZ
+         ST    R3,ACONSPTR
+         BCR   15,14
+CODOVL   XC    ACODEPTR,ACODEPTR  RESET CODE TABLE POINTER
+         BCR   15,R14
+LNEOVL   XC    ALINEPTR,ALINEPTR  RESET LINE TABLE POINTER
+         BCR   15,R14
+FRCOVL   XC    AFORCPTR,AFORCPTR  RESET FORC TABLE POINTER
+         BCR   15,R14
+         EJECT
+         LTORG
+         EJECT
+*
+********ATTENTION INTERRUPT HANDLER************************************
+*
+ATTNINT  BALR  R12,R0             SET TO ADDRESS SELF
+         USING *,R12              TELL ASSEMBLER ABOUT IT
+         DROP  R9                 GET RID OF THAT ONE
+         SENSE 2                  GET ADDRESS OF TWORK             N001
+         L     1,0(1)             DISPL. FOR LOAD TEXT
+         LR    R10,R1             ASSEMBLER WAS TOLD IT IS HERE
+         LR    R11,R1             FOR ADDRESSABILITY TO AREA
+         A     R11,TWORKSIZ       ASSEMBLER WAS TOLD IT IS HERE
+         CLI   SW7,X'01'          IF ON WE ARE IN INPUT ROUTINE
+         BE    ATTNINT1           IF SO DO NOT POST
+         MVI   SW1,X'01'          MARK CONTROLS SOFT ATTENTION
+         OI    AFLAGS,ASYNTAX     MARK EXECUTORS SOFT ATTENTION
+ATTNINT1 SET   10                 WAY BACK TO POINT OF INTERRUPT
+         EJECT
+*
+************TIMER INTERRUPT HANDLER************************************
+***********************************************************************
+*  THIS ROUTINE MODIFIED MAY 1972 BY SHELDON BECKER TO CORRECT       *
+*     TIMER TRAP ESCAPE FROM COMPILED CODE                           *
+***********************************************************************
+*
+TIMERINT BALR  R12,R0             SET TO ADDRESS SELF
+         USING *,R12              TELL ASSEMBLER ABOUT IT
+         SENSE 2                  GET ADDRESS OF TWORK             N001
+         L     1,0(1)             DISPL. FOR LOAD TEXT
+         LR    R10,R1             ASSEMBLER WAS TOLD IT IS HERE
+         LR    R11,R1             FOR ADDRESSABILITY TO AREA
+         A     R11,TWORKSIZ       ASSEMBLER WAS TOLD IT IS HERE
+         TM    SW9,X'80'          CHECK IF TIMED OUT IN COMPILED CODE
+         BO    TIMERIN1
+*  TIMED OUT IN INTERPRETER
+         OI    AFLAGS,ASYNTAX     MARK EXECUTORS SOFT ATTENTION
+         MVI   SW1,X'01'          MARK CONTROLS SOFT ATTENTION
+         MVI   SW9,X'01'          MARK TIMER FIRED SWITCH
+         SET   10                 WAY BACK TO POINT OF INTERRUPT
+*  TELL USER TIMER INTERRUPT OCCURRED - ASK IF HE WISHES TO CONTINUE
+TIMERIN1 MVI   LINEIN,X'40'
+         LA    14,AMESS
+         READ  TI,LINEIN,133,(14)
+         WAIT  TI
+         CLC   LINEIN(3),YES
+         BNE   NOCONT
+*  HE WANTS TO CONTINUE - START TIMER AGAIN
+         L     R1,BREKTIME
+         SET   4,(1)
+         SET   10             BACK TO INTERRUPTED COMPILED CODE
+*  NO CONTINUE - SO BACK TO INTERRUPT ATTENTION HANDLER
+NOCONT     MVI   SW1,X'01'      MARK CONTROLS SOFT ATTENTION
+         MVI   SW9,X'01'      MARK TIMER FIRED SWITCH
+         OI    AFLAGS,ASYNTAX
+         L     1,ATEMPBEG     USE A RUN TIME TABLE IN WHICH TO
+         AR    1,11
+         SENSE 15,(1)         OBTAIN USERS INTERRUPT SAVE AREA
+         L     14,VATTENT
+         ST    14,4(1)        MODIFY INSTRUCTION ADDRESS IN PSW
+         SET   10,(1)           RETURN FROM INTERRUPT TO ATTN HANDLER
+         DS    0F
+AMESS    DC    AL2(L'MESS1)
+         DC    AL2(L'MESS2)
+MESS1    DC    C':TIMER INTERRUPT.'
+MESS2    DC    C':TO CONTINUE TYPE "YES" '
+YES      DC    C'YES'
+VATTENT  DC    V(ATTENT)
+         EJECT
+*
+******************PANIC INTERRUPT HANDLER******************************
+*
+PANICINT LR    R3,R1              MOVE THE CAUSE TO A SAFE REGR
+         BALR  R12,R0             GET ADDRESSABILITY
+         USING *,BASER            *
+         SENSE 2                  GET ADDR OF TWORK                N001
+         L     1,0(1)             DISPL. FOR LOAD TEXT
+         LR    R10,R1             USING ON THIS
+         LR    R11,R1             SET UP TO ADDRESS AREA
+         A     R11,TWORKSIZ       USING ON THIS
+         LTR   R3,R3              SORT OUT PANIC CALLS FROM THE REST
+         BP    PANICD1            NOT A PANIC FURTHER SORTING REQUIRED
+         PANIC (3)                SEND OUT THE PANIC CALL CODE
+PANBACK  PANIC (0)                MY OWN PANIC
+PANICD1  SLL   R3,2(R0)           MAKE A *4
+PANICD2  BC    15,PANICD2(R3)     BRANCH TO THE BRANCH
+         B     PANBACK            OPERATION EXCEPTION
+         B     PANBACK            PRIVILEGED OPERATION EXCEPTION
+         B     PANBACK            EXECUTE EXCEPTION
+         B     PANBACK            PROTECTION VIOLATION
+         B     PANBACK            ADDRESSING EXCEPTION
+         B     PANBACK            SPECIFICATION EXCEPTION
+         B     PANBACK            DATA EXCEPTION
+         B     PANBACK            FIXED OVERFLOW
+         B     PANBACK            FIXED DIVIDE EXCEPTION
+         B     PANBACK            DECIMAL OVERFLOW
+         B     PANBACK            DECIMAL DIVIDE EXCEPTION
+         B     PANIT12            EXPONENT OVERFLOW
+         B     PANIT13            EXPONENT UNDERFLOW
+         B     PANBACK            SIGNIFICANCE EXCEPTION
+         B     PANIT15            FLOATING DIVIDE EXCEPTION
+         B     PANBACK            TWO I/O OPERATIONS WERE ISSUED FOR
+*                                 THE SAME DEVICE OR FILE WITH NO
+*                                 INTERVENING WAIT.  (SHAME)
+*
+**************PROLOG INTERFACE FOR OVER,UNDER,DIVIDE*******************
+*
+PANIT12  LA    R3,4(R0,R0)        MAKE A USEFUL CODE
+         B     COMMON             BRANCH TO COMMON PROLOG
+PANIT13  LA    R3,8(R0,R0)        MAKE A USEFULE CODE
+         B     COMMON             BRANCH TO COMMON PROLOG
+PANIT15  LA    R3,12(R0,R0)       MAKE A USEFUL CODE
+         B     COMMON             BRANCH TO COMMON PROLOG
+*
+****GET INFORMATION FOR SAVE AREA FROM ORVYL BRANCH TO HANDLER*********
+*
+COMMON   LA    R9,PANICPSW        SET TO GET SAVE AREA
+         USING SAVEIT,R9          ADDRESSED ON DSECT
+         SENSE 15,(9)             ASK ORVYL FOR SAVE AREA INFORMATION
+         SET   11,X'C0'  ENABLE TIMER AND ATTN INTERRUPTS. PRS 12/11/75 14615000
+         L     R4,AINT            GET DISPL TO USERS GO STATE SAVE
+         LA    R4,0(R4,R11)       GET ADDRESS OF USERS GO STATE SAVE
+         USING AINTWORK,R4        ADDRESSED ON DSECT
+         L     R5,AINTWORK        GET FIRST WORD LEFT BY EXECUTOR CODE
+         LTR   R5,R5              TEST FOR TYPE OF ACTION
+         BZ    ACTION1            ZERO MEANS FIXUP REGISTER
+         B     ACTION2            NON-ZERO MEANS PASS DOWN TO
+*                                 LOWER LEVEL INTERRUPT HANDLER
+*
+************FIX UP FLOATING POINT REG 0 AND RETURN TO POINT AFTER******
+*
+ACTION1  BC    15,ACTION1(R3)     BRANCH TO BRANCH
+         B     PANIT12A           OVERFLOW
+         B     PANIT13A           UNDERFLOW
+         B     PANIT15A           DIVIDE
+*
+*
+PANIT12A LH    R6,OVERSCNT        GET NUMBER OF OVERFLOWS
+         LH    R7,OVERUCNT        GET STOP MESSAGE LIMIT
+         LA    R6,1(R0,R6)        KICK SYSTEM COUNT
+         STH   R6,OVERSCNT        PUT IT BACK
+         CR    R6,R7              CHECK FOR STOP OF MESSAGE
+         BH    PANIT12C           SKIP WRITING MESSAGE
+         BAL   R6,COMMON1         GO CONVERT LINE NUMBER
+         SR    R14,R14            CLEAR FOR LENGTH INSERT
+         IC    R14,=AL1(L'OVERMSG)
+         BCTR  R14,R0             LOWER FOR MVC
+         EX    R14,MOVEOVER       PUT MESSAGE IN BUFFER
+         LA    R14,1(R0,R14)      RETURN LENGTH AFTER MVC
+         MVC   EXPANBUF+22(8),EXPANNUM  MOVE IN STATEMENT NUMBER
+         LA    R1,EXPANBUF        SET ADDRESS OF MESSAGE
+         CLC   GPR0,=F'10000'     GET THE LINE NUMBER
+         BNE   PANIT12B           DO NOT SHORT IF NOT 10000
+         LA    R14,8(R0,R0)       SET NEW LENGTH
+PANIT12B WRITE TI,(1),(14)        SEND USER OVERFLOW MSG
+         LA    R0,2(R0,R0)        LOAD MY PANIC CODE
+         BNZ   PANBACK            IF NOT STARTED RUN DON'T WALK
+         WAIT  TI                 NOW WAIT FOR IT
+         BM    PANIT12B           BACK FOR I/O ERROR
+PANIT12C LD    R0,MASKOVER        SET FOR RETURN
+         SET   10,(9)             BACK TO POINT OF INTERUPT
+MOVEOVER MVC   EXPANBUF(0),OVERMSG
+OVERMSG  DC    C'OVERFLOW AT STATEMENT XXXX.XXX'
+         DS    0D
+MASKOVER DC    X'7FFFFFFFFFFFFFFF'
+*
+*
+PANIT13A LH    R6,UNDRSCNT        GET NUMBER OF UNDERFLOWS
+         LH    R7,UNDRUCNT        GET STOP MESSAGE LIMIT
+         LA    R6,1(R0,R6)        KICK SYSTEM COUNT
+         STH   R6,UNDRSCNT        PUT IT BACK
+         CR    R6,R7              CHECK FOR STOP OF MESSAGE
+         BH    PANIT13C           SKIP WRITING MESSAGE
+         BAL   R6,COMMON1         GO CONVERT LINE NUMBER
+         SR    R14,R14            CLEAR FOR LENGTH INSERT
+         IC    R14,=AL1(L'UNDERMSG)
+         BCTR  R14,R0             LOWER FOR MVC
+         EX    R14,MOVUNDER       PUT MESSAGE IN BUFFER
+         LA    R14,1(R0,R14)      RETURN LENGTH AFTER MVC
+         MVC   EXPANBUF+23(8),EXPANNUM  MOVE IN STATEMENT NUMBER
+         LA    R1,EXPANBUF        SET ADDRESS OF MESSAGE
+         CLC   GPR0,=F'10000'     GET THE LINE NUMBER
+         BNE   PANIT13B           DO NOT SHORT IF NOT 10000
+         LA    R14,9(R0,R0)       SET NEW LENGTH
+PANIT13B WRITE TI,(1),(14)        SEND USER UNDERFLOW MSG
+         LA    R0,3(R0,R0)        LOAD MY PANIC CODE
+         BNZ   PANBACK            IF NOT STARTED RUN DON'T WALK
+         WAIT  TI                 NOW WAIT FOR IT
+         BM    PANIT13B           BACK FOR I/O ERROR
+PANIT13C LD    R0,MAKUNDER        SET FOR RETURN
+         SET   10,(9)             BACK TO POINT OF INTERUPT
+MOVUNDER MVC   EXPANBUF(0),UNDERMSG
+UNDERMSG DC    C'UNDERFLOW AT STATEMENT XXXX.XXX'
+         DS    0D
+MAKUNDER DC    X'0010000000000000'
+*
+*
+PANIT15A LH    R6,DIVDSCNT        GET NUMBER OF DIVIDE ZEROS
+         LH    R7,DIVDUCNT        GET STOP MESSAGE LIMIT
+         LA    R6,1(R0,R6)        KICK SYSTEM COUNT
+         STH   R6,DIVDSCNT        PUT IT BACK
+         CR    R6,R7              CHECK FOR STOP OF MESSAGE
+         BH    PANIT15C           SKIP WRITING MESSAGE
+         BAL   R6,COMMON1         GO CONVERT LINE NUMBER
+         SR    R14,R14            CLEAR FOR LENGTH INSERT
+         IC    R14,=AL1(L'DIVIDMSG)
+         BCTR  R14,R0             LOWER FOR MVC
+         EX    R14,MOVDIVID       PUT MESSAGE IN BUFFER
+         LA    R14,1(R0,R14)      RETURN LENGTH AFTER MVC
+         MVC   EXPANBUF+28(8),EXPANNUM  MOVE IN STATEMENT NUMBER
+         LA    R1,EXPANBUF        SET ADDRESS OF MESSAGE
+         CLC   GPR0,=F'10000'     GET THE LINE NUMBER
+         BNE   PANIT15B           DO NOT SHORT IF NOT 10000
+         LA    R14,14(R0,R0)      SET NEW LENGTH
+PANIT15B WRITE TI,(1),(14)        SEND USER DIVIDE 0 MSG
+         LA    R0,4(R0,R0)        LOAD MY PANIC CODE
+         BNZ   PANBACK            IF NOT STARTED RUN DON'T WALK
+         WAIT  TI                 NOW WAIT FOR IT
+         BM    PANIT15B           BACK FOR I/O ERROR
+PANIT15C LD    R0,MAKDIVID        SET FOR RETURN
+PANICBY  SET   10,(9)             BACK TO POINT OF INTERUPT
+MOVDIVID MVC   EXPANBUF(0),DIVIDMSG
+DIVIDMSG DC    C'DIVIDE BY ZERO AT STATEMENT XXXX.XXX'
+         DS    0D
+MAKDIVID DC    X'7FFFFFFFFFFFFFFF'
+*
+***MOVE REGISTERS TO LOWER LEVEL SAVE AREA AND RETURN TO HIS HANDLER**
+*
+ACTION2  MVC   AINTWORK+4(8),CAUSE
+         MVC   AINTWORK+12(8),GPR14
+         MVC   AINTWORK+20(52),GPR0
+         MVC   ADDRESS(4),AINTWORK
+         SET   10,(9)
+*
+****************SETS UP ERROR MESSAGE IN BUFFER FOR WRITE**************
+*
+COMMON1  L     R13,GPR13          GET BASIC'S SAVE AREA PTR
+         L     R0,GPR0            GET STATEMENT NUMBER
+         XC    PRESD1ST(4),PRESD1ST CLEAR
+         STH   R0,PRESD1ST        PUT STATEMENT NUMBER IN
+         ST    R0,CONTEMP
+         XC    CONTEMP+4(2),CONTEMP+4      ZERO OUT FRACTIONAL PART     15811000
+         SR    R1,R1
+         STH   R1,CONTEMP+4
+         LA    R1,CONTEMP         FOR ARG LIST
+         ST    R1,ARG01           *
+         LA    R1,INLWORKB+4
+         ST    R1,ARG02
+         LA    R1,EXPANNUM        FOR ARG LIST
+         ST    R1,ARG03           *
+         LA    R1,ARG01           ARG LIST
+         L     R15,=V(CONVERTL)
+         BALR  R14,R15            OFF TO CONVERT ROUTINE
+         BR    R6                 BACK TO LOCAL CALLER
+         EJECT
+         LTORG
+END      EQU   *
+*        PRINT OFF
+         EJECT
+TWORK    DSECT
+         COPY TWORK
+         EJECT
+AREA     DSECT
+         COPY AREA
+         END

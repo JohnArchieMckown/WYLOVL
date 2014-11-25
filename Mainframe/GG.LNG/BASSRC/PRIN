@@ -1,0 +1,424 @@
+PRIN     TITLE 'PRINT ROUTINE -- JANET GALLO'
+PRINT    CSECT
+*          THIS ROUTINE PROVIDES THE INTERFACE TO THE I/O PROGRAM AND
+*          THE NUMBER CONVERSION FOR THE PRINT STATEMENT OF
+*          STANFORD BASIC.
+*          AT THE TIME THIS ROUTINE RECEIVES CONTROL, REG 15 SHOULD
+*          CONTAIN THE ADDRESS OF THE ENTRY POINT, REGISTER 11 SHOULD
+*          CONTAIN THE ADDRESS OF THE USER WORKAREA REFERENCED BY THE
+*          DSECT CALLED AREA, AND REGISTER 1 SHOULD POINT TO AN
+*          ARGUMENT LIST AS FOLLOWS:
+*             WORD 1: ADDRESS OR ZERO
+*                     IF ZERO, JUST OUTPUT THE LINE WITH NO NEW DATA
+*                              ADDED
+*                     IF ADDRESS, THIS IS THE ADDRESS OF THE NUMBER
+*                              OR STRING TO BE PUT IN OUTPUT BUFFER.
+*             WORD 2: X'00000000' FOR FLOATING POINT NUMBER TO BE
+*                              CONVERTED AND OUTPUT
+*                     X'00000001' FOR STRING TO BE OUTPUT
+*             WORD 3: X'00000000' FOR OUTPUT LINE AFTER PUTTING DATA
+*                              IN BUFFER.
+*                     X'00000001' FOR , (I.E. DATA PADDED WITH BLANKS
+*                              TO 15 SPACES)
+*                     X'00000002' FOR ; (I.E. NO EXTRA SPACES INSERTED)
+*
+*          WHEN THE ROUTINE IS READY TO OUTPUT A BUFFER, IT CALLS PUTIT
+*          WITH THE LINE LENGTH IN REGISTER 0 AND THE ADDRESS OF THE
+*          BEGINNING OF THE LINE IN REGISTER 1.
+*
+*          ASSUMPTIONS
+*             1. 130 CHARACTERS PER LINE ARE OUTPUT.  THIS ROUTINE WILL
+*                AUTOMATICALLY OUTPUT THE OLD LINE AND GO TO A NEW LINE
+*                IF THERE IS NOT ENOUGH ROOM ON THE OLD LINE FOR THE
+*                CURRENT DATA.
+*             2. THIS ROUTINE RECEIVES ONLY ONE DATA ITEM AT A CALL.
+*                THE USER'S AREA WILL NOT BE RELOCATED DURING THE
+*                EXECUTION OF THIS ROUTINE.
+*             3. FOR ; (I.E. NO EXTRA SPACES ADDED) NUMBERS OCCUPY
+*                THE FOLLOWING NUMBER OF COLUMNS:
+*                           NUMBER LENGTH      NUMBER OF COLUMNS
+*                            2, 3, OR 4                 6
+*                            5, 6, OR 7                 9
+*                            8, 9, OR 10               12
+*                           11,12,13,OR 14             15
+*             4. STRINGS FOR OUTPUT WILL BE CONTAINED IN 4 CONSECUTIVE
+*                WORDS. THE STRING IS LEFT ADJUSTED IN THE FIRST WORD.
+*                THE RIGHTMOST BYTE OF THE FOURTH WORD IS A COUNT OF
+*                THE NUMBER OF CHARACTERS IN THE STRING.
+*             5. NORMAL RETURN TO THE CALLER WILL BE TO 4 BYTES PAST
+*                THE ADDRESS IN REGISTER 14.  ERROR RETURN WILL BE TO
+*                THE ADDRESS IN REGISTER 14.
+*             6. NO INSTRUCTIONS OR CONSTANTS ARE CHANGED WITHIN THE
+*                PROGRAM DURING EXECUTION.
+*             7. NUMBERS ARE CONVERTED BY SUBROUTINE DCONVERT AS
+*                DESCRIBED IN THAT ROUTINE.
+*             8. 200 BYTES BEGINNING ON A DOUBLE WORD BOUNDARY ARE
+*                NEEDED IN AREA DSECT FOR BUFFER, WORKAREA, AND
+*                ARGUMENT LIST (TO DCONVERT).
+*
+R0       EQU    0              BUFFER LENGTH
+R1       EQU    1              ARGUMENT LIST POINTER
+R2       EQU    2              BUFFER AND COUNT POINTER
+R3       EQU    3              POINTER TO WORKAREA
+R4       EQU    4              WORKING REGISTER
+R5       EQU    5              NUMBER OF CHARACTERS STORED
+R6       EQU    6              MAXIMUM FIELD LENGTH (15)
+R7       EQU    7              BUFFER LENGTH LIMIT)
+R8       EQU    8              INCREMENTS THRU OUTPUT BUFFER
+R9       EQU    9              POINTER TO PRINT ARGUMENT LIST
+R10      EQU    10             CONTAINS INTEGER 1
+R11      EQU    11             WORKING REGISTER
+R12      EQU    12             BASE REGISTER
+R13      EQU    13             POINTER TO SAVE AREA
+R14      EQU    14             WORKING REGISTER
+R15      EQU    15             BRANCH REGISTER
+BFCTLTH  EQU   134           BUFFER PLUS COUNT FIELD LENGTH
+DCONWORK EQU   160           DISPLACEMENT OF DCONVERT WORKAREA WITHIN
+*                            PRINT WORKAREA (MUST BE MULTIPLE OF 8)
+DCONWKLN EQU   16            LENGTH OF DCONVERT WORKAREA
+BUFCTBEG EQU   0             DISPLACEMENT OF BEGINNING OF COUNT AND
+*                            BUFFER WITHIN PRINT WORKAREA:  MUST BE 0
+*                            SINCE OTHER ROUTINE IN TIME-SHARING
+*                            VERSION DEPEND ON THE BUFFER COUNT BEING
+*                            THE FIRST WORD IN 'APBUFFER'.
+         SAVE  (14,12),,*    SAVE CONVENTION
+         BALR  12,0          REGISTER 12 IS BASE REGISTER
+         USING *,12
+         LA    R2,72(R13)    BASIC SAVE CONVENTIONS
+         ST    R2,8(0,13)
+         ST    R13,4(R2)
+         LR    R13,R2
+*
+*        INITIALIZE
+*
+         LA    R10,1         LOOP INCREMENT REGISTER
+         LA    R6,255        MAXIMUM FIELD LENGTH
+         LA     R7,BFCTLTH-4   BUFFER LENGTH LIMIT
+         LR    R9,R1         SAVE ARGUMENT LIST POINTER
+         USING AREA,R11      REG 11 WILL BE USED AS BASE FOR AREA DSECT
+         L     R3,APBUF    APBUF CONTAINS THE DISPLACEMENT OF WORKAREA
+         LA    R3,0(R3,R11) LOAD THE ADDRESS OF WORKAREA
+         USING APBUFDSC,R3   ESTABLISH ADDRESSABILITY TO DCONVERT ARG
+         SR    R0,R0
+         ST    R0,HOWMANY         (DEFAULT)
+*                            LIST AREA
+         DROP  R11           AREA NEEDS TO BE ADDRESSABLE NO LONGER
+*
+*        FIND CURRENT LOCATION WITHIN BUFFER
+*
+         LA    R2,BUFCTBEG(R3)  LOAD ADDRESS OF PRINT BUFFER COUNT
+         L     R8,0(R2)      LOAD BUFFER COUNT
+*
+         LTR   R1,R1
+         BNL   PRNU00
+         LCR   R1,R1              DONT COMPL. R9, USE AS FLAG TO COPY
+         LM    R4,R5,12(R1)          UP TO NEXT SPEC ONLY
+         B     PRNU0
+PRNU00   L     R14,0(R1)     LOAD FIRST WORD OF ARGUMENT LIST
+*                            ADDRESS OF DATA TO BE OUTPUT
+         LTR   R14,R14       IS IT ZERO?
+         BZ    STARGU        BRANCH IF YES TO OUTPUT PRESENT BUFFER
+         LM    R4,R5,12(R1)       FETCH STRING PTR. AND INDEX ADDRS.
+         LTR   R4,R4              IS IT PRINT USING
+         BM    PRN                NO, GO DO STANDARD PRINT
+PRNU0    L     R11,0(R4)          R11=ADDR. OF STRING IMAGE
+         LA    R11,0(R11)         WIPE OUT HI BYTE
+         L     R14,0(R5)          GET INDEX INTO IMAGE
+         LA    R14,0(R14)         WIPE OUT HI BYTE
+         SR    R15,R15
+         IC    R15,0(R4)          GET IMAGE LENGTH
+         AR    R15,R11            R15=ADDR. OF END OF IMAGE
+         BCTR  R15,0
+         AR    R11,R14            R11=ADDR. OF CURRENT POS. IN IMAGE
+         LR    R14,R10            R14=1=INCR. FOR BXLE
+         LA    R1,1(R2,R8)        GET ADDR. OF OUTPUT BUFFER
+         CR    R11,R15            TEST IF ALREADY AT END
+         BH    PRNU2A             YES, BRANCH
+         SR    R0,R0
+PRNULOP  CLI   0(R11),C'.'        SPEC MAY START WITH DP
+         BNE   PRNU1              BUT ONLY ON THE CONDITION
+         LR    R0,R10             THAT IT IS FOLLOWED BY
+         CLI   1(R11),C'#'        A # SIGN
+         BE    PRNU5              IF THIS IS CASE GO PROCESS IT
+         CLI   1(R11),C'$'        CANT HAVE $ NEXT
+         BE    ABEND
+         SR    R0,R0              ELSE RESET DP FOUND FLAG AND START
+PRNU1    CLI   0(R11),C'#'        NUMBER SPEC. ?
+         BE    PRNU5              YES, GO SEE IF ITS WHATS NEEDED
+         CLI   0(R11),C'$'        DOLLAR SPEC. ?
+         BE    PRNU5              YES, GO SEE IF ITS WHATS NEEDED
+         CLI   0(R11),C'@'        STRING SPEC. ?
+         BE    PRNU7              YES, GO SEE IF ITS WHATS NEEDED
+PRNU2    MVC   3(1,R1),0(R11)     NOT FOUND, MOVE CHAR TO BUFFER
+         AR    R8,R10             BUMP BUFFER COUNT
+         AR    R1,R10             BUMP BUFFER POINTER
+         BXLE  R11,R14,PRNULOP    BACK IF ANY MORE IMAGE TO SEARCH
+PRNU2A   LTR   R9,R9              IF IMAGE ONLY PRINT THEN GO TO
+         BM    PUT00                 PUT OUT IMAGE ONLY
+         CLI   7(R9),X'01'        WHAT WAS BEING LOOKED FOR
+         BNE   PRNU3              NUM, GO SEE IF ONE WAS FOUND BEFORE
+         TM    0(R5),X'02'        STRING, WAS ONE FOUND BEFORE
+         BNO   ABEND              NO, ERROR
+         B     PRNU4              YES, OK TO RE-SEARCH
+PRNU3    TM    0(R5),X'01'        WAS NUMBER PREV. FOUND
+         BNO   ABEND              NO, ERROR
+PRNU4    CLI   23(R9),X'02'       SHOULD CR BE DONE FIRST
+         BNE   PRNREOK1           YES, GO PRINT LINE AND COME BACK
+PRNU4A   L     R11,0(R4)          NO, SET IMAGE PTR. TO BEGINNING
+         LA    R11,0(R11)         WIPE OUT HI BYRE
+         BCTR  R8,0               OFF ONE FROM BXLE
+         BCTR  R1,0               OFF ONE FROM BXLE
+         B     PRNU1              GO BACK AGAIN
+PRNU5    LTR   R9,R9              IMAGE ONLY PRINT UP TO SPEC ?
+         BM    PUT0               YES, BRANCH
+         OI    0(R5),X'01'        SET # OR $ INDICATOR
+         CLI   7(R9),X'00'        WAS IT NUMBER BEING LOOKED FOR
+         BNE   PRNU2              NO, GO BACK AND CONTINUE SCAN
+         ST    R11,HOWMANY        SET PTR. TO IMAGE SPEC FOR DCON
+         ST    R15,ENDIMG         SAVE END FOR CALL TO DCONVERT
+PRNU6    AR    R11,R10            FIND END OF SPEC
+         LA    R1,4               USED TO COUNT EXCL. IF ANY
+         CR    R11,R15
+         BH    PRNU6B             IF AT END OF SPEC
+         CLI   0(R11),C'#'        CHECK FOR VALID NUMBER SPEC
+         BE    PRNU6
+         CLI   0(R11),C'$'
+         BE    PRNU6
+         CLI   0(R11),C'.'
+         BE    PRNU6C
+PRNU6A   CLI   0(R11),C'!'
+         BNE   PRNU6B
+         AR    R11,R10            NOW LOOK FOR 4  EXCL. PTS.
+         BCT   R1,PRNU6A          BACK FOR MORE IF MORE NEEDED
+PRNU6B   L     R1,0(R4)           NOW COMPUTE NEW IMAGE PTR.
+         LA    R1,0(R1)
+         SR    R11,R1             CONVERT TO AN INDEX
+         SR    R1,R1
+         IC    R1,0(R5)           GET INDICATOR
+         ST    R11,0(R5)          STORE NEW INDEX
+         STC   R1,0(R5)           AND RE-STORE INDEX
+         L     R14,0(R9)          GET PTR. TO NUMBER
+         B     PRN1               GO PROCESS NUMBER
+PRNU6C   LTR   R0,R0              WAS DP ALREADY FOUND
+         BNE   ABEND              YES, ERROR
+         LR    R0,R10             SET FLAG THAT DP FOUND
+         B     PRNU6              GO BACK TO CONTINUE SCAN
+PRNU7    LTR   R9,R9              PRINT ONLY IMAGE TO SPEC. ?
+         BM    PUT0               YES, BRANCH
+         OI    0(R5),X'02'        SET @ INDICATOR
+         CLI   7(R9),X'01'        WAS IT STRING BEING LOOKED FOR
+         BNE   PRNU2              NO, GO BACK AND FINISH SCAN
+         LR    R14,R11            FIND END OF STRING IMAGE SPEC
+PRNU8    AR    R14,R10            BUMP IMAGE POINTER
+         AR    R8,R10             BUMP BUFFER COUNT
+         CR    R14,R15
+         BH    PRNU8A             IF AT END OF SPEC
+         CLI   0(R14),C'@'
+         BE    PRNU8
+PRNU8A   L     R15,0(R4)          GET ADDR. OF IMAGE
+         LA    R15,0(R15)
+         LR    R0,R14
+         SR    R0,R15             GOT NEW IMAGE INDEX
+         SR    R15,R15
+         IC    R15,0(R5)
+         ST    R0,0(R5)           SAVE NEW INDEX
+         STC   R15,0(R5)          AND INDICATOR
+         SR    R14,R11            IMAGE SPEC. LEN IN R14
+         L     R5,0(R9)           FETCH STRING TO PRINT ADDR. AND LEN
+         IC    R15,0(R5)          LENGTH IN R15
+         L     R5,0(R5)
+         LA    R5,0(R5)           ADDR. IN R5
+         LR    R11,R14
+         CR    R14,R15            IS IMAGE OR STRING SHORTER
+         BL    PRNU9              IMAGE SPEC. SHORTER, BRANCH
+         LR    R11,R15            STRING TO PRINT SHORTER
+PRNU9    MVI   3(R1),C' '         SHORTER NOW IN R11
+         BCTR  R14,0              MOVE BLANKS INTO BUFFER OF LENGTH
+         BCTR  R14,0                OF IMAGE SPEC
+         EX    R14,MVCBK
+         BCTR  R11,0              MOVE ACTUAL STRING NOW
+         EX    R11,MVCST
+         LR    R5,R8              FOR PUT ROUTINE
+         B     PUT
+MVCBK    MVC   4(0,R1),3(R1)
+MVCST    MVC   3(0,R1),0(R5)
+*
+PRNREOK1 LA    R1,4(R2)           GET ADDR. OF BUFFER
+         BCTR  R8,0               COUNT OFF BY 1 FROM BXLE
+         LR    R0,R8              GET LENGTH TO PRINT
+         L     R15,VPUTIT
+         BALR  R14,R15
+         SR    R8,R8              RESET BUFFER COUNT
+         ST    R8,0(R2)           SAVE IT
+         IC    R15,0(R5)
+         ST    R8,0(R5)           RESET IMAGE PTR TO START
+         STC   R15,0(R5)          LEAVE TYPE FOUND FLAG ALONE
+         B     PRNU0              GO BACK TO RESCAN STRING
+*
+*
+*
+PRN      CLI   7(R1),X'01'   IS IT STRING INFORMATION TO BE OUTPUT?
+         BE    STRING        BRANCH IF YES
+*
+*        FLOATING POINT NUMBER TO BE CONVERTED
+*        SET UP ARGUMENT LIST AND GO TO DCONVERT
+*
+PRN1     L     R4,0(R14)     LOAD NUMBER TO BE CONVERTED
+         ST    R4,NUMBER     STORE NUMBER IN DCONVERT ARGUMENT LIST
+         LA    R4,DCONW      LOAD ADDRESS OF DCONVERT WORKAREA
+         ST    R4,WORK       STORE WORKAREA ADDRESS IN ARGUMENT LIST
+         LA    R4,4(R8,R2)   LOAD POINTER IN BUFFER FOR RESULT
+         ST    R4,RESULT     STORE ADDRESS IN ARGUMENT LIST
+         LA    R1,DCONARGL   LOAD ADDRESS OF ARGUMENT LIST
+         L     R15,VDCNVERT  LOAD ADDRESS OF DCONVERT ROUTINE
+         BALR  R14,R15       BRANCH TO DCONVERT
+         L    R5,HOWMANY    LOAD NUMBER OF CHARACTERS STORED
+         AR   R8,R5         ADD NUMBER OF CHARACTERS TO BUFFER COUNT
+         B    PUT           BRANCH TO INSERT SPACING
+*
+*         STRING TO BE OUTPUT
+*
+STRING   LA    R4,1(R2,R8)  LOAD ADDRESS OF BUFFER
+         SR    R11,R11       INITIALIZE
+         IC    R11,0(R14)    GET STRING LENGTH
+         CLC   0(4,R14),MZERO
+         BE    ABEND              FOR UNDEFINED STRING VARIABLE.
+         L     R14,0(R14)         POINT TO ACTUAL STRING
+         AR    R8,R11        ADD LENGTH TO BUFFER POINTER
+         LR    R5,R11        SAVE NUMBER OF CHARACTERS STORED
+         CR    R11,R6        IS LENGTH GREATER THAN MAXIMUM?
+         BH    ABEND         BRANCH IF YES
+         SR    R11,R10       SUBTRACT ONE FOR LOOP LIMIT
+         BM    PUT           DO NOT MOVE STRING IF LENGTH = 0
+*                            (LENGTH=0 FOR NULL OR UNUSED STRINGS)
+         EX    R11,MOVESTRG  MOVE STRING INTO BUFFER
+         B     PUT
+*
+*        LOOK AT THE ARGUMENT LIST TO DETERMINE FORMATTING OF DATA
+*        AND IF THE LINE SHOULD BE OUTPUT
+*
+PUT00    BCTR  R11,0              OFF ONE FROM BXLE
+PUT0     LCR   R9,R9              RE-COMPLEMENT R9
+         LM    R4,R5,12(R9)
+         L     R14,0(R4)          GET IMAGE PTR.
+         LA    R14,0(R14)         WIPE OUT HI BYTE
+         SR    R11,R14            COMPUTE NEW INDEX
+         IC    R15,0(R5)
+         ST    R11,0(R5)          STORE INDEX AWAY
+         STC   R15,0(R5)          AND FLAG ALSO
+         LR    R5,R8              NEEDED FOR PUT ROUTINE
+         B     PUT1
+PUT      L     R4,12(R9)          GET PRINT ITEM INDICATOR
+         LTR   R4,R4              IS THIS PRINT USING
+         BNL   CHKLTH             YES, SKIP PADDING
+PUT1     CLI   11(R9),X'00'  IS THE  LINE TO BE OUTPUT?
+         BE    AWAY          BRANCH IF YES
+         SR    R4,R4              FIND MULTIPLE OF 15
+         D     R4,=F'15'
+         LTR   R4,R4              CHECK IF EVEN MULTIPLE
+         BZ    CHKLTH             YES, SKIP PADDING
+         LR    R5,R4              REMAINDER TO R5
+         LA    R1,64          LOAD EBCDIC BLANK
+         CLI   11(R9),X'01'  IS THE ITEM TO BE PADDED TO 15 COLUMNS?
+         BE    SPACE       BRANCH IF YES
+*
+*        IF LINE IS NOT TO BE OUTPUT AND SPACING IS NOT TO BE PADDED
+*        TO 15 COLUMNS, THEN NO EXTRA SPACING IS ASSUMED
+*
+         CLI   7(R9),X'01'   WAS IT A STRING?
+         BE    CHKLTH        BRANCH IF YES
+*
+*        THE SPACING FOR A NUMBER IS AS FOLLOWS:
+*                           NUMBER LENGTH      NUMBER OF COLUMNS
+*                            2, 3, OR 4                 6
+*                            5, 6, OR 7                 9
+*                            8, 9, OR 10               12
+*                           11,12,13,OR 14             15
+*        FIRST DETERMINE N SUCH THAT IT IS THE LOWEST INTEGER SUCH THAT
+*        2+N(3) IS GREATER THAN THE NUMBER OF CHARACTERS STORED.  THEN
+*        2+N(3)+1 IS THE TOTAL NUMBER OF CHARACTERS TO BE OUTPUT TO THE
+*        BUFFER
+*
+         LA    R4,3          LOAD LOOP INCREMENT
+         LA    R11,2         LOAD THE CONSTANT 2
+MYSELF   BXLE  R11,R4,MYSELF KEEP INCREMENTING REG 11 UNTIL IT IS
+*                            GREATER THAN THE NUMBER OF CHARACTERS
+*                            ALREADY STORED
+         LA    R11,1(R11)    INCREMENT REG 11 TO GET LENGTH OF FIELD
+         CR    R11,R6        IS IT LARGER THAN MAXIMUM LENGTH ALLOWED
+         BNH   BLKS          BRANCH IF NO
+SPACE    LA    R11,15        LOAD MAXIMUM LENGTH ALLOWED
+         B     BLKS          GO TO STORE BLANKS
+LOOP     LA    R8,1(R8)      INCREMENT BUFFER POINTER
+         STC   R1,3(R8,R2)   STORE BLANK
+BLKS     BXLE  R5,R10,LOOP   LOOP TO STORE PADDING BLANKS
+CHKLTH   CR    R8,R7         HAS ITEM BEEN STORED PAST LIMIT
+         BNH   PUTCT         BRANCH IF NO
+NEXTBUF  LR    R5,R7         LOAD ADDRESS OF LAST COMPLETE ITEM
+         ST    R7,0(R2)
+         SR    R8,R5         GET NUMBER OF CHARACTERS IN OVERFLOW
+         B     BUFOUT        BRANCH TO OUTPUT BUFFER
+RESUME   LA    R5,4(R5,R2)   INCREMENT BUFFER POINTER
+         LR    R11,R8        LOAD NUMBER OF CHARACTERS IN OVERFLOW
+         SR    R11,R10       NUMBER TO BE PUT IN MVC INSTRUCTION
+         EX    R11,MOVE      MOVE OVERFLOW INTO BEGINNING OF BUFFER
+         CLI   11(R9),X'00'  IS THE LINE TO BE OUTPUT
+         BE    STORCT        BRANCH IF YES
+*
+*        PREPARE TO RETURN TO CALLER
+*
+PUTCT    ST    R8,0(R2)      STORE FINAL BUFFER POSITION POINTER
+         B     RETURN        BRANCH TO RETURN
+*
+*        LINE IS TO BE OUTPUT BEFORE RETURNING TO CALLER
+*
+AWAY     CR    R8,R7         HAS ITEM BEEN STORED PAST LIMIT
+         BH    NEXTBUF       BRANCH IF YES
+STORCT   ST    R8,0(R2)      STORE FINAL BUFFER POSITION POINTER
+STARGU   SR    R5,R5         INITIALIZE
+BUFOUT   LA    R1,4(R2)      LOAD ADDRESS OF BEGINNING OF BUFFER
+         L     R0,0(R2)      LOAD BUFFER COUNT INTO REG 0
+         L     R15,VPUTIT    LOAD ADDRESS OF OUTPUT ROUTINE
+         BALR  R14,R15       BRANCH TO OUTPUT ROUTINE
+*
+*        ZERO OUT BUFFER COUNT
+*
+         LTR   R5,R5         TEST REGISTER 5
+         BNZ   RESUME        IF NOT ZERO, GO BACK INTO CODE
+         SR    R1,R1         INITIALIZE TO ZERO
+         ST    R1,0(R2)      STORE ZERO IN BUFFER COUNT
+*
+*        RETURN TO CALLER
+*
+RETURN   L     R1,8(R9)           GET CURRENT DELIMITER
+         ST    R1,20(R9)          STORE AS PREVIOUS DELIMETER
+         L     R13,4(R13)    IF ZERO RETURN TO CALLER - RESTORE REG 13
+         LM    14,12,12(13)  RESTORE OTHER REGISTERS
+         B     4(14)         NORMAL RETURN TO 4 BYTES PAST REG 14
+*
+*        ABNORMAL END RETURN
+*
+ABEND    L     R13,4(13)     RESTORE REG 13
+         LM    14,12,12(13)  RESTORE OTHER REGISTERS
+         BR    14            ERROR RETURN TO ADDRESS IN REG 14
+MOVESTRG MVC   3(0,R4),0(R14) MOVE STRING INTO BUFFER
+MOVE     MVC   4(0,R2),0(R5) MOVE OVERFLOW INTO BEG. OF NEXT BUFFER
+VPUTIT   DC    V(PUTIT)      ADDRESS CONSTANT FOR I/O ROUTINE
+VDCNVERT DC    V(DCONVERT)   ADDRESS CONSTANT FOR DCONVERT
+MZERO    DC    X'80000000'
+         SPACE
+APBUFDSC DSECT               PRINT BUFFER ('APBUFFER') DSECT
+         DS    (DCONWORK)C   COUNT + BUFFER + SOME
+DCONW    DS    (DCONWKLN)C   DCONVERT WORKAREA
+DCONARGL DS    0C            DCONVERT ARGUMENT LIST FOLLOWS
+NUMBER   DS    F              NUMBER TO BE CONVERTED
+WORK     DS    F             ADDRESS OF 16 BYTE WORKAREA ON DOUBLE-WORD
+*                            BOUNDARY
+RESULT   DS    F             ADDRESS OF WHERE RESULT IS TO BE RETURNED
+HOWMANY   DS   F               NUMBER OF CHARACTERS BEING RETURNED
+ENDIMG   DS    F             END OF THE IMAGE
+RES2     DS    F             RESERVED FOR FUTURE USE
+         SPACE 2
+AREA     DSECT
+         COPY   AREA
+         END

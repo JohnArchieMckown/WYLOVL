@@ -1,0 +1,155 @@
+         TITLE 'Command Modify Exit'                                    00001000
+*********************************************************************   00002000
+*                                                                   *   00003000
+*  MVS Command Modification Exit                                    *   00004000
+*                                                                   *   00005000
+*  Inspect and possibly modify commands issued from the operator    *   00006000
+*  console, or via SVC34.                                           *   00007000
+*                                                                   *   00008000
+*  Functions:                                                       *   00009000
+*                                                                   *   00010000
+*  *  Translate "@" to "F MILTEN,"                                  *   00011000
+*  *  Upcase portions of commands, because some software products   *   00012000
+*     don't understand lowercase commands.  Rule is:  Upcase the    *   00013000
+*     beginning part; stop at first quote mark, or at the second    *   00014000
+*     delimiter if no quote present.                                *   00015000
+*                                                                   *   00016000
+*  Re-written 1996/04/01, MCL                                       *   00017000
+*  *  revised 1996/07/23, mcl:  fix null milten command             *   00018000
+*                                                                   *   00019000
+*********************************************************************   00020000
+         SPACE                                                          00021000
+CMD@XIT  CSECT                                                          00022000
+CMD@XIT  AMODE 31                                                       00023000
+CMD@XIT  RMODE ANY                                                      00024000
+         REGISTER                                                       00025000
+         USING *,R15                                                    00026000
+         B     AROUND                                                   00027000
+         DC    AL1(#ID)                                                 00028000
+ID       DC    C'CMD@XIT-&SYSDATE.-&SYSTIME'                            00029000
+#ID      EQU   *-ID                                                     00030000
+AROUND   BAKR  R14,0                                                    00031000
+         LR    R12,R15                                                  00032000
+         USING CMD@XIT,R12                                              00033000
+         DROP  R15                                                      00034000
+         L     R10,0(,R1)          ->area                               00035000
+         USING CMDX,R10                                                 00036000
+*  OK, here is the command modify code                                  00037000
+*  Command is in CMDXCMDI, length in CMDXCMDL                           00038000
+         L     R8,CMDXCLIP         CMD area pointer                     00039000
+         USING CMDXCLIB,R8                                              00040000
+         LH    R11,CMDXCMDL                                             00041000
+         SPACE                                                          00042000
+         CLI   CMDXCMDI,C'@'       @milten cmd                          00043000
+         BNE   NOMILT                                                   00044000
+         SPACE                                                          00045000
+*  Change @command to F MILTEN,command                                  00046000
+         S     R11,=F'1'           -1 for @                             00047000
+         BNP   MILT0               if null                              00048000
+* following from old exit                                               00049000
+WORKREG1 EQU   R2                                                       00050000
+LENREG   EQU   R11                                                      00051000
+NORMLEN  LA    WORKREG1,L'FMILTEN(,LENREG) COMPUTE NEW LENGTH           00052000
+         STH   WORKREG1,CMDXCMDL       REPLACE LENGTH IN BUFFER         00053000
+LOOP1    IC    WORKREG1,CMDXCMDI(LENREG) ADJUST TEXT FROM LAST BYTE     00054000
+         STC   WORKREG1,CMDXCMDI+L'FMILTEN-1(LENREG) TO MAKE ROOM       00055000
+         BCT   LENREG,LOOP1                       FOR                   00056000
+         MVC   CMDXCMDI(L'FMILTEN),FMILTEN      'F MILTEN,'             00057000
+UPDTFLAG B     CHD                                                      00058000
+FMILTEN  DC    C'F MILTEN,',C' '                                        00059000
+FMILTEN0 EQU   FMILTEN,*-FMILTEN,C'C'            with trailing blank    00060000
+         SPACE                                                          00061000
+*  For F MILTEN,<null>, must add trailing blank (continue cmd for       00062000
+*  MILTEN command at console)                    ml 1996/07/23          00063000
+         SPACE                                                          00064000
+MILT0    MVC   CMDXCMDI(L'FMILTEN0),FMILTEN0     'F MILTEN, ' (w/blank) 00065000
+         LA    R0,L'FMILTEN0       L'CMD                                00066000
+         STH   R0,CMDXCMDL         length                               00067000
+         B     CHD                                                      00068000
+         SPACE                                                          00069000
+*  Here if not a MILTEN command                                         00070000
+         SPACE                                                          00071000
+NOMILT   LA    R9,CMDXCMDI(R11)    ->past end for TRT                   00072000
+         SR    R2,R2               Clear for trt                        00073000
+         LR    R15,R11             L'CMD                                00074000
+         BCTR  R15,0               -1 for EX-TRT                        00075000
+         LR    R1,R9               ->past end in case no blanks         00076000
+         EX    R15,TRT1            find blank                           00077000
+         LR    R7,R1               Save blank pointer                   00078000
+         BZ    UPC                 none found, do it all                00079000
+         CLI   0(R1),C''''         found quote before blank?            00080000
+         BE    UPC                 then stop there.                     00081000
+         LR    R15,R9              ->past end                           00082000
+         SR    R15,R1              Length remaining                     00083000
+         BCTR  R15,0                                                    00084000
+         LR    R1,R9               ->past end                           00085000
+         EX    R15,TRT2            Find nonblank                        00086000
+         BZ    UPC                 if all blank                         00087000
+         SPACE                                                          00088000
+*  Now, R1->first nonblank after first blank, i.e. cmd operand          00089000
+         CLI   0(R1),C''''         is it a quote                        00090000
+         BE    UPC                 stop now if so                       00091000
+         LR    R7,R1               ->cmd operand                        00092000
+         LR    R15,R9              ->past end                           00093000
+         SR    R15,R7              Length remaining                     00094000
+         BCTR  R15,0               -1 etc.                              00095000
+         LR    R1,R9               ->past end if no find                00096000
+         EX    R15,TRT3            Find next delim (end first op)       00097000
+*  Now, R1->second delimiter                                            00098000
+UPC      LA    R7,CMDXCMDI         ->CMD                                00099000
+         LR    R9,R1               Save delim ptr                       00100000
+         LR    R15,R1              ->delimiter                          00101000
+         SR    R15,R7              ->length to translate                00102000
+         EX    R15,TRT4            any lc to convert                    00103000
+         BZ    DONE                if not, done                         00104000
+*  Must translate                                                       00105000
+         EX    R15,UPC1            Convert to upper                     00106000
+CHD      OI    CMDXRFL1,CMDXRCMI       REQUEST TEXT CHANGE              00107000
+         SPACE                                                          00108000
+DONE     SR    R15,R15                                                  00109000
+         PR                        return                               00110000
+         SPACE                                                          00111000
+*  following called by EX instructions                                  00112000
+TRT1     TRT   CMDXCMDI(0),$BL     look for blank                       00113000
+TRT2     TRT   0(0,R7),$NB         (executed) find nonblank             00114000
+TRT3     TRT   0(0,R7),$DL         find delimiter                       00115000
+TRT4     TRT   0(0,R7),$LC         find lowercase                       00116000
+UPC1     OC    0(0,R7),BLANKS      cheap and dirty convert-to-upper     00117000
+         TITLE 'Data Area for Command Modify Exit'                      00118000
+*  Translate tables                                                     00119000
+         SPACE                                                          00120000
+         DC    0D'0'                                                    00121000
+$BL      DC    64X'00',X'01',191X'00'            find blank             00122000
+         ORG   $BL+C''''                         or quote               00123000
+         DC    X'03'                                                    00124000
+         ORG                                                            00125000
+         SPACE                                                          00126000
+$NB      DC    64X'01',X'00',191X'01'            find nonblank          00127000
+         ORG   $NB+C''''                         But quote              00128000
+         DC    X'03'                             is special...          00129000
+         ORG                                                            00130000
+         SPACE                                                          00131000
+$DL      DC    256X'00'                          Find delim             00132000
+         ORG   $DL+C','                                                 00133000
+         DC    X'02'                                                    00134000
+         ORG   $DL+C'='                                                 00135000
+         DC    X'02'                                                    00136000
+         ORG   $DL+C' '                                                 00137000
+         DC    X'01'                                                    00138000
+         ORG   $DL+C''''                                                00139000
+         DC    X'03'                                                    00140000
+         ORG                                                            00141000
+         SPACE                                                          00142000
+$LC      DC    256X'00'            find lower case                      00143000
+         ORG   $LC+C'a'                                                 00144000
+         DC    9X'01'                                                   00145000
+         ORG   $LC+C'j'                                                 00146000
+         DC    9X'01'                                                   00147000
+         ORG   $LC+C's'                                                 00148000
+         DC    8X'01'                                                   00149000
+         ORG                                                            00150000
+BLANKS   DC    CL80' '                                                  00151000
+         LTORG ,                                                        00152000
+         TITLE 'DSECT for Command Exit'                                 00153000
+         IEZVX101                                                       00154000
+         END                                                            00155000

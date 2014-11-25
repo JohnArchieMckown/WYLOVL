@@ -1,0 +1,324 @@
+;WYL.GS.WYL.COMMANDS#SHOTAPES
+;This EXEC file implements a pseudo WYLBUR command, SHOW TAPES, that displays
+;the current TLMS data base information for the currently logged-on account
+;or a specified account.  All options and messages are in WYLBUR format.
+;
+;   SHOW TAPES [account-options] [collect-options]
+;
+;Revision History:
+
+; 1998/09/25 GA.MCL        fake procname for TLMSLIST, real name not run class F, hangs batwyl showtapes
+; 1998/09/14 GA.MCL        use proc TLMSLIST for pgm TAPELIST
+; 1997/04/14 GA.MCL        Update maint. account list
+;   11/30/92 GG.LSO V1.08  Added GG.LSO back as another account for error reporting.  Fixed bug
+;                          in proc Display with accounts with lots of tapes (ie. CK.B1B) -- not
+;                          waiting enough to get any output.
+;   11/24/92 GG.LSO V1.07  Minor changes to make things internally quiet.
+;   10/22/92 GG.LSO        Changed error reporting account from GG.LSO to GG.PJG.
+;   09/29/92 GG.LSO V1.06  Internal command processing changes.
+;   12/12/91 GG.LSO        Miscellaneous internal cleanup.
+;   09/24/91 GG.LSO V1.05  Miscellaneous internal cleanup.  Change proc Generate_Job to
+;                          submit the &##TLMQ job in batch class F instead of C.
+;   09/02/91 GG.LSO V1.04  Changed job &#TLMQ in proc Generate_Job to run in batch class C
+;                          instead of default E, for concurrent execution.
+;   02/01/91 GG.LSO V1.03  Last minute pre-production internal cleanup.
+;   01/31/91               Minor documentation and internal changes.
+;   01/18/91 GG.LSO V1.02  Fixed various range bugs with not setting the delta.  Fixed minor
+;                          problem in proc Display with waiting for the job to complete.
+;   12/27/90               Additional changes in proc Display to correctly display the output
+;                          and have an OPTIONS: line if the user decides to print the output
+;                          collected in the active file.
+;   12/26/90 GG.LSO V1.01  Fixed error in proc Display with an empty active file (this can
+;                          occur when you cannot display the TLMS information for an account
+;                          that you are not authorized).  Added carriage control processing
+;                          in proc Display.
+;   12/18/90 GG.LSO V1.00  Initial release.
+;
+xproc () begin
+   on attn command='pcall Ignore_ATTN'
+   on error command='pcall Error_Exit'
+
+   declare string X.ExecDsn            ;EXEC file data set name.
+   declare string X.ExecName           ;EXEC file name.
+   declare string X.ExecBanner         ;EXEC file banner.
+   declare string X.ExecVersion        ;EXEC file version.
+   declare string X.Contact            ;Contact person.
+   declare string X.DebugAcct          ;Maintenance account.
+   declare string X.PCmdName           ;Pseudo command name.
+   declare boolean X.Debug             ;Debug mode [see proc Parse_Parm].
+
+   declare number X.Delta              ;Original delta setting.
+   declare number X.OrigActNum         ;User's original active file number.
+   declare number X.TermHeight         ;Terminal page pause height setting.
+
+   declare number Delay                ;Job completion wait period [see proc Parse_Parm].
+   declare string OwnerAcct            ;Tape owner account [see proc Parse_Parm].
+   declare boolean Purge               ;Job purge flag [see proc Parse_Parm].
+   declare boolean Raw                 ;Raw data format [see proc Parse_Parm].
+
+   X.ExecDsn = 'WYL.GS.WYL.COMMANDS#SHOTAPES'
+   X.ExecName = 'SHOTAPES'
+   X.ExecBanner = 'SHOTAPES  Revised 1998/09/22.  Version 1.09'
+   X.ExecVersion = 'V1.09 1998/09/22'
+   X.Contact = 'Mark C. Lawrence, MVS Systems'
+   X.DebugAcct = 'GA.MCL GG.PJG GG.MCL'
+   X.PCmdName = 'SHOW TAPES'
+
+   X.Delta = delta
+   X.OrigActNum = actno
+   X.TermHeight = height
+
+   pcall Parse_Parm(parm_string,OwnerAcct,Raw,Delay,Purge)
+
+   set delta 1.0
+
+   open GetTInfo title="Retrieve account's current tape status" temporary
+   pcall Generate_Job(OwnerAcct,Raw)
+   if (X.Debug) xpause msg="&(s'15')[DEBUG mode, execution pause.]"
+   try run noxhold nonotify quiet
+   close
+
+   pcall Display(Delay,Purge)
+
+   set delta &(X.Delta)
+end
+
+
+
+;<.PAGE>
+proc ATTN_Exit() begin
+;Process any ATTNs entered during the execution of the EXEC file to stop processing.
+;
+   comment ...
+   if (X.Debug) xpause msg="&(s'15')[DEBUG mode, execution pause.]"
+
+   clear attn                          ;Reset ATTN environment.
+   pcall Clean_Up('EXIT')
+end
+
+
+;<.PAGE>
+proc Clean_Up(Option) begin
+;Close any Active files and restore user to his original Active file.
+;
+   Option = upper(strip(Option))
+
+   on attn command='pcall Ignore_ATTN'
+
+   set delta &(X.Delta)
+
+   if (actno ne X.OrigActNum) begin
+      close
+      pick &(X.OrigActNum)
+   end
+
+   if (Option eq 'EXIT') xreturn
+end
+
+
+;<.PAGE>
+proc Display(WaitTime,Purge) begin
+;Retrieve and display the TLMS query output.
+;
+   declare string JobStatus            ;Current job status information.
+   declare boolean Waiting             ;Waiting flag.
+
+   Waiting = true
+
+   quietly try sync * wait=&(WaitTime)
+   if (tryattn) begin
+      try cancel * purge quiet
+      pcall ATTN_Exit
+   end
+
+   open ShoTapes title='TLMS Data base status as of &(xdate)' temporary
+   while (Waiting) begin
+      try locate * collect
+      if (tryattn) begin
+         try cancel * quiet
+         try purge * quiet
+         pcall ATTN_Exit
+      end
+
+      read string JobStatus using=last delete
+      if ((index(JobStatus,' AWAITING EXEC ') ne 0) or (index(JobStatus,' AWAITING XEQ ') ne 0) or \
+            (index(JobStatus,' EXECUTING ') ne 0)) begin
+         quietly try sync * wait=5
+         if (tryattn) begin
+            try cancel * purge quiet
+            pcall ATTN_Exit
+         end
+      end
+      else Waiting = false
+   end
+
+   putline 0.0 OPTIONS: UNNUMBERED CC FORMS=GBAR
+   quietly fetch * dd sysprint cc append
+   if (Purge) purge * quiet
+   if (index(line(last),'**ERROR** No tapes exist under account') ne 0) list last unnumbered column=12
+   elseif (lines gt 1) begin
+      number all start=0 by 1
+      change 1/1 to ' ' in ~'1' 1 in 1/last nolist  ;Remove potential erroneous CC characters generated by TAPELIST.
+      if (xdump) list unnumbered       ;DUMP commmand or collect-options.
+      else list 1/last unnumbered column=2
+   end
+   else begin
+      close
+      pcall Clean_Up('')
+      xreturn error errid=ERROR errmsg='Unable or unauthorized to retrieve requested TLMS tape information.'
+   end
+   close
+end
+
+
+;<.PAGE>
+proc Error_Exit() begin
+;Display the error condition and current variable settings when an error condition arises.
+;
+   on attn command='pcall Ignore_ATTN'
+
+   declare number SLine                ;Starting line line number for variable list.
+
+   write s'2F'||'An error has occurred in processing the &(X.PCmdName) command.'
+   open ErrorLog title='&(X.ExecName) EXEC file error log' temporary
+   putline end &(X.PCmdName) command
+   putline end &(X.ExecDsn)
+   putline end &(X.ExecVersion)
+   putline end
+   putline end Debugging information:
+   putline end    errmsg = '&(errmsg)'
+   putline end    errinfo = '&(errinfo)'
+   putline end
+   putline end    Variables:
+   SLine = end
+
+   dump variables type ses             ;Display session variables.
+   putline end
+   dump variables type X               ;Display global variables.
+   putline end
+   dump variables type error           ;Display variables at time of error.
+   change 1 to '   ' in &(SLine)/last nolist
+
+   if (index(X.DebugAcct,xaccount) gt 0) begin
+      try mail to (&(X.DebugAcct)) subject='&(X.PCmdName) command processing error' quiet
+      close
+      write s'15'||'The programming staff has been notified about the problem.'
+      write 'Processing terminated.'
+      pcall Clean_Up('EXIT')
+   end
+   xpause msg='[DEBUG mode; error condition occurred.  Execution pause.]'
+   clear error                         ;Reset error environment.
+   on error reenable
+   close
+end
+
+
+;<.PAGE>
+proc Generate_Job(OwnerAcct,RawFormat) begin
+;Generate the job needed to query TLMS for the tape holdings of the specified
+;account.
+;
+   putline end //&#TLMQ JOB ,'TLMS Db Query',CLASS=F                                   NUM
+   if (X.Debug) putline end /*JOBPARM LINES=9999,HOLD=OUTPUT,KEEP=YES
+   else putline end /*JOBPARM LINES=9999,LOG=NO,JCL=NO,HOLD=OUTPUT,KEEP=YES
+   putline end //*
+   putline end //* Job &(user)#TLMQ created on &(xdate) by
+   putline end //*    &(lname) on account &(xaccount) via
+   putline end //*    pseudo WYLBUR command, &(X.PCmdName) (&(X.ExecVersion))
+   putline end //*    on system &(machine).
+   putline end //*
+;  if (OwnerAcct eq '') putline end //SHOTAPES EXEC TLMSLIST
+;  else putline end //SHOTAPES EXEC TLMSLIST,PARM='&(OwnerAcct)'
+; below temp. until JES2 tweaked mcl 1998/09/25
+   if (OwnerAcct eq '') putline end //SHOTAPES EXEC SPARE002
+   else putline end //SHOTAPES EXEC SPARE002,PARM='&(OwnerAcct)'
+   if (RawFormat) putline end //RAWPRINT DD SYSOUT=A
+   putline end //
+end
+
+
+;<.PAGE>
+proc Ignore_ATTN() begin
+;Ignore and reset ATTN mode.
+;
+   clear attn                          ;Reset ATTN environment.
+   on attn reenable
+end
+
+
+;<.PAGE>
+proc Parse_Parm(Parms,OwnerAcct,RawFormat,WaitTime,Purge) begin
+;Parse the options(s).  The full command syntax is:
+;   SHOW TAPES [[account-options] [RAW] [WAIT=nn] [NOPURGE] [DEBUG]|VERSION]
+;               [collect-options]
+;
+   OwnerAcct = ''
+   RawFormat = false
+   WaitTime = 10                       ;Default time delay (seconds).
+   Purge = true
+
+   declare string Token                ;Token from parm parsing.
+   declare string TokenType            ;Token type from parm parsing.
+
+   try syscall collect_scan(Parms)     ;Process any collect options.
+   if ((tryerror) or (tryattn)) xreturn error errid=ERROR errmsg='Command stopped.'
+
+   while (Parms ne '') begin
+      syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+      Token = upper(Token)
+
+      cases begin
+         case ((abbrev('ACCOUNT',Token,3)) or (Token eq 'ACCT')) begin  ;ACCOUNT option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='ACCOUNT: Missing operand.'
+            cases begin
+               case (size(Token) ne 6) xreturn error errid=INVALID errmsg='&(Token): invalid.'
+               case (index(Token,'$') eq 3) OwnerAcct = left(Token,2)||'.'||right(Token,3)
+               case (index(Token,'$') eq 4) OwnerAcct = right(Token,2)||'.'||left(Token,3)
+               case (index(Token,'.') eq 3) OwnerAcct = upper(Token)
+               case (true) xreturn error errid=INVALID errmsg='&(Token): invalid.'
+            end
+         end
+
+         case ((abbrev('GROUP',Token,3)) or (Token eq 'GRP')) begin  ;GROUP option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='GROUP: Missing operand.'
+            if (size(Token) ne 2) xreturn error errid=INVGRP errmsg='&(Token): invalid group.'
+            OwnerAcct = Token||right(xaccount,4)
+         end
+
+         case ((abbrev('USER',Token,3)) or (Token eq 'USR')) begin  ;USER option.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='USER: Missing operand.'
+            if (size(Token) ne 3) xreturn error errid=INVUSER errmsg='&(Token): invalid user.'
+            OwnerAcct = left(xaccount,3)||Token
+         end
+
+         case (abbrev('PUBLIC',Token,3)) xreturn error errid=INVALID errmsg='&(Token): invalid.'  ;PUBLIC option.
+
+         case ((abbrev('DEBUG',Token,3)) and (index(X.DebugAcct,xaccount) gt 0)) X.Debug = true  ;Debug mode.
+
+         case (abbrev('NOPURGE',Token,3)) Purge = false  ;Job no purge option.
+
+         case (Token eq 'RAW') RawFormat = true  ;Raw data format.
+
+         case (abbrev('VERSION',Token,3)) begin  ;Version information.
+            comment &(X.PCmdName) (&(X.ExecVersion))
+            xreturn
+         end
+
+         case (abbrev('WAIT',Token,3)) begin  ;Job delay time.
+            syscall scan(Token,Parms,TokenType,' ,=',' ,=;')
+            if (TokenType eq 'NULL') xreturn error errid=OPMISSNG errmsg='WAIT: Missing operand.'
+            if (TokenType ne 'NUMBER') xreturn error errid=INVALID errmsg='&(Token): invalid.'
+            WaitTime = Token
+         end
+
+         case (true) xreturn error errid=INVALID errmsg='&(Token): invalid.'  ;Unrecognized options.
+      end
+   end
+
+   return (OwnerAcct,RawFormat,WaitTime,Purge)
+end
+
+

@@ -1,0 +1,565 @@
+; TAPECOPY  by Mark C. Lawrence (GA.MCL)
+CLEAR VARIABLES
+DEC STR REVDATE
+
+; Last revision ;
+REVDATE = '2002/06/26'
+;
+;  Revision log--
+;  2002/06/26 pause processing, smarter username for copy of copy
+;  2000/02/25 fix "unknown tape" error messages
+;  1999/11/09 SHO TAPE TYPE; COMP/NOCOMP
+;  1995/08/17 fix bug with XC vols getting jcl w/o ovol
+;  1995/08/09 recognize S1/S2 as std. when setting default option
+;  1994/12/22 support S20000 tapes
+;  1993/11/19 changes for new unit names (TAPE=3480)
+;  1993/05/21 Allow nonstandard tape nos. with G-acct.; 3490E support
+;  1992/06/24 correct SETUP for 3480.  Default output to 3480.  Update
+;           help text.  Check outcode of output tape.
+;  1990/12/19 VERSION=TEST no longer used with 3480 tapes.
+;  1990/07/17 Fix problem with volseq/volcnt fields; allow write on
+;           last vol of set.
+;  1990/04/30 fix problem with invalid output tape volume; minor
+;           message cleanup
+;  1990/02/05 correct problem with OLABEL not honored
+;  1987/03/11 allow override of tape not found, label type
+;  1987/03/09 New variable names, multiple active files
+;  1986/12/17 Add PFORMAT=L132 to JCL
+;  1985/08/07 Increase time limit, add lines limit
+;  1985/08/04 Add D0 series tapes
+;  1985/07/30 Remove TAPE7, T800 support, add 3480 support
+;
+;  1984/07/12 Add OPTION support
+;
+;  variable usage --
+;
+;  PARM        input tape number
+;  S0          various prompts
+;  IUNIT       input unit name
+;  IVOL        input tape number
+;  IJOBNAM     jobname of job creating input tape (tlms cols 15-22)
+;  IUNAM       username of job creating input tape (tlms cols 24-33)
+;  OJOBNAM     jobname for this job
+;  OUNAM       username for this job
+;  OVOL        output tape number
+;  SVOL        output tape number for setup statement
+;  ITAPETYPE   info from SHOW TAPE TYPE for input tape
+;  OTAPETYPE   info from SHOW TAPE TYPE for output tape
+;  OPTION      OPTION value for TAPECOPY
+;  COMP        output data compression yes/no (IDRC)
+;  OUNIT       output unit name
+;  OUTCODE     TLMS output use code
+;
+;  OLDESC      user's escape character
+;
+;  GACC        (flag) user is G-account
+;  SPECVOL     (flag) output vol was specified
+;  NOSEQ       (flag) don't check fileseq
+;  NOTLMI      (flag) input tape unknown to TLMS
+;  W0          line number in loops
+;  OLDACT      User's previous ACTIVE file number
+;  WORKNO      Active file number for workfile
+;  FILESEQ     Starting file sequence number on output tape
+;  N0          various index values etc.
+;  N1
+;
+;
+;
+DECLARE STRING  IUNIT IVOL OVOL SVOL OPTION OUNIT OLDESC ITAPETYPE OTAPETYPE
+DECLARE STRING  OUTCODE KEEPDATE IJOBNAM OJOBNAM IUNAM OUNAM
+DECLARE STRING TAPEUNITS
+TAPEUNITS ='TAPE TAPE9 T6250 T1600 3480 T3480 T3490E MAGSTAR'
+DECLARE NUM     OLDACT WORKNO FILESEQ
+DECLARE BOOLEAN SPECVOL NOSEQ GACC NOTLMI COMP
+IF (SUB(GROUP,1,1) EQ 'G') GACC=TRUE
+OLDACT = ACTNO
+OLDESC = ESC
+COMP = TRUE
+FILESEQ = 1
+SET ESC &
+COMM
+COMM TAPECOPY version of &(REVDATE)
+IF (PARM NE '') EXE 40             ; PARM GIVEN, DON'T ASK FOR TAPE
+COMM
+REA STR S0 UPP PRO 'Do you need instructions? '
+IF (S0 EQ '') EXE *+2 ;  RETURN=NO
+IF (SUB(S0,1,1) NE 'N') EXE 1000            ; HELP GENERAL
+;
+; INPUT TAPE
+;
+S0 = UPPER(STRIP(PARM))
+IF (S0 EQ '') EXE 60               ; GO READ TAPE NO.
+; PARSE PARM; IT'S TAPENO OR TAPENO,UNIT
+IVOL =S0
+N0 = INDEX(S0,',')
+IF (N0 EQ 0) EXEC 52
+IUNIT =SUBSTR(S0,N0+1)
+IVOL =SUBSTR(S0,1,N0-1)
+COMM
+COMM Input tape is &(IVOL)
+IF (IUNIT NE '') COMM Unit name is &(IUNIT)
+EXE 63
+
+; READ TAPE NO.
+
+COMM
+REA STR IVOL UPP PRO 'Tape to be copied? ' ATTN=300
+IF (IVOL EQ '?') EXE 1110            ; HELP TAPENO
+; input tape verification
+IF (SIZE(IVOL) NE 6) EXE 1100        ; BAD TAPENO
+DUMP TAPE &(IVOL) TYPE         ; general info    mcl 1999/11/09
+REA STR ITAPETYPE USING LAST DELETE
+IF (SUB(ITAPETYPE,1,1) NE '?') EXE 65   ; Prefix ok
+WRI IVOL||':  Unknown tape series.'
+EXE 1100 ; Try again
+
+; input tape OK
+
+TRY DUMP TAPE &(IVOL) INTERNAL
+IF (TRYERR) WRI TRYMSG
+   THEN EXEC 1100 ; Try again
+
+REA STR IJOBNAM USI LAS COL 15/22  ; creating jobname
+REA STR IUNAM USI LAS COL 24/33    ; creating username
+; other useful stuff: dsn 45/88, filecount 90/93, crdat 101/106
+DEL LAS
+
+; UNIT
+; tapetype info: col 1 = S|U|X/? scratch/user/nonTLMS/unknown
+; col 5 = 2|8|9|5 3420, 3480, 3490E, 3590
+IF (IUNIT NE '') EXE 73  ; If user gave us a unit name, check it
+S0 = SUB(ITAPETYPE,5,1)   ; device type code
+IF (S0 EQ '2') IUNIT='T6250'
+IF (S0 EQ '8') IUNIT='T3480'
+IF (S0 EQ '9') IUNIT='T3490E'
+IF (S0 EQ '5') IUNIT='MAGSTAR'
+IF (IUNIT NE '') EXE 80         ; just got name from type, don't check it
+; following used only if user gave bad unit name, or for nonstandard volser
+COMM
+REA STR IUNIT UPP PRO 'UNIT (RETURN=T6250)? ' ATTN=60
+IF (IUNIT EQ '?') EXE 1210            ; HELP UNIT
+IF (IUNIT EQ '') IUNIT ='T6250'
+THEN EXEC 80
+;  unit name check
+IF (SIZE(IUNIT) LT 4 OR INDEX(TAPEUNITS,IUNIT) EQ 0) EXE 1200 ; bad unit
+IF (IUNIT EQ '3480') IUNIT='T3480'
+;
+; OUTPUT TAPE NUMBER
+OUNIT ='T3480' ; default output unit name
+FILESEQ = 1
+OLABEL='SL'
+SPECVOL=FALSE
+OVOL=''
+COMP = TRUE
+COMM
+REA STR OVOL UPP PRO 'Output tape number (RETURN=Assign a rental tape)? ' ATTN=60
+IF (OVOL EQ '') EXEC 100
+IF (OVOL EQ '?') EXE 1310            ; HELP OUTPUT TAPE
+IF (OVOL EQ '3480' OR OVOL EQ 'T3480') OUNIT ='T3480' ; 3480 scratch tape
+   THEN OVOL =''
+   THEN EXEC 100
+IF (OVOL EQ '3420' OR OVOL EQ 'T3420' OR OVOL EQ 'TAPE') OUNIT ='T6250'
+   THEN OVOL =''
+   THEN EXEC 100
+IF (SIZE(OVOL) NE 6) EXE 1300        ; BAD OUTPUT TAPE
+DUMP TAPE &(OVOL) TYPE         ; general info    mcl 1999/11/09
+REA STR OTAPETYPE USING LAST DELETE
+IF (SUB(OTAPETYPE,1,1) NE '?') EXE 85   ; Prefix ok
+WRI OVOL||':  Unknown tape series.'
+EXE 1300 ; Try again
+; tapetype info: col 1 = S|U|X/? scratch/user/nonTLMS/unknown
+; col 5 = 2|8|9|5 3420, 3480, 3490E, 3590
+;??IF (OUNIT NE '') EXE 73  ; If user gave us a unit name, check it
+S0 = SUB(OTAPETYPE,5,1)   ; device type code
+IF (S0 EQ '2') OUNIT='T6250'
+IF (S0 EQ '8') OUNIT='T3480'
+IF (S0 EQ '9') OUNIT='T3490E'
+IF (S0 EQ '5') OUNIT='MAGSTAR'
+IF (OUNIT NE '') EXE 100        ; just got name from type, don't check it
+
+; following used only if nonstandard volser
+COMM
+REA STR OUNIT UPP PRO 'UNIT (RETURN=3480)? ' ATTN=80
+OUNIT=STRIP(OUNIT)
+IF (OUNIT EQ '') OUNIT ='T3480'
+   THEN EXE 95
+IF (SIZE(OUNIT) LT 4 OR INDEX(TAPEUNITS,OUNIT) EQ 0) WRI OUNIT||":  invalid."
+   THEN EXEC 92
+SPECVOL=TRUE
+FILESEQ=1
+EXE 150 ; Nonstandard vol, TLMS won't know about it...
+
+IF (OVOL EQ '') EXE 180 ; nonspecific volume req, no vol to check
+IF (SUB(OTAPETYPE,1,1) EQ 'X') SPECVOL=TRUE   ; non-TLMS but a good one
+   THEN EXE 170                    ; TLMS doesn't do these
+
+IF (ACTNO NE WORKNO) OPEN WORKFILE TITLE 'Work file for UTIL TAPECOPY'
+   THEN WORKNO = ACTNO
+   ELSE IF (LINES GT 0) DEL 0/LAST
+; tape check
+OLABEL='SL'
+FILESEQ=1
+SPECVOL=FALSE
+TRY DUMP TAPE &(OVOL) INTERNAL
+IF (~TRYERR) EXE 126 ; OK
+; SHO TAPE BOMBED
+   WRI TRYMSG
+   IF (YESNO('Use it anyway? ') NE 'YES') EXE 80 ; Reprompt vol
+   PUTEND
+   SPECVOL = TRUE
+   EXE 130 ; use it anyway, no checking
+SPECVOL=TRUE
+S0=SUB(LINE(LAST),147,5)   ; VOLSEQ (2 COL), BLANK, VOLCNT
+OUTCODE=SUB(LINE(LAST),131,1) ; output use code
+KEEPDATE=SUB(LINE(LAST),115,6) ; keep date
+IF (S0 EQ ' 1  1') EXE 130 ; OK...VOL 1 OF 1
+IF (S0 EQ ' ?  ?') EXE 130 ; OK...NEW TAPE, NO INFO
+TRY QUI N1=NCON(SUB(S0,1,2))   ; VOLSEQ
+IF (TRYERR) EXE 130 ; Not numeric, don't check
+TRY QUI N2=NCON(SUB(S0,4,2))   ; VOLCNT
+IF (TRYERR) EXE 130
+IF (N1 GE N2) EXE 130  ; OK--last volume
+WRI 'This tape is volume '||FORMAT(N1,2,0)||' of '||FORMAT(N2,2,0)||'.  Writing on this volume will destroy'
+WRI 'the existing files.'
+DEL LAST
+IF (YESNO('OK? ') EQ 'YES' NOSEQ=TRUE  ; OK
+   THEN FILESEQ=1
+   THEN EXEC 130
+EXE 80           ; No, reprompt
+; OK, IS VOLUME 1 OF 1
+
+;  Label
+OLABEL = 'SL'
+IF (SUB(OTAPETYPE,1,1) NE 'S') EXE 130.4   ; if not scratch pool tape
+OLABEL = SUB(OTAPETYPE,6,1)||'L'           ; if so, get from tapetype
+EXE 133
+OLABEL = SUB(LINE(LAST),138,2) ; Label from TLMS rec
+IF (OLABEL NE 'AL' AND OLABEL NE 'NL') OLABEL = 'SL'
+REA STR S0 UPP PRO 'Label type for output tape (RETURN=&(OLABEL))? ' ATTN=80
+S0=STRIP(S0)
+IF (S0 EQ '') EXE 134 ; OK
+IF (S0 EQ 'SL' OR S0 EQ 'AL' OR S0 EQ 'NL') OLABEL='SL'
+   THEN EXEC 134 ; OK
+IF (S0 EQ '?') LIS 2001/2099 EXE UNN ATTN=130
+   THEN EXE 130
+WRI S0||':  Invalid.  Please reply SL, AL, or NL.  Type ? for help.'
+EXE 130
+
+;  File Sequence
+
+IF (NOSEQ) EXEC 137
+REA VAL FILESEQ USI LAST COL 90/93   ; FILE COUNT
+FILESEQ =FILESEQ+1                    ;   NEXT FILE
+
+; location
+REA VAL S0 USI LAST COL 188/189 ; LOCATION CODE
+IF (S0 EQ '') EXE 145           ; no info, tape wasn't found, said ok above
+IF (IND('.10.15.83.','.&S0.') GT 0) EXE 145 ; AT FORSYTHE, OK
+WRI 'Tape '||OVOL||' is not at Forsythe.  Location code is '||S0 ATTN=NEXT
+IF (YESNO('Use it anyway? ') ne 'YES') EXE 80
+
+
+;  FILE SEQUENCE
+;
+IF (NOSEQ OR ~SPECVOL) EXE 170
+COMM
+REA STR S0 UPP ATTN=80 PRO 'At which file sequence number do you wish to start (RETURN=&(FILESEQ))? '
+S0 = STRIP(S0)
+IF (SIZE(S0) EQ 0) EXE 170         ; Default
+IF (SUBSTR(S0,1,1) EQ '?') LIS 3001/3099 EXE UNN ATTN=150
+   THEN EXE 150
+;
+SET VAL N0 VER(S0,'0123456789')    ; VERIFY ALL NUMERIC
+IF (N0 NE 0) SET VAL S0 SUBSTR(S0,N0,1)         ; BAD CHAR.
+   THEN COMM &S0:  INVALID:  Characters must be all numeric
+   THEN EXE 150
+
+FILESEQ =S0    ;  COPY/CONVERT FILESEQ
+
+
+; OVOL/OSEQ done
+IF (WORKNO EQ ACTNO) CLOSE
+IF (SUB(OTAPETYPE,5,1) NE '8' OR FILESEQ GT 1) EXE 180     ; COMP is moot
+WRI ' '
+S0=YESNO('Use data compression on output tape','YES,NO,NULL,ATTN,HELP')
+IF (S0 EQ 'YES' OR S0 EQ 'NULL' OR S0 EQ 'ATTN') EXE 180         ; OK
+IF (S0 EQ 'NO') COMP=FALSE
+   THEN EXEC 180
+EXE 1600       ; Help comp
+
+; TAPECOPY OPTIONS
+
+OPTION ='NOVOLCHECK'   ; DEFAULT OPTION
+IF (IND('SU012',SUB(IVOL,2,1)) NE 0) OPTION ='' ; FOR STD. TAPE
+COMM
+IF (OPTION EQ '') REA STR S0 UPP PRO 'TAPECOPY options (RETURN=none): '  ATTN=80
+   ELSE REA STR S0 UPP PRO 'TAPECOPY options (RETURN=NOVOLCHECK): '  ATTN=80
+IF (S0 EQ '') EXE 200 ; TAKE DEFAULT
+IF (S0 EQ '?') EXE 1500 ; HELP OPTIONS
+OPTION =S0           ; COPY OPTIONS
+IF (OPTION EQ 'NONE') OPTION=''
+
+; BUILD JCL
+IF (ACTNO EQ OLDACT) OPEN TAPECOPY TITLE 'JCL generated by UTIL TAPECOPY'
+   ELSE IF (LINES GT 0) DELETE 0/LAST
+SVOL =OVOL                      ; OUTPUT TAPE
+IF (SVOL EQ '') SVOL ='SCRTCH'
+OJOBNAM = 'C#'||IVOL               ; default job name
+OUNAM = 'cp '||IVOL||' '           ; default "user name"
+IF (SUB(IJOBNAM,1,2) EQ 'C#') OUNAM = IUNAM   ; copy of copy, use old name field
+
+PUTEND //&(OJOBNAM) JOB ,'&(OUNAM)',TIME=2
+PUTEND /*JOBPARM HOLD=OUTPUT,PURGE=NO,LINES=25,PFORMAT=L132
+; SETUP statement
+S1=OVOL
+IF (OVOL EQ '') S1='SCRTCH'
+IF (IUNIT EQ OUNIT) EXE 220 ; same unit for in and out
+S0='T6250'
+IF (IUNIT EQ 'T3480' OR IUNIT EQ '3480') S0='T3480'
+IF (IUNIT EQ 'T3490E' OR IUNIT EQ '3490E') S0='T3490E'
+PUTEND /*SETUP &S0=1 INPUT=&(IVOL)
+S0='T6250'
+IF (OUNIT EQ 'T3480' OR OUNIT EQ '3480') S0='T3480'
+IF (OUNIT EQ 'T3490E' OR OUNIT EQ '3490E') S0='T3490E'
+PUTEND /*SETUP &S0=1 OUTPUT=&(S1)
+EXE 225
+S0='T6250'
+IF (IUNIT EQ 'T3480' OR IUNIT EQ '3480') S0='T3480'
+IF (IUNIT EQ 'T3490E' OR IUNIT EQ '3490E') S0='T3490E'
+PUTEND /*SETUP &S0=2 INPUT=&(IVOL) OUTPUT=&(S1)
+
+PUTEND //* JCL generated by UTIL TAPECOPY &(DATE)
+PUTEND //  EXEC  TAPECOPY,IVOL=&(IVOL),IUNIT=&(IUNIT),
+IF (SPECVOL) PUTEND //  OVOL=&(OVOL),OUNIT=&(OUNIT),OLABEL=&(OLABEL),
+   ELSE      PUTEND //  OUNIT=&(OUNIT),
+IF (FILESEQ GT 1) PUTEND //  OSEQNO=&(FILESEQ),
+IF (~COMP) PUTEND //  ODCB='TRTCH=NOCOMP',
+PUTEND //  OPTION='&(OPTION)'
+PUTEND //SYSTERM DD SYSOUT=A
+;
+;  RUN
+;
+COMM
+REA STR S0 UPP PRO 'RUN? ' ATTN=180
+IF (S0 EQ '') EXE 270
+IF (S0 EQ '?') EXE 1410            ;  HELP RUN
+IF (INDEX('YESOK',S0) NE 0) EXE 270
+IF (SUBSTR(S0,1,1) EQ 'N') EXE 290    ;  no
+IF (SUBSTR(S0,1,3) EQ 'PAU') EXE 280  ;  PAUSE
+IF (SUBSTR(S0,1,1) EQ 'Q') EXE 300    ;  QUIT
+EXE 1400                           ;  ERROR
+;
+;  RUN
+;
+RUN HOLD NOTIFY
+PIC &(OLDACT)
+EXE 300
+;
+;  PAUSE
+;
+COMM The JCL is in your active file.  Modify as desired, then type EXEC
+COMM to continue processing.
+EXE PAUSE
+EXE 250
+;
+;  NORUN
+;
+COMM The JCL is in your active file.  Type RUN to run the job; type
+COMM PICK &(OLDACT) to recover your previous active file.
+
+;
+;  CLEANUP
+;
+SET ESC &(OLDESC)
+CLR EXE
+; HELP GENERAL
+L 1050/1099 EXE UNN  ATTN=40
+EXE 40
+
+This EXEC file will submit a batch job to copy a tape volume.  The tape must
+have standard labels (either IBM or ANSI).  If the tape is unlabeled, refer to
+the IOPROGM User's Guide.
+
+You may answer with a question mark (?) to any prompt if you need an
+explanation of the question.  RETURN= means that the given value will be
+assumed if you just press Carriage Return without typing anything else.
+
+In the future, you can specify the tape to be copied when you invoke TAPECOPY;
+for example,
+
+  UTIL TAPECOPY AX9999
+
+;  BAD TAPENO
+;
+WRI IVOL||' is not a valid Data Center tape number.'
+;
+IF (NOT GACC) EXEC 1110 ; help and reprompt
+; here if G-acct
+S0 = YESNO('Use it anyway?','ATTN,YES,NO,NULL,HELP')
+IF (S0 EQ 'NO' OR S0 EQ 'ATTN') EXEC 60  ; no, reprompt
+IF (S0 EQ 'HELP') EXE 1180 ; Help anyway
+; here if yes (or null)
+   NOTLMI=TRUE  ; show unknown tape
+   IUNIT=''              ; and unknown unit
+   EXEC 71               ; and carry on; prompt unit
+
+;  HELP TAPENO
+;
+L 1150/1179 EXE UNN ATTN=40
+EXE 60
+
+Reply with the tape number that was assigned when you submitted the tape.
+This number is usually two letters and four digits, e.g., AX9876.  It does not
+matter if the tape has an internal volume label with a different number.
+
+If you have not yet turned in the tape, you cannot run TAPECOPY yet.  Use the
+PRISM External Tape Management system to enter the tape, then take it to the
+Production Control window.
+
+;  help g-acc "use it anyway"
+L 1190/1199 EXE UNN ATTN=1106
+EXE 1106
+
+
+The tape number that you specified is not known to be a valid Data Center tape
+number.  You can go ahead and use this number if you have made appropriate
+arrangements to have the tape mounted.
+
+; bad unit
+COMM &(IUNIT):  INVALID.
+;
+;  help unit
+;
+L 1250/1270 EXE UNN ATTN=70
+IF (SUB(GROUP,1,1) EQ 'G') LIST 1271/1299 EXE UNN ATTN=70
+EXE 71
+;
+
+The unit name determines what kind of tape drive is used.  At present only
+standard 1600 and 6250 BPI tapes and 3480/3490 cartridge tapes may be read or
+written at the Data Center.  800 BPI tapes are no longer supported.
+
+TAPECOPY supports 3480 tapes; this unit name will be supplied if your tape
+number is a 3480-type tape number.
+
+;  BAD OUTPUT TAPE
+;
+WRI OVOL||' is not a valid Data Center tape number.'
+;
+IF (NOT GACC) EXEC 1310 ; help and reprompt
+; here if G-acct
+S0 = YESNO('Use it anyway?','ATTN,YES,NO,NULL,HELP')
+IF (S0 EQ 'NO' OR S0 EQ 'ATTN') EXE 80 ; no, reprompt
+IF (S0 EQ 'HELP') EXE 1380 ; help ANYWAY
+; here if yes (or null)
+   OUNIT='T3480'
+   EXE 90 ; ok, go check unit
+
+; HELP OUTPUT TAPE
+;
+L 1350/1370 EXE UNN ATTN=80
+IF (SUB(GROUP,1,1) EQ 'G') LIST 1371/1399 EXE UNN ATTN=80
+EXE 80
+;
+
+Specify the SDC tape number you want to use for the output tape.  If you just
+press RETURN, or enter 3480, you will be assigned a Data Center rental tape
+(3480-type cartridge) which will be kept until you request that it be
+released.  If you want a standard "round reel" rental tape, specify TAPE or
+3420 here.  You will be assigned a Data Center rental tape (3420-type,
+standard "round reel" tape).  If you want to use your own tape, specify the
+number here.  The tape must be initialized with the label type you want to
+use.
+
+If the output is to a 3420-type (standard) tape, the copied tape will be
+written at 6250 BPI.
+
+
+;  help g-acc "use it anyway"
+L 1390/1399 EXE UNN ATTN=1306
+EXE 1306
+
+
+The tape number that you specified is not known to be a valid Data Center tape
+number.  You can go ahead and use this number if you have made appropriate
+arrangements to have the tape mounted.
+
+;  HELP RUN
+;
+L 1450/1499 EXE UNN ATTN=250
+EXE 250
+;
+
+If you reply YES or just press RETURN, the job will be submitted; the output
+will be placed in your bin.  If you respond NO or PAUSE, the JCL will be left
+in your active file so you can inspect and change it; you will then need to
+issue the RUN command yourself.
+
+;  HELP OPTIONS
+LIST 1550/1599 EXE UNN ATTN=180
+EXE 180
+
+The OPTIONS prompt allows you to change TAPECOPY options.  Any valid IOPROGM
+commands and options may be specified here.  The options you specify will be
+appended to a COPY NFILES=ALL command to IOPROGM.
+
+Some of the commonly used options are:
+
+NOVOLCHECK     Requests that IOPROGM not check the volume serial number in the
+               volume label.  This option is normally used with imported
+               tapes, since they will have a volume serial (internal number)
+               that does not match their SDC-assigned tape number.  This
+               option should not be used with standard (AS, AU, etc.) tapes,
+               since they will have correct internal labels.
+
+               This option will be supplied by default if your input tape has
+               an AX or EX prefix and you do not specify any TAPECOPY options.
+
+NOREBLOCK      Requests that IOPROGM use the same block size for each output
+               file as the corresponding input file.  You should request this
+               option if your input tape was created by BACKUP, or if your
+               programs or data have peculiar block size requirements.  The
+               default is to reblock all files to the maximum value of 32,760
+               bytes.
+
+For other options, refer to the "IOPROGM User's Guide", available by use of
+the PUBLISH command.
+
+; Help COMP
+LIST 1650/1699 EXE UNN ATTN=174
+EXE 174
+The 3480 tape drives have a "data compression" feature built in.  Normally,
+tapes written on these drives have compression in effect; this results in
+faster tape writing, and uses less tape for a given amount of data.  There is
+no additional CPU time used, as the compression is done in the tape hardware.
+If you are exporting this tape to a system that does not support the
+compression feature, respond NO to the prompt.  Note:  The compression feature
+is sometimes known as "IDRC" for "Improved Data Recording Capability".
+
+; help label
+The output tape can have IBM Standard Labels (<.b+>SL<.b->), ANSI Standard
+Labels (<.b+>AL<.b->), or no labels (<.b+>NL<.b->).  The tape must be "initialized"
+with the type of labels you specify; IOPROGM cannot change or override the
+output label type.  If the tape has a different kind of labels, the system
+will reject the tape and the operator will have to cancel the job.
+
+The default in the prompt is based on the TLMS records for your tape.  This
+information is not always accurate; you can override the default if you're
+sure the tape actually has the label type you want.  To change the label type,
+use PRISM External Tape Management to request re-initialization of the tape.
+
+----help file sequence----
+
+Files on a tape are located by File Sequence Number, the first file having a
+sequence number of 1.  The default value shown in the prompt is one greater
+than the number shown in the Tape Library Management System (TLMS) records for
+your tape.  If you just want to add files to this tape, just press RETURN and
+the default value will be used.  If you want to overwrite some existing files,
+you can specify a lower number.  If you specify a higher number the job will
+fail, unless there actually more files than shown in the TLMS data base (which
+is possible but unlikely).
+
+Note:  It is not possible to replace files in the middle of a tape, that is,
+if your tape has 10 files and you re-write files 4 and 5, files 4 through 10
+of the original tape will be lost.
+

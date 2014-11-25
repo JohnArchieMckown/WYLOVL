@@ -1,0 +1,1435 @@
+MCOM     TITLE 'MILTEN''s Command Processor'                                    
+*******************************************************************             
+*                                                                 *             
+*     MILTEN/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*box                                                                            
+*                                                                               
+*  Things to do:                                                                
+*                                                                               
+*  -  Tidy up command processor.                                                
+*                                                                               
+MILMCOM  CSECT                                                                  
+MCOM     IDENT 2047                10:16:23 02/16/02  (SLP)                     
+         REGS  ,,FSR,,,,,,BR,SCBR,(CMDR,CCBR),(FEBR,LSR),CVR,SPR,RAR            
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+         MACRO                                                                  
+&L       HEXDUMP &LOC,&LEN,&SEGCB,&OPT=                                         
+&L       SETMSG &LOC,&LEN                                                       
+         SEGLD &SEGCB                                                           
+        $L     R2,&OPT                                                          
+         ACALL HEXDUMP                                                          
+         MEND                                                                   
+*                                                                               
+         PUSH  DSECTS                                                           
+CVDSECT  DSECT                                                                  
+         COPY  CV                                                               
+*                                                                               
+SCB      RECORD BEGIN                                                           
+         COPY  SCB                                                              
+         END                                                                    
+*                                                                               
+         COPY  STRC                                                             
+*                                                                               
+SCANCB   RECORD 'SCANCB'                                                        
+*                                                                               
+SEGCB    RECORD 'SEGCB'                                                         
+*                                                                               
+FEB      RECORD BEGIN                                                           
+         COPY  FEB                                                              
+         END                                                                    
+*                                                                               
+PIB      RECORD BEGIN                                                           
+         COPY  PIB                                                              
+         END                                                                    
+*                                                                               
+         POP   DSECTS                                                           
+         TITLE 'Command Processor DSECTS'                                       
+UPATH    RECORD BEGIN                                                           
+UPAT     MILPATH                                                                
+         END                                                                    
+         EJECT                                                                  
+         COPY  SUBPOOLS                                                         
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  Command Control Block                                                        
+*                                                                               
+CMD      RECORD BEGIN                                                           
+         DS    CL4'CMD'                                                         
+CMDID    DS    H                   Unique identifier                            
+         DS    H                   Reserved                                     
+*                                                                               
+CMDLINK  DS    A                   Ptr to next CMD (or zero)                    
+*-                                                                              
+*-       Communications path.                                                   
+*-                                                                              
+CMDUPATH DS    XL(L'UPATH)         UPATH                                        
+CMDFSPR  EQU   CMDUPATH+(UPATFSPR-UPATH),L'UPATFSPR,1  Sys privs                
+CMDFOPR  EQU   CMDUPATH+(UPATFOPR-UPATH),L'UPATFOPR,1  Opr privs                
+*                                                                               
+CMDINP   DS    XL256               Input command                                
+*-                                                                              
+*-       Seg control block and buffer.                                          
+*-                                                                              
+CMDSG    SEGCB                                                                  
+CMDBUF   DS    XL1024              Output buffer                                
+         END                                                                    
+         TITLE 'Command Processor'                                              
+MILMCOM  CSECT                                                                  
+*box                                                                            
+*                                                                               
+*  MCOMINIT -- Routine to do command processor initialization.                  
+*    We open one command path and when someone connects to that                 
+*    path we'll open a new spare path.                                          
+*                                                                               
+MCOMINIT XPROC                                                                  
+         ACALL CMDOPEN             Create a command path                        
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MCOMDO -- Routine to check for commands.                                     
+*                                                                               
+MDOWA    RECORD BEGIN                                                           
+MDOCUR   DS    CL(L'CVCUR)         Saved failsoft information                   
+         END                                                                    
+*-                                                                              
+MCOMDO   XPROC MDOWA                                                            
+*-                                                                              
+*-       Go through CMD control blocks.                                         
+*-                                                                              
+MCOMLOOP LA    CMDR,CVCMDQH-(CMDLINK-CMD)  Dummy queue head                     
+         LOOP  BEGIN                                                            
+         WITH  CMD                                                              
+         WHILE ('LT CMDR,CMDLINK',NZ)  Get first/next CMD entry                 
+*-                                                                              
+*-       Check for any special path activity.                                   
+*-                                                                              
+         LA    R5,CMDUPATH                                                      
+         WITH  (UPATH,R5)                                                       
+         IF    UPATSFLG.UPATFOPN+UPATFNI+UPATFCLS,BEGIN                         
+*-                                                                              
+*-       Command path just opened, so we open a new free path.                  
+*-                                                                              
+         IF    UPATSFLG.UPATFOPN,BEGIN  Path opened...                          
+         CLEAR UPATSFLG.UPATFOPN,MODE=LOCKED,REF=UPATH  Turn bit off            
+*                                                                               
+         LA    R1,UPATH                                                         
+         VCALL PATHINFO            Fill in info about path partner              
+*                                                                               
+         ACALL CMDOPEN             Open a new command path                      
+         END                                                                    
+*-                                                                              
+*-       We have a command ("new info") sent by the path partner.               
+*-                                                                              
+         WHILE UPATSFLG.UPATFNI,BEGIN  New info...                              
+         LA    R1,UPATH                                                         
+         VCALL PATHREAD            Get a new line                               
+         IF    Z,BEGIN             We have some text...                         
+         MVC   CMDINP,CVBLANKS     Pre-blank command text area                  
+         LR    R15,R0                                                           
+         CEIL  R15,L'CMDINP                                                     
+         MOVE  R15,CMDINP,@R1      Save command text                            
+*                                                                               
+         MVC   MDOCUR,CVCUR        Save current failsoft ptrs                   
+         ST    CMDR,CVCURCMD       Set current CMD for failsoft rcvy            
+*                                                                               
+         SETMSG CMDINP,(R0)         Command text                                
+         LA    R15,CMDSG           SEGCB                                        
+         CLEAR R2                  Assume normal user                           
+         IF    CMDFSPR+CMDFOPR,'LA R2,1'   Priv'd user                          
+         ACALL COMMAND             Execute command                              
+*-                                                                              
+*-       If the command was a request to start monitoring then                  
+*-         we leave the path open and debugging messages are then               
+*-         sent to it.                                                          
+*-                                                                              
+         IF    (R15,EQ,20),BEGIN   Request to start monitoring...               
+         ST    CMDR,CVMONCMD       Save monitor CMD ptr                         
+         SEGWR 'Monitoring has started',,.CMDSG                                 
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               End of command...                            
+         IF    ((CMDSGLENF,NZ),AND,(CMDSGLENF,NE,CMDSGMRKF)),BEGIN              
+         SEGWR ,,.CMDSG                                                         
+         END                                                                    
+         SEGWR '$END',,.CMDSG      End of command                               
+         END                                                                    
+*                                                                               
+         MVC   CVCUR,MDOCUR        Restore failsoft ptrs                        
+         END                                                                    
+         END                                                                    
+*-                                                                              
+*-       Command path has closed.                                               
+*-                                                                              
+         IF    UPATSFLG.UPATFCLS,BEGIN  Path closed...                          
+         LA    R1,CMD                                                           
+         ACALL CMDCLOSE            Close and free CMD                           
+         B     MCOMLOOP                                                         
+         END                                                                    
+         END                                                                    
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CMDOPEN -- Routine to open a new command path and put it on                  
+*    our queue.                                                                 
+*                                                                               
+*    On exit:                                                                   
+*      R1 - newly built CMD ptr                                                 
+*                                                                               
+CMDOPEN  PROC                                                                   
+         LA    R0,L'CMD                                                         
+         LA    R1,MCOMSUBP                                                      
+         LR    R2,RAR                                                           
+         VCALL NGETCORE            Get memory for CMD                           
+         LR    CMDR,R1                                                          
+         WITH  CMD                                                              
+         ZOT   CMD                                                              
+         MVC   CMD(4),=CL4'CMD'    Set identification                           
+         INCR  R15,CVCMDID         Numeric ID                                   
+         STH   R15,CMDID           Save our ID                                  
+*                                                                               
+         LA    R1,CMDUPATH                                                      
+         VCALL PATHINIT            Initialize UPATH                             
+         FAIL  NZ,'CMDOPEN PATHINIT problem'                                    
+*                                                                               
+         LA    R2,CMDUPATH                                                      
+         WITH  (UPATH,R2),BEGIN                                                 
+         MVC   UPATMY,CVMNAME      MYTAG (our name--MILTEN/TESTMIL)             
+         END                                                                    
+*                                                                               
+         LA    R1,CMDUPATH                                                      
+         VCALL PATHOPEN            Open UPATH                                   
+         FAIL  NZ,'CMDOPEN PATHOPEN problem'                                    
+*                                                                               
+         SEGINIT CMDBUF,,CMDSG,RTN=PATHSEG,RTNTYPE=V                            
+         LA    R15,CMDUPATH                                                     
+         ST    R15,CMDSGUSR        Save UPATH ptr in SEGCB                      
+*-                                                                              
+*-       Add newly build CMD to queue.                                          
+*-                                                                              
+         LT    R2,CVCMDQT          Get current queue tail                       
+         IF    Z,BEGIN             Nothing on CMD queue...                      
+         ST    CMDR,CVCMDQH        We are the queue head...                     
+         ST    CMDR,CVCMDQT        ...and the tail too                          
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN               Add to end of the CMD queue...               
+         ST    CMDR,CMDLINK-CMD(R2)  Link us to the last entry                  
+         ST    CMDR,CVCMDQT        We are the new tail                          
+         END                                                                    
+*                                                                               
+         LA    R1,CMD                                                           
+         CLEAR R15                 (Neatness)                                   
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  CMDCLOSE -- Routine to close and free a command path.                        
+*                                                                               
+*    On entry:                                                                  
+*      R1 - CMD ptr                                                             
+*                                                                               
+CMDCLOSE PROC                                                                   
+         LR    CMDR,R1                                                          
+         WITH  CMD                                                              
+         FAIL  (CMD,NE,'CMD'),'Bad CMDCLOSE parm'                               
+*-                                                                              
+*-       Stop monitoring if this is the monitor path.                           
+*-                                                                              
+         IF    (CMDR,EQ,CVMONCMD),'CLEAR CVMONCMD'  Stop monitor                
+*-                                                                              
+*-       First take CMD off our queue.                                          
+*-                                                                              
+         LA    R3,CVCMDQH-(CMDLINK-CMD)  Dummy first link                       
+         LOOP  BEGIN                                                            
+         WITH  (CMD,R3)                                                         
+         LR    R2,R3               Save prev entry ptr                          
+         WHILE ('LT R3,CMDLINK',NZ)                                             
+         IF    (R3,EQ,CMDR),BEGIN  Matched our CMD entry...                     
+         L     R15,CMDLINK         Entry after ours (or zero)                   
+         ST    R15,@R2+(CMDLINK-CMD)  Take us off the queue                     
+         IF    (R15,Z),'ST R2,CVCMDQT'  New tail                                
+         IF    (CVCMDQH,Z),'CLEAR CVCMDQT'  Nothing in queue                    
+         B     CCLSCONT                                                         
+         END                                                                    
+         END                                                                    
+*                                                                               
+         FAIL  'Bad CMD queue'                                                  
+*-                                                                              
+*-       Close CMD path (if it's not open it's not a problem).                  
+*-                                                                              
+CCLSCONT LA    R1,CMDUPATH                                                      
+         VCALL PATHCLS             Close path (if it's open)                    
+*                                                                               
+         MVC   CMD(4),=C'OCMD'     Change ID                                    
+         MVC   CMDLINK,=F'-1'      Zap link ptr                                 
+*-                                                                              
+*-       Free CMD memory.                                                       
+*-                                                                              
+         LA    R1,CMD                                                           
+         VCALL FREECORE            Free CMD                                     
+*                                                                               
+         CLEAR R15                 (Neatness)                                   
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  COMMAND -- Execute a MILTEN command.                                         
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - command loc, len                                                 
+*      R2  - flags:  0=normal user; 1=priv'd user                               
+*      R15 - SEGCB ptr (for output messages)                                    
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - normal command completion                                            
+*      4 - command error                                                        
+*     20 - start monitoring request (command not complete)                      
+*                                                                               
+CCB      RECORD BEGIN                                                           
+CCBFLAG  FLAG                                                                   
+         FLAG  (CCBFPRIV,1)        - Privileged user                            
+         END                                                                    
+*-                                                                              
+COMMAND  XPROC CCB                                                              
+         LA    CCBR,CCB                                                         
+         WITH  CCB                                                              
+         CLEAR CCB                                                              
+         STC   R2,CCBFLAG          Save flags                                   
+*                                                                               
+         LR    R7,R15                                                           
+         WITH  (SEGCB,R7)                                                       
+*                                                                               
+         SEGDEF SEGCB                                                           
+         SCINIT (R1),(R0),CVSCNCB  Init scanner                                 
+*                                                                               
+         SCAN  CMDPRT,CVSCNCB                                                   
+*                                                                               
+         IF    NZ,BEGIN                                                         
+CMDERROR LPR   R0,R0                                                            
+         IF    ((R0,P),AND,(R1,P)),BEGIN                                        
+         SEGB  (R1),(R0)                                                        
+         SEGWR '- Invalid'                                                      
+         END                                                                    
+         ELSE  BEGIN                                                            
+         SEGWR 'Missing option'                                                 
+         END                                                                    
+         END                                                                    
+*                                                                               
+         B     CMDEND                                                           
+*-                                                                              
+*-       Command verb table                                                     
+*-                                                                              
+CMDPRT   SCKW  SET,CSET                                                         
+         SCKW  SHOW,CSHOW,A                                                     
+         SCKW  DUMP,CSHOW,A                                                     
+         SCKW  SC,SCORE                                                         
+         SCKW  PC,PCORE                                                         
+         SCKW  ATTACH,ATTACH,(A,P)                                              
+         SCKW  DETACH,DETACH,(A,P)                                              
+         SCKW  MONITOR,MONITOR,A                                                
+         SCKW  XWAIT,XWAIT         (Careful with this)                          
+         SCKW  ,CMDCHECK                                                        
+*-                                                                              
+*-       SET Commands.                                                          
+*-                                                                              
+CSET     SCAN  CSETPRT,CVSCNCB                                                  
+         B     CMDERROR                                                         
+*-                                                                              
+CSETPRT  SCKW  ELF,STELF                                                        
+         SCKW  ,CMDERROR                                                        
+*-                                                                              
+*-       SHOW Commands.                                                         
+*-                                                                              
+CSHOW    SCAN  CSHOWPRT,CVSCNCB                                                 
+         B     CMDERROR                                                         
+*-                                                                              
+CSHOWPRT SCKW  LINES,SLINES                                                     
+         SCKW  LTRACE,SLTRACE,A                                                 
+         SCKW  CORE,SCORE,A                                                     
+         SCKW  ELF,SHELF                                                        
+         SCKW  ,CMDERROR                                                        
+*-                                                                              
+*-       Caller subroutines.                                                    
+*-                                                                              
+STELF    LA    R1,CVSCNCB                                                       
+         LA    R15,SEGCB                                                        
+         VCALL SETELF              Do SET ELF                                   
+         B     CMDEND              Normal                                       
+*                                                                               
+SHELF    LA    R1,CVSCNCB                                                       
+         LA    R15,SEGCB                                                        
+         VCALL SHOWELF             Do SHOW ELF                                  
+         B     CMDEND              Normal                                       
+*                                                                               
+SLINES   LCALL SHOWLINS            Do SHOW LINES                                
+         BNZ   CMDERROR            Trouble                                      
+         B     CMDEND              Normal                                       
+*                                                                               
+SLTRACE  LCALL SHOWLTRC            Do SHOW LTRACE                               
+         BNZ   CMDERROR            Trouble                                      
+         B     CMDEND              Normal                                       
+*                                                                               
+SCORE    LCALL SHOWCORE            Do SHOW CORE                                 
+         BNZ   CMDERROR            Trouble                                      
+         B     CMDEND              Normal                                       
+*                                                                               
+PCORE    ACALL PATCORE             Do PATCH CORE                                
+         BNZ   CMDERROR            Trouble                                      
+         B     CMDEND              Normal                                       
+*-                                                                              
+*-       XWAIT command.                                                         
+*-                                                                              
+XWAIT    SEGWR 'Waiting for 30 seconds...'                                      
+         STIMER WAIT,BINTVL==A(30*100)  Wait 30 seconds                         
+         SEGWR 'Done.'                                                          
+         B     CMDEND                                                           
+*-                                                                              
+*-       Attach command.                                                        
+*-                                                                              
+ATTACH   IF    ^CCBFPRIV,BEGIN     Not priv'd...                                
+         SEGWR 'Privileged command.'                                            
+         LA    R15,4                                                            
+         B     CMDEXIT                                                          
+         END                                                                    
+*                                                                               
+         LA    R6,CVFEBQH-(FEBLINK-FEB)  Dummy first link                       
+         LOOP  BEGIN                                                            
+         WITH  (FEB,R6)                                                         
+         WHILE ('LT R6,FEBLINK',NZ)  Go through front-end list...               
+         IF    (FEBNAME,EQ,CVSCNKW),BEGIN  Matches this front-end...            
+         CLEAR FEBFDET                                                          
+         B     CMDEND                                                           
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGTB (R1),(R0)                                                        
+         SEG   'is an unknown front-end.'                                       
+         SEGWR                                                                  
+         LA    R15,4               Error                                        
+         B     CMDEXIT                                                          
+*-                                                                              
+*-       Detach command.                                                        
+*-                                                                              
+DETACH   IF    ^CCBFPRIV,BEGIN     Not priv'd...                                
+         SEGWR 'Privileged command.'                                            
+         LA    R15,4                                                            
+         B     CMDEXIT                                                          
+         END                                                                    
+*                                                                               
+         LA    R6,CVFEBQH-(FEBLINK-FEB)  Dummy first link                       
+         LOOP  BEGIN                                                            
+         WITH  (FEB,R6)                                                         
+         WHILE ('LT R6,FEBLINK',NZ)  Go through front-end list...               
+         IF    (FEBNAME,EQ,CVSCNKW),BEGIN  Matches this front-end...            
+         SET   FEBFDET                                                          
+         B     CMDEND                                                           
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGTB (R1),(R0)                                                        
+         SEG   'is an unknown front-end.'                                       
+         SEGWR                                                                  
+         LA    R15,4               Error                                        
+         B     CMDEXIT                                                          
+*-                                                                              
+*-       Monitor command.                                                       
+*-                                                                              
+MONITOR  IF    (CVMONCMD,NZ),BEGIN  Monitor already active...                   
+         IF    (CMDR,EQ,CVMONCMD),BEGIN                                         
+         CLEAR CVMONCMD            Reset monitoring                             
+         SEG   'Monitoring stopped'                                             
+         END                                                                    
+*                                                                               
+         ELSE  BEGIN                                                            
+         SEG   'Monitor already active (CMD='                                   
+         SEGHX L:CVMONCMD,8                                                     
+         SEG   ')'                                                              
+         END                                                                    
+         SEGWR                                                                  
+         B     CMDEND                                                           
+         END                                                                    
+*                                                                               
+         LA    R15,20              Request to start monitoring                  
+         B     CMDEXIT                                                          
+*-                                                                              
+*-       Match front-end name and then call that device                         
+*-         driver's CMD routine.                                                
+*-                                                                              
+CMDCHECK LA    R6,CVFEBQH-(FEBLINK-FEB)  Dummy first link                       
+         LOOP  BEGIN                                                            
+         WITH  (FEB,R6)                                                         
+         WHILE ('LT R6,FEBLINK',NZ)  Go through front-end list...               
+         IF    (FEBNAME,EQ,CVSCNKW),BEGIN  Matches this front-end...            
+         LA    R1,FEB                                                           
+         LA    R15,SEGCB                                                        
+         LC    RAR,FEBTYPE                                                      
+         IF    (RAR,GT,FEBTMAX),'CLEAR RAR'                                     
+         SLL   RAR,2                                                            
+         LT    RAR,CMDFE(RAR)      Appropriate routine                          
+         IF    NZ,'BALR RAR,RAR'                                                
+         ELSE  BEGIN                                                            
+         SEGT  FEBNAME                                                          
+         SEG   ' has no command processor.'                                     
+         SEGWR                                                                  
+         END                                                                    
+         B     CMDEND              All done                                     
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGTB (R1),(R0)                                                        
+         SEG   'is unrecognized.'                                               
+         SEGWR                                                                  
+         LA    R15,4               Error                                        
+         B     CMDEXIT                                                          
+*-                                                                              
+*-       Command processors for the different device types.                     
+*-                                                                              
+CMDFE    DC    A(0)                                                             
+         DC    V(CONSCMD)          FEBTCONS                                     
+*         DC    V(ASYNCMD)          FEBTASYN                                    
+         DC    A(0)                                                             
+*         DC    V(PDPCMD)           FEBTPDP                                     
+         DC    A(0)                                                             
+*         DC    V(VTAMCMD)          FEBTVTAM                                    
+         DC    A(0)                                                             
+         DC    V(VIRTCMD)          FEBTVIRT                                     
+*         DC    V(NSCCMD)           FEBTNSC                                     
+         DC    A(0)                                                             
+         DC    V(ELFCMD)           FEBTELF                                      
+*         DC    V(ALFCMD)           FEBTALF                                     
+         DC    A(0)                                                             
+*         DC    V(ECUCMD)           FEBTECU                                     
+         DC    A(0)                                                             
+CMDFEMX  EQU   (*-CMDFE-4)/4,,C'N'                                              
+         DS    0S(CMDFEMX-FEBTMAX,FEBTMAX-CMDFEMX)                              
+*                                                                               
+CMDEND   CLEAR R15                 A-ok                                         
+CMDEXIT  PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHOWLINS -- The SHOW LINES command.                                          
+*                                                                               
+SHLNSWA  RECORD BEGIN                                                           
+         DS    D                   Place holder                                 
+         END                                                                    
+*-                                                                              
+SHOWLINS PROC  SHLNSWA                                                          
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         CLEAR SHLNSWA             Clear work area                              
+*-                                                                              
+*-       Scan for SHOW LINES options.                                           
+*-                                                                              
+         SCAN  LINSPRT,CVSCNCB     SHOW LINES options                           
+         BNZ   LTRCEXIT            Error of some sort                           
+*-                                                                              
+*-       Build the SHOW LINES result table.                                     
+*-                                                                              
+         SEGCR '100|Milten lines;'                                              
+*                                                                               
+         SEGCR '101|Tag|Line|Account|Name|flags;'                               
+         SEGCR '102|STRING|NUMBER|STRING|STRING|STRING;'                        
+*-                                                                              
+*-       Go through list of SCBs.                                               
+*-                                                                              
+         LA    R5,CVSCBQH-(SCBLINK-SCB)  Dummy first entry                      
+         LOOP  BEGIN                                                            
+         WITH  (SCB,R5)                                                         
+         WHILE ('LT R5,SCBLINK',NZ)                                             
+*                                                                               
+         IF    (SCB,NE,'SCB'),EXIT  Something changed, scram                    
+*                                                                               
+         SEG   '|'                                                              
+         SEG   SCBSTAG             Session tag                                  
+         SEG   '|'                                                              
+         SEGDC LH:SCBNO            Line number                                  
+         SEG   '|'                                                              
+         SEG   SCBGRP              Account                                      
+         SEG   '.'                                                              
+         SEG   SCBUSER                                                          
+         SEG   '|'                                                              
+         SEGT  SCBNAME             User name                                    
+         SEG   '|'                                                              
+         IF    SCBFTRC,'SEG "T"'                                                
+         SEGCR ';'                                                              
+         END                                                                    
+*                                                                               
+         SEGCR '109|End of table;'                                              
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         B     LINSEXIT            All done                                     
+*-                                                                              
+*-       SHOW LINES options.                                                    
+*-                                                                              
+LINSPRT  SCKW  ,LINSEMSG                                                        
+*-                                                                              
+LINSEMSG SEG   (R1),(R0)                                                        
+         SETMSG ': invalid SHOW LINES option.'                                  
+*                                                                               
+LINSERR  CLEAR R15                 Universal return code                        
+LINSEXIT PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHOWLTRC -- The SHOW LTRACE command.                                         
+*                                                                               
+*  The syntax for the command is:                                               
+*    SHOW LTRACE line-number                                                    
+*                                                                               
+SHLTRCWA RECORD BEGIN                                                           
+SHLTLNO  DS    F                   Milten line-number                           
+SHLTACCT DS    CL(L'SCBACCT)       Tracee's account                             
+*                                                                               
+SHLTRCQH DS    A                   Trace entry queue head                       
+SHLTRCQT DS    A                   Trace entry queue tail                       
+*                                                                               
+SHLTAFT  DS    F                   Show unique trace ids after this             
+         END                                                                    
+*-                                                                              
+SHOWLTRC PROC  SHLTRCWA                                                         
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         CLEAR SHLTRCWA            Clear work area                              
+*-                                                                              
+*-       Check for system privileged user.                                      
+*-                                                                              
+         IF    ^CCBFPRIV,BEGIN     Not priv'd...                                
+         SETMSG 'Privileged command.'                                           
+         B     LTRCERR                                                          
+         END                                                                    
+*-                                                                              
+*-       Scan for SHOW LTRACE options.                                          
+*-                                                                              
+         SCAN  LTRCPRT,CVSCNCB     SHOW LTRACE options                          
+*                                                                               
+         L     R15,SHLTLNO         Session no.                                  
+         IF    (R15,LGE,CVMAXSES),BEGIN  Too high...                            
+         SEGDC (R15)                                                            
+         SETMSG ': MILTEN line-number is out of bounds.'                        
+         B     LTRCERR                                                          
+         END                                                                    
+*                                                                               
+         SLL   R15,2               Session no times 4                           
+         L     R1,CVSATP           Session index table ptr                      
+         LT    R6,@R1(R15)         Get SCB ptr                                  
+         IF    NP,BEGIN                                                         
+         SEG   'Line '                                                          
+         SEGDC L:SHLTLNO                                                        
+         SETMSG ' is not logged on.'                                            
+         B     LTRCERR                                                          
+         END                                                                    
+*-                                                                              
+*-       Save information from SCB.                                             
+*-                                                                              
+         WITH  (SCB,R6),BEGIN                                                   
+         MVC   SHLTACCT,SCBACCT                                                 
+         MVC   SHLTRCQH,SCBTRCQH                                                
+         MVC   SHLTRCQT,SCBTRCQT                                                
+         END                                                                    
+*-                                                                              
+*-       Display trace table title.                                             
+*-                                                                              
+         IF    (SHLTAFT,Z),BEGIN   Give title...                                
+         SEG   'Trace of line '                                                 
+         SEGDC L:SHLTLNO                                                        
+         SEG   ' '                                                              
+         SEG   SHLTACCT+3,2        gg                                           
+         SEG   '.'                                                              
+         SEG   SHLTACCT,3          uuu                                          
+         SEGWR ':'                                                              
+         END                                                                    
+*-                                                                              
+*-       Display trace table entries.                                           
+*-                                                                              
+         L     R0,SHLTAFT          Display trace entries after this             
+         L     R15,SHLTRCQH        Get first STRC entry                         
+         LCALL DISPLTRC            Display trace table                          
+         BNZ   LTRCEXIT            Error of some sort                           
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         B     LTRCEXIT            All done                                     
+*-                                                                              
+*-       SHOW LTRACE options.                                                   
+*-                                                                              
+LTRCPRT  SCKW  ,LTRCLNO,I                                                       
+         SCKW  AFTER,LTRCAFT,(P,I)                                              
+         SCKW  ,LTRCEMSG                                                        
+*-                                                                              
+LTRCLNO  MVC   SHLTLNO,@R15        Save line-number                             
+         BR    RAR                                                              
+*                                                                               
+LTRCAFT  MVC   SHLTAFT,@R15        Save after unique trace id num               
+         BR    RAR                                                              
+*                                                                               
+LTRCEMSG SEG   (R1),(R0)                                                        
+         SETMSG ': invalid SHOW LTRACE option.'                                 
+*                                                                               
+LTRCERR  CLEAR R15                 Universal return code                        
+LTRCEXIT PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DISPLTRC -- Routine to display the server trace table.                       
+*                                                                               
+*    On entry:                                                                  
+*      R0  - Match uid's higher than this                                       
+*      R15 - First STRC entry in queue (0=none)                                 
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - ok                                                                   
+*      nz- error of some kind                                                   
+*                                                                               
+DTRCWA   RECORD BEGIN                                                           
+DTRCUID  DS    F                   Match uid's ge this                          
+DTRCHID  DS    F                   Highest uid so far                           
+         END                                                                    
+*-                                                                              
+DISPLTRC PROC  DTRCWA                                                           
+         CLEAR DTRCWA                                                           
+*                                                                               
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         LR    R6,R15                                                           
+         ST    R0,DTRCUID          Save uid                                     
+*-                                                                              
+*-       Complain if trace table is empty.                                      
+*-                                                                              
+         IF    (R6,Z),BEGIN        No trace entries...                          
+         SEGCR 'Trace table is empty.'                                          
+         END                                                                    
+*-                                                                              
+*-       Step through the trace entry queue.                                    
+*-                                                                              
+         ELSE  BEGIN               Display the trace table...                   
+         LA    R5,500              Maximum loop counter                         
+         WHILE (R5,POS),BEGIN      Go through STRC queue...                     
+         WITH  (STRC,R6)                                                        
+         MVC   DTRCHID,STRCUID     Save highest uid                             
+*                                                                               
+         IF    (STRCUID,GT,DTRCUID),BEGIN  Display this trace...                
+         LA    R15,STRC                                                         
+         LCALL DISPLTRE            Display this trace entry                     
+         IF    NZ,'EXIT DISPLTRC'  Trouble, scram                               
+         END                                                                    
+*                                                                               
+         LT    R6,STRCLINK         Get next trace entry                         
+         IF    Z,EXIT              No more, all done                            
+*                                                                               
+         DECR  R5                  One less entry                               
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEG   'Highest trace id = '                                            
+         SEGDC L:DTRCHID                                                        
+         SEGCR                                                                  
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  DISPLTRE -- Routine to format a specific trace table entry.                  
+*                                                                               
+*    On entry:                                                                  
+*      R15 - STRC ptr                                                           
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - ok                                                                   
+*      nz- error of some kind                                                   
+*                                                                               
+SVDTWA   RECORD BEGIN                                                           
+SVDTTODW DS    XL16                Time of day work area                        
+         END                                                                    
+*-                                                                              
+DISPLTRE PROC  SVDTWA                                                           
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         LR    R6,R15                                                           
+         WITH  (STRC,R6)                                                        
+*-                                                                              
+*-       Format the trace entry.                                                
+*-                                                                              
+         IF    (STRC,NE,'STRC'),BEGIN  Shucks...                                
+         SEGCR 'Bad trace entry queue!'                                         
+         LA    R15,4                                                            
+         B     STREEXIT                                                         
+         END                                                                    
+*                                                                               
+         LM    R0,R1,STRCCLCK      Get time stamp                               
+         LA    R15,SVDTTODW                                                     
+         VCALL FMTTIME             Get "hh:mm:ss.th"                            
+         SEGB  (R1),(R0)                                                        
+*-                                                                              
+*-       Display trace header.                                                  
+*-                                                                              
+         SEGT  STRCTYPE            Trace type                                   
+         SEG   ' ('                                                             
+         SEGDC LH:STRCDLEN         Actual data length                           
+         IF    (STRCDLEN,NE,STRCACTLEN),BEGIN  Truncated trace...               
+         SEG   ' of '                                                           
+         SEGDC LH:STRCACTLEN                                                    
+         END                                                                    
+         SEGCR ' bytes):'                                                       
+*-                                                                              
+*-       Prefix.                                                                
+*-                                                                              
+         SETMSG '<-- '                                                          
+         IF    (STRCTYPE,EQ,'Quiet'),'SETMSG "(<) "'                            
+         IF    (STRCTYPE,EQ,'Read completion'),'SETMSG "--> "'                  
+         SEG   (R1),(R0)                                                        
+*-                                                                              
+*-       Data.                                                                  
+*-                                                                              
+         CLEAR R3                  No alternate buffer                          
+         IF    (STRCDLEN,NZ),BEGIN  Display trace data...                       
+         SETMSG STRCDATA,LH:STRCDLEN  Trace data                                
+*                                                                               
+         IF    STRCFASCII,BEGIN    Trace data is ASCII...                       
+         LA    R1,STMPSUBP                                                      
+         LR    R2,RAR                                                           
+         VCALL NGETCORE            Get a temporary buffer                       
+         LR    R3,R1                                                            
+         MOVEL @R3,STRCDATA,LH:STRCDLEN  Copy buffer                            
+         SETMSG (R3),LH:STRCDLEN                                                
+         VCALL TOEBCDIC            Convert ASCII to EBCDIC                      
+         END                                                                    
+*                                                                               
+         L     R2,=A(X'15')        EBCDIC NL                                    
+         LA    R15,=C'<-- '                                                     
+         IF    (STRCTYPE,EQ,'Quiet'),'LA R15,=C"(<) "'                          
+         IF    (STRCTYPE,EQ,'Read completion'),'LA R15,=C"--> "'                
+         LCALL NLFMT               Write lines in mixed format                  
+         END                                                                    
+         SEGCCR                                                                 
+*                                                                               
+         IF    ('LTR R1,R3',NZ),BEGIN  Free alternate buffer...                 
+         VCALL FREECORE            Release temporary buffer                     
+         END                                                                    
+*                                                                               
+         CLEAR R15                 A-ok                                         
+*                                                                               
+STREEXIT PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  NLFMT -- Routine to seg text and start a new line every time                 
+*    an "escape" character is found.  The caller passes up to four              
+*    characters which are to be considered ESCAPE characters.                   
+*                                                                               
+*    Based on Wylbur's ESCFMT routine.                                          
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*      R15 - 4 char continuation prompt ptr                                     
+*      R2 - four bytes of ESCAPE characters (a X'00' means ignore)              
+*                                                                               
+ESCWA    RECORD BEGIN                                                           
+ESCTRT   DS    XL256               Working TRT table                            
+         END                                                                    
+*-                                                                              
+NLFMT    PROC  ESCWA                                                            
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*-                                                                              
+*-       Set up TRT table to stop on all "escape" characters.                   
+*-                                                                              
+         CLEAR ESCTRT              Initialize working TRT table                 
+         WHILE (R2,NZ),BEGIN       Set ESC characters...                        
+         LR    R3,R2                                                            
+         N     R3,=A(X'FF')                                                     
+         IF    NZ,BEGIN            Set stop byte in TRT table...                
+         LA    R3,ESCTRT(R3)                                                    
+         MVI   @R3,X'FF'           Stop on this character                       
+         END                                                                    
+*                                                                               
+         SRL   R2,8                Next byte                                    
+         END                                                                    
+*                                                                               
+         LR    R3,R0               Save len...                                  
+         LR    R4,R1               ...loc                                       
+         LR    R5,R15              ...and indentation prompt                    
+*-                                                                              
+*-       Seg text.                                                              
+*-                                                                              
+         WHILE (R3,POS),BEGIN      Go through text...                           
+         LR    R15,R3                                                           
+         CEIL  R15,256                                                          
+         LA    R1,@R4(R15)                                                      
+         DTEX  R15,'TRT @R4(0),ESCTRT'  Find control char                       
+         SR    R1,R4               No. of EBCDIC chars                          
+         LR    R0,R1                                                            
+         LR    R1,R4                                                            
+         AR    R4,R0               Update...                                    
+         SR    R3,R0               ...ptrs                                      
+         IF    (R0,POS),'LCALL MIXFMT'  Write the text                          
+         SEGCCR                                                                 
+*                                                                               
+         IF    (R3,POS),BEGIN      We stopped on an ESC...                      
+         IF    (R3,GT,1),'SEG @R5,4'  Continuation line                         
+*                                                                               
+         LA    R4,@R4+1            Skip over the ESC character                  
+         DECR  R3                  One less character now                       
+         END                                                                    
+         END                                                                    
+*                                                                               
+         SEGCCR                                                                 
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MIXFMT -- Routine to seg line in mixed EBCDIC and HEX                        
+*    format.  (This routine was "borrowed" from Wylbur.)                        
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - line loc, len                                                    
+*                                                                               
+MIXWA    RECORD BEGIN                                                           
+MIXWORK  DS    D                                                                
+         END                                                                    
+*-                                                                              
+MIXFMT   PROC  MIXWA                                                            
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         LR    R3,R0                                                            
+         LR    R4,R1                                                            
+*                                                                               
+         WHILE (R3,POS),BEGIN                                                   
+         L     R15,=A(MIXTBL)                                                   
+         LR    R14,R15                                                          
+         LR    R15,R3                                                           
+         CEIL  R15,256                                                          
+         LA    R1,@R4(R15)                                                      
+         DTEX  R15,'TRT @R4(0),@R14'  Find control char                         
+         SR    R1,R4               No. of EBCDIC chars                          
+         LR    R0,R1                                                            
+         LR    R1,R4                                                            
+         AR    R4,R0               Update...                                    
+         SR    R3,R0               ...ptrs                                      
+         SEG   (R1),(R0)                                                        
+         IF    (R3,POS),BEGIN                                                   
+         SEG  '<'                                                               
+         LA    R5,4                                                             
+         LOOP  BEGIN                                                            
+         L     R15,=A(MIXTBL)                                                   
+         LR    R14,R15                                                          
+         LC    R15,@R4             Control char                                 
+         LC    R2,@R14(R15)                                                     
+         IF    (R2,Z),EXIT         Not a control char, scram                    
+         BTX   MIXWORK,2,(R15)                                                  
+         SEG   (R1),(R0)                                                        
+         LA    R4,@R4+1                                                         
+         DECR  R3                                                               
+         DECR  R5                                                               
+         IF    ((R3,POS),AND,(R5,NP)),'SEGBLANK; LA R5,4'                       
+         UNTIL (R3,^POS)                                                        
+         END                                                                    
+         SEG   '>'                                                              
+         END                                                                    
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+*box                                                                            
+*                                                                               
+*  MIXTBL -- TRT table for non-printing characters.  All                        
+*       non-printing characters are represented by an X'FF'.                    
+*       Modified, 11/6/90, to make X'6A' a non-printing                         
+*       character.                                                              
+*                                                                               
+*                 0 1 2 3 4 5 6 7 8 9 A B C D E F                               
+*                                                                               
+MIXTBL   DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'  0                           
+         DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'  1                           
+         DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'  2                           
+         DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'  3                           
+         DC    X'00FFFFFFFFFFFFFFFFFF000000000000'  4                           
+         DC    X'00FFFFFFFFFFFFFFFFFF000000000000'  5                           
+         DC    X'0000FFFFFFFFFFFFFFFFFF0000000000'  6                           
+         DC    X'FFFFFFFFFFFFFFFFFF00000000000000'  7                           
+         DC    X'FF000000000000000000FFFFFFFFFFFF'  8                           
+         DC    X'FF000000000000000000FFFFFFFFFFFF'  9                           
+         DC    X'FFFF0000000000000000FFFFFF00FFFF'  A                           
+         DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFF00FFFF'  B                           
+         DC    X'00000000000000000000FFFFFFFFFFFF'  C                           
+         DC    X'00000000000000000000FFFFFFFFFFFF'  D                           
+         DC    X'00FF0000000000000000FFFFFFFFFFFF'  E                           
+         DC    X'00000000000000000000FFFFFFFFFFFF'  F                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  SHOWCORE -- The SHOW CORE command.                                           
+*                                                                               
+*  The syntax for the command is:                                               
+*    SC [hexaddr|symbol] [+ nnn] [length] [OFFSET] [ASCII]                      
+*                                                                               
+SHOWCORW RECORD BEGIN                                                           
+SHOCORFL FLAG                                                                   
+         FLAG  SHCFLASC             - ASCII data format                         
+         FLAG  SHCFLDMP             - EBCDIC Dump format                        
+         FLAG  SHCFLOFF             - Show offset                               
+         FLAG  SHCFLADD             - Show address                              
+         END                                                                    
+*-                                                                              
+SHOWCORE PROC  SHOWCORW                                                         
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         CLEAR SHOWCORW            Clear work area                              
+         CLEAR R5                  Clear start address                          
+         CLEAR R6                  Clear length                                 
+*                                                                               
+         SCAN  ,CVSCNCB            Scan next token                              
+         IF    (R0,NP),SHCERR                                                   
+         VCALL ADDRSYM             Lookup symbol                                
+         IF    ^NEG,'LR R5,R15'    Symbol address                               
+         ELSE  BEGIN               Not a symbol...                              
+         XTB   (R1),(R0)           Maybe it's hex                               
+         BNZ   SHCERR                                                           
+         LR    R5,R15              Set start address                            
+         END                                                                    
+*                                                                               
+         SCAN  ,CVSCNCB                                                         
+         IF    ((R0,P),AND,(@R1,EQ,'+')),BEGIN                                  
+         SCAN  ,CVSCNCB                                                         
+         IF    (R0,NP),SHCERR                                                   
+         IF    (@R1,EQ,'0'),BEGIN                                               
+         XTB   (R1),(R0)                                                        
+         END                                                                    
+         ELSE  BEGIN                                                            
+         DTB   (R1),(R0)                                                        
+         END                                                                    
+         IF    (R0,NZ),SHCERR                                                   
+         AR    R5,R15                                                           
+         SCAN  ,CVSCNCB            Scan next token                              
+         END                                                                    
+*                                                                               
+         WHILE (R0,P),BEGIN        Scan any more options                        
+         IF    (CVSCNKW,EQ,'OFF'),'SET SHCFLOFF'                                
+         ELSEIF (CVSCNKW,EQ,'ASC'),'SET SHCFLASC'                               
+         ELSE  BEGIN                                                            
+         IF    (@R1,EQ,'0'),BEGIN                                               
+         XTB   (R1),(R0)                                                        
+         END                                                                    
+         ELSE  BEGIN                                                            
+         DTB   (R1),(R0)                                                        
+         END                                                                    
+         IF    (R0,NZ),SHCERR                                                   
+         LR    R6,R15                                                           
+         END                                                                    
+         SCAN  ,CVSCNCB                                                         
+         END                                                                    
+*                                                                               
+         IF    (R0,NZ),SHCERR                                                   
+*                                                                               
+         IF    ^SHCFLOFF,'SET SHCFLADD'                                         
+         IF    ^SHCFLASC,'SET SHCFLDMP'                                         
+         IF    (R6,Z),'LA R6,8*16'  Default is 8 lines of text                  
+         HEXDUMP (R5),(R6),OPT=LC:SHOCORFL                                      
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         EXIT                                                                   
+*                                                                               
+SHCERR   LA    R15,4               Error                                        
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  PATCORE -- Patch core command.                                               
+*                                                                               
+*  The syntax for the command is:                                               
+*    PC hexaddr|symbol [+ nnn] [replacement data]                               
+*                                                                               
+PCWA     RECORD BEGIN                                                           
+PCLOC    DS    F                   Patch address                                
+PCTLEN   DS    H                   Replacement text length                      
+         DS    H                   Reserved                                     
+PCTEXT   DS    CL128               Replacement text                             
+PCXTEXT  DS    CL128               Old text                                     
+         END                                                                    
+*-                                                                              
+PATCORE  PROC  PCWA                                                             
+         WITH  CCB,(SEGCB,R7)      Entry assumption                             
+*                                                                               
+         CLEAR PCWA                Clear work area                              
+*-                                                                              
+*-       Check for system privileged user.                                      
+*-                                                                              
+         IF    ^CCBFPRIV,BEGIN     Not priv'd...                                
+         SEG   'Privileged command.'                                            
+         B     PCERR                                                            
+         END                                                                    
+*-                                                                              
+*-       Scan "hexaddr|symbol [+ nnn]".                                         
+*-                                                                              
+         SCAN  ,CVSCNCB            Scan next token                              
+         IF    (R0,NP),PCERR                                                    
+         VCALL ADDRSYM             Get symbol addr in R15                       
+         IF    NEG,BEGIN           Not a symbol...                              
+         XTB   (R1),(R0)           Maybe it's hex                               
+         BNZ   PCERR                                                            
+         END                                                                    
+         ST    R15,PCLOC           Save patch core location                     
+*                                                                               
+         SCAN  ,CVSCNCB                                                         
+         IF    ((R0,P),AND,(@R1,EQ,'+')),BEGIN                                  
+         SCAN  ,CVSCNCB                                                         
+         IF    (R0,NP),PCERR                                                    
+         IF    (@R1,EQ,'0'),BEGIN                                               
+         XTB   (R1),(R0)                                                        
+         END                                                                    
+         ELSE  BEGIN                                                            
+         DTB   (R1),(R0)                                                        
+         END                                                                    
+         IF    (R0,NZ),PCERR                                                    
+         A     R15,PCLOC           Add offset to address                        
+         ST    R15,PCLOC           Save patch core location                     
+         SCAN  ,CVSCNCB            Scan next token                              
+         END                                                                    
+*-                                                                              
+*-       Scan "replacement data".                                               
+*-                                                                              
+         IF    (R0,NP),PCERR       Missing data                                 
+         LA    R15,PCTEXT          Put text here                                
+         VCALL DEQSTR              Dequote text                                 
+         IF    NEG,BEGIN           Not a string...                              
+         VCALL HEXSTR              Check for hex                                
+         BM    PCERR               Invalid hex digits                           
+         END                                                                    
+         CEIL  R0,L'PCTEXT                                                      
+         STH   R0,PCTLEN           Save data length                             
+*-                                                                              
+*-       Patch core.                                                            
+*-                                                                              
+         LH    R2,PCTLEN           Length of replacement text                   
+         L     R3,PCLOC            Put text here                                
+         LR    R15,R2                                                           
+         MOVE  R15,PCXTEXT,@R3     Save the old data                            
+*                                                                               
+         LR    R15,R2                                                           
+         MOVE  R15,@R3,PCTEXT      Patch core                                   
+*-                                                                              
+*-       Report the old data.                                                   
+*-                                                                              
+         SEG   'Old data was '                                                  
+         SETMSG PCXTEXT,(R2)                                                    
+         LA    R15,SEGCB                                                        
+         VCALL HEXSEG                                                           
+         SEGWR                                                                  
+*                                                                               
+         CLEAR R15                 A-ok                                         
+         EXIT                                                                   
+*                                                                               
+PCERR    LA    R15,4               Error                                        
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  XMONMSG -- Routine to write monitor message.                                 
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - message loc, len                                                 
+*                                                                               
+XMONMSG  XPROC                                                                  
+         LT    CMDR,CVMONCMD       CMD ptr for monitor (or zero)                
+         IF    NZ,BEGIN            We are monitoring...                         
+         WITH  CMD                                                              
+         SEG   (R1),(R0),.CMDSG    Write the message                            
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  XMONHEX -- Routine to write monitor data in hex.                             
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - data loc, len                                                    
+*                                                                               
+XMONHEX  XPROC                                                                  
+         LT    CMDR,CVMONCMD       CMD ptr for monitor (or zero)                
+         IF    NZ,BEGIN            We are monitoring...                         
+         WITH  CMD                                                              
+         SETMSG (R1),(R0)           Data                                        
+         LA    R15,CMDSG           SEGCB ptr                                    
+         LCALL HEXSEG              Write it in hex                              
+         SEG   ' ',,.CMDSG         Add a blank                                  
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  XMONDUMP -- Routine to write hex dump of area specified.                     
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - area loc, len                                                    
+*                                                                               
+XMONDUMP XPROC                                                                  
+         LT    CMDR,CVMONCMD       CMD ptr for monitor (or zero)                
+         IF    NZ,BEGIN            We are monitoring...                         
+         WITH  CMD                                                              
+         HEXDUMP (R1),(R0),.CMDSG,OPT=L'HXDFLOFF  Show offset                   
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  XMONREG -- Routine to write a register's contents.                           
+*                                                                               
+*    On entry:                                                                  
+*      R0 - value of register                                                   
+*                                                                               
+XMONREG  XPROC                                                                  
+         LT    CMDR,CVMONCMD       CMD ptr for monitor (or zero)                
+         IF    NZ,BEGIN            We are monitoring...                         
+         WITH  CMD                                                              
+         SEGHX (R15),8,.CMDSG      Write contents in hex                        
+         SEG   ' ',,.CMDSG         Add a blank                                  
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  XMONWR -- Routine to actually write the XMON text.                           
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - message loc, len                                                 
+*                                                                               
+XMONWR   XPROC                                                                  
+         LT    CMDR,CVMONCMD       CMD ptr for monitor (or zero)                
+         IF    NZ,BEGIN            We are monitoring...                         
+         WITH  CMD                                                              
+         SEGWR ,,.CMDSG            Write the message                            
+         END                                                                    
+*                                                                               
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HEXSEG -- Routine to seg data in hex format.                                 
+*                                                                               
+*    On entry:                                                                  
+*      R1,R0 - data loc, len                                                    
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+HXSWA    RECORD BEGIN                                                           
+HXSWORK  DS    D                   Work area                                    
+         END                                                                    
+*-                                                                              
+HEXSEG   XPROC HXSWA                                                            
+         LR    R3,R0                                                            
+         LR    R4,R1                                                            
+         LR    R5,R15              Save SEGCB ptr                               
+         SEGDEF (R5)                                                            
+*                                                                               
+         WHILE (R3,POS),BEGIN      Keep stepping through the data...            
+         BTX   HXSWORK,8,L:@R4     Convert a word to hex                        
+*                                                                               
+         LR    R0,R3                                                            
+         CEIL  R0,4                                                             
+         AR    R0,R0               Get correct length for digits                
+*                                                                               
+         SEG   HXSWORK,(R0)        Seg what we have                             
+         LA    R4,@R4+4            Next word                                    
+         SH    R3,=H'4'                                                         
+         END                                                                    
+*                                                                               
+HEXFEXIT PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  HEXDUMP -- Write formatted hex dump.                                         
+*                                                                               
+*    On entry:                                                                  
+*      R0  - length of area                                                     
+*      R1  - address of area                                                    
+*      R2  - option flag byte                                                   
+*      R15 - SEGCB address                                                      
+*                                                                               
+HXDWA    RECORD BEGIN                                                           
+HXDSEGCB DS    A                   SEGCB address                                
+HXDTRT   DS    A                   Translate table address                      
+*                                                                               
+HXDFLAGS FLAG                                                                   
+         FLAG  HXDFLASC             - ASCII data format                         
+         FLAG  HXDFLDMP             - EBCDIC Dump format                        
+         FLAG  HXDFLOFF             - Show offset                               
+         FLAG  HXDFLADD             - Show address                              
+*                                                                               
+HXDUNPK  DS    CL2                 Working UNPK area                            
+*                                                                               
+HXDADDR  DS    CL8                 Address                                      
+         DS    CL2                                                              
+HXDHEXDM DS    0CL(8*4+3)          Hex bytes (dump format)                      
+HXDHEX   DS    CL(16*3+1)          Hex bytes (data format)                      
+         DS    CL2                                                              
+         DS    C                   '|'                                          
+         DS    CL16                Char display                                 
+         DS    C                   '|'                                          
+HXDLINE  EQU   HXDADDR,*-HXDADDR,C'C'                                           
+         END                                                                    
+*-                                                                              
+HEXDUMP  PROC  HXDWA                                                            
+         LR    R5,R1               Save start address                           
+         LR    R6,R1               Init data pointer                            
+         LR    R7,R0               Init data counter                            
+*                                                                               
+         STC   R2,HXDFLAGS         Save option flags                            
+         IF    ^HXDFLOFF,'SET HXDFLADD'  Tidy up flags                          
+         IF    ^HXDFLASC,'SET HXDFLDMP'  Ditto                                  
+*                                                                               
+         ST    R15,HXDSEGCB        Save SEGCB address                           
+         SEGDEF L:HXDSEGCB                                                      
+*                                                                               
+         IF    HXDFLDMP,'MVC HXDTRT,=A(DUMPTBL)'   Dump fmt                     
+         ELSE  'MVC HXDTRT,=A(ASCIITBL)'           ASCII fmt                    
+         WHILE (R7,P),BEGIN        Loop on data count                           
+         MVI   HXDLINE,C' '        Init print line buffer                       
+         MVC   HXDLINE+1(L'HXDLINE-1),HXDLINE                                   
+         LR    R15,R6              Data address                                 
+         IF    HXDFLAGS.HXDFLADD,BEGIN   If address format,                     
+         BTX   HXDADDR,8,(R15)     Format address                               
+         END                                                                    
+         ELSE  BEGIN               Else display offset                          
+         SR    R15,R5              Get data offset                              
+         BTX   HXDADDR+4,4,(R15)   Format offset                                
+         END                                                                    
+         LA    R2,HXDHEX           Init hex display pointer                     
+         IF    HXDFLDMP,BEGIN      If dump format,                              
+         LA    R3,L'HXDHEXDM+2(R2)  Init char display pointer                   
+         END                                                                    
+         ELSE  BEGIN               Else data format,                            
+         LA    R3,L'HXDHEX+2(R2)                                                
+         END                                                                    
+         MVI   @R3,C'|'                                                         
+         MVI   @R3+17,C'|'                                                      
+         INCR  R3                                                               
+         LA    R4,1                Loop counter for this line                   
+         WHILE ((R4,LE,16),AND,(R7,P)),BEGIN                                    
+         MVC   HXDUNPK(1),@R6      Copy data byte                               
+         UNPK  @R2(3),HXDUNPK(2)   Format data byte (plus junk byte)            
+         NC    @R2(2),=X'0F0F'                                                  
+         TR    @R2(2),=C'0123456789ABCDEF'                                      
+         MVI   @R2+2,C' '                                                       
+         MVC   @R3(0),@R6          Move to char display                         
+         L     R15,HXDTRT          Translate table address                      
+         TR    @R3(0),@R15         Translate to text char                       
+         LA    R2,2(R2)            Incr hex pointer                             
+         IF    ^HXDFLAGS.HXDFLDMP,BEGIN  If not dump format,                    
+         INCR  R2                  Extra space                                  
+         IF    (R4,EQ,8),'INCR R2'  Extra space after 8th byte                  
+         END                                                                    
+         ELSE  BEGIN                                                            
+         LR    R0,R4                                                            
+         N     R0,=A(3)                                                         
+         IF    Z,'INCR R2'         Space after every 4th byte                   
+         END                                                                    
+         INCR  R3                  Incr char pointer                            
+         INCR  R6                  Incr data pointer                            
+         DECR  R7                  Decr data counter                            
+         INCR  R4                  Incr line loop counter                       
+         END                                                                    
+         SEGWR HXDLINE             Write line                                   
+         END                                                                    
+         PEND                                                                   
+*-                                                                              
+*-       Translate table to convert funny chars to dots.                        
+*-                                                                              
+DUMPTBL  DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'                              
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'                              
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'                              
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'                              
+         DC    X'404B4B4B4B4B4B4B4B4B4A4B4C4D4E4F'                              
+         DC    X'504B4B4B4B4B4B4B4B4B5A5B5C5D5E4B'                              
+         DC    X'60614B4B4B4B4B4B4B4B4B6B6C6D6E6F'                              
+         DC    X'4B4B4B4B4B4B4B4B4B4B7A7B7C7D7E7F'                              
+         DC    X'4B8182838485868788894B4B4B4B4B4B'                              
+         DC    X'4B9192939495969798994B4B4B4B4B4B'                              
+         DC    X'4B4BA2A3A4A5A6A7A8A94B4B4B4B4B4B'                              
+         DC    X'4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B'                              
+         DC    X'4BC1C2C3C4C5C6C7C8C94B4B4B4B4B4B'                              
+         DC    X'4BD1D2D3D4D5D6D7D8D94B4B4B4B4B4B'                              
+         DC    X'4B4BE2E3E4E5E6E7E8E94B4B4B4B4B4B'                              
+         DC    X'F0F1F2F3F4F5F6F7F8F94B4B4B4B4B4B'                              
+*-                                                                              
+*-       ASCII translate table                                                  
+*-                                                                              
+ASCIITBL DC    32C'.'                 00-1F                                     
+         DC    C' !"#$%&&''()*+,-./'  20-2F                                     
+         DC    C'0123456789:;<=>?'    30-3F                                     
+         DC    C'@ABCDEFGHIJKLMNO'    40-4F                                     
+         DC    C'PQRSTUVWXYZ[\]_'    50-5F                                     
+         DC    C'.abcdefghijklmno'    60-6F                                     
+         DC    C'pqrstuvwxyz{|}^.'    70-7F                                     
+         DC    127C'.',C'#'           80-FF                                     
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MCOMFAIL -- Routine to handle an abend when a command was                    
+*    active.  If we can cleanup the path then we can failsoft,                  
+*    otherwise MILTEN will go down.                                             
+*                                                                               
+*    On entry:                                                                  
+*      R1 - CMD ptr                                                             
+*                                                                               
+*    On exit, R15 (and cc):                                                     
+*      0 - OK; we cleaned everything up                                         
+*      4 - can't recover                                                        
+*                                                                               
+MCOMFAIL XPROC                                                                  
+         LR    CMDR,R1                                                          
+         WITH  CMD                                                              
+         IF    (CMD,NE,'CMD'),'LA R15,4; EXIT MCOMFAIL'                         
+*                                                                               
+         LA    R1,CMD                                                           
+         ACALL CMDCLOSE            Close the command path                       
+*                                                                               
+         CLEAR R15                 We cleaned up OK                             
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MCOMDIE -- Routine to do final cleanup.  It is entered when                  
+*    MILTEN is terminating.                                                     
+*                                                                               
+*    On entry:                                                                  
+*      R0 - 0: normal, 4: error                                                 
+*      R1 - FEB ptr                                                             
+*                                                                               
+MCOMDIE  XPROC                                                                  
+*-                                                                              
+*-       Nothing to do, simply return.                                          
+*-                                                                              
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  MCOMFMT -- Routine to do control block formatting.                           
+*                                                                               
+*    On entry:                                                                  
+*      R1  - FEB ptr                                                            
+*      R15 - SEGCB ptr                                                          
+*                                                                               
+MCOMFMT  XPROC                                                                  
+         PEND                                                                   
+*                                                                               
+         QLTORG                                                                 
+         END   .                                                                

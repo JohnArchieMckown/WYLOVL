@@ -1,0 +1,587 @@
+DBESPIE   TITLE 'Debugging stuff'
+********************************************************************
+*** %%Module: wings asm dbespie;                                   *
+********************************************************************
+***                                                                *
+***                                                                *
+***  WINGS -- DBESPIE                                              *
+***                                                                *
+***    DEBUGGER ESPE exit routine.  This module must be linked     *
+***    with subtask to be debugged.  Also XDBESPIE routine must    *
+***    be called to setup Debugger ESPIE exit in subtask to be     *
+***    debugged.                                                   *
+***                                                                *
+***    Created, 01/01/92, CH                                       *
+***                                                                *
+***                                                                *
+***  Modifications:                                                *
+***    01/01/92  CH   Initial version.                             *
+***                                                                *
+***                                                                *
+***                                                                *
+********************************************************************
+DBESPIE  HIBAL ASSOC=YES
+         REGS  FSR,,,,,,,BR,WAR,,,TVTR,(GVTR,LSR),SPR,RAR
+*
+         SYSDEFN
+*
+         TITLE 'Wings work areas'
+         EJECT ,
+         COPY  TPENTRY             TRAP ENTRY
+         EJECT ,
+         COPY  DVWA                GLOBAL DEBUG AREA
+         EJECT ,
+         COPY  LCLDBWA             LOCAL (ESPIE) DEBUG AREA
+*
+         PUSH  DSECTS              Common DSECTS
+GVT      RECORD BEGIN
+         COPY  GVT
+         END
+*
+TVT      RECORD BEGIN
+         COPY  TVT
+         END
+         POP   DSECTS
+*
+*
+         IHAEPIE
+*
+         USING GVT                 Universal assumption
+         USING TVT                 Universal assumption
+*
+         TITLE 'Local Macros'
+         TITLE 'DEBUG stuff'
+DBESPIE  CSECT
+         DC    C'SHOW CORE, SCOTTY, THEN BEAM ME UP'
+*
+*    This module is the DEBUGGER interface to the
+*    TASK (SUBTASK) being debugged.  Work in progress.
+*
+         EJECT
+*
+*
+*  CODE GOES HERE
+*
+*
+         TITLE 'DEBUG interface; ESPIE routine.'
+*box
+*
+*
+*  SET ESPIE -    XDBESPIE routine
+*
+*  CAUTION:
+*  DO not set exit for program exception 15.
+*  This can cause an infinit loop if a program
+*  exception 15 happens.
+*
+*  CAUTION:
+*  The SYMBOL table should exist prior to this call.
+*  (as we set the symbol table pointer up at this time)
+*
+*
+SETSPWA  RECORD BEGIN              GENERATE ESPIE PARAMETER LIST
+         ESPIE  SET,*-*,MF=L
+         END
+*
+*
+XDBESPIE XPROC SETSPWA
+         LA    R6,TVTLCLDB
+         USING LCLDBWA,R6
+*
+*                                  SET UP LOCAL ESPIE (DEBUG) WA
+         L     R1,TVTTCBP
+         ST    R1,LDBTCBP
+         LA    R1,GVTDVWA
+         ST    R1,LDBDVWAP
+         L     R1,TVTSYMTB
+         ST    R1,LDBSYMP
+*
+*                                  SET ESPIE EXIT, WORK AREA PTR
+         L     R1,=A(PROTESP)      LOAD ADCON FOR ESPIE PARM LIST
+         MVC   SETSPWA(L'PROTESP),@R1  MOVE IN MODEL ESPIE PARM LIST
+         LA    R3,LCLDBWA
+*GEN
+         ESPIE SET,ESPIERTN,((1,14)),PARAM=(R3),MF=(E,SETSPWA)
+*NOGEN
+         PEND
+         EJECT
+*box
+*
+*  ESPIE routine
+*
+*  SET THIS ROUTINE AS FOLLOWS:
+*     ESPIE  SET,ESPIERTN,(1-14)
+*
+*  CAUTION: DO NOT SET (15) AS A 15 MAY RESULT IN AN INFINITE LOOP
+*
+*  This routine is more or less as follows:
+*     * stop and establish addressability, stack, get common
+*       debug work area.
+*     * if debugging this tcb, post debugger to process this
+*       trap (or interrupt)
+*     * resume execution
+*       trapped instructions are simulated
+*
+*  Note:
+*  work in progress...
+*
+*  CAUTION !  CAUTION !!
+*  ESPIE stack area is VERY SMALL!  Nesting more than 2 calls
+*  or using the stack for more than register save area will
+*  probably cause program to fail in most miserably hard to
+*  to debug way !!  This code once debugged should not need
+*  any (yeah right) changes.  Change code in the Debugger!
+*
+*  NOTE:
+         DROP  TVT
+*  we do not allow addressing to TVT (other than LCLDBWA,
+*  which is in TVT) during TRAP processing; ie. espie routine.
+*  This insures that we are not trashing any user TVT fields.
+*  This is not a requirement.  It should be ok to look at TVT
+*  fields. But it helps us avoid bugs like the PROC macro
+*  clobbering the TVT trace registers.
+*
+*
+ESPIERTN LABEL ,
+*
+*                                  GET ADDRESSABILITY, ETC..
+*                                  DANCE, BUT DON'T STEP ON OWN FEET
+         WITH  (*,R15),BEGIN
+         QSNAP 'ESPIERTN'
+         QSNAP @R1,128
+         LR    R0,R1
+         WITH  (EPIE,R1),BEGIN
+         L     R1,EPIEPARM
+         END   , WITH EPIE,R1
+         WITH  (LCLDBWA,R1),BEGIN
+         ST    R0,LDBEPIEP
+         STM   R0,R15,LDBSREGS
+         LA    R13,LDBSTACK
+         LA    R6,LCLDBWA
+         END   , WITH LCLDVWA,R1
+         USING LCLDBWA,R6
+         BALR  BR,0                BR ?? (R10??, BR NOT DEFINED)
+         END   , WITH *,R15
+         USING *,BR
+         L     R5,LDBDVWAP         DVWA POINTER
+         USING DVWA,R5
+         L     R4,LDBEPIEP
+         USING EPIE,R4
+*
+*                                  FIX INTERRUPT ADDRESS
+         GETIA R1,EPIEPSW          ACTUAL ADDR = ADDR - ILC
+         LH    R2,EPIEINT          (ILC - INSTRUCTION LEN CODE)
+         SR    R1,R2
+         SETIA R1,EPIEPSW
+         CLEAR R2                  CLEAR ILC AFTER FIX
+         STH   R2,EPIEINT
+*
+*                                  IF CONTINUE TRAP,,, OUT OF HERE !
+         GETIA R1,EPIEPSW
+         LA    R2,LDBINST2
+         IF    (R1,EQ,R2),BEGIN
+         L     R1,LDBNEXT
+         SETIA R1,EPIEPSW
+         CLEAR LDBCURR
+         CLEAR LDBNEXT
+         B     SPIEEXIT
+         END
+*
+*                                  ARE WE CURRENT DEBUGGEE ??
+         L     R1,LDBTCBP
+         L     R2,DVEETCBP
+         L     R3,DVEEACTV
+         IF    ((R2,Z),OR,(R2,EQ,R1)),BEGIN
+         IF    ((R3,Z),OR,(R3,EQ,R1)),BEGIN
+         LR    R14,R1              TCB ADDRESS
+         LR    R15,R1
+         CDS   R2,R14,DVEETCBP     TRY TO BE DEBUGGEE, AND ACTIVE
+*
+*                                  IF CURRENT DEBUGGEE AND ACTIVE
+         IF    Z,BEGIN               LOAD EPIE AND SYMBOL TABLE PTRS
+         L     R0,LDBEPIEP           POST DEBUGER AND WAIT
+         ST    R0,DVEPIEP
+         L     R0,LDBSYMP
+         ST    R0,DVSYMP
+         LA    R0,LCLDBWA
+         LA    R1,DVWA
+         ACALL XFAILFIX            IF INSTR EXECUTION FAILED FIX
+         CLEAR DVEEECB
+         LA    R1,DVERECB
+         POST  (R1),0
+         LA    R1,DVEEECB
+         WAIT  ECB=(R1)
+*
+*                                  IF NEW IA, SET LOCALWA FLAG
+         IF    DVFNEWIA,BEGIN
+         SET   LDBFNEWIA
+         CLEAR DVFNEWIA
+         END
+*
+*                                  UNLOCK DVWA
+         L     R2,LDBTCBP
+         L     R3,LDBTCBP
+         L     R14,LDBTCBP
+         CLEAR R15
+         CDS   R2,R14,DVEETCBP
+         IF    NZ,BEGIN
+         QSNAP 'DVWA LOCK LOGIC ERROR'
+         END
+         END
+         END
+         END
+*
+*                                  IF TRAP, SIMUALATE INSTRUCTION..
+         LA    R0,DVWA             GLOBAL DEBUG AREA
+         LA    R1,LCLDBWA          LOCAL DEBUG AREA
+         ACALL SETUPX              SET UP INSTRUCTION EXECUTION
+*
+SPIEEXIT LABEL ,
+*
+         LM    R0,R15,LDBSREGS
+         BR    R14
+*
+         DROP  BR
+         DROP  R4
+         DROP  R5
+         DROP  R6
+         EJECT
+*
+*  IF TRAPPED INSTURCTION EXECUTION FAILED
+*  SET INTERRUPT (AS OPPOSED TO TRAP) AND TRY AGAIN
+*
+*  ON ENTRY:
+*        R0 - LCLDBWA
+*        R1 - DVWA
+*
+XFAILFIX PROC  TRACE=NO
+         LR    R6,R0
+         USING LCLDBWA,R6
+         LR    R5,R1
+         USING DVWA,R5
+         L     R4,LDBEPIEP
+         USING EPIE,R4
+*
+*                                  IF INSTRUCTION EXECUTION FAILED
+         GETIA R1,EPIEPSW
+         LA    R2,LDBINST1
+         IF    (R1,EQ,R2),BEGIN
+         L     R1,LDBCURR
+         SETIA R1,EPIEPSW
+         SET   DVFIRUPT            SIGNAL INTERRUPT
+         END
+*
+         PEND
+         DROP  R4
+         DROP  R5
+         DROP  R6
+         EJECT
+*box
+*
+*  SETUPX - SETUP TRAPPED INSTRUCTION EXECUTION
+*
+*  ON ENTRY:
+*     R0 - DVWA
+*     R1 - LCLDBWA
+*
+*  NOTE:
+*  WE HANDLE TRAPS BY MOVING THE TRAPPED INSTRUCTION INTO
+*  THE LCLDBWA.  WE FOLLOW THE INSTRUCTION WITH A TRAP (WE CALL
+*  IT A CONTINUATION TRAP, IT IS NOT IN THE TRAP TABLES)
+*  IF A CONTINUATION TRAP IS HIT WE SIMPLY RESUME EXECUTION
+*  AT THE ACTUAL NEXT INSTRUCTION ADDRESS.
+*
+SETUPX   PROC  TRACE=NO
+         LR    R6,R1
+         LR    R5,R0
+         USING LCLDBWA,R6
+         USING DVWA,R5
+         L     R4,DVEPIEP
+         USING EPIE,R4
+*
+*                                  IF NEW PSW ADDR (IE. PIA)
+         IF    LDBFNEWIA,BEGIN
+         CLEAR LDBFNEWIA
+         B     SETXEXIT
+         END
+*
+*                                  IF TRAP HIT,,,
+         LA    R0,DVWA
+         GETIA R1,EPIEPSW
+         ACALL FINDTRAP
+         IF    Z,BEGIN
+         LR    R3,R1
+         USING TPENTRY,R3
+*                                  SAVE CURRENT, NEXT INSTR ADDRS
+         L     R2,TPADDR
+         ST    R2,LDBCURR
+         LA    R2,@R2+2
+         CLI   TPOPCODE,X'40'
+         IF    GE,'LA R2,@R2+2'
+         CLI   TPOPCODE,X'D0'
+         IF    GE,'LA R2,@R2+2'
+         ST    R2,LDBNEXT
+*                                  SET UP CURRENT INSTR IN WORK AREA
+         MVC   LDBINST1,=X'0700070007000700'  NOPS
+         MVC   LDBINST1(2),TPOPCODE  OPCODE
+         L     R2,TPADDR           ACTUAL INSTR
+         CLI   TPOPCODE,X'40'      MOVE MORE INSTR IF MORE NEEDED
+         IF    GE,BEGIN
+         MVC   LDBINST1+2(2),@R2+2
+         END
+         CLI   TPOPCODE,X'D0'
+         IF    GE,BEGIN
+         MVC   LDBINST1+4(2),@R2+4
+         END
+         MVC   LDBINST2(2),=AL2(TRAPCODE) SET CONTINUE TRAP
+         LA    R1,LDBINST1
+         SETIA R1,EPIEPSW          EXECUTE TRAPED INSTR IN WORK AREA
+         LA    R0,EPIE
+         LA    R1,LCLDBWA
+         ACALL FIXBLINK            IF NEEDED, FIX BAL, BAS TYPE INSTR
+         B     SETXEXIT
+         END
+         DROP  R3
+*
+*                                  IF NOT TRAP,, IT IS INTERRUPT
+*
+         IF    (DVEETCBP,EQ,LDBTCBP),BEGIN  IF CURRENT DEBUGGEE
+         B     SETXEXIT             WE CONTINUE TO INTERRUPT
+         END
+         ELSE  BEGIN               NOT DEBUGGEE, RETURN AND ABEND
+         ESPIE SET,ESPIERTN,(15)   DO NOT CATCH INTERRUPT
+*                                  CAUTION: A 15 INTERRUPT CODE WILL
+*                                  LOOP INFINITLY, DO NOT ALLOW 15
+*                                  IN ORIGINAL 'ESPIE SET,RTN ..'
+         B     SETXEXIT             RETURN AND ABEND !
+         END
+*
+SETXEXIT LABEL ,
+         PEND
+         DROP  R6
+         DROP  R5
+         DROP  R4
+         EJECT
+*
+*
+*   FIX BRANCH AND LINK TYPE INSTRUCTIONS.
+*
+*   ON ENTRY:
+*     R0 - EPIE WORK AREA
+*     R1 - LOCAL DEBUG WORK AREA (LCLDBWA)
+*
+*   IF WE HAVE BAL, BALR, BAS, BASR, OR BASM WE MUST
+*   SIMULATE THE INSTRUCTION.  WE PATCH THE CORRECT
+*   BRANCH ADDRESS IN THE PSW AND WE PATCH THE CORRECT
+*   RETURN (LINK/SAVE) ADDRESS IN THE THE REQUESTED
+*   REGISTER.
+*
+*   THESE INSTRUCTIONS MUST BE SIMULATED BECAUSE
+*   ALL TRAPPED INSTRUCTIONS ARE EXECUTED IN A LOCAL
+*   WORK AREA.  THEY ARE **NOT** EXECUTED IN PLACE.
+*   IF WE DO NOT SIMULATE THEM THE RETURN ADDRESS WILL
+*   POINT INTO THE LOCAL WORK AREA, THIS IS A NO-NO.
+*
+*
+*   CAUTION:
+*   DO NOT CALL ANY MORE ROUTINES FROM THIS ROUTINE.
+*   THE PROC/PEND STACK IS NOT LARGE ENOUGH !! AHH!!
+*
+*
+FIXBLINK PROC  TRACE=NO
+         LR    R6,R1
+         LR    R5,R0
+         USING LCLDBWA,R6
+         USING EPIE,R5
+         LA    R4,LDBINST1         R4 - TRAPPED INSTRUCTION OPCODE
+*
+*                                  IF BAS, BASR, BALR AND BAL
+*
+         IF    ((@R4,EQ,X'05'),OR,(@R4,EQ,X'0C'),OR,(@R4,EQ,X'0D'),    X
+               OR,(@R4,EQ,X'45'),OR,(@R4,EQ,X'47')),BEGIN
+*
+*                                  GET COMMON INFO
+         CLEAR R14                 R14 - RETURN REG*4
+         IC    R14,LDBINST1+1
+         SRL   R14,4
+         SLL   R14,2
+         CLEAR R15                 R15 - BRANCH REG*4
+         IC    R15,LDBINST1+1
+         SLL   R15,28
+         SRL   R15,26              (IE SRL R15,28; SLL R15,2)
+*
+*                                  BALR
+         IF    (@R4,EQ,X'05'),BEGIN
+*                                  SET BRANCH ADDR
+         IF    (R15,NZ),BEGIN
+         L     R1,EPIEGPR(R15)
+         SETIA R1,EPIEPSW
+         END
+         ELSE  BEGIN (R15,Z)
+         L     R1,LDBNEXT
+         SETIA R1,EPIEPSW
+         END
+*                                  SET RETURN ADDRESS
+         L     R1,LDBNEXT
+         ST    R1,EPIEGPR(R14)
+         END
+*
+*                                  BASSM
+         IF    (@R4,EQ,X'0C'),BEGIN
+*                                  SET BRANCH ADDR
+         IF    (R15,NZ),BEGIN
+         L     R1,EPIEGPR(R15)
+         ST    R1,EPIEPSW+4
+         END
+         ELSE  BEGIN (R15,Z)
+         L     R1,LDBNEXT
+         SETIA R1,EPIEPSW
+         END
+*                                  SET RETURN ADDRESS
+         L     R1,EPIEPSW+4
+         N     R1,=X'80000000'
+         O     R1,LDBNEXT
+         ST    R1,EPIEGPR(R14)
+         END
+*
+*                                  BASR
+         IF    (@R4,EQ,X'0D'),BEGIN
+*                                  SET BRANCH ADDR
+         IF    (R15,NZ),BEGIN
+         L     R1,EPIEGPR(R15)
+         SETIA R1,EPIEPSW
+         END
+         ELSE  BEGIN (R15,Z)
+         L     R1,LDBNEXT
+         SETIA R1,EPIEPSW
+         END
+*                                  SET RETURN ADDRESS
+         L     R1,EPIEPSW+4
+         N     R1,=X'80000000'
+         O     R1,LDBNEXT
+         ST    R1,EPIEGPR(R14)
+         END
+*
+*                                  BAL
+         IF    (@R4,EQ,X'45'),BEGIN
+*                                  SET BRANCH ADDR
+         CLEAR R1
+         IF    (R15,NZ),BEGIN      BASE REG
+         L     R1,EPIEGPR(R15)
+         LA    R1,0(R3)
+         END
+         CLEAR R3                  OTHER BASE REG
+         IC    R3,LDBINST1+2
+         SRL   R3,4
+         IF    (R3,NZ),BEGIN
+         SLL   R3,2
+         L     R2,EPIEGPR(R3)
+         LA    R2,0(R2)
+         AR    R1,R2
+         END
+         L     R2,LDBINST1         DISPLACEMENT
+         SLL   R2,20
+         SRL   R2,20
+         AR    R1,R2
+         SETIA R1,EPIEPSW
+*                                  SET RETURN ADDRESS
+         L     R1,LDBNEXT
+         ST    R1,EPIEGPR(R14)
+         END
+*
+*                                  BAS
+         IF    (@R4,EQ,X'4D'),BEGIN
+*                                  SET BRANCH ADDR
+         CLEAR R1
+         IF    (R15,NZ),BEGIN      BASE REG
+         L     R1,EPIEGPR(R15)
+         LA    R1,0(R3)
+         END
+         CLEAR R3                  OTHER BASE REG
+         IC    R3,LDBINST1+2
+         SRL   R3,4
+         IF    (R3,NZ),BEGIN
+         SLL   R3,2
+         L     R2,EPIEGPR(R3)
+         LA    R2,0(R2)
+         ALR   R1,R2
+         END
+         L     R2,LDBINST1         DISPLACEMENT
+         SLL   R2,20
+         SRL   R2,20
+         ALR   R1,R2
+         SETIA R1,EPIEPSW
+*                                  SET RETURN ADDRESS
+         L     R1,EPIEPSW+4
+         N     R1,=X'80000000'
+         O     R1,LDBNEXT
+         ST    R1,EPIEGPR(R14)
+         END
+*
+         END   , OF BALR, BASSM, BASR, BAL, BAS
+         PEND  ,
+         DROP  R5
+         DROP  R6
+         EJECT
+*
+*  FINDTRAP -
+*
+*  ON ENTRY:
+*        R0 - DVWA
+*        R1 - INSTURCTION ADDRESS (OR ZERO)
+*
+*  ON EXIT:
+*        R0 - TRAP NUMBER (STARTS AT 1)
+*        R1 - TRAP ADDRESS
+*        R15=0 - TRAP FOUND
+*        R15=NZ - TRAP NOT FOUND
+*
+FINDTRAP PROC  TRACE=NO
+*
+         LR    R6,R0
+         USING DVWA,R6
+         LA    R5,DVTRAPS
+         LA    R4,DVTRAPS          TRAP NDX
+         USING TPENTRY,R4
+*
+*                                  FIND TRAP
+         LA    R1,@R1
+         LA    R3,1
+         WHILE ((R1,NE,TPADDR),AND,(TPADDR,NZ)),BEGIN
+         LA    R4,TPNEXT
+         INCR  R3
+         END
+*
+*                                  SET RETURNS
+         IF    (R1,EQ,TPADDR),BEGIN TRAP FOUND
+         LR    R1,R4
+         LR    R0,R3
+         PRETURN (R0,R1)
+         CLEAR R15
+         END
+         ELSE  BEGIN               NOT FOUND
+         LA    R15,4
+         END
+*
+         PEND
+         DROP  R6
+         DROP  R4
+         EJECT
+         SPACE ,
+*GEN
+PROTESP# ESPIE SET,*-*,MF=L
+PROTESP  EQU   PROTESP#,*-PROTESP#,C'C'
+         SPACE ,
+         EJECT
+         USING TVT
+         QLTORG
+         SPACE
+*
+*
+DBESPIEX EQU   *-DBESPIE           Module length
+*
+         DC    0D'0'               FORCE OUT TO DOUBLE WORD
+         ENTRY SYMDBSPI            DEFINE SYMBOL ENTRY FOR
+SYMDBSPI DC    CL8'DBESPIE',A(DBESPIE),A(DBESPIEX)
+         DC    A(0)                End of symbols
+         END   .

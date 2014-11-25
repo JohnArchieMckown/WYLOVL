@@ -1,0 +1,592 @@
+EXPR     TITLE ' EXPR:  ARITHMETIC EXPRESSION HANDLER,  BENDER'
+***********************************************************************
+*
+*
+*        PURPOSE: -TO CONVERT INFIX EXPRESSIONS TO POLISH EXPRESSIONS.
+*
+*        INPUTS:  -POINTER TO ARITHMETIC EXPRESSION TO BE COMPILED.
+*                 -SWITCH FOR MAT STATEMENTS WHICH ARE TO BE COMPILED.
+*
+*        OUTPUTS: -ENTRIES IN PSEUDO CODE TABLE OF THE FORM:
+*                  OPERATOR,  OPERAND1,  OPERAND2.
+*                 -POINTER TO LAST ENTRY IN PSEUDO TABLE.
+*                 -POINTER TO END-SYMBOL IN STATEMENT (IN REG STMT).
+*                 -ENTRIES IN DEFAULT DIM TABLE FOR A-Z.
+*
+*        DESCRIPTION:
+*
+*              THE INCOMING STRING CONSISTS OF HALF-WORD COMPONENTS
+*              WHICH ARE EITHER OPERANDS OR OPERATORS.
+*
+*              AN OPERAND HAS THE FOLLOWING HALFWORD CODE (IN HEX):
+*
+*                   A  - Z     -   1000 - 1019
+*                   A0 - Z9    -   2000 - 2103
+*                   A$ - Z$    -   3000 - 3019
+*                   TEMP ADDR      4000 - 4XXX (FOR A-Z DIMS)
+*                   TEMP VALS      5000 - 5XXX
+*                   NUMBER CONS    6000 - 6XXX
+*                   STRING CONS-   7000 - 7XXX
+*                   TEMP ADDR      8000 - 8XXX (FOR A$-Z$ DIMS)
+*                   ZER,CON,ETC-   9000 - 90XX
+*                   SIN,COS,ETC-   A000 - A0XX
+*                   FNA- FNZ   -   B000 - B019
+*
+*              AN OPERATOR HAS THE FOLLOWING HALFWORD CODE (IN HEX):
+*                                                   PSEUDO CODE
+*                 SYMBOL        INPUT CODE       (NON-MAT)     (MAT)
+*                 ------        ----------       ---------     -----
+*                   <          -   0C00          0300
+*                   >          -   0C01          0301
+*                   <=         -   0C02          0302
+*                   >=         -   0C03          0303
+*                   <>         -   0C04          0304
+*                   =R         -   0C05          0305
+*                   =          -   0C06          0306          0506
+*                   +          -   0C07          0307          0507
+*                   -          -   0C08          0308          0508
+*                   *          -   0C09          0309 (MAT *)  0509
+*                   *          -   0C09              (SCALAR*) 050A
+*                   /          -   0C0A          030A
+*                   **         -   0C0B          030B
+*                   (          -   0C0C          030C (SUBS)
+*                   (S         -   0C0D          030D          050D
+*                   )          -   0C0E          (EVAL)        (DEFMAT)
+*                   ,S         -   0C0F
+*
+***********************************************************************
+***********************************************************************
+*
+*              AN OPERATOR WHICH IS AN END SYMBOL IS:
+*
+*                   THEN       -   0D00
+*                   STEP       -   0D01
+*                   TO         -   0D02
+*                   ,          -   0D03
+*                   ;          -   0D04
+*                   BLANK      -   0D05
+*
+*
+*
+*
+*        CALLED FROM TRANS ROUTINE TO COMPILE:
+*
+*                  -LET STATEMENTS
+*                  -IF STATEMENTS       (STOPS AT 'THEN')
+*                  -FOR STATEMENTS      (STOPS AT 'TO','STEP',BLANK)
+*                  -I/O STATEMENTS      (STOPS AT ',' ';' BLANK)
+*                  -MAT STATEMENTS
+*                  -RIGHT-SIDE OF DEF FN STATEMENTS
+*
+*
+*        METHOD OF CALLING:
+*
+*                  L      STMT,BASE OF STRING TO BE COMPILED
+*                  LA     USER,AREA
+*                  L      R15,=V(EXPR)
+*                  BALR   R14,R15
+*                  B      CODEFULL
+*
+*                  REGISTER T1 WILL CONTAIN THE LAST ITEM IN THE
+*                  POL STACK UPON RETURN FROM EXPR.  THIS WILL
+*                  BE USED BY TRANS AS THE OPERAND FOR STEP, MAX
+*                  UNSTCKFN, AND I/O PSEUDO-OPS.
+*
+*        SPECIAL CONSIDERATIONS:
+*
+*                  THIS PROGRAM DOES NOT HAVE A SAVE AREA, SO THAT
+*                  IF ANY SUBROUTINES ARE INSERTED (IE CALLED),
+*                  THE SAVE AREA CHAIN MUST BE INSERTED.
+*
+*                  UPON ENTRY TO EXPR, REGISTERS 14 - 9 WILL BE
+*                  SAVE IN TRANS'S SAVE AREA (POINTED TO BY
+*                  REGISTER 13).
+*                  EXPR EXPECTS:
+*                       REG 'USER' (REG 11) TO POINT TO AREA, AND
+*                       REG 'STMT' (REG 12) TO POINT TO STRING TO BE
+*                       COMPILED.
+*                  IT WILL BUMP REG 'STMT' ACCORDINGLY AS IT COMPILES
+*                  CODE, AND REG 'STMT' WILL BE POINTING TO THE END-
+*                  SYMBOL UPON RETURN FROM EXPR.
+*                  EXPR WILL ALSO SET REG 'EXPT1' (REG 10) TO THE LAST
+*                  ENTRY IN THE POL STACK.
+*
+*                  THE NORMAL RETURN FROM EXPR TO TRANS IS TO
+*                  4(R14).
+*                  THE ERROR RETURN FROM EXPR TO TRANS (WHEN THE
+*                  CODE TABLE IS FULL) IS TO 0(R14).
+*
+*        WORK SPACE REQUIREMENTS:
+*
+*                  -OPERATOR STACK    -50H
+*                  -OPERAND STACK     -50H
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+EXPR     CSECT
+*
+*
+*                        REGISTERS
+*
+EXPR0    EQU   0                       -TO HOLD STMT
+EXPWORK  EQU   1                       -WORK REGISTER
+EXPI     EQU   2                       -CURRENT POINTER TO OPERAND STCK
+EXPJ     EQU   3                       -CURRENT POINTER TO OPERATOR STK
+EXPK     EQU   4                       -POINTER TO NEXT AVAILABLE CODE
+EXPUN    EQU   5                       -UNARY SWITCH AND OP-SWITCH
+EXPTEMP  EQU   6                       -INDEX TO TEMP STACK
+EXPRET   EQU   7                       -LOCAL RETURN
+EXPX     EQU   8                       -WORK: CONST = 2
+EXPBASE  EQU   9                       -BASE
+EXPT1    EQU   10                      -LAST POL(I) FOR TRANS
+USER     EQU   11                      -BASE OF AREA
+STMT     EQU   12                      -POINTER TO INCOMING STRING
+EXPR13   EQU   13                      -SAVE
+RETURN   EQU   14                      -GLOBAL RETURN
+*
+* INITIALIZATION
+         SAVE  (14,9),,*              -OS ENTRY
+         BALR  EXPBASE,0
+         USING *,EXPBASE
+*        ST    EXPR13,EXPSAVE+4
+*        LA    EXPX,EXPSAVE
+*        ST    EXPX,8(EXPR13)
+*        LR    EXPR13,EXPX
+*
+         USING AREA,USER
+*
+         L     EXPI,AWORKBEG           -FOR OPERANDS
+         LA    EXPI,0(EXPI,USER)
+         LA    EXPJ,100(EXPI)          -FOR OPERATORS
+*
+         SR    EXPTEMP,EXPTEMP         -FOR TEMPS DURING RUN-TIME
+*
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+*
+*              READ A SYMBOL FROM THE INPUT STACK.  IF IT IS AN
+*              OPERAND PUSH IT INTO THE 'POL' STACK.
+*              IF IT IS AN OPEN PAREN PUSH IT INTO THE 'OP' STACK
+*              AND CONTINUE READING THE INPUT STACK.
+*              THE COMMENTARY FOR THE OTHER OPERATORS IS DESCRIBED
+*              IN DETAIL DURING THE COURSE OF THE PROGRAM.
+*
+*              THE SCHEME USED IS BASICALLY THE BAUER-SAMELSON
+*              ALGORITHM, JACM .......
+*
+         STH   EXPTEMP,0(EXPJ)         -OP(J) = 'START SYMBOL'
+*                                       (EXPTEMP=0)
+*
+         LA    EXPX,2                  -SET UP FOR POPPING
+         LR    EXPR0,STMT              -SAVE STMT FOR SCALAR MULT CHECK
+*
+EXP1000  EQU   *
+*
+         LA    EXPUN,1                 -SET UNARY SWITCH ON INDICATING
+*                                       THE NEXT SYMBOL IN THE INPUT
+*                                       STRING MAY BE + OR -.
+*
+*                   TEST FOR END-SYMBOL
+EXP1010  EQU   *
+         CLI   0(STMT),OPEND
+         BE    EXP2000
+*
+*                   TEST FOR OPERAND
+*
+         TM    0(STMT),OPERAND         -TEST FOR A-Z,A0-Z9,A$-Z$,
+         BZ    EXP1050                  FNA-FNZ, SIN,COS,ETC,
+*                                       ZER,CON, ETC
+*
+*                   STORE OPERAND
+*
+EXP1020  EQU   *
+         LA    EXPI,2(EXPI)             I = I+1
+         MVC   0(2,EXPI),0(STMT)        POL (I) = ST(STMT)
+*
+EXP1030  EQU   *
+         SR    EXPUN,EXPUN             -SET UNARY SW OFF
+         LA    STMT,2(STMT)            -BUMP TO NEXT SYMBOL
+         B     EXP1010
+*
+*                   TEST OPERATOR
+*
+EXP1050  EQU   *
+         CLI   1(STMT),OPENPAR         -CURRENT-OP='(', '(S', OR ',S' ?
+         BL    EXP1150                 -NO.  BRANCH TO TEST MORE.
+         CLI   1(STMT),OPENSUBS         YES.  CURRENT-OP='(' OR '(S' ?
+         BH    EXP1070                 -NO.  CURRENT-OP = ')' OR ',S'
+*
+*                   FOUND ( OR (S.    SAVE IT
+*
+EXP1060  EQU   *
+         LA    EXPJ,2(EXPJ)             J     = J+1
+         MVC   0(2,EXPJ),0(STMT)        OP(J) = ST(STMT)
+         LA    STMT,2(STMT)            -BUMP TO NEXT SYMBOL
+         B     EXP1000                  AND SET UNARY SWITCH ON.
+*
+EXP1070  EQU   *
+*
+*                   FOUND ')' OR ',S'
+*                   UNSTACK UNTIL MATCHING PAIR
+*
+*  UNSTACK UNTIL:   OP(J)     0(STMT)        ACTION
+*                     ,S       )             UNSTACK (S AND ,S
+*                                            CODE: SUBS, SUBS, EVAL 2
+*                     (        )             UNSTACK (
+*                     (S       )             UNSTACK (S
+*                                            CODE: SUBS, EVAL 1
+*                     (S       ,             STACK ',S'
+*
+*
+         CLI   1(EXPJ),OPENPAR
+         BE    EXP1100                  FOUND ( ).  UNSTACK
+         BH    EXP1075                  FOUND (S...S)  OR
+*                                             (S...,   OR
+*                                             , ...)
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3000
+         B     EXP1070
+*
+EXP1075  EQU   *
+*
+         CLI   1(STMT),OPCLSUBS         CURRENT-OP = ')' ?
+         BNE   EXP1060                  FOUND (S...,S  STACK ','.
+*
+*                   FOUND (S OR ,S AT THE TOP OF THE STACK AND
+*                   )S AS CURRENT OPERATOR.
+*                   CODE:
+*                      SUBS   POL (I)         IF OP(J) = ,
+*                      SUBS   POL (I-1)
+*                      EVAL   POL (I-2)   2
+*                   AND
+*                      SUBS   POL (I)         IF OP(J) = (S
+*                      EVAL   POL (I-1)   1
+*
+*              THE OPERAND CORRESPONDING TO EVAL (POL(I-1) OR POL(I-2))
+*              MAY BE THE SUBJECT OF A MAT INSTRUCTION.
+*
+*              TEST MATFLAG.  IF ON, AND THE OPERAND IS A MAT-FUNCTION
+*              (EG., CON, IDN, ZER, ETC), THEN SET UP TO CODE THE
+*              OPERATORS CORRESPONDING TO EVAL FOR MATS.
+*              IF THE OPERAND IS NOT A MAT-FUNCTION, BUT THE NEXT
+*              INCOMING SYMBOL IS AND END-SYMBOL, THEN THE MAT
+*              OPERATORS MUST BE CODED.
+*              FOR EXAMPLE:  MAT READ A(3,4),
+*              SHOULD GENERATE
+*                      SUBS       4
+*                      SUBS       3
+*                      DEFMAT     A    2
+*              AND READ A(3,4) SHOULD GENERATE
+*                      SUBS       4
+*                      SUBS       3
+*                      EVAL       A    2
+*
+         SR    EXPWORK,EXPWORK          COUNTER OF NUMBER OF ARGUMENTS.
+         LA    EXPUN,OPNONMAT           SET UP TO GENERATE NON-MAT CODE
+         CLI   1(EXPJ),OPCOMMA          ONE OR TWO ARGUMENTS?
+         BNE   EXP1085                  ONE.
+*
+         SR    EXPJ,EXPX                J = J - 1 (UNSTACK ',' )
+         LA    EXPWORK,1                ARGUMENT COUNTER
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3100           CODE:  SUBS POL(I)
+EXP1085  EQU   *
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3100           CODE:  SUBS POL(I)
+         LA    EXPWORK,1(EXPWORK)       BUMP NUMBER OF SUBS COUNTER
+*
+         TM    AFLAGS,AMATFLAG          IS THIS A MAT INSTRUCTION?
+         BZ    EXP1095                  NO.  CODE:  EVAL
+*
+         CLI   2(STMT),OPEND            YES. IS THE NEXT SYMBOL 'END'?
+         BNE   EXP1095                  NO.  CODE EVAL.
+*
+         CLC   0(2,EXPI),OPMATFCT       IS OPERAND A-Z, ZER,CON,OR IDN?
+         BH    EXP1095                  NO.  CODE EVAL.
+*
+         LA    EXPUN,OPMAT              SET UP TO GENERATE MAT CODE
+EXP1095  EQU   *
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3200           CODE:  EVAL OR DEFMAT POL (I)
+*
+EXP1100  EQU   *
+         SR    EXPJ,EXPX                J = J - 1 (UNSTACK '(' )
+         B     EXP1030                  BR TO SET UNARY OFF.
+***********************************************************************
+         EJECT
+***********************************************************************
+*
+EXP1150  EQU   *
+*                   FOUND RELATIONAL-OP OR ARITH-OP.
+*                   TEST UNARY SWITCH.
+*                   IF ON, AND '+' IS THE CURRENT OPERATOR, SKIP.
+*                   IF '-', PUSH '0' IN POL(I) AND RETURN.
+*                   IF UNARY SWITCH IS OFF, TEST TOP OF OP-STACK,
+*                   OP(J) FOR (,(S AND =.  ANY OF THESE, CAUSE THE
+*                   CURRENT OPERATOR TO BE STACKED.
+*
+*              UNSTACK OP(J), POL(I-1), POL(I) AND
+*              GENERATE THE ASSOCIATED POLISH TRIPLETS.
+*
+*              CODE GENERATION ENDS WHEN:
+*               1. OP(J) = '('
+*                        OR
+*               2. OP(J) = '(S'
+*                        OR
+*               3. OP(J) = ','
+*                        OR
+*               4. OP(J) = '='
+*                        OR
+*               5. OP(J) < CURRENT OPERATOR, UNLESS
+*                  OP(J) = '+' AND CURRENT OPERATOR = '-' OR
+*                  OP(J) = '*' AND CURRENT OPERATOR = '/'.
+*
+*              IF CURRENT OPERATOR WAS A RELATIONAL OP OR '=' THEN
+*              RETURN TO CODE FOR SETTING UNARY SWITCH ON.
+*
+*
+         LTR   EXPUN,EXPUN             -UNARY ON?
+         BZ    EXP1170                  NO
+*
+*                   ASSUME UNARY -
+*
+         LA    EXPI,2(EXPI)             I      = I+1
+         MVC   0(2,EXPI),CONSZERO       POL(I) = ZERO
+EXP1160  EQU   *
+         LA    EXPJ,2(EXPJ)             J      = J+1
+         MVC   0(2,EXPJ),0(STMT)        OP (J) = -
+         B     EXP1030
+*
+EXP1170  EQU   *
+*
+         CLI   1(EXPJ),OPEXPON          OP(J) = ( OR (S ?
+         BH    EXP1180                  YES
+         CLI   1(EXPJ),OPEQUAL          OP(J) = '='
+         BNE   EXP1190                  NO
+*
+EXP1180  EQU   *
+         CLI   1(STMT),OPPLUS           CURRENT OP = REL-OP OR =?
+         BL    EXP1060                  YES.  PUSH AND SET UNARY ON.
+         B     EXP1160                  NO.   PUSH AND SET UNARY OFF.
+*
+*
+EXP1190  EQU   *
+         CLI   1(EXPJ),OPPLUS           OP(J) = '+' ?
+         BNE   EXP1210                  NO
+         CLI   1(STMT),OPMINUS          CURRENT-OP = '-' ?
+         BE    EXP1400                  YES.  UNSTACK '+'
+         B     EXP1220                  NO.  GO TO COMPARE.
+*
+EXP1210  EQU   *
+         CLI   1(EXPJ),OPTIMES          OP(J) = '*' ?
+         BNE   EXP1220                  NO
+         CLI   1(STMT),OPDIVIDE         CURRENT-OP = '/' ?
+         BE    EXP1400                  YES.  UNSTACK '*'.
+*
+EXP1220  EQU   *
+         CLC   0(2,EXPJ),0(STMT)        OP(J) < CURRENT-OP ?
+         BL    EXP1180                  YES.  TEST AND STACK
+*
+EXP1400  EQU   *
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3000           NO.  GENERATE CODE
+         B     EXP1170
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+EXP2000  EQU   *
+*
+*                   END-SYMBOL IS CURRENT OPERATOR.
+*                   UNSTACK OP(J), POL(I-1), POL(I)
+*                   UNTIL OP(J)= START SYMBOL
+*
+*                   FIRST TEST THE AMATFLAG.  IF IT IS ON
+*                   SET UP REG 'EXPUN' TO BE THE MAT-OP
+*                   CODE.  OTHERWISE SET IT TO THE NON-MAT
+*                   CODE.
+*                   (AT THIS POINT, IF THE STATEMENT WERE:
+*                   MAT <LETTER> = <LETTER> OR
+*                   MAT <LETTER> = <LETTER> <MAT-OP> <LETTER>
+*                   MAT <LETTER> = (<EXPRESSION>) * <LETTER>
+*                          OR
+*                   MAT <LETTER> = <MAT FUNCTION> ...
+*                   THE ONLY OPERATORS LEFT IN THE STACK WOULD
+*                   BE '=' AND POSSIBLY, THE <MAT-OP>.
+*                   THUS, JUST A SIMPLE TEST WILL RESOLVE
+*                   THESE MAT STATEMENTS).
+*
+         LA    EXPUN,OPNONMAT           SET UP FOR NON-MAT OPERATORS
+         TM    AFLAGS,AMATFLAG          IS AMATFLAG ON?
+         BZ    EXP2010                  NO.  GENERATE CODE.
+*
+         LA    EXPUN,OPMAT              SET UP FOR MAT OPERATORS
+         CLI   1(EXPJ),OPTIMES          FIND OUT IF MULTIPLY IS HERE.
+         BNE   EXP2010
+         LR    EXPWORK,EXPR0            FIND OUT WHICH MAT MULTIPLY.
+         CLI   4(EXPWORK),OPENPAR       SCALAR MULTIPLY?
+         BNE   EXP2010                  NO.
+         MVI   1(EXPJ),OPSCALAR         YES. FIX UP OPERATOR.
+*
+EXP2010  EQU   *
+         CLI   0(EXPJ),0                END OF STACK?
+         BE    EXP2100                  YES.  RETURN.
+         BAL   EXPRET,EXP2500           BRANCH TO SET UP FOR NEXT CODE.
+         BAL   EXPRET,EXP3010           NO.  GENERATE CODE.
+         B     EXP2010
+*
+EXP2100  EQU   *
+         LH    EXPT1,0(EXPI)            SET UP LAST TEMP FOR TRANS
+         LM    14,9,12(13)              RESTORE REGISTERS
+*                                       R10 WILL BE OPERAND 1 FOR TRANS
+*                                       R11 IS BASE OF AREA
+*                                       R12 IS PTR TO STRING
+*
+         B     4(RETURN)
+*                                       NORMAL RETURN
+*
+*
+***********************************************************************
+         EJECT
+***********************************************************************
+EXP2500  EQU   *
+*
+*                   LOCAL ROUTINE TO SET UP POINTER TO
+*                   NEXT AVAILABLE ENTRY IN PSEUDO-CODE TABLE.
+*                   (ACODEPTR CURRENTLY POINTS TO THE CURRENT
+*                   INITIAL DISPLACEMENT WITHIN AREA, AND ACODESIZ IS
+*                   IS THE MAXIMUM INDEX.)
+*
+         L     EXPK,ACODEPTR            PICK UP CURRENT POINTER
+*                                       TO PSEUDO-CODE.
+         C     EXPK,ACODESIZ            IS THE CODE TABLE FULL?
+         BNL   EXP4000                  YES.
+         LA    EXPK,0(USER,EXPK)        POINT TO ACTUAL ADDRESS FOR
+*                                       NEXT ENTRY.
+         A     EXPK,ACODEBEG
+         BR    EXPRET
+*
+*                   LOCAL ROUTINE TO GENERATE:
+*
+*              CODE (K)   NON-MATS   MATS    CODE (K+1)   CODE (K+2)
+*              --------   --------   ----    ----------   ----------
+*EXP3000        OP(J)      03XX      05XX      POL(I-1)     POL(I)
+*EXP3010 (END)  OP(J)      03XX      05XX      POL(I-1)     POL(I)
+*EXP3100        SUBS       030C      030C      POL(I)       0
+*EXP3200        EVAL       030D      050D      POL(I)     EXPWORK (1,2)
+*
+*
+EXP3000  EQU   *
+         LA    EXPUN,OPNONMAT           NORMAL ENTRY
+EXP3010  EQU   *
+         STC   EXPUN,0(EXPK)            CODE(K) = OPMAT OR OPNONMAT
+         MVC   1(1,EXPK),1(EXPJ)          COMPLETE CODE (K)
+         SR    EXPJ,EXPX                J = J - 1
+*
+         SR    EXPI,EXPX                I = I - 1
+         MVC   2(4,EXPK),0(EXPI)        CODE(K+1)= POL(I-1)
+*                                       CODE(K+2)= POL(I)
+*
+         B     EXP3307                  SAVE TEMP AND RETURN
+*
+*
+EXP3100  EQU   *
+         STC   EXPUN,0(EXPK)            CODE(K)  = SUBS
+         MVI   1(EXPK),OPSUBS
+*
+         MVC   2(2,EXPK),0(EXPI)        CODE(K+1)= POL(I)
+         SR    EXPI,EXPX                I = I - 1
+         B     EXP3310                  BUMP ACODEPTR AND RETURN
+EXP3200  EQU   *
+         STH   EXPWORK,4(EXPK)          CODE(K+2) = 1 OR 2
+         STC   EXPUN,0(EXPK)            CODE(K)  = EVAL
+         MVI   1(EXPK),OPEVAL
+*
+         MVC   2(2,EXPK),0(EXPI)        CODE(K+1)= POL(I)
+*
+*                 TRANSFER TO ROUTINE TO CHECK DIMENSIONS
+*
+         CLI   0(EXPI),OPATOZ           IS IT A TO Z?
+         BNE   EXP3306                  NO.
+         SR    EXPK,EXPK
+         IC    EXPK,1(EXPI)             YES. PICK UP LETTER INDEX.
+         SLL   EXPK,4                   MULTIPLY BY 16 TO GET INDEX
+         USING ATOZDSCT,EXPK
+         LA    EXPK,ATOZ(EXPK)          GET ADDRESS OF LETTER
+         STC   EXPWORK,ATOZALOC         SET HIGH-ORDER BYTE OF
+         B     EXP3308                  WORD IN ATOZALOC CORRESPONDING
+*                                       TO A-Z = 1 OR 2 FOR DEFAULT
+*                                       ALLOCATION.
+EXP3306  EQU   *
+         CLI   2(EXPK),OPATOZST         IS IT A$-Z$?
+         BNE   EXP3307                  NO. SET UP FOR EVAL 'VALUE'
+         LA    EXPK,OPTEMPST            YES. SET UP STRING ADDRESS TEMP
+         B     EXP3309
+EXP3307  EQU   *
+         LA    EXPK,OPTEMPV             NO.  EVAL MUST BE A VALUE.
+         B     EXP3309
+EXP3308  EQU   *
+         LA    EXPK,OPTEMPA             SET UP FOR TEMP ADDRESS.
+EXP3309  EQU   *
+         STH   EXPTEMP,0(EXPI)          POL(I)   = TEMP
+         EX    EXPK,EXECUTE             TO 'OI' INTO 0(EXPI)
+EXP3310  EQU   *
+         L     EXPK,ACODEPTR
+         LA    EXPK,6(EXPK)             BUMP TO NEXT ENTRY.
+         ST    EXPK,ACODEPTR            SAVE IT.
+         LA    EXPTEMP,1(EXPTEMP)       TEMP = TEMP + 1
+         BR    EXPRET
+*
+EXECUTE  OI    0(EXPI),0                TO INDICATE TEMP IS AN
+*                                       ADDRESS OR A VALUE.
+***********************************************************************
+*
+EXP4000  EQU   *
+*                                       ENTRY FOR PSEUDO-CODE BEING
+*                                       FULL.
+         LM    14,9,12(13)              RESTORE REGISTERS
+*                                       R10 WILL BE OPERAND 1 FOR TRANS
+*                                       R11 IS BASE OF AREA
+*                                       R12 IS PTR TO STRING
+*
+         BR    RETURN                   ERROR RETURN TO TRANS
+***********************************************************************
+         EJECT
+***********************************************************************
+*
+OPATOZ   EQU   X'10'                    OPERAND A-Z
+OPATOZST EQU   X'30'                    OPERAND A$-Z$
+OPTEMPA  EQU   X'40'                    FOR EVAL A-Z TEMPS
+OPTEMPV  EQU   X'50'                    FOR ALL OTHER TEMPS
+OPTEMPST EQU   X'80'                    FOR EVAL A$-Z$ TEMPS
+OPERAND  EQU   X'F0'
+*
+OPEND    EQU   X'0D'
+OPEQUAL  EQU   X'06'
+OPPLUS   EQU   X'07'
+OPMINUS  EQU   X'08'
+OPTIMES  EQU   X'09'
+OPDIVIDE EQU   X'0A'
+OPSCALAR EQU   X'0A'
+OPEXPON  EQU   X'0B'
+OPENPAR  EQU   X'0C'
+OPENSUBS EQU   X'0D'
+OPCLSUBS EQU   X'0E'
+OPCOMMA  EQU   X'0F'
+OPSUBS   EQU   X'0C'
+OPEVAL   EQU   X'0D'
+OPNONMAT EQU   X'03'
+OPMAT    EQU   X'05'
+OPMATFCT DC    X'9003'
+*
+CONSZERO DC    X'6000'                  PICK UP ZERO IN CONSTAB
+*
+***********************************************************************
+         EJECT
+AREA     DSECT
+         COPY  AREA
+*
+         END

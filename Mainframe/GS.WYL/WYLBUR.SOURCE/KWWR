@@ -1,0 +1,575 @@
+KWWR     TITLE 'WYLBUR''s Password File Routines'                               
+*******************************************************************             
+*                                                                 *             
+*     WYLBUR/370 - Release VI - Class I - Stanford Proprietary    *             
+*                                                                 *             
+*******************************************************************             
+         HIBAL                                                                  
+*                                                                               
+         SYSDEFN                                                                
+*                                                                               
+*MOD6, 18SEP79, R. Levitt/J. Nisbet                                             
+*  If R0 contains ttr do direct read instead of search.                         
+*  Return ttr to caller in R0 at I/O complete exit.                             
+*                                                                               
+*MOD7, 14Nov84, J. Nisbet/J. Stosick                                            
+*  Expand the size of the keyword record (since it's now over                   
+*  255 bytes, a few MVCs had to be changed).  Also, the hash number             
+*  was changed from 19949 to 32749.  The hash algorithm was also                
+*  changed so that all the letters in the account participate                   
+*  in the hash.                                                                 
+*                                                                               
+         SPACE 2                                                                
+         MACRO                                                                  
+&L       VERIFY &C                                                              
+         AIF   ('&C' EQ '').A1                                                  
+&L       B&C   *+8                 Br if ok                                     
+         BAS   R2,ABEND            Abend if not                                 
+         MEXIT                                                                  
+.A1      ANOP                                                                   
+&L       BAS   R2,ABEND                                                         
+         MEND                                                                   
+         SPACE 2                                                                
+         PUSH  DSECTS                                                           
+         COPY  CONTROL             Copy CV/CP                                   
+*                                                                               
+         EJECT                                                                  
+         RECORD 'KWRRSC'                                                        
+         EJECT                                                                  
+         COPY  RSCGROUP                                                         
+         EJECT                                                                  
+JCB      RECORD BEGIN                                                           
+         COPY  JCB                                                              
+         END                                                                    
+         EJECT                                                                  
+         DCBD  DSORG=DA,DEVD=DA                                                 
+         EJECT                                                                  
+         IEZDEB                                                                 
+DEBDSZDA EQU   DEBNMTRK+L'DEBNMTRK-DEBDASD  len of da ext section               
+*                                                                               
+         POP   DSECTS                                                           
+         EJECT                                                                  
+*WR      RECORD 'KWR'                                                           
+*        EJECT                                                                  
+         GBLA  &KWFSIZE            Number records in kwrfile                    
+*                                                                               
+&KWFSIZE SETA  32749               Set file max (should be prime)               
+*                                                                               
+WYLKWWR  CSECT                                                                  
+KWBASE   EQU   *                                                                
+*                                                                               
+KWWR     IDENT 7                   19:56:20 11/14/84 "Niz"                      
+*                                                                               
+         ENTRY KWEXCP,KWWAIT                                                    
+         ENTRY KWECB                                                            
+*                                                                               
+         REGS FSR,,,,,JCBR,DEBR,BR,(WAR,LSR),DCBR,KWRR,CPR,CVR,SPR,RAR          
+*                                                                               
+         USING KWBASE,BR                                                        
+         USING KWR                                                              
+         USING IHADCB,DCBR                                                      
+         EJECT                                                                  
+         DROP  BR                                                               
+         USING *,R15                                                            
+KWEXCP   STM   14,12,0(13)                                                      
+         LR    WAR,13              Save old stack pointer                       
+         LA    13,15*4(,13)        Push stack                                   
+         L     BR,=A(KWBASE)       Proper base register                         
+         DROP  R15                                                              
+         USING KWBASE,BR                                                        
+         LA    DCBR,KEYFILE                                                     
+*                                                                               
+         MVC   KWCMD,@R1           Copy command code                            
+         L3    KWRR,@R1+1          Point to kwr area                            
+         CLI   KWCMD,KWRCDIE       Die command?                                 
+         BE    KWCLOSE             Br if so                                     
+         TM    GFL,GFBUSY          Already busy?                                
+         VERIFY Z                  Better not be...                             
+         OI    GFL,GFBUSY          Set password operation in progress           
+         CLI   KWCMD,KWRCWR        Write command?                               
+         BE    INITCHK                                                          
+         CLI   KWCMD,KWRCRD        Read command?                                
+         VERIFY E                  It should be...                              
+INITCHK  TM    GFL,GFOPEN          Dcb opened?                                  
+         BO    KWGO                B if so                                      
+         OI    GFL,GFOPEN          Set open done                                
+         MVC   KEYNAME,DCBDDNAM    Set ddname for devtype                       
+         LCALL AMODE24             ********                                     
+         DEVTYPE KEYNAME,DVTAREA,DEVTAB  Get good info                          
+         LCALL AMODER              ********                                     
+         CLI   DVTCLASS,DVTCDA     Direct access?                               
+         BNE   NOFILE              No, skip (dd dummy)                          
+         LCALL AMODE24             ********                                     
+         OPEN  MF=(E,OPENLIST)                                                  
+         LCALL AMODER              ********                                     
+         TM    DCBOFLGS,X'10'      DCB open up?                                 
+         BZ    NOFILE              Br if not                                    
+         LH    R0,DCBBLKSI         Get total record length                      
+         ICM   R0,B'0100',DCBKEYLE  ...add in key length                        
+         LA    R1,DVTAREA          Point at device area                         
+         BAS   R14,CALCREC         Go compute records/track                     
+         ST    R1,TRKRCDS          Save number                                  
+         BAS   R14,COUNT           Get number of tracks                         
+         ST    R0,NUMTRKS           and save away                               
+         CLEAR R0                  couldn't be ttr if here                      
+KWGO     TM    DCBOFLGS,X'10'      Dcb open?                                    
+         BZ    NOFILE              B if not                                     
+         MVI   KWRHFL,KWRHFCK      Password checking in effect                  
+         MVC   KEYKEY(3),KWRUSER   Move in user id                              
+         MVC   KEYKEY+3(2),KWRGRP  Group code                                   
+         XC    KEYKEY,SCRMASK      Scramble user and acct                       
+         IF    (R0,Z),KWSRCH       Do search if ttr not given                   
+         STCM  R0,B'0111',KEYTTR   Set ttr pointer                              
+         SRL   R0,8                Move out record number                       
+         C     R0,NUMTRKS          In bounds?                                   
+         BNL   KWSRCH              Oops                                         
+         LC    R0,KEYTTR+2         Get record num                               
+         C     R0,TRKRCDS          In bounds?                                   
+         BH    KWSRCH              No                                           
+         MVC   KEYKEY1,KEYKEY      Save desired key                             
+         LCALL AMODE24             ********                                     
+         READ  KEYDECB,DI,MF=E                                                  
+         LCALL AMODER              ********                                     
+         BAS   14,KWEXCPEX         Return to dispatcher                         
+         TM    KEYDECB+1,X'0A'     I/O error?                                   
+         BNZ   KWRCLR              Clear record if so                           
+         TM    KEYDECB+1,X'FF'     Abend if anything else wrong                 
+         VERIFY Z                  Besides I/O err                              
+         CLC   KEYKEY,KEYKEY1      Get the right one?                           
+         BE    KWDOK               Continue on if so                            
+         MVC   KEYKEY,KEYKEY1      Reset desired key                            
+*-                                                                              
+*-       Search for the record for the user and group.                          
+*-                                                                              
+KWSRCH   BAS   R14,TTRGET          Go get the ttr                               
+         STCM  R0,B'0111',KEYTTR   Save ttr pointer                             
+         LCALL AMODE24             ********                                     
+         READ  KEYDECB,DKF,MF=E                                                 
+         LCALL AMODER              ********                                     
+         BAS   R14,KWEXCPEX        Return to dispatcher                         
+*                                                                               
+         TM    KEYDECB+1,X'FF'-X'8A'  abend if anything wrong                   
+         VERIFY Z                  Besides I/O err or nrf                       
+         TM    KEYDECB+1,X'0A'     I/O error?                                   
+         BNZ   KWRCLR              Go post I/O err if so                        
+KWDOK    DS    0H                                                               
+         CLI   KWCMD,KWRCWR        Write?                                       
+         BE    KEYWR               B if so                                      
+         TM    KEYDECB+1,X'88'     I/O err or rec not found?                    
+         BZ    KEYRDOK             Br if no problem                             
+KWRCLR   CLEAR KWRDATA             Clear kwr area                               
+         XC    KEYTTR,KEYTTR       And zot ttr                                  
+         TM    KEYDECB+1,X'0A'     I/O error?                                   
+         BZ    KEYPOST             Br if not                                    
+KEYIOERR OI    KWRHFL,KWRHFERR     Post I/O error condition                     
+         B     KEYPOST             Send record back                             
+KEYRDOK  MVC   KWRDATA(256),KEYBUF  Copy...                                     
+         MVC   KWRDATA+256(L'KWRDATA-256),KEYBUF+256  ...pw record              
+         XC    KWRPASS,PASSMASK    Unscramble...                                
+         XC    KWRPASS+KEYHALF(KEYHALF),KWRPASS  ...password                    
+         B     KEYPOST                                                          
+         EJECT                                                                  
+KEYWR    TM    KEYDECB+1,X'80'     Does record already exist?                   
+         BZ    KEYUPD1             Br if so                                     
+         CLI   KWRWRCT,0           Rewrite count is 0?                          
+         BE    KEYWR1              Br if so                                     
+*                                                                               
+* If the record is not found, and the rewrite count of the buffer               
+* that the caller passed to us is non-zero, we have a situation                 
+* where the record has been deleted, and the calling routine doesn't            
+* know that and is attempting to update from a stale copy of the                
+* keyword record. This actually happened. Account services deleted              
+* the account of a user who was logged on and was doing a SHOW MAIL.            
+* When the SHOW MAIL completed, it attempted to update the user's               
+* keyword record with the result being that KWWR abended.                       
+*                                                                               
+* The abend has now been changed to treat the case the same as if the           
+* the record was not found on the read. That is, the buffer is                  
+* zeroed, and the caller doesn't get an UPDATE OK indication.                   
+*                                                                               
+*        VERIFY                    Don't do this anymore                        
+         B     KWRCLR              Clear it out                                 
+*                                                                               
+KEYUPD1  CLC   KWRWRCT,KWRWRCT-KWRDATA+KEYBUF   rewrite counts agree?           
+         BNE   KEYRDOK             Record changed--send it back                 
+KEYWR1   MVC   KEYBUF(256),KWRDATA  Copy in...                                  
+         MVC   KEYBUF+256(L'KEYBUF-256),KWRDATA+256  ...new record              
+         IC    R1,KWRWRCT          Get old rewrite count                        
+         LA    R1,1(,R1)           Increment rewrite count                      
+         STC   R1,KEYBUF+(KWRWRCT-KWRDATA)  new count to buffer                 
+         XC    KEYBUF+(KWRPASS+KEYHALF-KWRDATA)(KEYHALF),KWRPASS                
+         XC    KEYBUF+(KWRPASS-KWRDATA)(L'KWRPASS),PASSMASK  Scramble           
+         TM    KEYDECB+1,X'80'     Does record already exist?                   
+         BZ    KEYUPD2             Br if so                                     
+         TM    KWRIFL,KWRIFVAL     Initials valid?                              
+         BZ    KEYWROK             Don't add if not                             
+         LCALL AMODE24             ********                                     
+         WRITE KEYDECB,DA,MF=E     Add the record                               
+         LCALL AMODER              ********                                     
+         MVI   CHKMASK,X'FF'-X'28' Allow I/O err and no space                   
+         B     KEYWR2                                                           
+*                                                                               
+KEYUPD2  TM    KWRIFL,KWRIFVAL     Initials valid?                              
+         BO    KEYUPD3             Br if so                                     
+         MVI   KEYKEY,X'FF'        Set to delete if not                         
+         MVC   KEYBUF(1),KEYTTR+2  Dummy record must have rec num               
+KEYUPD3  LCALL AMODE24             ********                                     
+         WRITE KEYDECB,DI,MF=E     Rewrite the record                           
+         LCALL AMODER              ********                                     
+         MVI   CHKMASK,X'FF'-X'0A' Allow only I/O err                           
+         CLI   KEYKEY,X'FF'        Delete operation?                            
+         BNE   KEYWR2              No                                           
+         XC    KEYTTR,KEYTTR       can't return ttr if gone                     
+KEYWR2   BAS   R14,KWEXCPEX        Return to dispatcher                         
+         TM    KEYDECB+1,X'FF'     Anything funny?                              
+         BZ    KEYWROK             Br if not                                    
+         NC    CHKMASK,KEYDECB+1   Anything really funny, then?                 
+         VERIFY Z                                                               
+         XC    KEYTTR,KEYTTR       Zero ttr if something amiss                  
+         TM    KEYDECB+1,X'20'     No room for new record?                      
+         BZ    *+8                                                              
+         OI    KWRHFL,KWRHFFUL                                                  
+         TM    KEYDECB+1,X'08'     I/O error?                                   
+         BZ    KEYPOST                                                          
+         B     KEYIOERR            Go post I/O err                              
+*                                                                               
+KEYWROK  OI    KWRHFL,KWRHFUOK     Update or add successful                     
+         B     KEYPOST                                                          
+         EJECT                                                                  
+*-                                                                              
+*-       signal password operation complete                                     
+*-                                                                              
+KEYPOST  MVI   KWECB,0             Clear ecb                                    
+         NI    GFL,X'FF'-GFBUSY    Clear busy indication                        
+         LCM   R0,B'0111',KEYTTR   Get ttr pointer                              
+         LR    13,WAR              Pop stack                                    
+         LM    14,15,0(13)                                                      
+         LM    1,12,12(13)                                                      
+         B     4(,14)              Return to "done" return point                
+*                                                                               
+NOFILE   MVI   KWECB,X'40'         Post ecb                                     
+         BAS   14,KWEXCPEX         Return to dispatcher                         
+         MVI   KWRHFL,0            Password checking not in effect              
+         MVI   KWRIFL,KWRIFVAL     Set user valid                               
+         MVI   KWRAFL,KWRAFVAL     Set account valid                            
+         B     KEYPOST                                                          
+*                                                                               
+KWCLOSE  TM    GFL,GFBUSY          Password operation in progress?              
+         BZ    KWCLOS1             Br if not                                    
+         WAIT  ECB=KWECB           Wait for current I/O to finish               
+KWCLOS1  LCALL AMODE24             ********                                     
+         CLOSE MF=(E,OPENLIST)     Close DCB                                    
+         LCALL AMODER              ********                                     
+         XC    KEYTTR,KEYTTR       Zero ttr if no file                          
+         B     EXIT1               Return                                       
+*                                                                               
+KWEXCPEX ST    14,EXITSA           Save resume point                            
+         STM   DCBR,KWRR,EXITSA+4  Save regs                                    
+EXIT1    LR    13,WAR              Pop save area stack                          
+         LM    14,12,0(13)                                                      
+         BR    14                  Return to "not done" return point            
+         EJECT                                                                  
+*-                                                                              
+*-       password wait and check routine                                        
+*-                                                                              
+KWWAIT   EQU   *                                                                
+         DROP  BR                                                               
+         USING *,15                                                             
+         TM    GFL,GFBUSY+GFOPEN                                                
+         VERIFY O                                                               
+         TM    KWECB,X'40'         I/O done yet?                                
+         BZR   14                  Return to "not done" return point            
+         STM   14,12,0(13)                                                      
+         LR    WAR,13              Save old stack pointer                       
+         LA    13,15*4(,13)        Push stack                                   
+         L     BR,=A(KWBASE)       Proper base register                         
+         DROP  R15                                                              
+         USING KWBASE,BR                                                        
+         L     14,EXITSA           Get resume point                             
+         LM    DCBR,KWRR,EXITSA+4  Restore regs                                 
+         BR    R14                                                              
+         EJECT                                                                  
+*                                                                               
+* The alrogithm below calculates a hashed starting place to                     
+*   search for the keyword record based on the account.  Note, if               
+*   you change this you will also need to change the PL/I version               
+*   in the "DAFT" accounting routine.                                           
+*                                                                               
+TTRGET   ICM   R1,15,KWRUSER       Get "uuug" in account                        
+         LNR   R1,R1                                                            
+         ICM   R0,15,KWRUSER+1     Get "uugg" in account                        
+         LNR   R0,R0                                                            
+         SR    R1,R0               Calc ("uuug"-"uugg"))                        
+         LPR   R1,R1               Ensure positive                              
+         CLEAR R0                                                               
+         D     R0,KWFSIZE          Get hashed record number                     
+*                                                                               
+         AL    R0,=F'1'            Add in one                                   
+         SRDL  R0,32               Move for divide                              
+         D     R0,TRKRCDS          Compute                                      
+         AL    R0,=F'1'            Ttr                                          
+         SLL   R1,8                Move tracks to left                          
+         OR    R0,R1               Setup ttr in R0                              
+         BR    R14                 Return to caller                             
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  AMODE24 -- Local routine to switch to 24-bit mode.                           
+*                                                                               
+AMODE24  STM   R14,R15,AMODERGS                                                 
+         LA    R15,A24GO                                                        
+         BASSM R14,R15             Switch to 24-bit mode                        
+A24GO    ST    R14,AMODESAV        Save old mode indicator                      
+         LM    R14,R15,AMODERGS    Restore regs                                 
+         BR    RAR                                                              
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  AMODER -- Local routine to switch back to previous AMODE.                    
+*                                                                               
+AMODER   STM   R14,R15,AMODERGS                                                 
+         LA    R15,ARGO                                                         
+         IF    AMODESAV.X'80','O R15,=A(X"80000000")'  31-bit mode              
+         BSM   0,R15                                                            
+ARGO     LM    R14,R15,AMODERGS    Restore regs                                 
+         BR    RAR                                                              
+*                                                                               
+AMODESAV DS    A                   Saved AMODE                                  
+AMODERGS DS    2A                  Save area                                    
+         EJECT                                                                  
+TRKREGS  DS    14F                 Register save area                           
+*                                                                               
+*PUSH,GEN                                                                       
+TRKLIST  TRKCALC MF=D                                                           
+*POP                                                                            
+         SPACE 2                                                                
+*box                                                                            
+*                                                                               
+*  CALCREC -- Routine to calculate the number of records per                    
+*    track for a given block size.                                              
+*                                                                               
+*    On entry:                                                                  
+*      R0 - block size (keylen in byte 2; datalen in bytes 3-4)                 
+*      R1 - DVTAREA ptr (info returned from DEVTYPE)                            
+*                                                                               
+*    On exit:                                                                   
+*      R1 - no. of records/track                                                
+*                                                                               
+*                                                                               
+CALCREC  STM   R2,R15,TRKREGS      Save regs                                    
+*                                                                               
+         LR    R6,R1                                                            
+         WITH  (DVTAREA,R6),BEGIN                                               
+         CLEAR TRKLIST                                                          
+         ST    R0,STARRKDD         Save key and data length                     
+         MVI   STARR,1             Save record number                           
+         LC    R2,DVTUTYPE         Device type                                  
+         TRKCALC  FUNCTN=TRKCAP,TYPE=(R2),MF=(E,TRKLIST)                        
+         LM    R2,R15,TRKREGS                                                   
+         LR    R1,R0               Records per track                            
+         END                                                                    
+         BR    R14                 Return                                       
+         EJECT                                                                  
+COUNT    L3    R1,DCBDEBAD+1       DEB addr                                     
+         WITH  (DEBBASIC,R1),BEGIN                                              
+         LC    R2,DEBNMEXT         No. of extents                               
+         LA    R1,DEBBASND         Device dependent section                     
+         WITH  (DEBDASD,R1),BEGIN                                               
+         CLEAR R0                                                               
+CNTTRK   AH    R0,DEBNMTRK         No. tracks in this extent                    
+         END                                                                    
+         LA    R1,DEBDSZDA(,R1)    Size of extent area                          
+         BCT   R2,CNTTRK           Next extent                                  
+         END   ,                                                                
+         BR    R14                 Done                                         
+         EJECT                                                                  
+ABEND    BASE                                                                   
+         L     BR,=A(KWBASE)                                                    
+         USING KWBASE,BR                                                        
+         SLR   R2,BR               Displacement to error point                  
+         ABEND 73,DUMP                                                          
+*                                                                               
+         QLTORG                                                                 
+*                                                                               
+EXITSA   DC    (KWRR-DCBR+2)A(0)                                                
+         READ  KEYDECB,DKF,KEYFILE,KEYBUF,'S',KEYKEY,KEYTTR,MF=L                
+*                                                                               
+KWECB    EQU   KEYDECB             Password I/O ecb                             
+*                                                                               
+OPENLIST OPEN  (KEYFILE,UPDAT),MF=L                                             
+*                                                                               
+KEYBUF   DS    XL(KWRHFL-KWRDATA)  Keyword file                                 
+KEYHALF  EQU   L'KWRPASS/2         For scrambling                               
+KEYKEY   DC    XL5'0'              Key for password record                      
+KEYTTR   DC    XL3'0'              Initial search address                       
+SCRMASK  DC    CL8'TTMCC'          Scramble mask for account                    
+PASSMASK DC    CL8'EATATCIT'       Scramble mask for password                   
+KEYKEY1  DC    XL5'0'                                                           
+KEYTTR1  DC    XL3'1'                                                           
+*                                                                               
+CHKMASK  DC    X'FF'               1-bits in mask are lethal errors             
+KWCMD    DC    X'0'                Cmd code                                     
+GFL      DC    X'0'                Global flags                                 
+*                                                                               
+GFBUSY   EQU   X'80'               Password operation in progress               
+GFOPEN   EQU   X'40'               DCB has been opened                          
+*                                                                               
+KEYNAME  DC    CL8' '              Ddname of file                               
+*                                                                               
+NUMTRKS  DC    A(0)                Number of tracks in data set                 
+         EJECT                                                                  
+DVTAREA  DVTAREA ,                 Define device area                           
+*                                                                               
+KWFSIZE  DC    A(&KWFSIZE)         Number of records in file                    
+*                                                                               
+TRKRCDS  DC    F'0'                Number of records/track                      
+         EJECT                                                                  
+KEYFILE  DCB   DDNAME=KWRFILE,DSORG=DA,RECFM=F,BLKSIZE=L'KEYBUF,       *        
+               MACRF=(RK,WAI),OPTCD=EF,KEYLEN=5,LIMCT=10                        
+         SPACE 2                                                                
+         DROP  DCBR,KWRR                                                        
+         EJECT                                                                  
+*                                                                               
+*                                                                               
+*                 Password I/O Routines                                         
+*                                                                               
+*                                                                               
+* the password I/O routines handle the password file resource                   
+* this file is a single user path and is used to update space                   
+* used, control various batch limits and contain the users                      
+* password.  it is also used to store cross session information                 
+* of which the best example is the flag that indicates that an                  
+* execfile is to be automatically executed when the user logs                   
+* on.                                                                           
+*                                                                               
+* the kwio routine obtains the kwrio resource and of course                     
+* waits if it is not available.  when the resource is obtained                  
+* the I/O is started and the user waits until it completes                      
+* upon completion of the I/O the kiopost routine is entered                     
+* this routine simply queues the kwrio user JCB to the setup                    
+* queue so that he can be dispatched again.  when the user                      
+* is dispatched he will free up the resource and that will                      
+* cause the first in the queue of other users to be setup                       
+* so that the resource can be reused.                                           
+*                                                                               
+* upon entry to kwio the following registers are setup:                         
+*      R1  -  address of the password record.                                   
+*      R0  -  type of operation:                                                
+*             nn    read                                                        
+*             mm    write                                                       
+*             oo    terminate                                                   
+*                                                                               
+* upon exit the password record has been updated to contain                     
+*   the result of the read/write.  note that an attempt to                      
+*   update the password record may result in a rejection if                     
+*   it had been updated prior to the update request but after                   
+*   the previous read.  if this happens the calling routine                     
+*   should reupdate the newly returned record and retry the                     
+*   update.                                                                     
+*   registers R0 and R1 are not preserved across the call                       
+*                                                                               
+KWIO     XPROC                                                                  
+         LR    R2,R0               Save function rqst                           
+         LR    R3,R1               Save kwr pointer                             
+KGO      L     JCBR,CVCURJCB       Point at JCB                                 
+         USING JCB                                                              
+*                                                                               
+         FAIL  CPRFKWR,KWRLOGIC,'Password I/O logic problem.'                   
+*                                                                               
+         SET   CPRFKWR             KWR owned                                    
+         GETRSC KWR,ATTN=NO        Get the resource                             
+         FAIL  NZ,KWRERR,'Password resource error.'                             
+         LR    R6,R1               Copy kwrio resource pointer                  
+         USING KWRRSC,R6                                                        
+         SET   KIO1ACTV            Turn on ecb moniter                          
+         STC   R2,KWOP             Save op code                                 
+         MOVEL KWR,@R3             Move the record                              
+         MVI   KWRHFL,0            Assume that it fails                         
+         CLEAR R0                  Assume no record no.                         
+         IF    (CPSACCT,EQ,KWRUSER),'L R0,CPKWRID'  Our record no.              
+         LA    R1,KWLIST           Parm list                                    
+         L     R15,=V(KWEXCP)      Get address of kwio start                    
+         LTR   R15,R15             Is there a password routine                  
+         BNP   KWIODN              Br no to set flag                            
+         BASR  RAR,R15             Go start the kw I/O                          
+         B     KIOPAUSE            Branch if not done                           
+         B     KWIODN              Br if done                                   
+KIOPAUSE PAUSE JCBWFD              Wait for kwrio to complete                   
+         L     R0,KWKWRID          Get kwr record id. from kwrrsc               
+KWIODN   IF    ^KWRHFL.KWRHFCK,'CLEAR KWRIFL'  No kw checking, zot              
+         IF    (CPSACCT,EQ,KWRUSER),'ST R0,CPKWRID'  Save our rec no.           
+         MOVEL @R3,KWR,L'KWR       Move the record                              
+         CLEAR KWR                                                              
+         FREERSC KWR                                                            
+         CLEAR CPRFKWR             KWR no longer owned                          
+         PEND  ,                                                                
+         DROP  KWRRSC                                                           
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  KWRFREE -- Routine to release the KWR resource if it is held.                
+*    This routine is called by the command processor at command                 
+*    cleanup.                                                                   
+*                                                                               
+KWRFREE  XPROC                                                                  
+         FREERSC KWR,CHECK=NO      Free if held                                 
+         CLEAR CPRFKWR                                                          
+         PEND                                                                   
+         EJECT                                                                  
+*                                                                               
+*            Password I/O post routine                                          
+*                                                                               
+* this routine is entered when the kwr$ecb is posted for                        
+* the kwrrsc.  it it used to set the user waiting on the                        
+* password I/O dispatchable.                                                    
+*                                                                               
+KIOPOST  XPROC                                                                  
+         LR    R4,R1               Copy resource group pointer                  
+         WITH  (RSCGROUP,R4)                                                    
+         LR    R6,R0               Get the resource                             
+         WITH  (KWRRSC,R6),BEGIN                                                
+         IF    KIO1@ECB,'L  R1,KIO$ECB'  Get pointer to...                      
+         ELSE  'LA  R1,KIO$ECB'    ...the ecb                                   
+         TM    @R1,X'40'           Is it posted?                                
+         BZ    KIONP               Br if not                                    
+         L     R15,=V(KWWAIT)      Get kwr routine                              
+         BASR  RAR,R15             Go there                                     
+         B     KIONP               Onward                                       
+         ST    R0,KWKWRID          Save kwr record no.                          
+         L     R5,KIO@JCB          Get the JCB pointer                          
+         CLEAR JCBWFD              No longer waiting for kio                    
+         VCALL QSETUP              Go put on setup queue                        
+KIONP    LABEL                                                                  
+         END                                                                    
+         PEND                                                                   
+         EJECT                                                                  
+*box                                                                            
+*                                                                               
+*  KIOINIT -- Password file initialization.                                     
+*    Called from the INIT module.                                               
+*                                                                               
+KIOINIT  XPROC                                                                  
+         L     R15,CVFJCB                                                       
+         ST    R15,CVCURJCB        Set for lousy GETRSC                         
+*                                                                               
+         L     R4,=V(KWRRSG)       Password file resource group                 
+         WITH  (RSCGROUP,R4)                                                    
+         GETRSC KWR,WAIT=NO        Get the password resource                    
+         FAIL  NZ,NOKWRRSC,'No password file resource.'                         
+*                                                                               
+         LR    R6,R1               Copy resource pointer                        
+         WITH  (KWRRSC,R6),BEGIN                                                
+         LT    R0,=V(KWECB)        Get address of kw ecb                        
+         FAIL  Z,NOKWECB,'Password file support messed up.'                     
+         SET   KIO1@ECB            Set have ecb address                         
+         ST    R0,KIO$ECB          Save ecb address                             
+         L     R0,=A(KIOPOST)      Get post routine address                     
+         ST    R0,RSG@POST         Save post address                            
+         END                                                                    
+*                                                                               
+         FREERSC KWR               Give the resource up                         
+         CLEAR CVCURJCB            Reset                                        
+         PEND                                                                   
+         SPACE 2                                                                
+         VLTORG ,                                                               
+         END   .                                                                

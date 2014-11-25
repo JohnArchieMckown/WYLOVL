@@ -1,0 +1,2784 @@
+VIRTMEM  TITLE 'Virtual memory manager'
+         COPY  HEADER
+         EJECT ,
+VIRTMEM  MODULE TRCNUM=3
+         EJECT ,
+*
+* Macros to Get/Free VSLBs
+*
+         MACRO
+&L       GVSLB &LOC
+&L       PSET  GFVSLB
+         PMOV  GFVADDR,&LOC
+         ACALL GETVSLB
+         MEND
+*
+         MACRO
+&L       FVSLB &LOC
+&L       PSET  GFVSLB
+         PMOV  GFVADDR,&LOC
+         ACALL FREEVSLB
+         MEND
+         EJECT ,
+         COPY  MAT
+         EJECT ,
+         COPY  PZERO
+         EJECT ,
+         COPY  ASB
+         EJECT ,
+         COPY  LOCKPARM
+         SPACE 2
+         COPY  VMPARM
+         EJECT
+         COPY  VMIPARM
+         SPACE 3
+         COPY  PARMPARM
+         EJECT ,
+         COPY  PAGEPARM
+         EJECT ,
+*****************************************************************
+*                                                               *
+*     Storage pool description.  The storage pool number is     *
+*   determined from some of the characteristics of the pool.    *
+*   It may be viewed as bits describing those characteristics.  *
+*   This section defines what characteristics determine the     *
+*   pool number and their bit assignments within the number. It *
+*   must ALWAYS be in sync with the macros that construct the   *
+*   pool numbers based on a description of the characteristics. *
+*                                                               *
+*****************************************************************
+         SPACE 2
+PNGLOBAL EQU   B'00100000'   On if the pool is for global memory
+*
+PNHIGH   EQU   B'00010000'   For local pool:
+*                              On if local system area
+*                              Off if user area
+*                            For global pool:
+*                              On if high global (above 16M)
+*                              Off if low global (mainly LPA type)
+*
+PNFETP   EQU   B'00001000'   On if pool fetch protected.
+*
+PNFIXED  EQU   B'00000100'   On if pool is fixed.
+*
+PNSYSKEY EQU   B'00000010'   On if system key.
+*
+PNDATA   EQU   B'00000001'   On if the pool is allocated from high
+*                            memory addresses to low addresses.
+*
+MAXPOOL  EQU   B'00111111'   Maximum pool number
+*
+VMAL     EQU   16,,C'N'
+VMALIGN  EQU   (-VMAL)-X'80000000'
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    VMCB  --  Virtual memory control block                     *
+*              This is the central control block for the        *
+*              Virtual memory manager.                          *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMCB     RECORD BEGIN
+         DC    C'VMCB'
+*
+* Address ranges of the various areas of virtual storage
+*
+VMCBGLS  DS    A             GL Start
+VMCBGLL  DS    A                Size
+VMCBUSS  DS    A             US Start
+VMCBUSL  DS    A                Size
+VMCBSLS  DS    A             SL Start
+VMCBSLL  DS    A                Size
+VMCBGHS  DS    A             GH Start
+VMCBGHL  DS    A                Size
+*
+VMCBHASH DS    X             Hash value for new pages
+VMCBGVS  DS    A             Address of the Global VSCT
+VMCBSTAT DS    A             --> Address of stats block
+VMCBSTAG DS    A             --> Address of global stats block
+         END   ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    VSCT  --  Virtual Storage Control Table                    *
+*              This control block represents a virtual memory   *
+*              for a user.  There is one of these per address   *
+*              space and one for the global memory.  The        *
+*              address space specific ones are pointed to by    *
+*              the ASB and the global one is pointed to by the  *
+*              VMCB.                                            *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VSCT     RECORD BEGIN
+         DC    C'VSCT'
+VSCTFLG1 FLAG  ,             Flags
+         FLAG  VSCTGLOB        This is the global VSCT
+         FLAG  VSCTNORS        There is no VSLB reserve
+         FLAG  VSCTLKRQ        VCALL to obtain LOCK
+         FLAG  VSCTPGDF        VCALL to page define
+         FLAG  VSCTPGFX        VCALL to page fix
+VSCTLOCK DS    A             Lock Id.  Global or local
+VSCTVMCB DS    A             Address of the VMCB
+VSCTUSED DS    A             Total virtual pages in use
+VSCTMLIM DS    A             Maximum allowed to be in use
+VSCTVSLB DS    A             Chain of free VSLBs
+VSCTRSRV DS    A             Chain of a some VSLBs kept in reserve
+VSCTPOOL DS    A             Chain of SPCB pointers
+VSCTHVSR DS    A             High VSLB addr (local: SL, global: GH)
+VSCTLVSR DS    A             Low VSLB addr (local: US, global: GL)
+*
+VSCTSKEY DS    X             System key (copy of MATSKEY)
+VSCTUKEY DS    X             User key (copy of MATUKEY)
+VSCTHASH DS    X             New page hash value
+*
+* Definition routines called via the VSCT to handle initialization
+* correctly
+*
+VSCTPDEF DS    A             Page definition routine (PAGDEF)
+VSCTPFIX DS    A             Long term fix routine (PAGFIX)
+*
+* Pointer to statistics area
+*
+VSCTSTAT DS    A             Stats area         -->
+         END   ,
+         EJECT ,
+VMSTAT   RECORD BEGIN
+VMSTAT$  DS    0A
+VHGET    DS    A                       Counts of routine calls
+VHGETM   DS    A
+VHGETS   DS    A
+VHFREE   DS    A
+VHADDSPEC DS   A
+VHREMSPEC DS   A
+VHREMANYR DS   A
+VHREMPAGE DS   A
+VHHIST   DS    (504)A
+MXHIST   EQU   (*-VHHIST)-4
+VHRTNCNT DS    A                       Number of times through list
+VHRTNPTR DS    A                       Routine pointer
+VHRTNSTK DS    D                       Store clock field
+VHRTN    DS    (508)A
+MXRTN    EQU   (*-VHRTN)-12
+         END   ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    VSLB  --  Virtual storage location Block                   *
+*              This control block represents a block of virtual *
+*              Storage.                                         *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VSLB     RECORD BEGIN
+         DC    C'VSLB'       Control block ID
+VSLBOWNR DS    A             Address of VSCT owning this VSLB
+VSLBNEXT DS    A             Ptr to next VSLB by Addr
+VSLBPREV DS    A             Ptr to previous VSLB by Addr
+VSLBLOC  DS    A             Address of the block
+VSLBLEN  DS    A             Length of the block
+VSLBSTAT DS    A             --> fragment cnt
+         DS    A             *** Reserved ***
+         END   ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    SPCB  --  Storage Pool Control Block                       *
+*              This control block represents a virtual storage  *
+*              pool.                                            *
+*                                                               *
+*****************************************************************
+         SPACE 2
+SPCB     RECORD BEGIN
+         DC    C'SPCB'
+SPCBNEXT DS    A             Next SPCB in the chain
+SPCBSIZE DS    A             Number of pages in the pool
+SPCBPOOL DS    0H            Complete pool number
+SPCBMAJP FLAG  ,             Major pool number
+         FLAG  (SPCBGLOB,PNGLOBAL,ON)  Global
+         FLAG  (SPCBSYS,PNSYSKEY,ON)   System key
+         FLAG  (SPCBFETP,PNFETP,ON)    Fetch protected
+         FLAG  (SPCBFIX,PNFIXED,ON)    Fixed
+         FLAG  (SPCBBACK,PNDATA,ON)    Data (reverse allocation)
+         FLAG  (SPCBHIGH,PNHIGH,ON)    High area
+SPCBSUBP DS    X             Sub-pool number
+SPCBVSRB DS    A             Addr of VSLB for this pool's region
+SPCBUVSL DS    A             Queue of Used memory (VSLBs)
+SPCBFVSL DS    A             Ring of Free memory  (VSLBs)
+         END   ,
+         EJECT ,
+*
+* Parm for the VSLB manipulation routines
+*
+         SPACE 2
+REMADDP  RECORD BEGIN
+RAPVSLB  DS    A             Address of the Dummy VSLB of the queue
+RAPLOC   DS    A             Location of the Area for SPEC requests
+RAPLEN   DS    A             Length of the area.
+RAPSPEC  DS    A             Specific VSLB (REMPAGE)
+         END   ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  REMANY  --  This routine removes a non-specific block of     *
+*              virtual storage from a Chain of VSLBs.  It is    *
+*              passed the length of storage desired and it      *
+*              returns the address of a block if one could be   *
+*              found.                                           *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means block found.  Addr in RAPLOC.      *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMANY   PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         LA    RVR,4                   Set up to fail
+         LOOP  BEGIN
+         L     RA,VSLBNEXT             Look at the next one
+         IF    (RA,EQ,RY),'EXIT REMANY'
+         IF    (VSLBLEN,GE,RAPLEN),EXIT
+         END   ,
+*
+* We have found a location, update its information.
+*
+         LM    RJ,RK,VSLBLOC           Get the location, length
+         ST    RJ,RAPLOC               Save the location
+         A     RJ,RAPLEN               Adjust the location
+         S     RK,RAPLEN               And the remaining length
+         STM   RJ,RK,VSLBLOC
+*
+* If this leaves a VSLB High and dry then remove and free it
+*
+         IF    Z,BEGIN                 None left in this VSLB
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         CLEAR RVR                     Let them know we found it
+         PEND  ,                       Return it to the caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+* REMANYR  --  This routine does the same as REMANY except that *
+*              the storage is allocated from the high addresses *
+*              first, i.e. in Reverse.                          *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means block address is in RAPLOC.        *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMANYR  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         L     RM,VSLBOWNR             -->
+         WITH  (VSCT,RM),'L RM,VSCTSTAT'
+         IF    (RM,NZ),BEGIN           -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHREMANYR
+         END   ,                       -->
+         LA    RVR,4                   Set up to fail
+         LOOP  BEGIN
+         L     RA,VSLBPREV             Look at the prev one
+         IF    (RA,EQ,RY),'EXIT REMANYR'
+         IF    (VSLBLEN,GE,RAPLEN),EXIT
+         END   ,
+*
+* We have found a location, update its information.
+*
+         LM    RJ,RK,VSLBLOC           Get the location, length
+         S     RK,RAPLEN               Adjust the length
+         ST    RK,VSLBLEN              Update the pointer
+         AR    RJ,RK                   Find the start of ours
+         ST    RJ,RAPLOC               Return the location
+*
+* If this leaves a VSLB High and dry then remove and free it
+*
+         IF    (RK,Z),BEGIN            none left
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         CLEAR RVR                     Tell caller we found one
+         PEND  ,                       Return it to the caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  REMSPEC --  This routine removes a specific block of virtual *
+*              storage from a chain of VSLBs.  It is passed the *
+*              location and length.  It returns a zero if the   *
+*              area could be removed and non-zero if not.       *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means storage removed.                   *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMSPEC  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         L     RM,VSLBOWNR             -->
+         WITH  (VSCT,RM),'L RM,VSCTSTAT'
+         IF    (RM,NZ),BEGIN           -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHREMSPEC
+         END   ,                       -->
+         LA    RVR,4                   Set up to fail
+         LOOP  BEGIN
+         L     RA,VSLBPREV             Look at the prev one
+         IF    (RA,EQ,RY),'EXIT REMSPEC'
+         IF    (VSLBLOC,LE,RAPLOC),EXIT
+         END   ,
+*
+* See if the block we found contains the one we want to free
+*
+         L     RJ,RAPLOC
+         A     RJ,RAPLEN               Ending addr of block +1
+         L     RK,VSLBLOC
+         A     RK,VSLBLEN              Ending of VSLB +1
+         IF    (RJ,GT,RK),'EXIT REMSPEC'
+*
+* If the heads coincide, just update the VSLB
+*
+         IF    (VSLBLOC,EQ,RAPLOC),BEGIN
+         ST    RJ,VSLBLOC              Update the VSLB location
+         SR    RK,RJ                   Length of the VSLB area
+         ST    RK,VSLBLEN              Update the VSLB
+         IF    Z,BEGIN                 This is the whole thing
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         B     RMSDONE                 All done
+         END   ,
+*
+* Update the head buffer.
+*
+         L     RS,RAPLOC               Where the new one starts
+         S     RS,VSLBLOC              Where the old one starts
+         ST    RS,VSLBLEN              Gives the length
+*
+* If the tails coincide we are done at this point
+*
+         IF    (RJ,EQ,RK),RMSDONE
+*
+* If not, we must add a VSLB for the tail buffer
+*
+         GVSLB L:VSLBOWNR              Get a new VSLB
+         LR    RX,RA                   Address of the old one
+         L     RS,VSLBNEXT             Address of the next one
+         LR    RA,RVR                  Address of the new one
+*
+* Fill in the new VSLB
+*
+         ST    RJ,VSLBLOC              Storage area location
+         SR    RK,RJ                   Get the length of the area
+         ST    RK,VSLBLEN              And save that
+         ST    RS,VSLBNEXT             Next pointer
+         ST    RX,VSLBPREV             Previous pointer
+         ST    RA,VSLBNEXT-VSLB(,RX)   Make prev point to this one
+         ST    RA,VSLBPREV-VSLB(,RS)   and the next point to it too
+*
+         WITH  (VSLB,RY)               --> One more fragment
+         INCR  RS,VSLBSTAT             -->
+*
+RMSDONE  CLEAR RVR
+         PEND  ,             All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  REMONE  --  This routine removes a non-specific block of     *
+*              virtual storage from a chain of VSLBs.  It will  *
+*              only accept blocks which do not cross a page     *
+*              boundary.  On entry it is passed the length of   *
+*              storage desired and it returns the address of    *
+*              a block if one could be found.                   *
+*                                                               *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means block found.  Addr in RAPLOC.      *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMONE   PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         LA    RVR,4                   Set up to fail
+*
+*  Loop through the VSLB's
+*
+ROLOOP   LOOP  BEGIN
+         L     RA,VSLBNEXT             Look at the next one
+         IF    (RA,EQ,RY),'EXIT REMONE'
+*
+*  A VSLB with sufficient room has been found - check alignment
+*
+         IF    (VSLBLEN,GE,RAPLEN),BEGIN
+         L     R14,VSLBLOC             Area location
+         L     R15,RAPLEN              Length desired
+         ALR   R15,R14                 End of the area
+         N     R14,=X'7FFFF000'        Starting page
+         N     R15,=X'7FFFF000'        Ending page
+         IF    (R14,EQ,R15),EXIT,ROLOOP
+         END   ,
+         END   ,
+*
+* We have found a location, update its information.
+*
+         LM    RJ,RK,VSLBLOC           Get the location, length
+         ST    RJ,RAPLOC               Save the location
+         A     RJ,RAPLEN               Adjust the location
+         S     RK,RAPLEN               And the remaining length
+         STM   RJ,RK,VSLBLOC
+*
+* If this leaves a VSLB High and dry then remove and free it
+*
+         IF    Z,BEGIN                 None left in this VSLB
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         CLEAR RVR                     Let them know we found it
+         PEND  ,                       Return it to the caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+* REMONER  --  This routine does the same as REMONE except that *
+*              the storage is allocated from the high addresses *
+*              first, i.e. in Reverse.                          *
+*                                                               *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means block found.  Addr in RAPLOC.      *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMONER  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         LA    RVR,4                   Set up to fail
+*
+*  Loop through the VSLB's
+*
+RORLOOP  LOOP  BEGIN
+         L     RA,VSLBPREV             Look at the prev one
+         IF    (RA,EQ,RY),'EXIT REMONER'
+*
+*  A VSLB with sufficient room has been found - check alignment
+*
+         IF    (VSLBLEN,GE,RAPLEN),BEGIN
+         LM    R14,R15,VSLBLOC         Area location and length
+         ALR   R15,R14                 End of the area
+         LR    R14,R15
+         S     R14,RAPLEN              Start of allocated area
+         N     R14,=X'7FFFF000'        Starting page
+         N     R15,=X'7FFFF000'        Ending page
+         IF    (R14,EQ,R15),EXIT,RORLOOP
+         END   ,
+         END   ,
+*
+* We have found a location, update its information.
+*
+         LM    RJ,RK,VSLBLOC           Get the location, length
+         S     RK,RAPLEN               Adjust the length
+         ST    RK,VSLBLEN              Update the pointer
+         AR    RJ,RK                   Find the start of ours
+         ST    RJ,RAPLOC               Return the location
+*
+* If this leaves a VSLB High and dry then remove and free it
+*
+         IF    (RK,Z),BEGIN            None left in this VSLB
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         CLEAR RVR                     Let them know we found it
+         PEND  ,                       Return it to the caller
+         SPACE 3
+         LTORG ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  CHKSPEC --  This routine verifies that a block of virtual    *
+*              storage is in that represented by a chain of     *
+*              VSLBS.  It is passed the location and length and *
+*              returns a zero if the storage is on that queue   *
+*              and non-zero if not.                             *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR = 0 means storage in queue.                  *
+*                                                               *
+*****************************************************************
+         SPACE 2
+CHKSPEC  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         LA    RVR,4                   Set up to fail
+         LOOP  BEGIN
+         L     RA,VSLBPREV             Look at the prev one
+         IF    (RA,EQ,RY),'EXIT CHKSPEC'
+         IF    (VSLBLOC,LE,RAPLOC),EXIT
+         END   ,
+*
+* See if the block we found contains the one we want
+*
+         L     RJ,RAPLOC
+         A     RJ,RAPLEN               Ending addr of block +1
+         L     RK,VSLBLOC
+         A     RK,VSLBLEN              Ending of VSLB +1
+         IF    (RJ,GT,RK),'EXIT CHKSPEC'
+*
+         CLEAR RVR                     It must be in this one
+         PEND  ,             All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  ADDSPEC --  This routine adds a specific block of virtual    *
+*              storage to a chain of VSLBs.  It is passed the   *
+*              location and length.                             *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR contains the VSLB of the added segment       *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ADDSPEC  PROC  REMADDP,SCOPE=LOCAL
+         L     RA,RAPVSLB              Get Q dummy VSLB
+         WITH  (VSLB,RA)
+         L     RM,VSLBOWNR             -->
+         WITH  (VSCT,RM),'L RM,VSCTSTAT'
+         IF    (RM,NZ),BEGIN           -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHADDSPEC
+         END   ,                       -->
+*
+* First find where in the queue the block should go
+*
+         LOOP  BEGIN
+         L     RA,VSLBPREV             Get next smallest
+         UNTIL (VSLBLOC,LT,RAPLOC),END Find the insert point
+*
+* Our block goes before the one we found.  See if they are abutting.
+*
+         LM    RJ,RK,VSLBLOC           Get the location and length
+         AR    RJ,RK                   Get the ending addr of block
+         IF    (RJ,EQ,RAPLOC),BEGIN    They abut
+         A     RK,RAPLEN               Get the total length
+         ST    RK,VSLBLEN              Update the VSLB
+*
+* See if the end abuts the next block in storage
+*
+         A     RJ,RAPLEN               Get addr of the end
+         L     RS,VSLBNEXT             Look at the next higher addr
+         C     RJ,VSLBLOC-VSLB(,RS)    Do they abut?
+         IF    EQ,BEGIN                Yes.
+         A     RK,VSLBLEN-VSLB(,RS)    Collapse that block too.
+         ST    RK,VSLBLEN              Update the VSLB
+         L     RB,VSLBNEXT-VSLB(,RS)   Get the one after that
+         ST    RB,VSLBNEXT             Ours points at that
+         ST    RA,VSLBPREV-VSLB(,RB)   And his points at us
+         FVSLB (RS)                    Free the one we don't need
+         L     RY,RAPVSLB              -->
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         LR    RVR,RA                  Return ptr to inserted one
+         EXIT  ADDSPEC                 Then we're all done
+         END   ,
+*
+* See if it abuts the block following
+*
+         L     RA,VSLBNEXT             Look at the block following
+         L     RB,RAPLOC
+         A     RB,RAPLEN               Get the ending address
+         IF    (RB,EQ,VSLBLOC),BEGIN   They abut
+         MVC   VSLBLOC,RAPLOC
+         L     RB,VSLBLEN
+         A     RB,RAPLEN
+         ST    RB,VSLBLEN              Update the VSLB
+         LR    RVR,RA                  Return ptr to inserted one
+         EXIT  ADDSPEC
+         END   ,
+*
+* It cannot be congealed with any other blocks so we must
+* allocate a new VSLB and put it on the queue
+*
+         GVSLB L:VSLBOWNR              Get the new VSLB
+         LR    RX,RA                   Address of the next one
+         LR    RA,RVR                  Address of the new one
+         MVC   VSLBLOC,RAPLOC
+         MVC   VSLBLEN,RAPLEN
+         ST    RX,VSLBNEXT             Pointer to the next one
+         L     RB,VSLBPREV-VSLB(,RX)   Address of the previous
+         ST    RB,VSLBPREV             Pointer to the previous
+         ST    RA,VSLBNEXT-VSLB(,RB)   Prev pointer to new
+         ST    RA,VSLBPREV-VSLB(,RX)   Next pointer to new
+         LR    RVR,RA                  Return ptr to inserted one
+*
+         L     RY,RAPVSLB              -->
+         WITH  (VSLB,RY)               --> One more fragment
+         INCR  RS,VSLBSTAT             -->
+*
+         PEND  ,             All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  REMPAGE --  This routine removes integral pages from the     *
+*              VLSB segment passed as a parameter.              *
+*              It removes sections over one and an              *
+*              integral number of pages long.  It returns the   *
+*              location and length removed in the parm area     *
+*              passed.  RVR indicates whether an area was found.*
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  RVR  = 0 : An area was found to remove.          *
+*              RVR ^= 0 : No area was found to remove.          *
+*                                                               *
+*****************************************************************
+         SPACE 2
+REMPAGE  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         L     RM,VSLBOWNR             -->
+         WITH  (VSCT,RM),'L RM,VSCTSTAT'
+         IF    (RM,NZ),BEGIN           -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHREMPAGE
+         END   ,                       -->
+         LA    RVR,4                   Set up to fail
+*
+* Check to see if this is our dream spot
+*
+         L     RA,RAPSPEC              Here's the one to free
+         IF    (VSLBLEN,LT,4096),EXIT  Not big enough
+         L     RJ,VSLBLOC
+         LR    RK,RJ
+         AH    RJ,=H'4095'
+         N     RJ,=F'-4096'            Round to nearest page
+         SR    RK,RJ                   Get neg of difference
+         A     RK,VSLBLEN              Storage left after the shift
+         N     RK,=F'-4096'            Round down to even pages
+         IF    ZERO,EXIT               Not big enough
+*
+* We have the stuff we want remove it from the queue
+*
+         STM   RJ,RK,RAPLOC            Save the location/length
+         AR    RJ,RK                   Ending addr of block +1
+         L     RK,VSLBLOC
+         A     RK,VSLBLEN              Ending of VSLB +1
+*
+* If the heads coincide, just update the VSLB
+*
+         IF    (VSLBLOC,EQ,RAPLOC),BEGIN
+         ST    RJ,VSLBLOC              Update the VSLB location
+         SR    RK,RJ                   Length of the VSLB area
+         ST    RK,VSLBLEN              Update the VSLB
+         IF    Z,BEGIN                 This is the whole thing
+         L     RS,VSLBNEXT             Address of the next one
+         MVC   VSLBPREV-VSLB(4,RS),VSLBPREV
+         L     RS,VSLBPREV
+         MVC   VSLBNEXT-VSLB(4,RS),VSLBNEXT
+         FVSLB (RA)
+         WITH  (VSLB,RY)               --> One less fragment
+         DECR  RS,VSLBSTAT             -->
+         END   ,
+         B     RMPDONE                 All done
+         END   ,
+*
+* Update the head buffer.
+*
+         L     RS,RAPLOC               Where the new one starts
+         S     RS,VSLBLOC              Where the old one starts
+         ST    RS,VSLBLEN              Gives the length
+*
+* If the tails coincide we are done at this point
+*
+         IF    (RJ,EQ,RK),RMPDONE
+*
+* If not, we must add a VSLB for the tail buffer
+*
+         GVSLB L:VSLBOWNR              Get a new VSLB
+         LR    RX,RA                   Address of the old one
+         L     RS,VSLBNEXT             Address of the next one
+         LR    RA,RVR                  Address of the new one
+*
+* Fill in the new VSLB
+*
+         ST    RJ,VSLBLOC              Storage area location
+         SR    RK,RJ                   Get the length of the area
+         ST    RK,VSLBLEN              And save that
+         ST    RS,VSLBNEXT             Next pointer
+         ST    RX,VSLBPREV             Previous pointer
+         ST    RA,VSLBNEXT-VSLB(,RX)   Make prev point to this one
+         ST    RA,VSLBPREV-VSLB(,RS)   and the next point to it too
+*
+         WITH  (VSLB,RY)               --> One more fragment
+         INCR  RS,VSLBSTAT             -->
+*
+RMPDONE  CLEAR RVR
+         PEND  ,             All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  FINDMAX --  This routine finds the largest block of virtual  *
+*              storage in the chain of VSLBs.  It returns the   *
+*              location and length of the storage.              *
+*                                                               *
+*   Input  --  REMADDP                                          *
+*                                                               *
+*  Output  --  REMADDP updated.                                 *
+*                                                               *
+*****************************************************************
+         SPACE 2
+FINDMAX  PROC  REMADDP,SCOPE=LOCAL
+         L     RY,RAPVSLB              Get Q dummy VSLB
+         CLEAR RAPLOC
+         CLEAR RAPLEN                  Clear the values
+         LR    RA,RY
+         WITH  (VSLB,RA)
+         LOOP  BEGIN
+         L     RA,VSLBPREV             Look at the prev one
+         IF    (RA,EQ,RY),'EXIT FINDMAX'    out of VSLBs
+         IF    (VSLBLEN,GT,RAPLEN),BEGIN
+         MVC   RAPLEN,VSLBLEN
+         MVC   RAPLOC,VSLBLOC          Save this one
+         END   ,
+         END   ,
+         CLEAR RVR                     Return what we have.
+         PEND  ,             All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   VMGET  --  This routine gets a block of virtual memory of   *
+*              the reqested size out of the requested pool. It  *
+*              returns the address of the storage in RVR.       *
+*                                                               *
+*   Input  --  @VMGET                                           *
+*                                                               *
+*  Output  --  Storage block address in RVR                     *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMGET    PROC  @VMGET,SCOPE=GLOBAL
+*
+* Determine whether the requested pool is local or global and get
+* the address of the correct VSCT
+*
+         TM    @VMGPOOL,PNGLOBAL       Check the global bit in pool
+         IF    ON,BEGIN                Global pool
+         USING PZERO,R0
+         L     RS,PZMATP               Get the mat pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         END   ELSE,BEGIN              Local pool
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the local one
+         END   ,
+         WITH  (VSCT,RY)
+         IF    ('LT RM,VSCTSTAT',NZ),BEGIN      -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHGET
+         L     RN,@VMGLEN
+         SRL   RN,5                    multiples of 32
+         SLL   RN,2
+         CEIL  RN,=A(MXHIST)
+         L     RS,VHHIST(RN)           one more for histogram
+         INCR  RS
+         ST    RS,VHHIST(RN)
+         BAS   RN,VGRTNLOG             --> log caller
+         END   ,                                -->
+*
+* Check out the pool number
+*
+         CLI   @VMGPOOL,MAXPOOL        Is the pool number too big
+         IF    HIGH,BEGIN              Pool too big
+         CLEAR RVR
+         B     VMGEXIT             Signal the lack of storage
+         END   ,
+*
+* Lock up the VSCT
+*
+         SET   VSCTLKRQ            Indicate VCALL for a lock
+         IF    ^VSCTGLOB,'VCALL ASLOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Lock id
+         IF    NZ,'LKOB (RS)'          Obtain it if it exists
+         END   ,
+         CLEAR VSCTLKRQ            No longer in obtain lock code
+VMGLOCK  BEGIN                         Locked area in its own block
+*
+* Now we look for the SPCB
+*
+         L     RX,VSCTPOOL             Get the first one
+         WITH  (SPCB,RX)
+         WHILE (SPCBPOOL,NE,@VMGPOOL),BEGIN
+         LT    RX,SPCBNEXT
+*
+* If there is no pool... we have to make one up
+*
+         IF    Z,BEGIN
+         PSET  NEWPOOLP
+         ST    RY,NEWPVSCT             VSCT Address
+         MVC   NEWPPOOL,@VMGPOOL       Pool number
+         ACALL NEWPOOL                 Create the pool
+         LR    RX,RVR                  This is its SPCB
+         END   ,
+         END   ,
+*
+* Round the Amount of storage he is requesting up to the nearest
+* eight byte boundary
+*
+         L     RS,@VMGLEN
+         AH    RS,=Y(VMAL-1)
+         N     RS,=A(VMALIGN)
+         IF    Z,BEGIN
+         CLEAR RVR
+         EXIT  VMGLOCK                 He doesn't want any
+         END   ,
+         ST    RS,@VMGLEN              Update the parm value
+*
+* Is his request for more than a page?  If so we don't even bother
+* looking in the pool for it.  We just go directly to the free
+* space pointers to find enough memory.
+*
+         IF    (RS,GE,4096),NOTPOOLD   We need fresh stuff
+         IF    @VMGPAGE,NOTPOOLD       Page aligned
+*
+* Look through the free blocks to find one that is big enough.
+*
+         PSET  REMADDP,CLEAR=NO        Common data area
+         MVC   RAPVSLB,SPCBFVSL        Free memory head
+         MVC   RAPLEN,@VMGLEN          Length of memory desired
+         IF    @VMGONEP,BEGIN
+         IF    SPCBBACK,'ACALL REMONER'
+         ELSE  'ACALL REMONE'
+         END
+         ELSE  BEGIN
+         IF    SPCBBACK,'ACALL REMANYR'
+         ELSE  'ACALL REMANY'
+         END
+*
+* See if we actually got something
+*
+         IF    (RVR,Z),BEGIN           We actually got something
+         MVC   RAPVSLB,SPCBUVSL        Mark the space as allocated
+         ACALL ADDSPEC                 By adding it to the res q
+         L     RVR,RAPLOC              Get the location of the data
+         EXIT  VMGLOCK                 Then return to the caller
+         END   ,
+*
+* For one reason or another, we must allocate new pages for the
+* storage requested.
+*
+NOTPOOLD LABEL ,
+         PSET  REMADDP,CLEAR=NO
+         L     RA,@VMGLEN              Get the length desired
+         AH    RA,=H'4095'             Round up
+         N     RA,=F'-4096'            And to the even page
+         ST    RA,RAPLEN               This is how much we need
+         MVC   RAPVSLB,SPCBVSRB        Move in the dummy VSLB addr
+         IF    SPCBBACK,'ACALL REMANYR'
+         ELSE  'ACALL REMANY'
+*
+* Did we get it?
+*
+         IF    (RVR,NZ),BEGIN          No memory left fella
+         CLEAR RVR
+         EXIT  VMGLOCK
+         END   ,
+*
+* Call the paging supervisor to define the virtual memory location.
+*
+         LM    RJ,RK,RAPLOC            Get the location and length
+         PSET  @PAGDEF
+         STM   RJ,RK,@PDADDR           Save the location/length
+         IF    SPCBGLOB,'SET @PDFGLOB'
+         IF    SPCBSYS,'MVC @PDKEY,VSCTSKEY'
+         ELSE  'MVC @PDKEY,VSCTUKEY'
+         IF    SPCBFETP,'SET @PDKEY.8'           Fetch protect
+*        MVC   @PDHASH,VSCTHASH                  Hash Value
+         SET   VSCTPGDF                Indicate call to PAGE DEF
+         ACALL VSCTPDEF                Call page defn function
+         CLEAR VSCTPGDF                No longer in PAGE DEF code
+
+*
+* Is the page fixed?
+*
+         IF    SPCBFIX,BEGIN
+         PSET  @PAGE
+         ST    RJ,@PAGLOC              Save the page location
+         ST    RK,@PAGLEN              And the length in bytes
+         SET   VSCTPGFX                Indicate call to PAGE FIX
+         IF    SPCBGLOB,'ACALL VSCTPFIX' Long term fix
+         ELSE  'VCALL PAGSFIX'         Otherwise short term fix
+         CLEAR VSCTPGFX                No longer in PAGE FIX code
+         END   ,
+*
+* Start out with the location and length of the new stuff in RJ,RK.
+* Figure out where in the new stuff our storage will come from.  Put
+* the storage address into RA, and the location and length of any
+* storage left over in RJ and RK.  If the pool is a forward pool or
+* if the request is for a page aligned thing then just take the first
+* part of the page(s) we just got.
+*
+         IF    (@VMGPAGE,OR,^SPCBBACK),BEGIN
+         LR    RA,RJ                   Get the location
+         A     RJ,@VMGLEN              Point past the buffer
+         S     RK,@VMGLEN              And subtract the length
+         END   ELSE,BEGIN
+*
+* If this is a reverse pool and the request is not for something
+* page aligned, we take the request from the end of the new page(s)
+* and free the stuff at the beginning.
+*
+         LR    RA,RJ                   Copy the location
+         S     RK,@VMGLEN              Get the residual length
+         AR    RA,RK                   Point past the free area
+         END   ,
+*
+* Insert the stuff we're keeping on the used queue
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBUVSL        Used queue
+         ST    RA,RAPLOC               Location
+         MVC   RAPLEN,@VMGLEN          Length
+         ACALL ADDSPEC                 Add it
+*
+* If there is anything left over from the request, we add that to
+* the free queue.
+*
+         IF    (RK,POS),BEGIN          If there is any left
+         MVC   RAPVSLB,SPCBFVSL        Free queue
+         STM   RJ,RK,RAPLOC            Save loc,len of free area
+         ACALL ADDSPEC                 Add it
+         END   ,
+*
+* Check on the VSLB supply
+*
+         IF    VSCTNORS,BEGIN
+         PSET  GFVSLB,CLEAR=NO
+         PMOV  GFVADDR,LA:VSCT         VSCT address
+         ACALL ALOCVSLB                Get more
+         END   ,
+*
+* Now we can return to the caller with the memory
+*
+         LR    RVR,RA
+         END   ,                       End of VMGLOCK
+*
+* Free the lock
+*
+         LR    RA,RVR                  Save the return value
+         IF    ('LT RM,VSCTSTAT',NZ),BEGIN      -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHGET
+         BAS   RN,VGRTNLOG             --> log caller
+         END   ,                                -->
+         IF    ^VSCTGLOB,'VCALL ASULOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Get the lock ID
+         IF    NZ,'LKREL (RS)'         Free the lock (if one exists)
+         END   ,
+         LR    RVR,RA                  Restore the return value
+*
+VMGEXIT  PEND
+         EJECT
+*****************************************************************
+*                                                               *
+*  VMGETM  --  This routine gets a block of virtual memory of   *
+*              at least the requested size and the largest      *
+*              available block of less than the maximum value   *
+*              that is passed in VMGDAT.  It returns the        *
+*              address in RVR and updates the @VMGLEN field to  *
+*              indicate the length of the storage obtained.     *
+*                                                               *
+*   Input  --  @VMGET                                           *
+*                                                               *
+*  Output  --  Storage block address in RVR, length in @VMGLEN. *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMGETM   PROC  @VMGET,SCOPE=GLOBAL
+*
+* Determine whether the requested pool is local or global and get
+* the address of the correct VSCT
+*
+         TM    @VMGPOOL,PNGLOBAL       Check the global bit in pool
+         IF    ON,BEGIN                Global pool
+         USING PZERO,R0
+         L     RS,PZMATP               Get the mat pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         END   ELSE,BEGIN              Local pool
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the local one
+         END   ,
+         WITH  (VSCT,RY)
+*
+* Check out the pool number
+*
+         CLI   @VMGPOOL,MAXPOOL        Is the pool number too big
+         IF    HIGH,BEGIN              Pool too big
+         CLEAR RVR
+         B     VMGMEXIT            Signal the lack of storage
+         END   ,
+*
+* Lock up the VSCT
+*
+         SET   VSCTLKRQ            Indicate VCALL for a lock
+         IF    ^VSCTGLOB,'VCALL ASLOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Lock id
+         IF    NZ,'LKOB (RS)'          Obtain it if it exists
+         END   ,
+         CLEAR VSCTLKRQ            No longer in obtain lock code
+VMMGLCK  BEGIN                         Locked area in its own block
+*
+* Now we look for the SPCB
+*
+         L     RX,VSCTPOOL             Get the first one
+         WITH  (SPCB,RX)
+         WHILE (SPCBPOOL,NE,@VMGPOOL),BEGIN
+         LT    RX,SPCBNEXT
+*
+* If there is no pool... we have to make one up
+*
+         IF    Z,BEGIN
+         PSET  NEWPOOLP
+         ST    RY,NEWPVSCT             VSCT Address
+         MVC   NEWPPOOL,@VMGPOOL       Pool number
+         ACALL NEWPOOL                 Create the pool
+         LR    RX,RVR                  This is its SPCB
+         END   ,
+         END   ,
+*
+* Round the min amount of storage he is requesting up to the nearest
+* eight byte boundary
+*
+         L     RS,@VMGLEN
+         AH    RS,=Y(VMAL-1)
+         N     RS,=A(VMALIGN)
+         IF    Z,BEGIN
+         CLEAR RVR
+         EXIT  VMMGLCK                 He doesn't want any
+         END   ,
+         ST    RS,@VMGLEN              Update the parm value
+*
+* Round the max amount of storage he is requesting up to the nearest
+* eight byte boundary
+*
+         L     RS,@VMGDAT
+         AH    RS,=Y(VMAL-1)
+         N     RS,=A(VMALIGN)
+         IF    (Z,OR,(RS,LT,@VMGLEN)),BEGIN      Max=0 or Max<Min
+         CLEAR RVR
+         EXIT  VMMGLCK                 He doesn't get any
+         END   ,
+         ST    RS,@VMGDAT              Update the parm value
+*
+* Is his request for more than a page?  If so we don't even bother
+* looking in the pool for it.  We just go directly to the free
+* space pointers to find enough memory.
+*
+         CLEAR RK                      Length of block found so far
+         IF    (RS,GE,4096),MAXPAGE    We need fresh stuff
+         IF    @VMGPAGE,MAXPAGE        Page aligned
+*
+* Find the largest one in the free blocks.
+*
+         PSET  REMADDP,CLEAR=NO        Common data area
+         MVC   RAPVSLB,SPCBFVSL        Free memory head
+         ACALL FINDMAX                 Find the largest
+         L     RK,RAPLEN               Length in pre-allocated area
+*
+* If the amount returned from the free pool is bigger than
+* the maximum desired then it is plenty big enough and we can
+* just use it.
+*
+         IF    (RK,LT,@VMGDAT),MAXPAGE See if we can do better
+TAKELOC  LABEL ,                       Take the memory from local
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBFVSL        Free space queue
+         CEIL  RK,@VMGDAT              Max amount
+         IF    (RK,LT,@VMGLEN),BEGIN   Too small
+         CLEAR RVR
+         EXIT  VMMGLCK                 return
+         END   ,
+         ST    RK,RAPLEN               Store the length
+         IF    SPCBBACK,'ACALL REMANYR' Get the block
+         ELSE  'ACALL REMANY'           Ditto
+*
+* Add it to the Used queue
+*
+         MVC   RAPVSLB,SPCBUVSL        Used queue pointer
+         ACALL ADDSPEC                 Add it to the queue
+         ST    RK,@VMGLEN              Save the length
+         L     RVR,RAPLOC              Get the location
+         EXIT  VMMGLCK                 Then return to the user
+*
+* Check the free page reserve.
+*
+MAXPAGE  LABEL ,
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBVSRB        Get the region VSLB
+         ACALL FINDMAX                 Find the largest block
+         IF    (RK,GE,RAPLEN),TAKELOC  The local stuff is as good
+         L     RK,RAPLEN               Get the size of the block
+         CEIL  RK,@VMGDAT              Maximum size
+         IF    (RK,LT,@VMGLEN),BEGIN   Too small
+         CLEAR RVR
+         EXIT  VMMGLCK                 return
+         END   ,
+*
+* At this point it looks as if we have to allocate some more pages
+* to the pool to satisfy the request.
+*
+         ST    RK,@VMGLEN              Update the length
+         AH    RK,=H'4095'             Round up
+         N     RK,=F'-4096'            To an even page
+         ST    RK,RAPLEN               This is how much we need
+         MVC   RAPVSLB,SPCBVSRB        Move in the dummy VSLB addr
+         IF    SPCBBACK,'ACALL REMANYR'
+         ELSE  'ACALL REMANY'
+*
+* Did we get it?
+*
+         IF    (RVR,NZ),BEGIN          No memory left fella
+         CLEAR RVR
+         EXIT  VMMGLCK
+         END   ,
+*
+* Call the paging supervisor to define the virtual memory location.
+*
+         LM    RJ,RK,RAPLOC            Get the location and length
+         PSET  @PAGDEF
+         STM   RJ,RK,@PDADDR           Save the location/length
+         IF    SPCBGLOB,'SET @PDFGLOB'
+         IF    SPCBSYS,'MVC @PDKEY,VSCTSKEY'
+         ELSE  'MVC @PDKEY,VSCTUKEY'
+         IF    SPCBFETP,'SET @PDKEY.8'           Fetch protect
+*        MVC   @PDHASH,VSCTHASH                  Hash Value
+         SET   VSCTPGDF                Indicate call to PAGE DEF
+         ACALL VSCTPDEF
+         CLEAR VSCTPGDF                No longer in PAGE DEF code
+*
+* Is the page fixed?
+*
+         IF    SPCBFIX,BEGIN
+         PSET  @PAGE
+         ST    RJ,@PAGLOC              Save the page location
+         ST    RK,@PAGLEN              And the length in bytes
+         SET   VSCTPGFX                Indicate call to PAGE FIX
+         IF    SPCBGLOB,'ACALL VSCTPFIX' Long term fix
+         ELSE  'VCALL PAGSFIX'         Otherwise short term fix
+         CLEAR VSCTPGFX                No longer in PAGE FIX code
+         END   ,
+*
+* Start out with the location and length of the new stuff in RJ,RK.
+* Figure out where in the new stuff our storage will come from.  Put
+* the storage address into RA, and the location and length of any
+* storage left over in RJ and RK.  If the pool is a forward pool or
+* if the request is for a page aligned thing then just take the first
+* part of the page(s) we just got.
+*
+         IF    (@VMGPAGE,OR,^SPCBBACK),BEGIN
+         LR    RA,RJ                   Get the location
+         A     RJ,@VMGLEN              Point past the buffer
+         S     RK,@VMGLEN              And subtract the length
+         END   ELSE,BEGIN
+*
+* If this is a reverse pool and the request is not for something
+* page aligned, we take the request from the end of the new page(s)
+* and free the stuff at the beginning.
+*
+         LR    RA,RJ                   Copy the location
+         S     RK,@VMGLEN              Get the residual length
+         AR    RA,RK                   Point past the free area
+         END   ,
+*
+* Insert the stuff we're keeping on the used queue
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBUVSL        Used queue
+         ST    RA,RAPLOC               Location
+         MVC   RAPLEN,@VMGLEN          Length
+         ACALL ADDSPEC                 Add it
+*
+* If there is anything left over from the request, we add that to
+* the free queue.
+*
+         IF    (RK,POS),BEGIN          If there is any left
+         MVC   RAPVSLB,SPCBFVSL        Free queue
+         STM   RJ,RK,RAPLOC            Save loc,len of free area
+         ACALL ADDSPEC                 Add it
+         END   ,
+*
+* Check on the VSLB supply
+*
+         IF    VSCTNORS,BEGIN
+         PSET  GFVSLB,CLEAR=NO
+         PMOV  GFVADDR,LA:VSCT         VSCT address
+         ACALL ALOCVSLB                Get more
+         END   ,
+*
+* Now we can return to the caller with the memory
+*
+         LR    RVR,RA
+         END   ,                       End of VMMGLCK
+*
+* Free the lock
+*
+         LR    RA,RVR                  Save the return value
+         IF    ('LT RM,VSCTSTAT',NZ),BEGIN      -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHGETM
+         BAS   RN,VGRTNLOG             --> log caller
+         END   ,                                -->
+         IF    ^VSCTGLOB,'VCALL ASULOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Get the lock ID
+         IF    NZ,'LKREL (RS)'         Free the lock (if one exists)
+         END   ,
+         LR    RVR,RA                  Restore the return value
+*
+VMGMEXIT PEND
+         LTORG
+         EJECT
+*****************************************************************
+*                                                               *
+*  VMGETS  --  This routine gets a page of virtual memory out   *
+*              of the requested pool at the requested location. *
+*              It returns the address of the page in RVR if it  *
+*              can manage that or a zero if the page was not    *
+*              available.                                       *
+*                                                               *
+*   Input  --  @VMGET                                           *
+*                                                               *
+*  Output  --  Storage block address in RVR                     *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMGETS   PROC  @VMGET,SCOPE=GLOBAL
+*
+* Make sure the request is on a page boundary and is for an integral
+* number of pages.
+*
+         CLEAR RVR                     Default return
+         LA    RS,4095                 Get a page mask
+         N     RS,@VMGDAT              Check the address
+         BNZ   VMGSEXIT            Not a page boundary
+         LA    RS,4095                 Get a page mask
+         N     RS,@VMGLEN              Check the length
+         BNZ   VMGSEXIT            Not an integral number of pages
+*
+* Determine whether the requested pool is local or global and get
+* the address of the correct VSCT
+*
+         TM    @VMGPOOL,PNGLOBAL       Check the global bit in pool
+         IF    ON,BEGIN                Global pool
+         USING PZERO,R0
+         L     RS,PZMATP               Get the MAT pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         END   ELSE,BEGIN              Local pool
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the local one
+         END   ,
+         WITH  (VSCT,RY)
+*
+* Check out the pool number
+*
+         CLI   @VMGPOOL,MAXPOOL        Is the pool number too big
+         IF    HIGH,BEGIN              Pool too big
+         CLEAR RVR
+         B     VMGSEXIT            Signal the lack of storage
+         END   ,
+*
+* Lock up the VSCT
+*
+         SET   VSCTLKRQ            Indicate VCALL for a lock
+         IF    ^VSCTGLOB,'VCALL ASLOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Lock id
+         IF    NZ,'LKOB (RS)'          Obtain it if it exists
+         END   ,
+         CLEAR VSCTLKRQ            No longer in obtain lock code
+VMSGLCK  BEGIN                         Locked area in its own block
+*
+* Now we look for the SPCB
+*
+         L     RX,VSCTPOOL             Get the first one
+         WITH  (SPCB,RX)
+         WHILE (SPCBPOOL,NE,@VMGPOOL),BEGIN
+         LT    RX,SPCBNEXT
+*
+* If there is no pool... we have to make one up
+*
+         IF    Z,BEGIN
+         PSET  NEWPOOLP
+         ST    RY,NEWPVSCT             VSCT Address
+         MVC   NEWPPOOL,@VMGPOOL       Pool number
+         ACALL NEWPOOL                 Create the pool
+         LR    RX,RVR                  This is its SPCB
+         END   ,
+         END   ,
+*
+* Go to the pool of free pages and see if we can get the memory
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPLEN,@VMGLEN          Move the amount requested
+         MVC   RAPLOC,@VMGDAT          And the desired address
+         MVC   RAPVSLB,SPCBVSRB        Move in the dummy VSLB addr
+         ACALL REMSPEC                 Remove that if possible
+*
+* Did we get it?
+*
+         IF    (RVR,NZ),BEGIN          No memory left fella
+         CLEAR RVR
+         EXIT  VMSGLCK
+         END   ,
+*
+* Put the memory on the used up queue.
+*
+         MVC   RAPVSLB,SPCBUVSL        Used queue
+         ACALL ADDSPEC                 Add the data to the used queue
+*
+* Call the paging supervisor to define the virtual memory location.
+*
+         LM    RJ,RK,RAPLOC            Get the location and length
+         PSET  @PAGDEF
+         STM   RJ,RK,@PDADDR           Save the location/length
+         IF    SPCBGLOB,'SET @PDFGLOB'
+         IF    SPCBSYS,'MVC @PDKEY,VSCTSKEY'
+         ELSE  'MVC @PDKEY,VSCTUKEY'
+         IF    SPCBFETP,'SET @PDKEY.8'           Fetch protect
+*        MVC   @PDHASH,VSCTHASH                  Hash Value
+         SET   VSCTPGDF                Indicate call to PAGE DEF
+         ACALL VSCTPDEF
+         CLEAR VSCTPGDF                No longer in PAGE DEF code
+*
+* Is the page fixed?
+*
+         IF    SPCBFIX,BEGIN
+         PSET  @PAGE
+         ST    RJ,@PAGLOC              Save the page location
+         ST    RK,@PAGLEN              And the length in bytes
+         SET   VSCTPGFX                Indicate call to PAGE FIX
+         IF    SPCBGLOB,'ACALL VSCTPFIX' Long term fix
+         ELSE  'VCALL PAGSFIX'         Otherwise short term fix
+         CLEAR VSCTPGFX                No longer in PAGE FIX code
+         END   ,
+*
+* Check on the VSLB supply
+*
+         IF    VSCTNORS,BEGIN
+         PSET  GFVSLB,CLEAR=NO
+         PMOV  GFVADDR,LA:VSCT         VSCT address
+         ACALL ALOCVSLB                Get more
+         END   ,
+*
+* Now we can return to the caller with the memory
+*
+         LR    RVR,RJ
+         END   ,                       End of VMGLOCK
+*
+* Free the lock
+*
+         LR    RA,RVR                  Save the return value
+         IF    ('LT RM,VSCTSTAT',NZ),BEGIN      -->
+         WITH  (VMSTAT,RM)
+         INCR  RS,VHGETS
+         BAS   RN,VGRTNLOG             --> log caller
+         END   ,                                -->
+         IF    ^VSCTGLOB,'VCALL ASULOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Get the lock ID
+         IF    NZ,'LKREL (RS)'         Free the lock (if one exists)
+         END   ,
+         LR    RVR,RA                  Restore the return value
+*
+VMGSEXIT PEND
+*
+         LTORG
+         EJECT
+*****************************************************************
+*                                                               *
+*  VMFREE  --  This routine frees a block of virtual memory of  *
+*              the reqested size into the requested pool. It    *
+*              returns success or failure in RVR.               *
+*                                                               *
+*                                                               *
+*   Input  --  @VMFREE                                          *
+*                                                               *
+*  Output  --  RVR  = 0 : Memory freed                          *
+*              RVR ^= 0 : Memory not freed                      *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMFREE   PROC  @VMFREE,SCOPE=GLOBAL
+*
+* Determine whether the requested pool is local or global and get
+* the address of the correct VSCT
+*
+         TM    @VMFPOOL,PNGLOBAL       Check the global bit in pool
+         IF    ON,BEGIN                Global pool
+         USING PZERO,R0
+         L     RS,PZMATP               Get the mat pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         END   ELSE,BEGIN              Local pool
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the local one
+         END   ,
+         WITH  (VSCT,RY)
+         IF    ('LT RM,VSCTSTAT',NZ),BEGIN      -->
+         WITH  (VMSTAT,RM)
+         BAS   RN,VFRTNLOG             --> log caller
+         END   ,                                -->
+*
+* Lock up the VSCT
+*
+         SET   VSCTLKRQ            Indicate VCALL for a lock
+         IF    ^VSCTGLOB,'VCALL ASLOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Lock id
+         IF    NZ,'LKOB (RS)'          Obtain it if it exists
+         END   ,
+         CLEAR VSCTLKRQ            No longer in obtain lock code
+VMFLOCK  BEGIN                         Locked area in its own block
+*
+* Now we look for the SPCB
+*
+         L     RX,VSCTPOOL             Get the first one
+         WITH  (SPCB,RX)
+         WHILE (SPCBPOOL,NE,@VMFPOOL),BEGIN
+         LT    RX,SPCBNEXT
+*
+* If there is no pool... he must be mistaken
+*
+         IF    Z,BEGIN
+         LA    RVR,4
+         EXIT  VMFLOCK
+         END   ,
+         END   ,
+*
+* Round the Amount of storage he is requesting up to the nearest
+* eight byte boundary
+*
+         L     RS,@VMFLEN
+         AH    RS,=Y(VMAL-1)
+         N     RS,=A(VMALIGN)
+         IF    Z,BEGIN
+         LA    RVR,12                  Invalid length
+         EXIT  VMFLOCK                 He doesn't really have any
+         END   ,
+         ST    RS,@VMFLEN              Update the parm value
+*
+* Also round the address of the storage off to the lower 8 byte bdy
+*
+         NC    @VMFLOC,=A(VMALIGN)     Turn off the low order bits
+*
+* Remove his block from the used queue
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBUVSL        It is the used queue we want
+         MVC   RAPLOC,@VMFLOC          Location of the block
+         MVC   RAPLEN,@VMFLEN          And its length
+         ACALL REMSPEC                 Remove the block
+         IF    (RVR,NZ),BEGIN          The block was not reserved
+         LA    RVR,16
+         EXIT  VMFLOCK                 He doesn't own the block
+         END   ,
+*
+* The storage has been removed from the used queue, now it must be
+* added to the free queue.
+*
+         MVC   RAPVSLB,SPCBFVSL        Free queue designator
+         ACALL ADDSPEC                 And add it there
+         LR    RA,RVR
+         WITH  (VSLB,RA),BEGIN
+         IF    (VSLBLEN,GE,4096),BEGIN
+*
+* Now scan for free pages.  If there are any we free them.
+*
+         PMOV  RAPSPEC,LA:VSLB         And the seg over 4k
+         ACALL REMPAGE                 See if there are any
+*
+         IF    (RVR,Z),BEGIN           There are some pages free
+         MVC   RAPVSLB,SPCBVSRB        Move in the regional VSLB
+         ACALL ADDSPEC                 Add the pages to the region
+*
+* Then free the underlying frames
+*
+         LM    RJ,RK,RAPLOC            Get the location and length
+         IF    SPCBFIX,BEGIN
+         PSET  @PAGE                   Parm area for unfix
+         ST    RJ,@PAGLOC              Save the location
+         ST    RK,@PAGLEN              And the length
+         IF    SPCBGLOB,'VCALL PAGUFIX'   Long term unfix
+         ELSE  'VCALL PAGUSFIX'        Short term unfix
+         END   ,
+         PSET  @PAGE                   Parm area for undef
+         ST    RJ,@PAGLOC              Location
+         ST    RK,@PAGLEN              Length
+         VCALL PAGUDEF                 Then undefine the pages
+         END   ,
+         END   ,                       OF Segment over 4K
+         END   ,                       OF VSLB addr
+*
+* Check on the VSLB supply
+*
+         IF    VSCTNORS,BEGIN
+         PSET  GFVSLB,CLEAR=NO
+         PMOV  GFVADDR,LA:VSCT         VSCT address
+         ACALL ALOCVSLB                Get more
+         END   ,
+*
+* All done.  Now we can return to the caller
+*
+         CLEAR RVR
+         END   ,                       End of the locked area
+         LR    RA,RVR                  Save the return value
+         IF    ^VSCTGLOB,'VCALL ASULOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Get the lock ID
+         IF    NZ,'LKREL (RS)'         Free the lock (if one exists)
+         END   ,
+         LR    RVR,RA                  Restore the return value
+         PEND  ,                       Return to caller
+         LTORG
+         EJECT ,
+*  -->
+*  Uses RJ RK R15 R1
+*  RM points @ stat blk
+*  RN is return addr ptr for this temp rtn
+*  R0 contains allocated mem addr
+*  R14 contains return address to original caller
+*
+VGRTNLOG LABEL ,                       -->
+         BEGIN ,
+         BASE  RJ
+         WITH  (VMSTAT,RM)
+         WITH  (@VMGET-72,WAR)
+*
+*  Histogram of lengths
+*
+         L     EPAR,@VMGLEN
+         SRL   EPAR,5                  multiples of 32
+         SLL   EPAR,2
+         CEIL  EPAR,=A(MXHIST)
+         L     RK,VHHIST(EPAR)         one more for histogram
+         INCR  RK
+         ST    RK,VHHIST(EPAR)
+*
+*  Circular list of return addr, len, loc
+*
+         L     RK,VHRTNPTR             Offset to last slot
+         IF    (RK,GT,MXRTN),BEGIN     If it overflows, reset it
+         STCK  VHRTNSTK                Mark w/ TOD
+         INCR  RK,VHRTNCNT
+         CLEAR RK
+         END   ,
+         L     R14,4+(4*14)(,WAR)      Get return addr
+         LA    RJ,VHRTN(RK)
+         STM   R14,R0,0(RJ)            Store return address, len, loc
+         LA    RK,@RK+12               Update it
+         ST    RK,VHRTNPTR             Reset offset
+         BR    RN                      Return from whence called
+         END   ,
+         SPACE 4
+*  -->
+*  Uses RJ RK R15
+*  RM points @ stat blk
+*  RN is return addr ptr for this temp rtn
+*  R0 contains allocated mem addr
+*  R14 contains return address to original caller
+*
+VFRTNLOG LABEL ,                       -->
+         BEGIN ,
+         BASE  RJ
+         WITH  (VMSTAT,RM)
+         WITH  (@VMFREE-72,WAR)
+         INCR  RK,VHFREE
+*
+*  Circular list of return addr, len, loc
+*
+         L     RK,VHRTNPTR             Offset to last slot
+         IF    (RK,GT,MXRTN),BEGIN     If it overflows, reset it
+         STCK  VHRTNSTK                Mark w/ TOD
+         INCR  RK,VHRTNCNT
+         CLEAR RK
+         END   ,
+         N     R14,=X'7FFFFFFF'        Show it's a free
+         L     R15,@VMFLEN             length
+         L     R0,@VMFLOC              location
+         LA    RJ,VHRTN(RK)
+         STM   R14,R0,0(RJ)            Store return address, len, loc
+         LA    RK,@RK+12               Update it
+         ST    RK,VHRTNPTR             Reset offset
+         BR    RN                      Return from whence called
+         END   ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*    VMCHK --  This routine determines whether a given area of  *
+*              virtual storage is allocacted and resides within *
+*              the specified pool.  It returns a 0 if so and    *
+*              non-zero if not in RVR.                          *
+*                                                               *
+*   Input  --  @VMFREE                                          *
+*                                                               *
+*  Output  --  In pool and allocated: RVR=0; otherwize: RVR^=0  *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMCHK    PROC  @VMFREE,SCOPE=GLOBAL
+*
+* Determine whether the requested pool is local or global and get
+* the address of the correct VSCT
+*
+         TM    @VMFPOOL,PNGLOBAL       Check the global bit in pool
+         IF    ON,BEGIN                Global pool
+         USING PZERO,R0
+         L     RS,PZMATP               Get the mat pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         END   ELSE,BEGIN              Local pool
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the local one
+         END   ,
+         WITH  (VSCT,RY)
+*
+* Lock up the VSCT
+*
+         SET   VSCTLKRQ            Indicate VCALL for a lock
+         IF    ^VSCTGLOB,'VCALL ASLOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Lock id
+         IF    NZ,'LKOB (RS)'          Obtain it if it exists
+         END   ,
+         CLEAR VSCTLKRQ            No longer in obtain lock code
+VMCLOCK  BEGIN                         Locked area in its own block
+*
+* Now we look for the SPCB
+*
+         L     RX,VSCTPOOL             Get the first one
+         WITH  (SPCB,RX)
+         WHILE (SPCBPOOL,NE,@VMFPOOL),BEGIN
+         LT    RX,SPCBNEXT
+*
+* If there is no pool... he must be mistaken
+*
+         IF    Z,BEGIN
+         LA    RVR,4
+         EXIT  VMCLOCK
+         END   ,
+         END   ,
+*
+* Round the Amount of storage he is curious about up to the nearest
+* eight byte boundary
+*
+         L     RS,@VMFLEN
+         AH    RS,=Y(VMAL-1)
+         N     RS,=A(VMALIGN)
+         IF    Z,BEGIN
+         LA    RVR,12                  Invalid length
+         EXIT  VMCLOCK                 He doesn't really have any
+         END   ,
+         ST    RS,@VMFLEN              Update the parm value
+*
+* Also round the address of the storage off to the lower 8 byte bdy
+*
+         NC    @VMFLOC,=A(VMALIGN)     Turn off the low order bits
+*
+* See if his block is in the used queue
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBUVSL        It is the used queue we want
+         MVC   RAPLOC,@VMFLOC          Location of the block
+         MVC   RAPLEN,@VMFLEN          And its length
+         ACALL CHKSPEC                 Check on the block
+         IF    (RVR,NZ),BEGIN          The block was not in there
+         LA    RVR,16
+         EXIT  VMCLOCK                 He doesn't own the block
+         END   ,
+*
+* All done.  Now we can return to the caller
+*
+         CLEAR RVR
+         END   ,                       End of the locked area
+         LR    RA,RVR                  Save the return value
+         IF    ^VSCTGLOB,'VCALL ASULOCK'
+         ELSE  BEGIN
+         LT    RS,VSCTLOCK             Get the lock ID
+         IF    NZ,'LKREL (RS)'         Free the lock (if one exists)
+         END   ,
+         LR    RVR,RA                  Restore the return value
+         PEND  ,                       Return to caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+* NEWPOOL  --  This routine allocates and formats control       *
+*              blocks for a new storage pool.  It is passed the *
+*              address of the controlling VSCT and the pool     *
+*              number to be created.                            *
+*                                                               *
+*   Input  --  NEWPOOLP                                         *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+NEWPOOLP RECORD BEGIN
+NEWPVSCT DS    A             VSCT Address
+NEWPPOOL DS    H             Pool number (MAJOR/SUB)
+         END   ,
+         SPACE 2
+NEWPOOL  PROC  NEWPOOLP,SCOPE=LOCAL
+         L     RY,NEWPVSCT             Get the VSCT address
+         WITH  (VSCT,RY)
+*
+* Get the storage for the SPCB
+*
+         IF    VSCTGLOB,BEGIN
+         VMGET L'SPCB,LOC=GLOBHI,FIX=YES
+         END   ELSE,BEGIN
+         VMGET L'SPCB,LOC=LOCSYS
+         END   ,
+         LTR   RX,RVR
+         IF    Z,'ABORT NOSPCBMEM'     Don't assume we got memory
+         WITH  (SPCB,RX)
+*
+* Fill in the SPCB
+*
+         CLEAR SPCB
+         MVC   SPCB(4),=C'SPCB'        Control block id
+         MVC   SPCBPOOL,NEWPPOOL       Pool number
+         IF    SPCBHIGH,'MVC SPCBVSRB,VSCTHVSR'
+         ELSE  'MVC SPCBVSRB,VSCTLVSR'
+*
+* Get the queue VSLBs and set them up
+*
+         GVSLB (RY)                    Get the VSLB
+         LR    RA,RVR
+         WITH  (VSLB,RA)
+         ST    RA,VSLBNEXT             This is next
+         ST    RA,VSLBPREV             and previous
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN
+         ST    RA,SPCBUVSL             None used in this pool
+         GVSLB (RY)                    Get the VSLB
+         LR    RA,RVR
+         ST    RA,VSLBNEXT             This is next
+         ST    RA,VSLBPREV             and previous
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN
+         ST    RA,SPCBFVSL             None free in this pool
+*
+* Now that the SPCB is all filled in, we must queue it to the
+* end of the SPCB queue off the VSCT
+*
+         LR    RS,RX                   Address of our SPCB
+         L     RX,VSCTPOOL             Address of first SPCB
+         WHILE (SPCBNEXT,NZ),'L RX,SPCBNEXT'
+         ST    RS,SPCBNEXT             update the queue
+         LR    RVR,RS                  Return the SPCB address
+         PEND  ,                       all done
+         EJECT ,
+*****************************************************************
+*                                                               *
+* GETVSLB  --  This routine allocates a VSLB associated with    *
+*              the VSCT whose address is passed as a parm.  If  *
+*              there are none left that have been pre-allocated *
+*              a reserve supply is released so that more memory *
+*              can be allocated.                                *
+*                                                               *
+*   Input  --  GFVSLB                                           *
+*                                                               *
+*  Output  --  RVR contains the address of a VSLB               *
+*                                                               *
+*****************************************************************
+         SPACE 2
+GFVSLB   RECORD BEGIN        Parm for Get or Free VSLB
+GFVADDR  DS    A             Address of VSLB(free) or VSCT(get)
+         END   ,
+         SPACE 2
+GETVSLB  PROC  GFVSLB,SCOPE=LOCAL
+         L     RY,GFVADDR              VSCT address
+         WITH  (VSCT,RY)
+         LT    RA,VSCTVSLB             Get the first VSLB addr
+         IF    Z,BEGIN
+         LT    RA,VSCTRSRV             Get the reserve supply
+         IF    Z,'ABORT NOVSLBS'       Thats all folks
+         CLEAR VSCTRSRV                No more reserve supply
+         SET   VSCTNORS                Make note of that lack
+         END   ,
+*
+* Remove first from the list
+*
+         WITH  (VSLB,RA)
+         MVC   VSCTVSLB,VSLBNEXT       Remove this one from the queue
+         CLEAR VSLBNEXT                Clean up the pointers
+         LR    RVR,RA
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* FREEVSLB --  This routine frees a VSLB.  It is passed the     *
+*              address of the VSLB and it queues it to the free *
+*              queue of the VSCT which owns it.                 *
+*                                                               *
+*   Input  --  GFVSLB                                           *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+FREEVSLB PROC  GFVSLB,SCOPE=LOCAL
+         L     RX,GFVADDR              Get the VSLB address
+         WITH  (VSLB,RX)
+         L     RY,VSLBOWNR             Get the VSCT address
+         WITH  (VSCT,RY)
+         CLEAR VSLB
+         MVC   VSLB(4),=C'VSLB'        Re-do the block ID
+         ST    RY,VSLBOWNR             Re-do the owner too
+         MVC   VSLBNEXT,VSCTVSLB       this one points at chain
+         ST    RX,VSCTVSLB             Head points at this one
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* ALOCVSLB --  This routine allocates a bunch of new VSLBs and  *
+*              queues them up to the VSCT whose address is      *
+*              passed.                                          *
+*                                                               *
+*   Input  --  GFVSLB                                           *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+ALOCVSLB PROC  GFVSLB,SCOPE=LOCAL
+         L     RY,GFVADDR              Get the VSLB address
+         WITH  (VSCT,RY)
+*
+* Turn off the indicator to call this routine
+*
+         CLEAR VSCTNORS                Clear the flag
+*
+* Get some more memory
+*
+         IF    VSCTGLOB,BEGIN          This is for a global one
+         VMGET L'VSLB*30,LOC=GLOBHI,FIX=YES
+         END   ELSE,BEGIN
+         VMGET L'VSLB*30,LOC=LOCSYS
+         END   ,
+*
+* Format the lot into VSLBs and queue them up
+*
+         LTR   RX,RVR                  Get the address of the first
+         IF    Z,'ABORT NOVSLBMEM'     Don't assume we got memory
+         WITH  (VSLB,RX)
+         LA    RA,30                   Number of VSLBs there
+         LOOP  BEGIN
+         CLEAR VSLB                    Zero it out
+         MVC   VSLB(4),=C'VSLB'        ID
+         ST    RY,VSLBOWNR             Save the owner address
+         MVC   VSLBNEXT,VSCTVSLB       Make it point at the queue
+         ST    RX,VSCTVSLB             And the queue at it
+         AH    RX,=Y(L'VSLB)           Update the pointer
+         UNTIL (BCT,RA),END            keep going until we're done
+*
+* Restore the Reserve component to it's previous strength
+*
+         LA    RA,10                   Number in reserve
+         LOOP  BEGIN
+         L     RX,VSCTVSLB             Get first in the queue
+         MVC   VSCTVSLB,VSLBNEXT       Remove it from the list
+         MVC   VSLBNEXT,VSCTRSRV       Point it at reserve list
+         ST    RX,VSCTRSRV             And put it on that list
+         UNTIL (BCT,RA),END
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*   VMINFO --  This routine returns info on the user address    *
+*              space limits and the trash value for new pages.  *
+*                                                               *
+*   Input  --  @VMINFO                                          *
+*                                                               *
+*  Output  --  @VMINFO - Fields updated                         *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMINFO   PROC  @VMINFO,SCOPE=GLOBAL
+*
+* Get the VMCB address
+*
+         USING PZERO,R0
+         L     RS,PZMATP               Get the MAT address
+         DROP  R0
+         WITH  (MAT,RS),'L RY,MATVMCB' Get the VMCB pointer
+         WITH  (VMCB,RY),BEGIN
+         MVC   @VMIUST,VMCBUSS         Start of the area
+         MVC   @VMIULEN,VMCBUSL        Length of the area
+         END   ,
+*
+* Get the local VSCT
+*
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB addr
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the VSCT address
+         WITH  (VSCT,RY),BEGIN
+         MVC   @VMITRSH,VSCTHASH       Move in the current hash val
+         END   ,
+         PEND  ,                       Then return to the caller
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  VMINIT1 --  This routine initalizes the control blocks for   *
+*              the virtual storage manager for global memory.   *
+*              This routine is entered out of initialization    *
+*              and makes use of the special characteristics of  *
+*              that, eg. not having to pre-define any virtual   *
+*              storage before use.                              *
+*                                                               *
+*   Input  --  @VMIPARM                                         *
+*                                                               *
+*  Output  --  None                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+#VMIWORK RECORD BEGIN
+#VMIRPRM DS    XL(L'PARMIN)            Area for PARMIN
+         DS    CL8                     Key 1
+         DS    CL8                     Key 2
+         DS    CL8                     Key 3
+#VMIPSTR DS    CL80                    String parameter area
+#VMIGHL  DS    F                       Length of global high area
+         END   ,
+         SPACE 2
+VMINIT1  PROC  @VMIPARM,#VMIWORK,SCOPE=GLOBAL
+         WITH  (PARMIN,#VMIRPRM)
+         MVC   #VMIGHL,XLGHL           Set default
+*
+*  Set memory values from initialization parameters
+*
+         GETPARM2 KEY=(VIRTMEM,GHSIZE),TYPE=INT,REGS=(RA,R14)
+         IF    Z,BEGIN
+         SLL   RA,20
+         ST    RA,#VMIGHL              Update Global High size
+         END   ,
+*-
+*-       First get the extents of the global high region.
+*-
+         L     RK,XLGHS            Start of Global high
+         A     RK,#VMIGHL          Add length to get the end
+*-
+*-       Define the segment and page tables for the highest 10
+*-         megabytes of memory (more than we will need for
+*-         initialization).  The key here is to pre-define the
+*-         page tables so that we don't try to allocate them
+*-         on the fly in VMINIT2 after we can't run in "SVC 0"
+*-         mode.  Check out the PFINIT routine called by PAGINIT
+*-         (called immediately before VMINIT2) for details.
+*-
+         LR    R1,RK
+         DECR  R1                  Last byte in virtual memory
+         LA    RJ,10
+         LOOP  BEGIN
+         SVC   3                   Define last segment
+         S     R1,=A(1024*1024)
+         UNTIL (BCT,RJ),END
+*-
+*-       Turn on automatic page fault resolution (IPL environment
+*-         only).
+*-
+         SVC   0
+*-
+*-       Allocate the MAT.
+*-
+         SH    RK,=Y(((L'MAT+VMAL-1)/VMAL)*VMAL)  Update the location
+         LR    RJ,RK                   Get the MAT address
+         USING MAT,RJ                  Address it
+         ZOT   MAT                     Clear it to zero
+         MVC   MAT(4),=CL4'MAT'        Set the control block id
+         MVI   MATSKEY,X'80'           System key
+         MVI   MATUKEY,X'70'           User key
+         MVC   MATKSTRT,@VMIKLOC       Save the kernal start
+         MVC   MATKMAP,@VMIMLOC        Location of the map
+         MVC   MATKMAPL,@VMIMLEN       Length of the map
+         USING PZERO,R0
+         ST    RJ,PZMATP               Save the pointer to the MAT
+         DROP  R0
+*
+* Allocate and initialize the VMCB
+*
+         SH    RK,=Y(((L'VMCB+VMAL-1)/VMAL)*VMAL) Update the location
+         LR    RX,RK                   Get the VMCB address
+         WITH  (VMCB,RX)               Address it
+         CLEAR VMCB                    Clear it to zero
+         MVC   VMCB(4),=C'VMCB'        Set the control block id
+         ST    RX,MATVMCB              Save a pointer to it in the MAT
+*
+         MVC   VMCBGLS,XLGLS           Global low Start
+         MVC   VMCBGLL,XLGLL           Global low length
+         MVC   VMCBUSS,XLUSS           User start
+         MVC   VMCBUSL,XLUSL           User length
+         MVC   VMCBSLS,XLSLS           Local system start
+         MVC   VMCBSLL,XLSLL           Local system length
+         MVC   VMCBGHS,XLGHS           Global high start
+         MVC   VMCBGHL,#VMIGHL         Global high length
+         MVI   VMCBHASH,X'81'          Default trash value
+*
+*  Set memory values from initialization parameters
+*
+         GETPARM2 KEY=(VIRTMEM,GLSIZE),TYPE=INT,REGS=(RA,R14)
+         IF    Z,BEGIN
+         SLL   RA,20
+         ST    RA,VMCBGLL              Update Global Low size
+         ST    RA,VMCBUSS               and User start
+         L     RS,VMCBSLS              Local system start
+         SR    RS,RA                    less modified User start
+         ST    RS,VMCBUSL              New User length
+         END   ,
+*
+* Allocate and initialize the global VSCT
+*
+         SH    RK,=Y(((L'VSCT+VMAL-1)/VMAL)*VMAL) Update the location
+         LR    RY,RK                   Get the VSCT address
+         WITH  (VSCT,RY)               Address it
+         CLEAR VSCT                    Clear it to zero
+         MVC   VSCT(4),=C'VSCT'        Set the control block id
+         ST    RY,VMCBGVS              Save its address in the VMCB
+*
+         ST    RX,VSCTVMCB             Save address of the VMCB
+         MVC   VSCTSKEY,MATSKEY        System key
+         MVC   VSCTUKEY,MATUKEY        User key
+         DROP  RJ                      Done with the MAT
+         MVC   VSCTHASH,VMCBHASH       Default trash value
+         SET   VSCTGLOB                This is the global one
+         MVC   VSCTPDEF,=A(INITPDEF)   Move dumb routine for initln
+         MVC   VSCTPFIX,=A(INITPFIX)   ditto for the fix
+*
+* Get some VSLB's
+*
+         LA    RS,30                   The number we want
+         CLEAR RA                      Address of the previous one
+         LOOP  BEGIN
+         SH    RK,=Y(((L'VSLB+VMAL-1)/VMAL)*VMAL) Update the location
+         WITH  (VSLB,RK)               Address it
+         CLEAR VSLB                    Clear it to zero
+         MVC   VSLB(4),=C'VSLB'        Set the control block id
+         ST    RY,VSLBOWNR             Save the VSCT pointer
+         ST    RA,VSLBNEXT             Save pointer to the next one
+         LR    RA,RK                   This becomes the previous
+         UNTIL (BCT,RS),END
+*
+         ST    RA,VSCTRSRV             Put em all on reserve list
+         USING VSLB,RA
+         LA    RS,9                    Count for the reserve supply
+         LOOP  BEGIN
+         L     RA,VSLBNEXT             Reserve one
+         UNTIL (BCT,RS),END            Do all but one
+         L     RS,VSLBNEXT             Do the last one
+         CLEAR VSLBNEXT                Zero the end of that queue
+         LR    RA,RS                   Point to the next free one
+*
+* Take care of the Regions
+*
+         ST    RA,VSCTHVSR             Save the high Region one
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+         ST    RA,VSCTLVSR             And the low Region
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+*
+* Allocate and initialize some Pools
+*
+         SH    RK,=Y(((L'SPCB+VMAL-1)/VMAL)*VMAL) Update the location
+         LR    RJ,RK                   Get the SPCB address
+         WITH  (SPCB,RJ)               Address it
+         CLEAR SPCB                    Clear it to zero
+         MVC   SPCB(4),=C'SPCB'        Set the control block id
+         SET   SPCBGLOB+SPCBSYS+SPCBFETP+SPCBFIX   GLOBLO pool
+         MVC   SPCBVSRB,VSCTLVSR       Low region for it
+         ST    RA,SPCBUVSL             Used Area chain header
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+         ST    RA,SPCBFVSL             Free area chain header
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+         LR    RS,RJ                   Save the SPCB address
+*
+         SH    RK,=Y(((L'SPCB+VMAL-1)/VMAL)*VMAL) Update the location
+         LR    RJ,RK                   Get the SPCB address
+         WITH  (SPCB,RJ)               Address it
+         CLEAR SPCB                    Clear it to zero
+         MVC   SPCB(4),=C'SPCB'        Set the control block id
+         ST    RS,SPCBNEXT             Point at the prevous one
+         SET   SPCBGLOB+SPCBSYS+SPCBFETP+SPCBFIX+SPCBHIGH+SPCBBACK
+         MVC   SPCBVSRB,VSCTHVSR       High region for it
+         ST    RA,SPCBUVSL             Used Area chain header
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+         ST    RA,SPCBFVSL             Free area chain header
+         L     RS,VSLBNEXT             Save a pointer to the next
+         ST    RA,VSLBNEXT             Null Entry
+         ST    RA,VSLBPREV             Null Entry
+         LR    RA,RS                   Point to the next free one
+         ST    RJ,VSCTPOOL             Save pointer to the chain
+*
+* Any VSLB's left are queued off the VSCT
+*
+         ST    RA,VSCTVSLB             Save the rest for later
+         DROP  RA
+*
+* That is the last of the memory we will obtain just by referencing
+* it.  We now turn off the automatic page fault resolution by issuing
+* an SVC is is only valid in the IPL environment.
+*
+         SVC   1
+*
+* Now we have to account for the memory that has been acquired
+* up until now.  We start with the region definitions.
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,VSCTHVSR        High region
+         MVC   RAPLOC,VMCBGHS          Start
+         MVC   RAPLEN,VMCBGHL          And length
+         ACALL ADDSPEC                 Take care of it
+         MVC   RAPVSLB,VSCTLVSR        Low region
+         MVC   RAPLOC,=A(4096)         Start
+         L     RS,VMCBGLL              Get the length
+         S     RS,=A(4096)             Less Page zero
+         ST    RS,RAPLEN               Real length
+         ACALL ADDSPEC                 Add it too
+*
+* Set the key for the PZERO page
+*
+         IC    RVR,VSCTSKEY            System key
+         O     RVR,=X'00000008'        Fetch protect
+         CLEAR RS
+         SSKE  RVR,RS                  Set the key for page zero
+*
+* Do the high pool
+*
+         LR    RA,RK                   Get the low water mark
+         N     RA,=F'-4096'            Round down to a page
+         L     RB,VMCBGHS              Start of the region
+         A     RB,VMCBGHL              get the ending addr of region
+         MVC   RAPVSLB,SPCBVSRB        Region control
+         ST    RA,RAPLOC               Start of section to remove
+         LR    RS,RB                   Addr of the end
+         SR    RS,RA                   Length to remove
+         ST    RS,RAPLEN
+         ACALL REMSPEC                 Remove it from the region
+*
+* Set the keys
+*
+         LC    RVR,VSCTSKEY            System key
+         O     RVR,=X'00000008'        Fetch protect
+         LR    EPAR,RA                 Get starting page
+         WHILE (EPAR,LT,RB),BEGIN      Loop through the page(s)
+         LRA   RS,@EPAR                Get the real addr of the page
+         SYSCTL RS,TYPE=PAGE           Notify the hardware
+         SSKE  RVR,RS                  Set the key
+         AH    EPAR,=Y(4096)           Get to the next page
+         END   ,
+*
+* Put it into the Pool
+*
+         MVC   RAPVSLB,SPCBFVSL        Free area
+         ST    RA,RAPLOC               Starts at the page
+         LR    RS,RK                   Get the start of used stuff
+         SR    RS,RA                   Get the length of free stuff
+         IF    NZ,BEGIN
+         ST    RS,RAPLEN               Save the length of free stuff
+         ACALL ADDSPEC                 Put it on the free queue
+         END   ,
+*
+         MVC   RAPVSLB,SPCBUVSL        Used area
+         ST    RK,RAPLOC               Location
+         SR    RB,RK                   Get the length
+         ST    RB,RAPLEN               Length of the used area
+         ACALL ADDSPEC                 Add it to the queue too
+*
+* Do the low pool (kernal, etc.)
+*
+         L     RJ,SPCBNEXT             Point at the Storage pool
+         LC    EPAR,VSCTSKEY           Get the system key
+         O     EPAR,=X'00000008'       Fetch protect bit
+*
+* Kernal
+*
+         L     RS,@VMIKLEN             Get the length of the kernal
+         AH    RS,=Y(4095)
+         N     RS,=F'-4096'            Round up to next page
+         ST    RS,@VMIKLEN
+         L     RA,@VMIKLOC             Get the start of the kernal
+         LR    RB,RA                   Copy the start address
+         A     RB,@VMIKLEN             Get the ending address
+         WHILE (RA,LT,RB),BEGIN
+         LRA   RS,@RA                  Get the real address
+         SYSCTL RS,TYPE=PAGE           Notify the hardware
+         SSKE  EPAR,RS                 Set the storage key
+         AH    RA,=Y(4096)             Get to the next page
+         END   ,
+         MVC   RAPVSLB,SPCBVSRB        The region
+         MVC   RAPLOC,@VMIKLOC         Location of the kernal
+         MVC   RAPLEN,@VMIKLEN         Length of the kernal
+         ACALL REMSPEC                 Remove it from the region
+         MVC   RAPVSLB,SPCBUVSL        Used area
+         ACALL ADDSPEC                 Add it to the pool
+*
+* Map
+*
+         LC    EPAR,VSCTSKEY           Get the system key
+         O     EPAR,=X'00000008'       Fetch protect bit
+         L     RS,@VMIMLEN             Get the length of the MAP
+         AH    RS,=Y(4095)
+         N     RS,=F'-4096'            Round up to next page
+         ST    RS,@VMIMLEN
+         L     RA,@VMIMLOC             Get the start of the Map
+         LR    RB,RA                   Copy the start address
+         A     RB,@VMIMLEN             Get the ending address
+         WHILE (RA,LT,RB),BEGIN
+         LRA   RS,@RA                  Get the real address
+         SYSCTL RS,TYPE=PAGE           Notify the hardware
+         SSKE  EPAR,RS                 Set the storage key
+         AH    RA,=Y(4096)             Get to the next page
+         END   ,
+         MVC   RAPVSLB,SPCBVSRB        The region
+         MVC   RAPLOC,@VMIMLOC         Location of the Map
+         MVC   RAPLEN,@VMIMLEN         Length of the Map
+         ACALL REMSPEC                 Remove it from the region
+         MVC   RAPVSLB,SPCBUVSL        Used area
+         ACALL ADDSPEC                 Add it to the pool
+*
+* Take care of the V=R stack area
+*
+         LC    EPAR,VSCTSKEY           Get the system key
+         O     EPAR,=X'00000008'       Fetch protect bit
+         L     RA,@VMISLOC             Get the V=R stack area addr
+         LA    RS,16                   Get the real address
+         LOOP  BEGIN
+         SYSCTL RA,TYPE=PAGE           Notify the hardware
+         SSKE  EPAR,RA                 Set the storage key
+         AH    RA,=Y(4096)             Go to the next page
+         UNTIL (BCT,RS),END
+*
+* Account for the Area
+*
+         MVC   RAPVSLB,SPCBVSRB        The region
+         MVC   RAPLOC,@VMISLOC         Location of the area
+         MVC   RAPLEN,=A(16*4096)      Length of the area
+         ACALL REMSPEC                 Remove it from the region
+         MVC   RAPVSLB,SPCBUVSL        Used area
+         ACALL ADDSPEC                 Add it to the pool
+*
+* Return the size of the Address space so the Real storage
+* Guy can do his job
+*
+         L     RVR,VMCBGHS             Start of the the high region
+         A     RVR,VMCBGHL             Add the length
+         PEND  ,
+XLGLS    DC    FS20'00'                GLOBLO Start address
+XLGLL    DC    FS20'12'                12 megabytes long
+XLUSS    DC    FS20'12'                User start address
+XLUSL    DC    FS20'03'                User length
+XLSLS    DC    FS20'15'                LOCSYS start
+XLSLL    DC    FS20'05'                Length
+XLGHS    DC    FS20'20'                GLOBHI start address
+*LGHL    DC    FS20'60'         !!!!!! And length (7/90: 12->60)
+*oldL    DC    FS20'12'         !!!!!! Restored back to 12
+*LGHL    DC    FS20'28'         !!!!!! Global high length (3/91)
+*LGHL    DC    FS20'60'         !!!!!! Global high length (4/91)
+*LGHL    DC    FS20'140'        !!!!!! Global high length (5/91)
+*LGHL    DC    FS20'172'        !!!!!! Global high length (4/00)
+XLGHL    DC    FS20'236'               Global high length (9/00)
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  VMINIT2 --  **** SECOND LEVEL INITIALIZATION ****            *
+*              This routine continues the global                *
+*              initialization that was started with VMINIT1     *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMINIT2  PROC  SCOPE=GLOBAL
+*
+* Find the VMCB
+*
+         USING PZERO,R0
+         L     RS,PZMATP               Get the address of the MAT
+         DROP  R0
+         WITH  (MAT,RS),'L RX,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RX)
+         L     RY,VMCBGVS              Get the global VSCT
+         WITH  (VSCT,RY)
+*
+* Define the global area
+*
+         PSET  @PAGSEGD                Segment create parms
+         MVC   @SDADDR,VMCBGLS         Global Low Start address
+         MVC   @SDLEN,VMCBGLL          And length of global area
+         MVC   @SDHASH,VSCTHASH        Set hash value for segment
+         SET   @SDFGLOB                Tell Him it is global
+         VCALL PAGSEGD                 Have paging manager do it
+         MVC   @SDADDR,VMCBGHS         Global High start address
+         MVC   @SDLEN,VMCBGHL          And length of global area
+         MVC   @SDHASH,VSCTHASH        Set hash value for segment
+         SET   @SDFGLOB                Tell Him it is global
+         VCALL PAGSEGD                 Have paging manager do it
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  VMINIT3 --  **** THIRD LEVEL INITIALIZATION ****             *
+*              This routine continues the global                *
+*              initialization that was started with VMINIT1,2   *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMINIT3  PROC  SCOPE=GLOBAL
+*
+* Find the VMCB
+*
+         USING PZERO,R0
+         L     RS,PZMATP               Get the address of the MAT
+         DROP  R0
+         WITH  (MAT,RS),'L RX,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RX)
+         L     RY,VMCBGVS              Get the global VSCT
+         WITH  (VSCT,RY)
+*
+* Create the global memory lock
+*
+         LKCRE VMGLOBAL                Get the lock
+         ST    RVR,VSCTLOCK            Save the LOCK id
+*  -->
+*  --> Allocate and clear statistics areas
+*  -->
+         VMGET L:=A(L'VMSTAT),LOC=GLOBHI,FIX=YES
+         ST    RVR,VMCBSTAG            Global stats area
+         ST    RVR,VSCTSTAT
+         LR    RA,RVR
+         L     RB,=A(L'VMSTAT)
+         CLEAR RK
+         MVCL  RA,RJ
+         VMGET L:=A(L'VMSTAT),LOC=GLOBHI,FIX=YES
+         ST    RVR,VMCBSTAT            Local stats area
+         LR    RA,RVR
+         L     RB,=A(L'VMSTAT)
+         CLEAR RK
+         MVCL  RA,RJ
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* VMDEFSET --  This routine is called by the Paging supervisor  *
+*              when it is ready to handle paging calls. It just *
+*              updates the addresses in the global VSCT that    *
+*              point to the page define and page fix routines.  *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMDEFSET PROC  SCOPE=GLOBAL
+         USING PZERO,R0
+         L     RS,PZMATP               Get the MAT address
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),'L RY,VMCBGVS'
+         WITH  (VSCT,RY)
+         MVC   VSCTPDEF,=V(PAGDEF)     Real page def routine
+         MVC   VSCTPFIX,=V(PAGFIX)     Real page fix routine
+*-
+*-       The following SVC is defined only in the IPL environment.
+*-         It ensures that the IPL code will no longer resolve page
+*-         faults automatically.
+*-
+         SVC   4          Can't auto define real memory any more
+         PEND
+         EJECT
+*****************************************************************
+*                                                               *
+*  VMCRAS1 --  This routine initalizes the control blocks for   *
+*              the virtual storage manager for local memory     *
+*              and together with calls to the paging manager,   *
+*              sets up a new address space.                     *
+*                                                               *
+*   Input  --  @VMCRAS                                          *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMCRAS1  PROC  @VMCRAS,SCOPE=GLOBAL
+*
+* Find the VMCB so we can find the extent of the local memory.
+*
+         USING PZERO,R0
+         L     RS,PZMATP               Get the address of the MAT
+         DROP  R0
+         WITH  (MAT,RS),'L RX,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RX)               Address it
+         L     RY,VMCBGVS              Get the global VSCT
+         WITH  (VSCT,RY)
+*
+* Find the end of the local area
+*
+         L     RK,VMCBSLS              Get the star of system area
+         A     RK,VMCBSLL              Then point at the end
+*
+* Reserve space for the page needed by the paging manager for
+* a page table, then call him to set up our address space.
+*
+         SH    RK,=Y(4096)             Make room for the page
+         PSET  @PAGASC2                Parms for paging manager
+         ST    RK,@ASCVA               His page address
+         MVC   @ASCKEY,VSCTSKEY        System key
+         OI    @ASCKEY,X'08'           Fetch protected
+         VCALL PAGASC2                 Create the address space
+*
+* Define the page to be used for pool control blocks
+*
+         PSET  @PAGDEF
+         LR    RS,RK                   Get the end of the page
+         SH    RS,=Y(4096)             Get the start of the page
+         ST    RS,@PDADDR              Location
+         MVC   @PDLEN,=A(4096)         Length
+         MVC   @PDKEY,VSCTSKEY         System key
+         OI    @PDKEY,X'08'            Fetch protected
+*        MVC   @PDHASH,VSCTHASH        Hash value
+         VCALL PAGDEF                  Define the page
+*
+* Allocate and initialize the VSCT
+*
+         SH    RK,=Y(((L'VSCT+VMAL-1)/VMAL)*VMAL) Update the location
+         LR    RY,RK                   Copy address to VSCT pointer
+         CLEAR VSCT
+         MVC   VSCT(4),=C'VSCT'        Move in CB name
+*
+         ST    RX,VSCTVMCB             Save the VMCB address
+         USING PZERO,R0
+         L     RS,PZMATP               Get the MAT pointer
+         DROP  R0
+         WITH  (MAT,RS),BEGIN
+         MVC   VSCTSKEY,MATSKEY        System key value
+         MVC   VSCTUKEY,MATUKEY        User key value
+         END   ,
+         MVC   VSCTPDEF,=V(PAGDEF)     Page definition function
+         MVC   VSCTPFIX,=V(PAGFIX)     Page fix function
+         MVC   VSCTHASH,VMCBHASH       Default hash value
+         MVC   VSCTSTAT,VMCBSTAT       --> Stats pointer
+*
+         L     RS,@VMCASB              Get our ASB
+         WITH  (ASB,RS),'ST RY,ASBVSCT'  Save the VSCT pointer there
+*
+* Get some VSLB's
+*
+         LA    RS,30                   The number we want
+         CLEAR RA                      Address of the previous one
+         LOOP  BEGIN
+         SH    RK,=Y(((L'VSLB+VMAL-1)/VMAL)*VMAL) Update the location
+         WITH  (VSLB,RK)               Address it
+         CLEAR VSLB                    Clear it to zero
+         MVC   VSLB(4),=C'VSLB'        Set the control block id
+         ST    RY,VSLBOWNR             Save the VSCT pointer
+         ST    RA,VSLBNEXT             Save pointer to the next one
+         LR    RA,RK                   This becomes the previous
+         UNTIL (BCT,RS),END
+*
+         ST    RA,VSCTRSRV             Put em all on reserve list
+         WITH  (VSLB,RA),BEGIN
+         LA    RS,9                    Count of reserve less one
+         LOOP  BEGIN
+         L     RA,VSLBNEXT             Reserve one
+         UNTIL (BCT,RS),END
+         L     RS,VSLBNEXT             Do the final one
+         CLEAR VSLBNEXT                End of the reserve list
+         LR    RA,RS                   Get the first free one
+         END   ,
+         ST    RA,VSCTVSLB             Save the rest
+*
+* Set up the high region (system area)
+*
+         L     RA,VSCTVSLB             Get first VSLB in list
+         ST    RA,VSCTHVSR             Save as the queue master
+         WITH  (VSLB,RA),BEGIN
+         MVC   VSCTVSLB,VSLBNEXT       Update the chain
+         ST    RA,VSLBNEXT
+         ST    RA,VSLBPREV             Chain is empty
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN                 And this element is empty
+         END   ,
+*
+* Set up the low region (user area)
+*
+         L     RA,VSCTVSLB             Get first VSLB in list
+         ST    RA,VSCTLVSR             Save as the queue master
+         WITH  (VSLB,RA),BEGIN
+         MVC   VSCTVSLB,VSLBNEXT       Update the chain
+         ST    RA,VSLBNEXT
+         ST    RA,VSLBPREV             Chain is empty
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN                 And this element is empty
+         END   ,
+*
+* Setup the System area SPCB
+*
+         SH    RK,=Y(((L'SPCB+VMAL-1)/VMAL)*VMAL) Room for the SPCB
+         WITH  (SPCB,RK)               Address it
+         CLEAR SPCB
+         MVC   SPCB(4),=C'SPCB'        Control block ID
+         ST    RK,VSCTPOOL             First in the pool chain
+         MVC   SPCBVSRB,VSCTHVSR       Use the high area
+*
+         MVI   SPCBMAJP,PNHIGH+PNFETP+PNSYSKEY+PNDATA
+         L     RA,VSCTVSLB             Get first VSLB in list
+         ST    RA,SPCBUVSL             Save as used queue master
+         WITH  (VSLB,RA),BEGIN
+         MVC   VSCTVSLB,VSLBNEXT       Update the chain
+         ST    RA,VSLBNEXT
+         ST    RA,VSLBPREV             Chain is empty
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN                 And this element is empty
+         END   ,
+*
+         L     RA,VSCTVSLB             Get first VSLB in list
+         ST    RA,SPCBFVSL             Save as free queue master
+         WITH  (VSLB,RA),BEGIN
+         MVC   VSCTVSLB,VSLBNEXT       Update the chain
+         ST    RA,VSLBNEXT
+         ST    RA,VSLBPREV             Chain is empty
+         CLEAR VSLBLOC
+         CLEAR VSLBLEN                 And this element is empty
+         END   ,
+*
+* All the control blocks have now been allocated, but we need to
+* set up the information that must be contained in them.
+*
+* First set up the user region
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,VSCTLVSR        Move in the master address
+         MVC   RAPLOC,VMCBUSS          User region start
+         MVC   RAPLEN,VMCBUSL          And length
+         ACALL ADDSPEC                 Add it to the region
+*
+* Next set up the system region
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,VSCTHVSR        Move in the master address
+         MVC   RAPLOC,VMCBSLS          Start of the system local area
+         LR    RA,RK                   Get current location in area
+         N     RA,=F'-4096'            Round down to a page
+         LR    RB,RA                   Copy it
+         S     RB,VMCBSLS              Get the length in pages left
+         ST    RB,RAPLEN               Save that
+         ACALL ADDSPEC                 Put that all in the region
+*
+* Next the free space left in the system local area
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBFVSL        Free space master
+         ST    RA,RAPLOC               Start of the current page
+         SR    RA,RK                   Neg of length
+         LCR   RA,RA                   length
+         ST    RA,RAPLEN               Save it
+         ACALL ADDSPEC                 Add that
+*
+* Now the used space in the system local area
+*
+         PSET  REMADDP,CLEAR=NO
+         MVC   RAPVSLB,SPCBUVSL
+         ST    RK,RAPLOC               Starting point
+         L     RA,VMCBSLS              Start of the region
+         A     RA,VMCBSLL              Length of the region
+         SR    RA,RK                   Get the length used so far
+         ST    RA,RAPLEN
+         ACALL ADDSPEC                 Add it to the queue
+*
+* The control blocks are all set to allow allocation near the
+* top of the local system area.  We now call the paging supervisor
+* to let him know about the whole local area.
+*
+         PSET  @PAGSEGD                Segment define
+         MVC   @SDADDR,VMCBUSS         Start of user area
+         MVC   @SDLEN,VMCBUSL          length of the area
+         MVC   @SDHASH,VSCTHASH        Set hash value for segment
+         VCALL PAGSEGD                 Define it
+         MVC   @SDADDR,VMCBSLS         System local start
+         MVC   @SDLEN,VMCBSLL          And length
+         MVC   @SDHASH,VSCTHASH        Set hash value for segment
+         VCALL PAGSEGD                 then define it
+         PEND  ,                       All done
+         EJECT ,
+*****************************************************************
+*                                                               *
+*  VMCRAS2 --  **** SECOND LEVEL ****                           *
+*              Finishes up the memory initialization.           *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+VMCRAS2  PROC  SCOPE=GLOBAL
+*
+* Get the local VSCT address
+*
+         USING PZERO,R0
+         L     RS,PZCURASB             Get the current ASB
+         DROP  R0
+         WITH  (ASB,RS),'L RY,ASBVSCT' Get the VSCT address
+         WITH  (VSCT,RY)
+*
+* Finish up local things
+*
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* INITPFIX --  Page fix routine to be called during             *
+*              the initialization process.  Since all pages     *
+*              allocated during initialization turn out fixed   *
+*              when it is over, this is just a null return.     *
+*                                                               *
+*   Input  --  none                                             *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+INITPFIX PROC  SCOPE=LOCAL
+         PEND  ,
+         EJECT ,
+*****************************************************************
+*                                                               *
+* INITPDEF --  This is the page definition routine called       *
+*              during the initialization process.  It just      *
+*              hashes the page and sets the key to that desired *
+*              by the caller.  When the paging supervisor is    *
+*              ready to handle these calls it will call         *
+*              VMDEFSET and from that point on its routine will *
+*              be called to define pages.  This assumes that    *
+*              any pages referenced by it will be automatically *
+*              resolved, and defined by the IPLTEXT routine.    *
+*                                                               *
+*   Input  --  @PAGDEF                                          *
+*                                                               *
+*  Output  --  none                                             *
+*                                                               *
+*****************************************************************
+         SPACE 2
+INITPDEF PROC  @PAGDEF,SCOPE=LOCAL
+         L     RA,@PDADDR              Get the address
+         L     RB,@PDLEN               And the length
+         USING PZERO,R0
+         L     RS,PZMATP               Get the mat pointer
+         DROP  R0
+         WITH  (MAT,RS),'L RS,MATVMCB' Get the VMCB address
+         WITH  (VMCB,RS),BEGIN
+         CLEAR RK
+         ICM   RK,B'1000',VMCBHASH     Get the hash value (was @PDHASH)
+         END   ,
+*
+* Allow initialization page faults (IPL environment only)
+*
+         SVC   0                       Turn em on
+         MVCL  RA,RJ                   Trash the page
+*
+* Disallow initialization page faults (IPL environment only)
+*
+         SVC   1                       Turn em off
+         L     RA,@PDADDR              Get the address
+         L     RB,@PDLEN               Get the length
+         AR    RB,RA                   Get the end of the area
+         LC    RJ,@PDKEY               And the key
+         WHILE (RA,LT,RB),BEGIN
+         LRA   RS,@RA                  Get the real page addr
+         SYSCTL RS,TYPE=PAGE           Notify the hardware
+         SSKE  RJ,RS                   Set the key
+         AH    RA,=Y(4096)             Get to the next page
+         END   ,
+         PEND  ,
+         XTRCDATA ,                    Generate the trace info
+         END   .

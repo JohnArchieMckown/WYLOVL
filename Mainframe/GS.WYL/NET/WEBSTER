@@ -1,0 +1,129 @@
+;
+;;  Webster -- Network dictionary word lookup service.
+;;
+;;    This webster exec is designed to work the same as the
+;;    Unix "webster" program.
+;;
+;;    The REQUEST subroutine really does all the work.
+;;
+;;
+;;  Created, 12/1/89, Jim Nisbet
+;;
+;;  Modifications:
+;;     12/1/89  Niz     Based on webster command.
+;;     1/30/90  Niz     Merge Webster and Thesaurus execs.
+;;     2/14/90  Niz     Add COLLECT options.
+;;     3/26/90  Niz     Allow quoted set of words as parm.
+;
+
+xproc () begin
+   x.origact = actno
+   x.attn = 0                         ; attn counter (see attnexit)
+
+   x.pgm = 'webster'                  ; program name
+   x.maint = '(netexec-maint)'               ; maintenance people
+
+   x.pno = 0
+
+   on error cmd 'xcall wyl.gs.wyl.net#\
+      _error(x.pgm, x.maint, errid, errmsg, errinfo)'
+   on attn  cmd 'xcall wyl.gs.wyl.net#\
+      _attn(x.pgm, x.maint, x.attn)'
+
+   nicname = 'sri-nic.arpa'           ; webster server host name
+   nicname = '26.0.0.73' ;; <--- Amelia can't lookup "sri-nic" yet!
+   nicname = '36.8.0.231'  ;;  use next.stanford.edu as server
+   port = 103                         ; webster tcp port number
+
+;
+;  Right now only the Forsythe SYSA machine has a SUNet interface.
+;
+
+   if (machine ne 'SYSA') begin
+      write x.pgm || ' can not be executed on this machine.'
+      write 'The ' || machine \
+         || ' machine does not have a direct SUNet connection.'
+      xreturn
+   end
+
+;
+;  Scan Webster parameters (big deal).
+;
+
+   wordparm = strip(parm_string)
+;
+   try syscall collect_scan(wordparm)
+   ; if not ok to clear, cleanup and exit
+   if (tryattn or tryerr) begin
+      try write 'No action taken.'
+      pcall cleanup('error')
+   end
+   x.origact = actno         ; "collect keep" could change actno
+
+   wordparm = strip(wordparm)
+
+   if (wordparm eq '') begin
+      write 'Missing "name" after &(x.pgm).  Type \
+         "HELP &(x.pgm)" for more information.'
+      pcall cleanup('error')
+   end
+
+;  Allow "-t" as Thesaurus option.
+
+   thesaurus = false
+
+   opt = ''
+   optparms = wordparm
+   syscall scan_parm(opt, optparms)
+   if (lower(opt) eq '-t') begin
+      wordparm = strip(optparms)
+      thesaurus = true
+   end
+
+   if (left(wordparm,1) eq '"' or left(wordparm,1) eq '''') begin
+      try wordparm = &(wordparm)
+   end
+
+;
+;  Issue the network request (responses will come back in the
+;    current Active file).
+;
+
+   open webster title 'webster &(tran(wordparm,'"',"'"))' temp
+
+   if (wordparm eq 'help') \
+      wordparm = 'HELP'
+   else \
+      wordparm = 'DEFINE ' || wordparm
+
+   if (thesaurus) begin
+      wordparm = 'INDEX thesaurus' || s'0d25' || wordparm
+   end
+
+   rc = ''
+   xcall wyl.gs.wyl.net#_request (x.pgm, \
+      nicname, port, wordparm, rc)
+
+   try delete 'DEFINITION 0' in 1
+   comm
+   try list unn
+
+   close
+
+   pcall cleanup('')
+end
+
+
+
+; <.page>
+;
+;  cleanup -- This routine is always called to return to the
+;    user.  It handles restoring the user state.
+;
+
+proc cleanup(opt) begin
+   pick &(x.origact)
+   if (opt eq 'error') \
+      opt = "error errmsg=''"
+   xreturn &(opt)
+end

@@ -1,0 +1,148 @@
+//WINGRX JOB
+// EXEC ASMCLG,parm.go='HG$LDW.@TAPER.FOO'
+//ASM.SYSLIB DD DSN=WYL.GA.MCL.IOPROGM.MACLIB
+WINGRX   CSECT
+         REGISTER
+         ENTER BASE=12
+         L     R11,0(R1)           ->parm
+         LA    R11,0(R11)          clear hi byte
+         SR    R1,R1
+         MCALL MSGOPEN             Open SYSPRINT
+         LTR   R11,R11             if any...
+         BNP   BADPARM
+         LH    R10,0(R11)          L'parm
+         MVI   BPRSN,C'1'
+         LTR   R10,R10
+         BNP   BADPARM
+         LA    R11,2(R11)          ->parm
+         MVI   BPRSN,C'2'
+         C     R10,=F'44'          MAX
+         BH    BADPARM
+         BCTR  R10,0               -1 for ex-mvc
+         EX    R10,MVDSPARM
+         MVC   MSDSN0,DSNAME       Copy (original) dsn
+         SPACE
+         RACROUTE REQUEST=EXTRACT,TYPE=EXTRACT,CLASS='DATASET',        *
+               FIELDS=RFIELDS,RELEASE=1.9,ENTITY=DSNAME,GENERIC=YES,   *
+               WORKA=WORKA,MATCHGN=YES,MF=S
+         LR    R10,R0              Save R0
+         LR    R11,R15             RC
+         LA    R4,0(R1)            ->returned data (lo 3 bytes)
+         L     R5,0(R4)            L'data
+         ST    R0,X1
+         ST    R15,X2
+         MVC   X3(8),IHB0004A         codes from RACF
+         SYSPRINT MSG00
+         LA    R1,X1               ->regs
+         ST    R1,DUMPARMS
+         LA    R1,DUMPARMS
+         MCALL IOPDUMPR
+         ST    R4,DUMPARMS         ->dat for dumper
+         STA   R5,DUMLEN           L'dat (lo 3 bytes)
+         ST    R4,DUMOFF           show actual address
+         EDIT  MSRC,(R15),DW
+         MVC   MSDSN1,DSNAME       Copy (modified) dsn
+         SYSPRINT MSG1
+         SYSPRINT MSG1A
+         LTR   R4,R4               ->data if any
+         BZ    OUT
+         LA    R1,DUMPARMS
+         MCALL IOPDUMPR
+         SPACE
+*  Format some data
+         LH    R6,4(R4)            Offset to good part
+         LA    R6,0(R4,R6)         ->returned data
+         MVC   MSAUTHOR,4(R6)      AUTHOR
+         LA    R6,12(R6)           ->next
+         MVC   MSGROUPN,4(R6)      GROUPNM
+         LA    R6,12(R6)
+         UNPK  MSUNIVAC(3),4(2,R6) UNIVACS
+         TR    MSUNIVAC,$HEX       ...AS HEX
+         MVI   MSUNIVAC+2,C' '
+         LA    R6,5(R6)            ->NEXT
+         SYSPRINT MSG2
+*  Now, R6 points to the remaining data, which should be a list of
+*  userids followed by a list of user access levels.  Each list
+*  starts with a 4-byte length.
+         L     R7,0(R6)            L'userid list
+         LA    R8,8(R6,R7)         ->access list (past its length)
+         LA    R6,4(R6)            ->first userid
+         LTR   R7,R7               L'list
+         BNP   FM                  remember the FREEMAIN!
+LOOP     MVC   MSUSERID,4(R6)      USERID
+         UNPK  MSUSERAC(3),4(2,R8) access
+         TR    MSUSERAC,$HEX       ...in hex
+         MVI   MSUSERAC+2,C' '      ...clean up
+         SYSPRINT MSG3
+         LA    R6,12(R6)           ->next userid
+         LA    R8,5(R8)            ->next access byte
+         S     R7,=F'12'           length of userid entry
+         BP    LOOP                if any left
+FM       LR    R0,R5               L'area
+         LR    R1,R4               ->area
+         FREEMAIN R,LV=(0),A=(1)   free the area
+OUT      MCALL MSGCLOSE
+         EXIT  RC=(R11)
+         SPACE
+BADPARM  SYSPRINT MSGBPARM
+         EXIT  RC=16
+         SPACE
+MVDSPARM MVC   DSNAME(1),0(R11)    executed: copy dsn
+         EJECT
+DW       DC    D'0'
+DSNAME   DC    CL44' '
+MSG1     MSG   ' DSN='
+MSDSN0   DC    CL44' ',C' Profile name ='
+MSDSN1   DC    CL44' '
+         MSGEND
+MSG1A    MSG   ' RC was'
+MSRC     DC    CL4' ',C' RACF data follows:'
+         MSGEND
+MSG2     MSG   '0AUTHOR='
+MSAUTHOR DC    CL8' ',C'  GROUPNAME='
+MSGROUPN DC    CL8' ',C'  UNIVACS='
+MSUNIVAC DC    CL2' ',C' '
+         MSGEND
+MSG3     MSG   '     USERID='
+MSUSERID DC    CL8' ',C'  USERACS='
+MSUSERAC DC    CL2' ',C' '
+         MSGEND
+MSGBPARM MSG   '0Missing or invalid parm ('
+BPRSN    DC    C'0',C')'
+         MSGEND
+         SPACE
+MSG00    MSGX  '            R0      SAF RC   RACF RC  RACF RSN'
+         SPACE
+X1       DC    F'0'
+X2       DC    F'0'
+X3       DC    2F'0'
+         SPACE
+*  Field names for RACF
+         SPACE
+RFIELDS  DC    A(#RF)
+RF0      DC    CL8'AUTHOR',CL8'GROUPNM',CL8'UNIVACS'
+         DC    CL8'USERID',CL8'USERACS'
+#RF      EQU   (*-RF0)/8
+         SPACE
+*  Parms for dumper
+         SPACE
+DUMPARMS DC    A(0)                ->data
+DUMLEN   DC    F'16'               L'data
+DUMOFF   DC    A(0)                Offset for dump label
+DUMFLG   DC    AL1(2),AL3(132)     flags, line length
+DUM@PRT  DC    V(IOPSYSPR)         V(sysprint writer)
+DUM@TRN  DC    A(1)                ->translate table
+         SPACE
+$HEX     EQU   *-240
+         DC    C'0123456789ABCDEF'  For hex translate
+         SPACE
+WORKA    DS    XL512
+         END
+//LKED.SYSLMOD DD DSN=WYL.GA.MCL.LINKLIB(WINGRX),DISP=SHR,SPACE=
+//LKED.OBJECT DD DSN=WYL.GA.MCL.IOPROGM.OBJECT,DISP=SHR
+//LKED.SYSIN DD *
+ INCLUDE OBJECT(IOPSYSPR)
+ INCLUDE OBJECT(IOPDUMPR)
+ SETCODE AC(1)
+//GO.SYSPRINT DD SYSOUT=*
+//GO.SYSUDUMP DD SYSOUT=C

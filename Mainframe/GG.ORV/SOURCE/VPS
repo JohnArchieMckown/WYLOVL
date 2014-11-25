@@ -1,0 +1,552 @@
+VPS      TITLE 'ORVYL''S PROGRAM SERVICES PROCESSOR'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 4
+* MODIFICATIONS
+*
+         EJECT
+         HIBAL
+*
+VPS      CSECT
+         IDENT 00
+         SPACE 2
+         COPY  ORVDEFN
+&MODULE  SETC  'VPS'
+         SPACE 3
+         REGS  ,,SR,TR,QR,(RR,FSUBR),BRR,BR,WAR,RAR,CLWR,LCBR,GPWR
+         EJECT
+*GEN
+         MACRO
+&L       BTD   &LOC,&LEN,&WORD,&SW,&COMMAS=NO
+         LCLC  &CM
+         AIF   ('&COMMAS' NE 'YES').NOCM
+&CM      SETC  'C'
+.NOCM    ANOP
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN,TYPE=&SW
+         SYSLR 1,&LOC
+         XCALL BTD&CM
+         MEND
+*
+         MACRO
+&L       BTX   &LOC,&LEN,&WORD
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN
+         SYSLR 1,&LOC
+         XCALL BTX
+         MEND
+         EJECT
+         COPY  CLW
+         EJECT
+         COPY  WYLMDWD
+         EJECT
+         COPY  GPW
+         EJECT
+*
+** MONITOR WORK PAGE. REDEFINES GET/PUT WORK PAGE
+*
+GPWDSECT DSECT                         CONTINUE GPW DSECT
+MON      EQU   GPW,4096                DEFINE MONITOR PAGE
+         ORG   GPWBUF
+MONBUF   DS    XL(2048/20*20)          MONITOR BUFFER
+         ORG   GPWHXBUF                SKIP ESSENTIAL GPW STUFF
+MONCLRST DS    0D                      ALIGN
+MONINTVL DS    A                       MONITORING INTERVAL (MS)
+MONNSAMP DS    A                       NUMBER OF SAMPLES
+MONFLAGS FLAG  ,                       PROGLOOK FLAGS
+         FLAG  MONTCPU                 CPU TIME TIMER
+         FLAG  MONTREAL                REAL TIME TIMER
+         FLAG  MONSHARE                SHARED PGM PROGLOOK OPTION
+         FLAG  MONNOMAP                OMIT MAP RECORDS
+MONSAMPL DS    A                       NUMBER OF SAMPLES LEFT
+MONPRGNM DS    CL8                     NAME FOR PROGLOOK RECORD
+MONPBASE DS    A                       START OF PROGRAM
+MONBUFAD DS    A                       ADDRESS OF NEXT SAMPLE
+MONBFEND DS    A                       BUFFER LIMIT ADDRESS
+MONCLEAR EQU   MONCLRST,*-MONCLRST,C'X'      AREA INIT TO 0 ON ENTRY
+         SPACE 3
+*
+**  PROGLOOK SAMPLE
+*
+SAMPDSCT DSECT
+SAMPADDR DS    A                       ADDRESS OF PROG AT SAMPLE
+SAMPTYPE EQU   SAMPADDR,1              SAMPLE TYPE
+SAMPRUN  EQU   0                       INDICATE PROGRAM WAS RUNNING
+SAMPWAIT EQU   1                       INDICATE PROGRAM WAS WAITING
+SAMPMAP  EQU   C'M'                    INDICATE MAP ENTRY
+SAMPPROG DS    CL8                     PROGRAM NAME
+SAMPTCB  DS    A                       YOU'VE GOTTA BE KIDDING
+SAMPBASE DS    A                       PROGRAM BASE
+SAMPLE   EQU   SAMPDSCT,*-SAMPDSCT
+SAMPNEXT DS    0F                      NEXT SAMPLE ADDRESS
+         EJECT
+*NOGEN
+VPS      CSECT ,
+*
+*
+****   PROGLOOK INITIALIZATION
+*
+*
+         USING CLW,CLWR                ##
+*
+PROGSERV VENTER SR,R11,*
+         L     BR,=A(BASE)
+         USING BASE,BR                 ##
+         LR    SR,0                    SAVE KEYWORD LENGTH
+         LR    TR,15                   SAVE ENTRY CODE
+         STM   BRR,WAR,CLWQRET         QUICK RETURN REGISTERS
+         FSCALL FILSETUP
+         B     SETUPRTN                SKIP ERROR ROUTINE
+BASE     EQU   *
+*
+* EXIT BRANCH TABLE
+         B     EXIT                    NORMAL EXIT
+         B     TYPERR                  ERROR MESSAGE EXIT
+*
+EXIT     DS    0H
+         LR    R15,SR                  RETURN CODE
+         LR    0,TR
+         VEXIT SR,R11,LTR
+         LTORG
+*
+TYPERR   VCALL TYPEIT
+         B     FILEXIT                 DROP FILES
+         SPACE 6
+         USING GPW,GPWR                ##
+SETUPRTN DS    0H
+         CLEAR MONCLEAR                INITIALIZE MONITOR AREA
+*GEN
+         VPSTAB PSTAB,TR               BRANCH ON CODE
+*NOGEN
+         EJECT
+*
+*
+****   CLP TIMER FIRED.
+*      NOTIFY USER OF CPU USAGE AND RESET TIMER.
+*
+TIMEOUT  VENTER SR,R11,*          CPU TIMER ROUTINE
+         L     BR,=A(BASE)
+         USING BASE,BR
+*
+*  PUT 'ORVYL CPU USAGE ...' MESSAGE IN BUFFER
+*  DELAY PRINTING MESSAGE UNTIL AFTER TIMER INTERVAL VSET, OTHERWISE
+*  AN ATTN BREAK DURING WRITE WILL CAUSE TIMER VSET TO BE SKIPPED
+*
+         SEG   'Timer break, Orvyl CPU usage = '   2.80 SECONDS
+         SENSE 4                  GET CURRENT CPU TIME  (IN R15)
+         LR    TR,R15
+         SR    SR,SR
+         D     SR,=F'3840'
+         STH   TR,CLWTIME         SAV CURRENT CPU TIME IN 10THS SEC.
+         LR    TR,R15
+         SR    SR,SR
+         D     SR,=F'384'
+         SR    SR,SR
+         D     SR,=F'100'
+         SEGDC 4,(TR)             PRINT CPU TIME IN 100THS OF SEC.
+         SEG   '.'
+         BTD   CLWTEMP,2,(SR)
+         OC    CLWTEMP(2),=C'00'
+         SEG   (R1),(R0)
+         SEG   ' seconds.'        CPU TIME MESSAGE IN BUFFER
+         LH    TR,CLWTIME         TR - CURRENT CPU TIME
+         LH    R1,CLWTMAX         R1 - MAXIMUM CPU TIME LIMIT
+         LH    SR,CLWTIVAL        SR - TIMEOUT INTERVAL
+         IF    ('LTR R1,R1',NZ),BEGIN  IF WE HAVE MAX CPU LIMIT
+         BEGIN
+         CR    TR,R1              IF CURNT TIME >= CPU LIMIT, LOGOFF
+         BNL   TLOGOFF            IF CURNT TIME >= CPU LIMIT, LOGOFF
+         END
+         SR    R1,TR              TIME BEFORE CPU TIME LIMIT REACHED
+         LH    SR,CLWTIVAL        IF NEXT TIMEOUT > CPU LIMIT, WE FIX
+         IF    ('CR SR,R1',H),'LR SR,R1'   WE USE CPU LIMIT
+         END
+         MH    SR,=H'3840'        TIMEOUT INTERVAL
+         VSET  153,(SR)           SET TIMER
+         LCALL WRITE              PRINT ORVYL CPU USAGE MESSAGE NOW
+         SEG   'Type ''GO'' to continue.'
+         LCALL WRITE
+         VEXIT SR,R11,*           GO CONTINUE
+         SPACE 2
+TLOGOFF  DS    0H                 TIME LIMIT EXCEEDED, LOGOFF NOW.
+         LA    R1,3480            GIVE USER ANOTHER .1 SECONDS
+         VSET  153,(R1)           AND THEN BADGER HIM TO LOGOFF AGAIN
+         LCALL WRITE              PRINT ORVYL CPU USAGE MESSAGE NOW
+         SEG   'Orvyl CPU usage limit exceeded. Please logoff.'
+         LCALL WRITE
+         VEXIT SR,R11,*
+         SPACE 2
+*
+* TIMER INITIALIZATION  (GOES IN CLP)
+*
+* NORMAL :
+*        MVC   CLWTIMAX(8),XL8'0'   NO LIMITS, NO AUTO TIMEOUT
+*
+*  FOR STUDENTS:
+*
+*        MVC   CLWTIMAX(2),=H'20'   2 SECOND MAX INTERVAL
+*        MVC   CLWTIVAL(2),=H'5'    .5 SECOND INTERVAL     (SEE NOTE)
+*        MVC   CLWTMAX(2),=H'100'   10 SECOND MAX CPU LIMIT (OR 0)
+*        MVC   CLWTIME(2),=H'0'            NO NEED TO INIT CLWTIME
+*        L     R1,=F'17400'       .5*34800
+*        VSET  153,(1)            SET TIMER
+* NOTE:
+* NOTE!! NOTE.  IF CLWTMAX SET, CLWTIVAL MUST BE NONZERO.
+*                                             (CAN BE BIG)
+* (CLWTIVAL IS CHECKED TO SEE IF WE ARE TIMING, OR PROGLOOKING)
+         EJECT
+*
+*        PROGLOOK
+*
+PROGLOOK DS    0H
+         IF    (CLWTIVAL,NE,0),TIMERERR    TIMER MUST BE OFF
+         IF    (CLWPFPL+CLWPFPIC,Z),NOPROG  MAKE SURE PROGRAM IN CORE
+         IF    CLWFPRGL,NOCHANGE       ALREADY MONITORING
+         L     R1,CLWMONP              IF ALREADY HAVE MON PAGE,
+         IF    (R1,NZ),BEGIN
+         FREECLW (1),L:=A(L'GPW)       FREE IT
+         CLEAR CLWMONP
+         END   ,
+         SCAN  PRGLOPTS,CLWKWCB        LOOK FOR OPTIONS
+         BNZ   SCRET                   ERROR IN SCAN
+         IF    (GPWFNL,EQ,0),MISFILNM  MUST HAVE FILE NAME
+         FSCALL ASMBLNAM               PUT FILENAME TOGETHER
+         SET   GPWFANW                 CREATE FILE IF NOT THERE
+         IF    MONSHARE,'FSCALL ATTOLD' IF SHARE, ATTACH SHARED
+         ELSE  'FSCALL ATTOLDE'          OTHERWISE
+         FSCALL CHKSPIRE               DON'T WRITE ON SPIRES FILES
+         IF    GPWFNEW,ATTACHOK        IF NEW, NO DELETION
+         FSCALL SENLREC                ANY DATA?
+         BNZ   ATTACHOK                NO, GOOD
+         LA    R1,@R1+1                INCREMENT IN CASE OF APPEND
+         ST    R1,GPWBN                SAVE IT
+         IF    (GPWFERS+GPWFAPP),ATTNOASK    APPEND OR ERASE?
+         FSCALL ASKERASE               OK TO ERASE?
+         IF    (GPWFERS+GPWFAPP,Z),REQABORT  APPEND OR ERASE?
+ATTNOASK IF    ^GPWFERS,ATTACHOK       ERASE?
+         LCALL DELETE                 ERASE CONTENTS
+         CLEAR GPWBN                   ZOT BLOCK NUMBER
+ATTACHOK DS    0H
+         MVC   GPWUINFO,=AL1(L'GPWUIFLR,0,0,20)  FILE IS FIXED/20
+         SET   GPWFFMT                  FORMAT
+         FSCALL SETUINFO                 TO FIXED/20
+         EJECT
+*
+** SET DEFAULT VALUES IF ANY OMITTED
+*
+         IF    (MONINTVL,Z),' MVC  MONINTVL,=A(10) ' SET DEFAULT
+         IF    (MONNSAMP,Z),' MVC  MONNSAMP,=A(4096*4096-1)'
+         IF    (MONTCPU+MONTREAL,Z),'SET MONTCPU'
+*
+* FILE IS ATTACHED, SET UP FOR MONITORING
+*
+         MVC   MONPRGNM,CLWPROGN       GET PROGRAM NAME
+         MVC   MONPBASE,CLWUPST         AND START OF PROGRAM
+         LCALL RESETBUF                RESET THE BUFFER
+         IF    ^MONNOMAP,'LCALL WRITEMAP'  WRITE MAP INFO IF WANTED
+         L     R1,=A(768)              CONVERT TIME
+         M     R0,MONINTVL              TO 26 MIC UNITS
+         A     R1,=A(10)
+         SRDL  R0,1
+         D     R0,=A(10)
+         ST    R1,CLWTIMER
+         SET   CLWDOTIM                SET TIMER IN VCLP AT RUN
+         MVC   MONSAMPL,MONNSAMP       SET NO OF REMAINING SAMPLES
+         CLEAR CLWFGPW                 PRESERVE GPW AFTER COMMAND
+         CLEAR CLWGPWP
+         ST    GPWR,CLWMONP            SAVE PAGE AS MONITOR PAGE
+         SET   CLWFMWP                 SET MONITOR PAGE EXISTS
+         SET   CLWFPRGL                SET PROGLOOK IN OPERATION
+         B     FILEXIT                 DONE
+         EJECT
+*
+*
+** CLP TIMER FIRED. RECORD LOCATION
+*
+PROGMON  VENTER SR,R11,*
+         L     BR,=A(BASE)             GET COMMON ADDRESSIBILITY
+         USING BASE,BR                 ##
+         IF    ^CLWFMWP,BEGIN         IF NO MONITOR PAGE,
+         CLEAR CLWFPRGL                SOMETHING SCREWY, STOP TIMING
+         B     PMEXIT                  AND RETURN
+         END
+         L     GPWR,CLWMONP            POINT TO MON PAGE
+         USING GPW,GPWR                ##
+         L     R1,MONBUFAD             GET ADDRESS OF NEXT RECORD
+         USING SAMPLE,R1               ##
+         MVC   SAMPADDR,CLWSBPSW+4     SET SAMPLE ADDRESS
+         MVC   SAMPPROG,MONPRGNM       SET PROGRAM NAME
+         MVC   SAMPBASE,MONPBASE       SET PROGRAM BASE
+         DROP  R1                      ##
+         LCALL NEXTREC                 BUMP BUFFER POINTER
+         L     R1,MONSAMPL             GET REMAINING SAMPLE COUNT
+         DECR  R1                      DECREMENT COUNT
+         IF    (R1,NP),'LCALL ENDPROGL' IF NO MORE, GO CLEAN UP
+         ELSE  BEGIN                    OTHERWISE,
+         ST    R1,MONSAMPL                SAVE NEW COUNT
+         LA    R0,152                  ASSUME REAL INTERVAL
+         IF    MONTCPU,'LA R0,153'     IF NOT, SET COMPUTE
+         VSET  (0),L:CLWTIMER          SET TIMER FOR NEXT TIME
+         END   ,
+PMEXIT   VEXIT SR,R11
+         EJECT
+*
+** COMMAND ERROR ROUTINES
+*
+NOPROG   SEG   'No program in core'
+         B     WRITEXIT
+*
+NOCHANGE SEG   'Proglook already active'
+         B     WRITEXIT
+*
+MISFILNM SEG   'Missing file name'
+         B     WRITEXIT
+TIMERERR SEG   'Proglook is not available when timer is set'
+         B     WRITEXIT
+         SPACE 6
+*
+** ERROR WHILE MONITORING. JUST TERMINATE QUIETLY (FOR NOW)
+*
+MONIOERR DS    0H
+         IF    ^CLWFPRGL,'FSCALL WRITERR'  IF CMD,  , DO STANDARD ERROR
+         CLEAR MONBUFAD                DON'T TRY TO WRITE RESIDUAL
+         LR    RAR,BR                  SET RETURN FROM ENDPROGL
+         B     ENDPROGL                GO STOP
+         EJECT
+*
+** STOP PROGLOOKING.
+*
+STOPMON  VENTER SR,R11,*
+         L     BR,=A(BASE)             GET COMMON ADDRESSIBILITY
+         USING BASE,BR                 ##
+         IF    CLWFMWP,BEGIN          IF THERE IS A MONITOR PAGE,
+         L     GPWR,CLWMONP            SET UP GPWR
+         LCALL ENDPROGL                GO CLEAN UP
+         END   ,
+         VEXIT SR,R11
+         SPACE 3
+ENDPROGL DS    0H
+         VPUSH RAR,,*                  SAVE RETURN
+         CLEAR CLWFPRGL                NO MORE PROGLOOKING
+         VSET  152,0                   CANCEL CLP TIMER
+         LCALL WRITEBUF                WRITE OUT LAST BUFFER
+         FSCALL DETACH                 DETACH FILE
+         CLEAR CLWFMWP                 INDICATE NO
+         CLEAR CLWMONP                  MORE MON PAGE
+         FREECLW (GPWR),L:=A(L'GPW)    FREE MON PAGE
+         VPOP  RAR,,*
+         BR    RAR                     RETURN
+         EJECT
+*
+** PROGLOOK KEYWORD ROUTINES
+*
+         SPACE ,
+         EXTRN GOTNKWR                 DEFINE EXTERNAL ROUTINE
+         EXTRN KWFNOPT
+         SPACE ,
+PRGLOPTS DS    0F
+         SCKW  FILE,GOTNKWR,(A,P)
+         SCKW  INTERVAL,INTERVAL,(A,P,PI),10000000
+         SCKW  SAMPLES,SAMPLES,(A,P,PI),10000000
+         SCKW  REAL,REALTIM,A
+         SCKW  CPU,CPUTIME
+         SCKW  SHARED,SHARED,A
+         SCKW  NOMAP,NOMAP,A
+         SCKW  COMPUTE,CPUTIME,A
+         SCKW  ,KWFNOPT,PUSH
+         SCKW  REPLACE,REPLACE,A
+         SCKW  ERASE,REPLACE,A
+         SCKW  SCRATCH,REPLACE,A
+         SCKW  APPEND,APPEND,A
+         SCKW  ,UNREC
+         EJECT
+INTERVAL BZ    MISSING                 NO INTERVAL
+         MVC   MONINTVL,@R15           SAVE INTERVAL
+         SCRTN (15)
+         SPACE 2
+SAMPLES  BZ    MISSING                 NO NUMBER OF SAMPLES
+         MVC   MONNSAMP,@R15          SAVE NUMBER
+         SCRTN (15)
+         SPACE 2
+REALTIM  IF    MONTCPU,UNREC           CAN'T HAVE IT BOTH WAYS
+         SET   MONTREAL                SET REAL TIME
+         SCRTN (15)
+         SPACE 2
+CPUTIME  IF    MONTREAL,UNREC          CAN'T HAVE IT BOTH WAYS
+         SET   MONTCPU                 SET CPU TIME
+         SCRTN (15)
+         SPACE 2
+SHARED   SET   MONSHARE
+         SCRTN (15)
+         SPACE 2
+NOMAP    SET   MONNOMAP
+         SCRTN (15)
+         SPACE 2
+REPLACE  DS    0H
+         IF    GPWFAPP,UNREC           APPEND SPECIFIED?
+         SET   GPWFERS                 SET ERASE OK
+         SCRTN (15)
+         SPACE 2
+APPEND   DS    0H
+         IF    GPWFERS,UNREC           ERASE SPECIFIED?
+         SET   GPWFAPP                 SET APPEND
+         SCRTN (15)
+         EJECT
+*
+*  SCAN EXIT ERROR ROUTINES
+*
+SCRET    LPR   0,0
+         BZ    MISSING
+*
+ILLSTR   SEG   (1),(0)
+         SEG   ': Invalid string'
+         B     4(,BR)                  ERROR RETURN
+*
+MISSING  SEG   'Operand missing'
+         B     4(,BR)                  ERROR RETURN
+*
+UNREC    SEG   (1),(0)
+         SEG   ': Invalid'
+         B     4(,BR)                  ERROR RETURN
+FILEXIT  DS    0H
+         FSCALL FILEXIT                DOES NOT RETURN HERE
+*  SET MESSAGE, CLEAN UP AND LEAVE
+*
+MSGEXIT  DS    0H
+         SEG   (1),(0)
+WRITEXIT DS    0H                      :::
+         VWRITE ,                      SEND MESSAGE
+         B     FILEXIT                 RETURN
+QIETEXIT DS    0H                      :::
+         IF    ^GPWFQIET,WRITEXIT
+         CLEAR (CLWOBUF,4)             QUIET!!
+         B     FILEXIT
+*
+REQABORT SEG   'Request aborted'
+         B     4(,BR)
+         EJECT
+*
+** MISCELLANEOUS SUBROUTINES
+*
+DELETE   DS    0H                      DELETE CONTENTS OF FILE
+         VPUSH RAR,,*                  SAVE RETURN
+         FSCALL SENLREC                GET LAST RECORD
+         BNZ   DELETED                 NO BLOCKS (???)
+         LR    R14,R1                  SAVE LAST BLOCK IN R14
+         FSCALL SENFREC                GET FIRST RECORD
+         LR    R15,R1                  PUT IN R15
+         FSCALL DELLOTS                DELETE RANGE OF BLOCKS
+         FSCALL FORCE                  FORCE IXR
+DELETED  VPOP  RAR,,*                  RESTORE RETURN
+         BR    RAR                     EXIT
+         SPACE 2
+*
+** (RE) INITIALIZE MONITOR BUFFER
+*
+RESETBUF DS    0H
+         VPUSH R0,R3,*
+         L     R0,MONBUFA              START OF BUFFER
+         ST    R0,MONBUFAD             SET NEXT SAMPLE LOCATION
+         LA    R1,2040                 LENGTH TO INITIALIZE
+         L     R2,MONBUFA              GET START OF BUFFER
+         LA    R2,@R2(R1)              GET END OF BUFFER
+         ST    R2,MONBFEND             SAVE FOR LATER
+         CLEAR R2
+         CLEAR R3
+         MVCL  R0,R2                   INITIALIZE BUFFER
+         VPOP  R0,R3,*
+         BR    RAR                     RETURN
+         EJECT
+*
+** BUMP BUFFER POINTER AND WRITE RECORD IF BUFFER IS FULL
+*
+*  R1 POINTS TO LAST RECORD. RETURNS WITH R1 POINTING TO NEXT RECORD
+*  WRITEBUF IS ENTRY TO FLUSH BUFFER
+         SPACE
+NEXTREC  DS    0H
+         LA    R1,@R1+L'SAMPLE         POINT TO NEXT RECORD
+         ST    R1,MONBUFAD             UPDATE POINTER
+         IF    (R1,GE,MONBFEND),BEGIN BUFFER IS FULL
+WRITEBUF L     R15,MONBUFAD            LAST BYTE + 1
+         L     R1,MONBUFA              START OF BUFFER
+         SR    R15,R1                  COMPUTE LENGTH
+         IF    P,BEGIN                IF SOMETHING TO WRITE,
+         IF    MONSHARE,BEGIN         IF SHARED, PICK BLOCK NUM
+         STCK  CLWTEMP                 GET TIME OF DAY
+         CLEAR R14
+         ICM   R14,3,CLWTEMP+4         PICK SOME BITS
+         END   ,
+         ELSE  'L R14,GPWBN'           USE NEXT BLOCK IF NOT SHARED
+         WRITE IC:GPWFID,(R1),(R15),(R14) WRITE NEXT BLOCK
+         WAIT  (0)
+         ST    R14,GPWBN               SAVE NEXT BLOCK
+         BNZ   MONIOERR                ERROR ON FILE. STOP MONITORING
+         END   ,
+         VPUSH RAR,,*
+         LCALL RESETBUF                RE-INITIALIZE BUFFER
+         VPOP  RAR,,*
+         L     R1,MONBUFA              START NEW BUFFER
+         END   ,
+         BR    RAR                     RETURN
+         EJECT
+*
+** OUTPUT MAP INFORMATION
+*
+WRITEMAP VPUSH RAR,,*                  SAVE RETURN
+         L     LCBR,CLWLNKP            SET UP LINK PAGE BASE
+         VCALL LDSET                   INITIALIZE MAP SCAN
+         L     TR,MONBUFAD             SET UP BUFFER POINTER
+         USING SAMPLE,TR               ##
+WRMAPLP  VCALL LDNEXT                  GET NEXT SYMBOL
+         BZ    WRMAPEND                THAT'S ALL
+         IF    (R0,P),BEGIN           IF SECTION (LENGTH >0)
+         ST    R1,SAMPBASE             SET START ADDRESS
+         MVC   SAMPPROG,@R15           SET SYMBOL NAME
+         AR    R0,R1                   COMPUTE END OF SECTION
+         ST    R0,SAMPADDR             SET SAMPLE ADDRESS
+         MVI   SAMPTYPE,SAMPMAP        INDICATE MAP ENTRY
+         LR    R1,TR                   SET R1 TO POINT TO SAMPLE
+         LCALL NEXTREC                 BUMP POINTER
+         LR    TR,R1                   SET NEW SAMPLE ADDRESS
+         END   ,
+         B     WRMAPLP                 GO TO NEXT ENTRY
+         SPACE 2
+WRMAPEND LCALL WRITEBUF                FLUSH BUFFER
+         VPOP  RAR,,*                  RESTORE RETURN
+         BR    RAR                     EXIT
+         EJECT
+         FSCALL GOSUB
+SEG      DS    0H
+         VPUSH RAR,,*                  SAVE RETURN ADDRESS
+         VSEG  (1),(0)                 CALL SEG ROUTINE
+         VPOP  RAR,,*                  RESTORE RETURN REGISTER
+         BR    RAR                     RETURN TO CALLER
+*
+MSG      VPUSH RAR,,*                  SEG, WRITE, AND RETURN
+         SEG   (1),(0)
+         B     WRIT1
+*
+WRITE    VPUSH RAR,,*                  SAVE RETURN
+WRIT1    VWRITE ,
+         BNZR  BR                      ATTN OR ERROR
+         VPOP RAR,,*
+         BR    RAR                     NO ERROR
+*
+SEGDC    VPUSH RAR,14,*
+         BTD   CLWTEMP,(0),(15)
+         VSEG  (1),(0)
+         VPOP  RAR,14,*
+         BR    RAR
+*
+SEGHX    VPUSH RAR,14,*
+         BTX   CLWTEMP,(0),(15)
+         VSEG  (1),(0)
+         VPOP  RAR,14,*
+         BR    RAR
+*
+         EJECT ,
+         GENMSGS ,
+         END   .

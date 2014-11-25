@@ -1,0 +1,530 @@
+VP       TITLE 'ORVYL''S PATCH COMMAND'
+********************************************************************
+*                                                                  *
+*       ORVYL/370  RELEASE III - CLASS I - STANFORD PROPRIETARY    *
+*                                                                  *
+********************************************************************
+         SPACE 2
+         HIBAL ,
+         SPACE 2
+* MODIFICATIONS
+*
+         EJECT ,
+VP       CSECT
+         IDENT 00
+         SPACE 2
+         COPY  ORVDEFN
+&MODULE  SETC  'VP'
+         SPACE 3
+         REGS  ,,SR,TR,QR,RR,PR,BR,WAR,RAR,CLWR
+         EJECT ,
+*GEN
+         MACRO
+&L       BTD   &LOC,&LEN,&WORD,&SW,&COMMAS=NO
+         LCLC  &CM
+         AIF   ('&COMMAS' NE 'YES').NOCM
+&CM      SETC  'C'
+.NOCM    ANOP
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN,TYPE=&SW
+         SYSLR 1,&LOC
+         XCALL BTD&CM
+         MEND
+*
+         MACRO
+&L       BTX   &LOC,&LEN,&WORD
+&L       SYSLR 15,&WORD,OP=L
+         SYSLR 0,&LEN
+         SYSLR 1,&LOC
+         XCALL BTX
+         MEND
+         EJECT
+         COPY  SCP
+         COPY  CLW
+         EJECT ,
+*NOGEN
+*  WORK AREAS
+*
+WA       RECORD BEGIN
+         VSA   SR,R11
+PFL      FLAG  ,
+         FLAG  PFLERR                  ERROR MESSAGE
+         FLAG  PFLNOVER                SKIP VERIFICATION MESSAGE
+         FLAG  PFLSYS                  SYSTEM PATCH EXPECTED
+         FLAG  PFLOR                   PATCH BY 'OR'ING
+         FLAG  PFLAND                  PATCH BY 'AND'ING
+PALEN    DS    H
+VERLEN   DS    H
+PASIZE   EQU   32                      SIZE OF PATCH CORE AREA
+         DS    0F
+PA       DS    (PASIZE)X
+VER      DS    (PASIZE)X
+PAOLD    DS    (PASIZE)X
+WASIZE   EQU   *-WA
+         END   ,
+         SPACE 2
+* READ/WRITE CORE WORK AREA
+*
+RWCWA    RECORD BEGIN
+RWCR0    DS    A                       SAVED R0
+RWCR1    DS    A                       SAVED R1
+         VSA   SR,R11
+RWCFL    FLAG  ,                       FLAGS
+         FLAG  (RWCFLSUP,X'80')
+         FLAG  (RWCFLPRO,X'02')        PROTECTED
+*
+RWCFL1   DS    X                       DUMMY FLAG
+*
+         DS    0F
+RWCWASIZ EQU   *-RWCWA
+         END   ,
+         EJECT ,
+VP       CSECT ,
+         USING CLW,CLWR                ##
+         USING WA,WAR                  ##
+*  PATCH COMMAND
+*
+PATCH    VENTER SR,R11,WASIZE
+BASE     EQU   *
+         CLEAR PFL                     ZERO FLAGS
+         IF    CLWPFPRV,PRIVPROG        PRIVATE PROGRAM?
+         SCAN  PATTBL,CLWKWCB          SCAN FOR OPTION
+*
+SCRET    IF    ('LPR R0,R0',ZERO),PATEXIT
+*
+ILLSTR   SEG   (1),(0)
+         SEG   ': Invalid string'
+         B     ERROR
+*
+PRIVPROG LABEL ,
+         SEG   'Private program loaded, command blocked'
+         B     ERROR
+*
+UNREC    SEG   (1),(0)
+         SEG   ': Invalid'
+*
+ERROR    VCALL TYPEIT
+*
+PATEXIT   DS   0H
+         CLEAR CLWFOSC
+         VEXIT SR,R11
+         EJECT ,
+*  OPTION TABLE
+*
+PATTBL   SCKW  PSW,PATPSW
+         SCKW  GPR,PATGPR
+         SCKW  FPR,PATFPR
+         SCKW  IA,PATIA
+         SCKW  CORE,PATCORE,A
+         SCKW  OSCORE,PATOSC,A
+         SCKW  SAVEPSW,PATSPSW
+         SCKW  SAVEGPR,PATSGPR
+         SCKW  SAVEIA,PATSIA
+         SCKW  P,PATPSW
+         SCKW  G,PATGPR
+         SCKW  F,PATFPR
+         SCKW  C,PATCORE
+         SCKW  SP,PATSPSW
+         SCKW  SG,PATSGPR
+         SCKW  SIA,PATSIA
+*        SCKW  SCP,PATSCP
+         SCKW  ,UNREC
+         EJECT ,
+*  PATCH PSW
+*
+PATPSW   LA    TR,CLWSBPSW
+         B     PATPC
+*
+PATSPSW  L     TR,CLWSCP               GET SCP ADDRESS
+         WITH  (SCP,TR),'LA TR,SCPXPSW'
+*
+PATPC    LABEL ,
+         IF    ('VCALL EVAL',NEG),ERROR DISPLACEMENT
+         LTR   SR,R0
+         IF    (M,OR,(R0,GE,8)),BEGIN
+         SEG   'Invalid displacement'
+         B     ERROR
+         END
+         LA    R0,8
+         SR    R0,SR                   COMPUTE LENGTH
+         LA    R1,@TR(SR)              LOCATION
+         IF    ('VCALL EVHEX',NEG),ERROR   GET THE STRING
+         B     PATEXIT
+*
+         EJECT ,
+*  PATCH IA
+*
+*
+*  PATCH IA OR SAVEIA
+PATIA    LABEL ,
+         LA    TR,CLWSBPSW+4
+         B     PATIACOM
+*
+PATSIA   LABEL ,
+         L     TR,CLWSCP
+         WITH  (SCP,TR),'LA TR,SCPXPSW+4'
+PATIACOM LABEL ,
+         IF    ('VCALL EVAL',NEG),ERROR
+         ST    R0,@TR
+         B     PATEXIT
+         EJECT ,
+*  PATCH GPR
+*
+PATGPR   LA    TR,CLWSBGPR
+         B     PATGC
+*
+PATSGPR  L     TR,CLWSCP
+         WITH  (SCP,TR),'LA TR,SCPXGPRS'
+*
+PATGC    LABEL ,
+         IF    ('VCALL EVAL',NEG),ERROR REGISTER
+         BZ    ILLGPR
+         IF    (R0,M),ILLGPR
+         IF    (R0,GE,16),ILLGPR
+         LR    SR,R0
+         IF    ('VCALL EVAL',NEG),ERROR VALUE
+         SLL   SR,2
+         ST    R0,@TR(SR)
+         B     PATEXIT
+*
+ILLGPR   SEG   'Invalid GPR'
+         B     ERROR
+         EJECT ,
+*  PATCH FPR
+*
+PATFPR   LABEL ,
+         IF    ('VCALL EVAL',NEG),ERROR REGISTER
+         BZ    ILLFPR
+         LTR   SR,R0                   SAVE REGISTER NUMBER
+         IF    (M,OR,(R0,GT,6)),ILLFPR       VALID REGISTER?
+         ST    R0,CLWTEMP
+         IF    (CLWTEMP+3,ONE,1),ILLFPR
+         CLEAR (CLWTEMP,8)               CLEAR A DOUBLE WORD
+         LA    R1,CLWTEMP
+         LA    R0,8
+         IF    ('VCALL EVHEX',NEG),ERROR
+         SLL   SR,4
+         EX    SR,PFLD                 LOAD NEW VALUE
+         B     PATEXIT
+*
+PFLD     LD    *-*,CLWTEMP
+*
+ILLFPR   SEG   'Invalid FPR'
+         B     ERROR
+         EJECT ,
+*  PATCH SCP  <LINE>  <OFFSET>  <PATCH TEXT>
+*
+PATSCP   LABEL ,
+         BR    BR
+         EJECT ,
+*  PATCH CORE
+*
+PATOSC   SET   CLWFOSC
+PATCORE  LABEL ,
+         IF    ('VCALL EVAL',NEG),ERROR LOCATION
+         N     R0,=XL4'0FFFFFFF'
+         IF    (^CLWSSP,AND,^CLWFOSC),BEGIN
+         N     R0,=XL4'00FFFFFF'
+         END   ,
+         IF    (R0,LE,4095),PCNWRT     WRITE PROTECTED
+         LR    SR,R0                   SAVE LOCATION
+         LA    R0,PASIZE
+         LA    R1,PA
+         IF    ('VCALL EVHEX',NEG),ERROR   GET THE STRING
+         IF    (R0,NP),PATEXIT         EXIT IF NO STRING
+         STH   R0,PALEN                STRING LEN
+         CLEAR VERLEN
+PCSCAN   SCAN  PCOPT,CLWKWCB           PATCH CORE OPTIONS
+         LR    R1,SR
+         LA    R0,PAOLD                GET OLD DATA
+         LH    R15,PALEN
+         IF    (R15,LT,VERLEN),'LH R15,VERLEN'
+         VCALL READCORE                GET THE OLD TEXT
+         B     *+4(15)                 RETURN CODE
+         B     PCPROT                  PROTECTED CORE
+         B     PCUSER                  GOOD OLD USER CORE
+         B     PCNONE
+         B     PCBAD
+*
+PCPROT   LA    RAR,VERPATCH
+         IF    PFLSYS,'L RAR,=V(PRIVTEST)' SYSTEMS PATCH EXPECTED
+         BASR  RAR,RAR                 GET CHECK PRIVS
+         BNZ   PATEXIT
+*
+PCUSER   LH    R1,VERLEN
+         IF    ((R1,NZ),AND,('DECR R1;EX R1,VERCLC',NE)),BEGIN
+         SEG   'Patch aborted, '
+         SET   PFLERR                  SET ERROR
+         END   ELSE,BEGIN
+         BALR  R14,0                SET 14 NON-ZERO TO OK SYS PATCH
+         LR    R1,SR                SOURCE
+         LA    R0,PA                 DESTINATION
+         LH    R15,PALEN
+         L     RAR,=A(RITECORE)     PLAIN PATCH
+         IF    PFLOR,'L  RAR,=A(ORCORE)'
+         IF    PFLAND,'L  RAR,=A(ANDCORE)'
+         BASR  RAR,RAR              DO THE PATCH
+         IF    (NZ,AND,CLWFOSC),PCNWRT
+         IF    ((PALEN,LE,VERLEN),OR,PFLNOVER),PATEXIT SKIP VERIFY?
+         END
+*
+         SEG   'Old data was '
+         LA    TR,PAOLD                 OLD DATA
+         LH    SR,PALEN
+         AR    SR,SR                   CONVER BYTES TO HEX DIGITS
+*
+PCPLOP   LABEL ,
+         BTX   CLWTEMP,8,L:@TR
+         IF    (SR,LE,R0),PCPDONE      PRINT ALL?
+         SEG   CLWTEMP,(0)
+         SEG   ' '
+         LA    TR,@TR+4                  NEXT WORD
+         S     SR,=A(8)                DROP LENGTH
+         B     PCPLOP
+*
+PCPDONE  SEG   CLWTEMP,(SR)
+         LH    R1,PALEN                DISPLAY TRANSLATION
+         L     TR,=V(BCDTBL)
+         DEX   R1,'TR PAOLD(1),@TR'
+         SEG   '  |'
+         LA    R1,PAOLD
+         LH    R0,PALEN
+         SEG   (1),(0)
+         SEG   '|'
+         L     RAR,=V(VWRITE)          NORMAL MESSAGE WRITE
+         IF    PFLERR,'L RAR,=V(TYPEIT)' ERROR?
+         BASR  RAR,RAR
+         B     PATEXIT
+*
+VERCLC   CLC   VER(*-*),PAOLD          COMPARE OLD DATA AND VERIFY TEXT
+*
+PCNONE   SEG   'Memory undefined'
+         B     ERROR
+*
+PCBAD    SEG   'Invalid address'
+         B     ERROR
+*
+PCNWRT   SEG   'Write protected'
+         B     ERROR
+*
+*
+* PATCH CORE KEYWORD ROUTINES
+PCOPT    SCKW  VERIFY,VERIFY,A
+         SCKW  NOVERIFY,NOVER,A
+         SCKW  SYSTEM,VPSYS,A
+         SCKW  OR,PCOR
+         SCKW  AND,PCAND
+         SCKW  ,UNREC
+*
+VERIFY   LA    R0,PASIZE
+         LA    R1,VER
+         IF    ('VCALL EVHEX',NEG),ERROR
+         STH   R0,VERLEN
+         B     PCSCAN
+*
+NOVER    SET   PFLNOVER
+         SCRTN (15)
+*
+VPSYS    SET   PFLSYS
+         SCRTN (15)
+*
+PCOR     IF    PFLAND,UNREC
+         SET   PFLOR
+         SCRTN (15)
+*
+*
+PCAND    IF    PFLOR,UNREC
+         SET   PFLAND
+         SCRTN (15)
+*
+         EJECT ,
+*  READ/WRITE CORE ROUTINES
+*
+*        - R1: EXTERNAL ADDRESS (VERIFIED BY READCORE/RITECORE)
+*        - R0: LOCAL ADDRESS (ERROR IF NOT LEGAL)
+*        - R15: LENGTH (0 TO TEST VALIDITY)
+*        - R14: NON-ZERO GIVES OK TO PATCH NON-USER ORVYL CORE
+*               - REAL CORE PATCHES ARE ACCEPTED WITHOUT QUESTION
+*        - RETURNS IN R15:
+*                  0 - ADDRESS VALID BUT PROTECTED
+*                  4 - ADDRESS VALID, UNPROTECTED
+*                  8 - ADDRESS VALID BUT PAGE NOT DEFINED
+*                 12 - INVALID ADDRESS
+RITECORE VENTER R0,R11,RWCWASIZ
+         LA    TR,6                    SET WRITE CODE
+         B     RWCCOM
+*
+READCORE VENTER R0,R11,RWCWASIZ
+         SR    TR,TR                   SET READ CODE
+         B     RWCCOM
+*
+ORCORE   VENTER R0,R11,RWCWASIZ
+         LA    TR,6
+         B     RWCANDOR
+*
+ANDCORE  VENTER R0,R11,RWCWASIZ
+         LA    TR,12
+RWCANDOR LCR   TR,TR
+*
+         USING RWCWA,WAR               ##
+RWCCOM   BASE  BR                      TEMPORARY ADDRESSIBILITY
+         L     BR,=A(BASE)             COMMON ADDRESSIBILITY
+         USING BASE,BR                 ##
+         CLEAR RWCFL
+         LR    RR,R1                   EXTERNAL ADDRESS
+         LR    QR,R15                  SAVE LENGTH
+         LR    SR,R1                   STARTING ADDRESS
+         AR    SR,QR                   LAST BYTE+1
+         IF    (R0,POS),'DECR SR'
+         IF    ^CLWFOSC,RWCORV         ORVYL IF NOT REAL
+         EJECT ,
+* REAL CORE READ/WRITE/AND/OR
+         CLPSERV FETCH,(0),(QR),(RR)   LOAD PARAMETER REGISTERS
+         ORG   *-2                     KILL SVC
+         AR    TR,TR                   (BRANCH CODE IS MULTIPLE OF 12)
+         B     RWCSYFET(TR)
+RWCSYAND CLPSERV AND,(1),(15),(14)
+         B     RWCEXIT
+         ORG   RWCSYAND+12
+RWCSYOR  CLPSERV OR,(1),(15),(14)
+         B     RWCEXIT
+         ORG   RWCSYOR+12
+RWCSYFET CLPSERV FETCH,(1),(15),(14)
+         B     RWCEXIT
+         ORG   RWCSYFET+12
+         CLPSERV STORE,(1),(15),(14)
+         B     RWCEXIT
+         EJECT ,
+* ORVYL CORE READ/WRITE
+*
+RWCORV   LABEL ,
+         IF    CLWSSP,BEGIN
+         CLPSERV CHKADDR,(R1),(R15)
+         BNZ   RWCBAD                  NOT VALID
+         STC   R0,RWCFL                SAVE PROTECTION FLAGS
+         END
+         ELSE  BEGIN
+         N     RR,=X'00FFFFFF'         Make it a 24 bit address
+         N     SR,=X'00FFFFFF'         Make it a 24 bit address
+         SENSE 0,(R1)                  SENSE PAGE STATUS
+         BNZ   RWCNONE                 PAGE NOT DEFINED OR RESERVED
+         STC   R0,RWCFL                SAVE STATUS BITS
+         SRL   SR,12                   IS LAST BYTE ON NEXT PAGE?
+         SLL   SR,12
+         IF    (SR,LE,RR),RWCGO
+*
+         SENSE 0,(SR)                  SENSE SECOND PAGE STATU
+         BNZ   RWCNONE
+         STC   R0,RWCFL1                SAVE STATUS BITS
+         OC    RWCFL(1),RWCFL1         CONBINE STATUS BITS
+         END   ,
+RWCGO    L     SR,RWCR0                 RELOAD LOCAL AREA ADDRESS
+         IF    (RR,LT,CLWUPST),'SET  RWCFLSUP'   NOT USER AREA
+         C     RR,=X'00F00000'
+         IF    GE,'SET  RWCFLSUP'   NOT USER AREA
+         IF    (QR,NP),RWCDONE         TEST LENGTH
+         DECR  QR
+         IF    (^RWCFLPRO,OR,(TR,ZERO)),BEGIN   NOT PROTECTED PATCH
+         ACALL AMODE31
+         EX    QR,RWCMV(TR)            MOVE TO/FROM AREA
+         ACALL AMODE24
+         END   ,
+         ELSE  BEGIN
+         LA    R15,@QR+1
+         CLPSERV PGPRTOFF,(RR),(R15)   TURN OFF PAGE PROTECTION
+         ACALL AMODE31
+         EX    QR,RWCMV(TR)
+         ACALL AMODE24
+         LA    R15,@QR+1
+         CLPSERV PGPRTON,(R1),(R15)    TURN ON PAGE PROTECTION
+         END   ,
+RWCDONE  IF    ((TR,Z),AND,RWCFLPRO+RWCFLSUP),RWCRZ
+RWCR4    LA    R15,4                   CORE NOT PROTECTED
+         B     RWCEXIT
+RWCRZ    SR    R15,R15                 RETURN PROTECT CODE
+RWCEXIT  VEXIT R0,R11,LTR
+         SPACE 2
+*box
+*
+*  AMODE31 -- Routine to switch to 31-bit addressing mode.
+*
+AMODE31  LA    R15,A31GO
+         O     R15,=A(X'80000000')  31 bit mode wanted
+         BSM   0,R15
+*
+A31GO    BR    RAR                 Return
+*box
+*
+*  AMODE24 -- Routine to switch back to 24-bit addressing mode.
+*
+AMODE24  LA    R15,A24GO
+         BSM   0,R15               Return to 24 bit mode
+*
+A24GO    BR    RAR                 Return
+*
+         NC    @RR(*-*),@SR            AND
+         OC    @RR(*-*),@SR            OR
+RWCMV    MVC   @SR(*-*),@RR             READ
+         MVC   @RR(*-*),@SR             WRITE
+*
+RWCNONE  LABEL ,
+         IF    (R15,NE,4),RWCBAD       RESERVED BUT NOT DEFINED?
+         LA    R15,8
+         B     RWCEXIT
+*
+RWCBAD   LA    R15,12
+         B     RWCEXIT
+*
+*RWCSCP   LR    R14,R0                  SCP OFFSET
+*RWCSCP   L     SR,=X'0000FFFF'
+*         NR    14,SR                   GET SCP OFFSET
+*         L     SR,CLWPS                LINE NUMBER
+*         SLL   SR,16                   HIGH ORDER
+*         OR    14,SR
+*         LTR   TR,TR                   IN OR OUT?
+*         BZ    RWSCPOUT
+*         CLPSERV FETSCP,(1),(15),(14)
+*         B     RWCEXIT
+**
+*RWSCPOUT CLPSERV STSCP,(1),(15),(14)
+*         B     RWCEXIT
+         EJECT ,
+*  VERIFY A PATCH TO THE SYSTEM
+*
+VERPATCH VENTER SR,R11,*
+         L     BR,=A(BASE)             COMMON ADDRESSIBILITY
+         USING BASE,BR                 ##
+         LA    RR,4                    SET 'NO' RETURN
+         VCALL PRIVTEST                PRIVILIGED?
+         BNZ   VPEXIT                  BR IF NOT
+         SEG   'Do you mean to patch the system'
+         VREAD                         THE $64 QUESTION
+         BNZ   VPABORT                 BR IF ATTN
+         SCINIT (1),(0),CLWKWCB
+         SCAN  VPTBL,CLWKWCB           SCAN FOR ANSWER
+         B     VPABORT                 BR IF BAD STRING
+*
+VPOK     SR    RR,RR                   SET 'YES' CODE
+VPEXIT   LR    R15,RR                  RETURN CODE
+         VEXIT SR,R11,LTR
+*
+VPABORT  SEG   'Request aborted'
+         VWRITE
+         B     VPEXIT
+*
+VPTBL    SCKW  YES,VPOK
+         SCKW  OK,VPOK
+         SCKW  Y,VPOK
+         SCKW  ,VPABORT
+         EJECT ,
+*  SPECIAL SEG ROUTINE
+*
+SEG      LABEL ,
+         VPUSH RAR,,*
+         VSEG  (1),(0)
+         VPOP  RAR,,*
+         BR    RAR
+         SPACE 5
+         GENMSGS
+         SPACE 2
+         END   .
